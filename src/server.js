@@ -8,8 +8,8 @@ import { initDb, query, withTransaction, auditLog, vendorCategories, pool } from
 
 const app = express();
 const upload = multer();
-const sessions = new Map();
 const PORT = Number(process.env.PORT || 3000);
+const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 app.use(cookieParser());
@@ -118,9 +118,26 @@ function parseUploadedRows(file, pastedText) {
   });
 }
 
+function signSession(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+function readSession(token) {
+  if (!token || !token.includes(".")) return null;
+  const [body, sig] = token.split(".");
+  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+  if (sig !== expected) return null;
+  try {
+    return JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
 function currentUser(req) {
-  const token = req.cookies.session_token;
-  return token ? sessions.get(token) : null;
+  return readSession(req.cookies.session_token);
 }
 
 function requireAuth(req, res, next) {
@@ -184,15 +201,13 @@ app.post("/login", async (req, res) => {
     res.status(401).send(loginPage("Invalid username or password."));
     return;
   }
-  const token = crypto.randomBytes(24).toString("hex");
-  sessions.set(token, { id: user.id, username: user.username, role: user.role });
-  res.cookie("session_token", token, { httpOnly: true });
+  const token = signSession({ id: user.id, username: user.username, role: user.role });
+  res.cookie("session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
   res.redirect("/");
 });
 
 app.get("/logout", (req, res) => {
-  sessions.delete(req.cookies.session_token);
-  res.clearCookie("session_token");
+  res.clearCookie("session_token", { path: "/" });
   res.redirect("/login");
 });
 
