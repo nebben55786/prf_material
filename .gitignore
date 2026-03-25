@@ -1,0 +1,14 @@
+.env
+node_modules/
+__pycache__/
+*.pyc
+*.log
+server.out.log
+server.err.log
+app.db
+Import.xlsx
+.DS_Store
+.vercel
+coverage/
+dist/
+build/
