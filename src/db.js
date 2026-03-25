@@ -7,9 +7,20 @@ import pg from "pg";
 dotenv.config();
 
 const { Pool } = pg;
+const databaseUrl = process.env.DATABASE_URL;
+
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is not set.");
+}
+
+const useSsl =
+  !databaseUrl.includes("localhost") &&
+  !databaseUrl.includes("127.0.0.1") &&
+  !databaseUrl.includes("host.docker.internal");
 
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
+  connectionString: databaseUrl,
+  ssl: useSsl ? { rejectUnauthorized: false } : false
 });
 
 export const vendorCategories = [
