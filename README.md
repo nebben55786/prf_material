@@ -102,7 +102,7 @@ To deploy without installing Postgres locally:
 3. Add these Vercel environment variables:
 
 ```text
-DATABASE_URL=...
+DATABASE_URL=postgresql://neondb_owner:npg_91WTLxPMFAyt@ep-falling-thunder-a89uohj4-pooler.eastus2.azure.neon.tech/neondb?sslmode=require&channel_binding=require
 SESSION_SECRET=change-me
 DEFAULT_ADMIN_USERNAME=admin
 DEFAULT_ADMIN_PASSWORD=admin123
