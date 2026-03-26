@@ -86,7 +86,7 @@ function layout(title, body, user) {
           <div class="brand">Material Control</div>
           ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
         </div>
-        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a><a href="/logout">Logout</a></nav>` : ""}
+        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a><a href="/settings">Settings</a><a href="/logout">Logout</a></nav>` : ""}
       </div>
       ${body}
     </div>
@@ -211,6 +211,55 @@ async function recalcRfqStatus(client, rfqId) {
   await client.query("update rfqs set status = $2 where id = $1", [rfqId, total > 0 && issued >= total ? "CLOSED" : "OPEN"]);
 }
 
+async function recalcPoStatus(client, poId) {
+  const po = (await client.query("select status from purchase_orders where id = $1", [poId])).rows[0];
+  if (!po || po.status === "CANCELLED" || po.status === "DRAFT") return;
+  const totals = (await client.query(`
+    select
+      count(*) as line_count,
+      count(*) filter (
+        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) >= pl.qty_ordered
+      ) as fully_received_count,
+      count(*) filter (
+        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) > 0
+      ) as received_count
+    from po_lines pl
+    where pl.po_id = $1
+  `, [poId])).rows[0];
+  const lineCount = num(totals?.line_count);
+  const fullyReceivedCount = num(totals?.fully_received_count);
+  const receivedCount = num(totals?.received_count);
+  let nextStatus = "ISSUED";
+  if (lineCount > 0 && fullyReceivedCount >= lineCount) nextStatus = "FULLY_RECEIVED";
+  else if (receivedCount > 0) nextStatus = "PARTIALLY_RECEIVED";
+  await client.query(`
+    update purchase_orders
+    set status = $2,
+        issued_at = case when $2 in ('ISSUED', 'PARTIALLY_RECEIVED', 'FULLY_RECEIVED') and issued_at is null then now() else issued_at end,
+        closed_at = case when $2 = 'FULLY_RECEIVED' then now() else null end,
+        updated_at = now()
+    where id = $1
+  `, [poId, nextStatus]);
+}
+
+async function getJobNumber(client = null) {
+  const runner = client || { query };
+  const result = await runner.query("select value from app_settings where key = 'job_number'");
+  return String(result.rows[0]?.value || "0000").trim() || "0000";
+}
+
+async function getNextRfqNumber(client = null) {
+  const runner = client || { query };
+  const jobNumber = await getJobNumber(client);
+  const result = await runner.query(`
+    select coalesce(max(cast(right(rfq_no, 5) as integer)), 0) as max_no
+    from rfqs
+    where rfq_no ~ '-RFQ-[0-9]{5}$'
+  `);
+  const nextNumber = num(result.rows[0]?.max_no) + 1;
+  return `${jobNumber}-RFQ-${String(nextNumber).padStart(5, "0")}`;
+}
+
 function loginPage(error = "") {
   return layout("Login", `
     ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
@@ -251,15 +300,17 @@ app.get("/logout", (req, res) => {
 });
 
 app.get("/", requireAuth, async (req, res) => {
-  const [rfqs, pos, receipts, vendors, osd] = await Promise.all([
+  const [rfqs, pos, receipts, vendors, osd, jobNumber] = await Promise.all([
     query("select count(*) from rfqs"),
     query("select count(*) from purchase_orders"),
     query("select count(*) from receipts"),
     query("select count(*) from vendors"),
-    query("select count(*) from receipts where osd_status <> 'OK'")
+    query("select count(*) from receipts where osd_status <> 'OK'"),
+    getJobNumber()
   ]);
   res.send(layout("Dashboard", `
     <h1>Operations Dashboard</h1>
+    <div class="card"><strong>Job Number:</strong> ${esc(jobNumber)}</div>
     <div class="stats">
       <div class="stat"><div>RFQs</div><strong>${rfqs.rows[0].count}</strong></div>
       <div class="stat"><div>POs</div><strong>${pos.rows[0].count}</strong></div>
@@ -267,6 +318,37 @@ app.get("/", requireAuth, async (req, res) => {
       <div class="stat"><div>OS&D Cases</div><strong>${osd.rows[0].count}</strong></div>
     </div>
   `, req.user));
+});
+
+app.get("/settings", requireAuth, async (req, res) => {
+  const jobNumber = await getJobNumber();
+  res.send(layout("Settings", `
+    <h1>Settings</h1>
+    <div class="card">
+      <form method="post" action="/settings/job-number" class="stack">
+        <div class="grid">
+          <div><label>Job Number</label><input name="job_number" value="${esc(jobNumber)}" required /></div>
+        </div>
+        <p class="muted">Future RFQs will use this format: <strong>${esc(jobNumber)}-RFQ-00001</strong></p>
+        <div class="actions"><button type="submit">Save Job Number</button></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/settings/job-number", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
+  if (!jobNumber) throw new Error("Job number is required.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      insert into app_settings (key, value, updated_at)
+      values ('job_number', $1, now())
+      on conflict (key) do update
+      set value = excluded.value, updated_at = now()
+    `, [jobNumber]);
+    await auditLog(client, req.user.id, "update", "app_setting", "job_number", jobNumber);
+  });
+  res.redirect("/settings");
 });
 
 app.get("/vendors", requireAuth, async (req, res) => {
@@ -382,13 +464,18 @@ app.get("/rfq", requireAuth, async (req, res) => {
     )`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  const rfqs = (await query(`
+  const [rfqsRes, nextRfqNo, jobNumber] = await Promise.all([
+    query(`
     select r.*
     from rfqs r
     ${whereSql}
     order by r.id desc
     limit 300
-  `, params)).rows;
+  `, params),
+    getNextRfqNumber(),
+    getJobNumber()
+  ]);
+  const rfqs = rfqsRes.rows;
   const vendorOptions = [`<option value="">All Vendors</option>`]
     .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === vendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
@@ -417,7 +504,10 @@ app.get("/rfq", requireAuth, async (req, res) => {
     <div class="card">
       <form method="post" action="/rfq" class="stack">
         <div class="grid">
-          <div><label>RFQ Number</label><input name="rfq_no" required /></div>
+          <div><label>Job Number</label><input value="${esc(jobNumber)}" readonly /></div>
+          <div><label>Next RFQ Number</label><input value="${esc(nextRfqNo)}" readonly /></div>
+        </div>
+        <div class="grid">
           <div><label>Project</label><input name="project_name" required /></div>
           <div><label>Due Date</label><input type="date" name="due_date" /></div>
         </div>
@@ -430,11 +520,12 @@ app.get("/rfq", requireAuth, async (req, res) => {
 
 app.post("/rfq", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   const id = await withTransaction(async (client) => {
+    const rfqNo = await getNextRfqNumber(client);
     const insert = await client.query(
       "insert into rfqs (rfq_no, project_name, due_date, status) values ($1, $2, $3, 'OPEN') returning id",
-      [req.body.rfq_no?.trim(), req.body.project_name?.trim(), req.body.due_date || null]
+      [rfqNo, req.body.project_name?.trim(), req.body.due_date || null]
     );
-    await auditLog(client, req.user.id, "create", "rfq", insert.rows[0].id, req.body.rfq_no?.trim() || "");
+    await auditLog(client, req.user.id, "create", "rfq", insert.rows[0].id, rfqNo);
     return insert.rows[0].id;
   });
   res.redirect(`/rfq/${id}`);

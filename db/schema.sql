@@ -85,6 +85,12 @@ create table if not exists quote_revisions (
   created_at timestamptz not null default now()
 );
 
+create table if not exists app_settings (
+  key text primary key,
+  value text not null,
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists import_batches (
   id bigserial primary key,
   entity_type text not null,
@@ -112,7 +118,16 @@ create table if not exists purchase_orders (
   po_no text not null unique,
   vendor_id bigint not null references vendors(id),
   rfq_id bigint references rfqs(id),
-  status text not null default 'OPEN',
+  vendor_contact text,
+  freight_terms text,
+  ship_to text,
+  bill_to text,
+  notes text,
+  buyer_name text,
+  status text not null default 'DRAFT',
+  issued_at timestamptz,
+  closed_at timestamptz,
+  cancelled_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -150,6 +165,15 @@ alter table rfq_items add column if not exists awarded_at timestamptz;
 alter table rfq_items add column if not exists awarded_by bigint references users(id);
 alter table rfq_items add column if not exists award_notes text;
 alter table po_lines add column if not exists rfq_item_id bigint references rfq_items(id) on delete set null;
+alter table purchase_orders add column if not exists vendor_contact text;
+alter table purchase_orders add column if not exists freight_terms text;
+alter table purchase_orders add column if not exists ship_to text;
+alter table purchase_orders add column if not exists bill_to text;
+alter table purchase_orders add column if not exists notes text;
+alter table purchase_orders add column if not exists buyer_name text;
+alter table purchase_orders add column if not exists issued_at timestamptz;
+alter table purchase_orders add column if not exists closed_at timestamptz;
+alter table purchase_orders add column if not exists cancelled_at timestamptz;
 
 update po_lines pl
 set rfq_item_id = ri.id
@@ -173,6 +197,14 @@ where pl.po_id = po.id
       and coalesce(ri2.thk_2, '') = coalesce(pl.thk_2, '')
       and ri2.id <> ri.id
   );
+
+update purchase_orders
+set status = case
+  when status = 'OPEN' then 'ISSUED'
+  when status = 'CLOSED' then 'FULLY_RECEIVED'
+  else status
+end
+where status in ('OPEN', 'CLOSED');
 
 create index if not exists idx_po_po_no on purchase_orders(po_no);
 create index if not exists idx_po_vendor_id on purchase_orders(vendor_id);

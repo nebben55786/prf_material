@@ -69,6 +69,16 @@ export async function initDb() {
     `,
     [username, passwordHash]
   );
+
+  const defaultJobNumber = process.env.DEFAULT_JOB_NUMBER || "0000";
+  await pool.query(
+    `
+      insert into app_settings (key, value)
+      values ('job_number', $1)
+      on conflict (key) do nothing
+    `,
+    [defaultJobNumber]
+  );
 }
 
 export async function auditLog(client, userId, action, entityType, entityId = "", details = "") {
