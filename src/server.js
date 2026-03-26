@@ -100,18 +100,19 @@ function normalizeCategories(input) {
 }
 
 function parseUploadedRows(file, pastedText) {
+  const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (file?.buffer?.length) {
     if ((file.originalname || "").toLowerCase().endsWith(".xlsx")) {
       const workbook = XLSX.read(file.buffer, { type: "buffer" });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
-      return rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [String(key).trim().toLowerCase(), String(value ?? "").trim()])));
+      return rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeHeader(key), String(value ?? "").trim()])));
     }
     pastedText = file.buffer.toString("utf8");
   }
   if (!pastedText?.trim()) return [];
   const lines = pastedText.trim().split(/\r?\n/);
-  const headers = lines.shift().split(",").map((cell) => cell.trim().toLowerCase());
+  const headers = lines.shift().split(",").map((cell) => normalizeHeader(cell));
   return lines.filter((line) => line.trim()).map((line) => {
     const values = line.split(",");
     return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").trim()]));
@@ -540,7 +541,7 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
   }
   const [itemsRes, vendorsRes, quoteVendorsRes, poCountRes, recentImportsRes] = await Promise.all([
     query(`
-      select ri.id, ri.qty, ri.notes, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
+      select ri.id, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
              ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
              mi.item_code, mi.description, mi.material_type, mi.uom
       from rfq_items ri
@@ -600,6 +601,9 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
       <td>${esc(item.material_type)}</td>
       <td>${esc(item.qty)}</td>
       <td>${esc(item.uom)}</td>
+      <td>${esc(item.spec || "")}</td>
+      <td>${esc(item.commodity_code || "")}</td>
+      <td>${esc(item.tag_number || "")}</td>
       <td>${esc(item.size_1 || "")}</td>
       <td>${esc(item.size_2 || "")}</td>
       <td>${esc(item.thk_1 || "")}</td>
@@ -636,7 +640,7 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
   const uploadItemsCard = `
     <div class="card">
       <h3>Upload RFQ Items</h3>
-      <p class="muted">CSV/XLSX columns: item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty, notes</p>
+      <p class="muted">CSV/XLSX columns: item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes</p>
       <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/items/import" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
         <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
@@ -674,8 +678,8 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     <div class="card scroll">
       <h3>RFQ Items</h3>
       <table>
-        <tr><th>Item</th><th>Description</th><th>Type</th><th>Qty</th><th>UOM</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th><th>Award Status</th><th>Award Summary</th>${vendorHeaders}<th>Issued PO</th><th>Actions</th></tr>
-        ${itemRows.join("") || `<tr><td colspan="${14 + quoteVendors.length}" class="muted">No RFQ items loaded yet.</td></tr>`}
+        <tr><th>Item</th><th>Description</th><th>Type</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th><th>Award Status</th><th>Award Summary</th>${vendorHeaders}<th>Issued PO</th><th>Actions</th></tr>
+        ${itemRows.join("") || `<tr><td colspan="${17 + quoteVendors.length}" class="muted">No RFQ items loaded yet.</td></tr>`}
       </table>
     </div>
     <div class="card scroll">
@@ -743,15 +747,15 @@ app.post("/rfq/:id/items/import", requireAuth, requireRole(["admin", "buyer"]), 
       if (existingItem.rows[0]) {
         await client.query(`
           update rfq_items
-          set qty = $2, notes = $3, updated_at = now()
+          set spec = $2, commodity_code = $3, tag_number = $4, qty = $5, notes = $6, updated_at = now()
           where id = $1
-        `, [existingItem.rows[0].id, qty, row.notes || ""]);
+        `, [existingItem.rows[0].id, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
         updatedCount += 1;
       } else {
         await client.query(`
-          insert into rfq_items (rfq_id, material_item_id, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, now())
-        `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
+          insert into rfq_items (rfq_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+        `, [rfqId, materialItemId, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
         insertedCount += 1;
       }
     }
@@ -1025,7 +1029,7 @@ app.post("/rfq-item/:id/award/clear", requireAuth, requireRole(["admin", "buyer"
 
 app.get("/rfq-item/:id/edit", requireAuth, async (req, res) => {
   const item = (await query(`
-    select ri.id, ri.rfq_id, ri.qty, ri.notes, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
+    select ri.id, ri.rfq_id, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
            mi.item_code, mi.description, mi.material_type, mi.uom
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
@@ -1046,6 +1050,9 @@ app.get("/rfq-item/:id/edit", requireAuth, async (req, res) => {
           <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
           <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
           <div><label>Qty</label><input name="qty" value="${esc(item.qty)}" required /></div>
+          <div><label>Spec</label><input name="spec" value="${esc(item.spec || "")}" /></div>
+          <div><label>Commodity Code</label><input name="commodity_code" value="${esc(item.commodity_code || "")}" /></div>
+          <div><label>Tag Number</label><input name="tag_number" value="${esc(item.tag_number || "")}" /></div>
           <div><label>Size 1</label><input name="size_1" value="${esc(item.size_1 || "")}" /></div>
           <div><label>Size 2</label><input name="size_2" value="${esc(item.size_2 || "")}" /></div>
           <div><label>Thk 1</label><input name="thk_1" value="${esc(item.thk_1 || "")}" /></div>
@@ -1069,9 +1076,9 @@ app.post("/rfq-item/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asy
     );
     const update = await client.query(`
       update rfq_items
-      set size_1 = $2, size_2 = $3, thk_1 = $4, thk_2 = $5, qty = $6, notes = $7, updated_at = now()
-      where id = $1 and extract(epoch from updated_at)::text = $8
-    `, [itemId, req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", Number(req.body.qty || 0), req.body.notes || "", req.body.updated_token || ""]);
+      set spec = $2, commodity_code = $3, tag_number = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, qty = $9, notes = $10, updated_at = now()
+      where id = $1 and extract(epoch from updated_at)::text = $11
+    `, [itemId, req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", Number(req.body.qty || 0), req.body.notes || "", req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This RFQ item was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "rfq_item", itemId, req.body.item_code?.trim() || "");
     return current.rfq_id;
