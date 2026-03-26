@@ -575,7 +575,7 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     </div>
     <div class="card">
       <h3>Create RFQ From BOM</h3>
-      <p class="muted">Creates an RFQ for BOM lines that are still in planning and marks those lines as `ON_RFQ`.</p>
+      <p class="muted">Creates an RFQ for BOM lines that are still in planning and marks those lines as <code>ON_RFQ</code>.</p>
       <form method="post" action="/bom/${bom.id}/to-rfq" class="stack">
         <div class="grid">
           <div><label>Project</label><input name="project_name" value="${esc(bom.description || bom.bom_no)}" required /></div>
