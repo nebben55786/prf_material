@@ -627,6 +627,12 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     select awarded_vendor_id as vendor_id, count(*) as line_count
     from rfq_items
     where rfq_id = $1 and award_status = 'AWARDED' and awarded_vendor_id is not null
+      and not exists (
+        select 1
+        from po_lines pl
+        join purchase_orders po on po.id = pl.po_id
+        where po.rfq_id = rfq_items.rfq_id and pl.rfq_item_id = rfq_items.id
+      )
     group by awarded_vendor_id
     order by awarded_vendor_id
   `, [rfqId])).rows;
@@ -669,12 +675,17 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
         <div class="actions"><button type="submit">Create PO From Awarded Lines</button></div>
       </form>
     </div>`;
+  const issuePoHelpCard = `
+    <div class="card">
+      <h3>Issue PO From Awarded Lines</h3>
+      <p class="muted">Award at least one RFQ item line first. Once lines are awarded, they will appear here by vendor so you can create the PO.</p>
+    </div>`;
 
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>RFQ ${esc(rfq.rfq_no)}</h1>
     ${items.length === 0 && poCount === 0 ? uploadItemsCard : ""}
     ${poCount === 0 ? importQuotesCard : ""}
-    ${poCount === 0 && awardedVendorCounts.length > 0 ? issuePoCard : ""}
+    ${awardedVendorCounts.length > 0 ? issuePoCard : issuePoHelpCard}
     <div class="card scroll">
       <h3>RFQ Items</h3>
       <table>
