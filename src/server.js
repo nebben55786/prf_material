@@ -118,6 +118,46 @@ function parseUploadedRows(file, pastedText) {
   });
 }
 
+function num(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function quoteCell(unitPrice, leadDays) {
+  return `$${Number(unitPrice).toFixed(2)} | ${num(leadDays)}d`;
+}
+
+async function writeQuoteRevision(client, { rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId = null, createdBy = null }) {
+  await client.query(`
+    insert into quote_revisions (rfq_item_id, vendor_id, unit_price, lead_days, source_type, source_batch_id, created_by)
+    values ($1, $2, $3, $4, $5, $6, $7)
+  `, [rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId, createdBy]);
+}
+
+async function createImportBatch(client, { entityType, rfqId, uploadedBy, filename }) {
+  const result = await client.query(`
+    insert into import_batches (entity_type, rfq_id, uploaded_by, filename, status)
+    values ($1, $2, $3, $4, 'COMPLETED')
+    returning id
+  `, [entityType, rfqId, uploadedBy || null, filename || ""]);
+  return result.rows[0].id;
+}
+
+async function updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount, status = "COMPLETED" }) {
+  await client.query(`
+    update import_batches
+    set inserted_count = $2, updated_count = $3, skipped_count = $4, status = $5
+    where id = $1
+  `, [batchId, insertedCount, updatedCount, skippedCount, status]);
+}
+
+async function addImportBatchError(client, batchId, rowNumber, errorCode, message, rawPayload) {
+  await client.query(`
+    insert into import_batch_errors (batch_id, row_number, error_code, message, raw_payload)
+    values ($1, $2, $3, $4, $5::jsonb)
+  `, [batchId, rowNumber, errorCode, message, JSON.stringify(rawPayload || {})]);
+}
+
 function signSession(payload) {
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
@@ -163,11 +203,10 @@ function requireRole(roles) {
 async function recalcRfqStatus(client, rfqId) {
   const total = Number((await client.query("select count(*) from rfq_items where rfq_id = $1", [rfqId])).rows[0].count);
   const issued = Number((await client.query(`
-    select count(distinct ri.id)
-    from rfq_items ri
-    join purchase_orders po on po.rfq_id = ri.rfq_id
-    join po_lines pl on pl.po_id = po.id and pl.material_item_id = ri.material_item_id
-    where ri.rfq_id = $1
+    select count(distinct pl.rfq_item_id)
+    from purchase_orders po
+    join po_lines pl on pl.po_id = po.id
+    where po.rfq_id = $1 and pl.rfq_item_id is not null
   `, [rfqId])).rows[0].count);
   await client.query("update rfqs set status = $2 where id = $1", [rfqId, total > 0 && issued >= total ? "CLOSED" : "OPEN"]);
 }
@@ -304,7 +343,55 @@ app.post("/vendors/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asyn
 });
 
 app.get("/rfq", requireAuth, async (req, res) => {
-  const rfqs = (await query("select * from rfqs order by id desc")).rows;
+  const rfqNo = String(req.query.rfq_no || "").trim();
+  const project = String(req.query.project || "").trim();
+  const status = String(req.query.status || "").trim();
+  const itemCode = String(req.query.item_code || "").trim();
+  const vendorId = String(req.query.vendor_id || "").trim();
+  const vendors = (await query("select id, name from vendors order by name")).rows;
+  const where = [];
+  const params = [];
+  if (rfqNo) {
+    params.push(`%${rfqNo}%`);
+    where.push(`r.rfq_no ilike $${params.length}`);
+  }
+  if (project) {
+    params.push(`%${project}%`);
+    where.push(`r.project_name ilike $${params.length}`);
+  }
+  if (status) {
+    params.push(status);
+    where.push(`r.status = $${params.length}`);
+  }
+  if (itemCode) {
+    params.push(`%${itemCode}%`);
+    where.push(`exists (
+      select 1
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.rfq_id = r.id and mi.item_code ilike $${params.length}
+    )`);
+  }
+  if (vendorId) {
+    params.push(num(vendorId));
+    where.push(`exists (
+      select 1
+      from rfq_items ri
+      join quotes q on q.rfq_item_id = ri.id
+      where ri.rfq_id = r.id and q.vendor_id = $${params.length}
+    )`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const rfqs = (await query(`
+    select r.*
+    from rfqs r
+    ${whereSql}
+    order by r.id desc
+    limit 300
+  `, params)).rows;
+  const vendorOptions = [`<option value="">All Vendors</option>`]
+    .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === vendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
+    .join("");
   const rows = rfqs.map((rfq) => `<tr>
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td>${esc(rfq.project_name)}</td>
@@ -313,6 +400,20 @@ app.get("/rfq", requireAuth, async (req, res) => {
   </tr>`).join("");
   res.send(layout("RFQs", `
     <h1>RFQs</h1>
+    <div class="card">
+      <form method="get" action="/rfq" class="stack">
+        <div class="grid-4">
+          <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
+          <div><label>Project</label><input name="project" value="${esc(project)}" /></div>
+          <div><label>Status</label><select name="status"><option value="">All Statuses</option><option value="OPEN" ${status === "OPEN" ? "selected" : ""}>OPEN</option><option value="CLOSED" ${status === "CLOSED" ? "selected" : ""}>CLOSED</option></select></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(itemCode)}" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Quoted Vendor</label><select name="vendor_id">${vendorOptions}</select></div>
+        </div>
+        <div class="actions"><button type="submit">Filter RFQs</button><a class="btn btn-secondary" href="/rfq">Clear</a><span class="muted">${rfqs.length} result(s), max 300 shown</span></div>
+      </form>
+    </div>
     <div class="card">
       <form method="post" action="/rfq" class="stack">
         <div class="grid">
@@ -323,7 +424,7 @@ app.get("/rfq", requireAuth, async (req, res) => {
         <div class="actions"><button type="submit">Create RFQ</button></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>RFQ</th><th>Project</th><th>Due</th><th>Status</th></tr>${rows}</table></div>
+    <div class="card scroll"><table><tr><th>RFQ</th><th>Project</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="4" class="muted">No RFQs match the current filter.</td></tr>`}</table></div>
   `, req.user));
 });
 
@@ -346,9 +447,10 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
     return;
   }
-  const [itemsRes, vendorsRes, quoteVendorsRes, poCountRes] = await Promise.all([
+  const [itemsRes, vendorsRes, quoteVendorsRes, poCountRes, recentImportsRes] = await Promise.all([
     query(`
       select ri.id, ri.qty, ri.notes, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
+             ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
              mi.item_code, mi.description, mi.material_type, mi.uom
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
@@ -364,13 +466,23 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
       where ri.rfq_id = $1
       order by v.name
     `, [rfqId]),
-    query("select count(*) from purchase_orders where rfq_id = $1", [rfqId])
+    query("select count(*) from purchase_orders where rfq_id = $1", [rfqId]),
+    query(`
+      select ib.id, ib.entity_type, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
+             coalesce((select count(*) from import_batch_errors ibe where ibe.batch_id = ib.id), 0) as error_count
+      from import_batches ib
+      where ib.rfq_id = $1
+      order by ib.id desc
+      limit 5
+    `, [rfqId])
   ]);
 
   const items = itemsRes.rows;
   const vendors = vendorsRes.rows;
   const quoteVendors = quoteVendorsRes.rows;
   const poCount = Number(poCountRes.rows[0].count);
+  const recentImports = recentImportsRes.rows;
+  const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
 
   const itemRows = [];
   for (const item of items) {
@@ -380,14 +492,17 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
         select distinct po.po_no
         from purchase_orders po
         join po_lines pl on pl.po_id = po.id
-        join rfq_items ri on ri.rfq_id = po.rfq_id
-        where ri.id = $1 and pl.material_item_id = ri.material_item_id
+        where pl.rfq_item_id = $1
         order by po.po_no
       `, [item.id])
     ]);
-    const qMap = new Map(quotesRes.rows.map((row) => [row.vendor_id, `$${Number(row.unit_price).toFixed(2)} | ${row.lead_days}d`]));
+    const qMap = new Map(quotesRes.rows.map((row) => [row.vendor_id, quoteCell(row.unit_price, row.lead_days)]));
     const vendorCells = quoteVendors.map((vendor) => `<td>${esc(qMap.get(vendor.id) || "-")}</td>`).join("");
     const poRefs = poRefsRes.rows.map((row) => row.po_no).join(", ") || "Not Issued";
+    const awardedVendor = item.awarded_vendor_id ? (vendorNameMap.get(item.awarded_vendor_id) || `Vendor ${item.awarded_vendor_id}`) : "";
+    const awardSummary = item.award_status === "AWARDED"
+      ? `${awardedVendor} | $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d`
+      : "Open";
     itemRows.push(`<tr>
       <td>${esc(item.item_code)}</td>
       <td>${esc(item.description)}</td>
@@ -399,18 +514,34 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
       <td>${esc(item.thk_1 || "")}</td>
       <td>${esc(item.thk_2 || "")}</td>
       <td>${esc(item.notes || "")}</td>
+      <td>${esc(item.award_status)}</td>
+      <td>${esc(awardSummary)}</td>
       ${vendorCells}
       <td>${esc(poRefs)}</td>
       <td><div class="actions">
+        <a class="btn btn-secondary" href="/rfq-item/${item.id}/award">${item.award_status === "AWARDED" ? "Change Award" : "Award"}</a>
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/quotes">Quotes</a>
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/edit">Edit</a>
+        ${item.award_status === "AWARDED" ? `<form method="post" action="/rfq-item/${item.id}/award/clear"><button class="btn btn-secondary" type="submit">Clear Award</button></form>` : ""}
         <form method="post" action="/rfq-item/${item.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>
       </div></td>
     </tr>`);
   }
 
-  const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
+  const awardedVendorCounts = (await query(`
+    select awarded_vendor_id as vendor_id, count(*) as line_count
+    from rfq_items
+    where rfq_id = $1 and award_status = 'AWARDED' and awarded_vendor_id is not null
+    group by awarded_vendor_id
+    order by awarded_vendor_id
+  `, [rfqId])).rows;
+  const poVendorOptions = awardedVendorCounts
+    .map((row) => `<option value="${row.vendor_id}">${esc(vendorNameMap.get(row.vendor_id) || `Vendor ${row.vendor_id}`)} (${row.line_count} awarded line(s))</option>`)
+    .join("");
   const vendorHeaders = quoteVendors.map((vendor) => `<th>${esc(vendor.name)}</th>`).join("");
+  const importRows = recentImports.length > 0
+    ? recentImports.map((batch) => `<tr><td><a href="/imports/${batch.id}">${esc(batch.entity_type)}</a></td><td>${esc(batch.created_at)}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
+    : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
   const uploadItemsCard = `
     <div class="card">
       <h3>Upload RFQ Items</h3>
@@ -433,14 +564,14 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     </div>`;
   const issuePoCard = `
     <div class="card">
-      <h3>Issue PO From This RFQ</h3>
+      <h3>Issue PO From Awarded Lines</h3>
       <form method="post" action="/po/create" class="stack">
         <input type="hidden" name="rfq_id" value="${rfqId}" />
         <div class="grid">
           <div><label>PO Number</label><input name="po_no" required /></div>
-          <div><label>Vendor</label><select name="vendor_id">${vendorOptions}</select></div>
+          <div><label>Vendor</label><select name="vendor_id" required><option value="">Select awarded vendor</option>${poVendorOptions}</select></div>
         </div>
-        <div class="actions"><button type="submit">Create PO Using Vendor Quotes</button></div>
+        <div class="actions"><button type="submit">Create PO From Awarded Lines</button></div>
       </form>
     </div>`;
 
@@ -448,12 +579,19 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     <h1>RFQ ${esc(rfq.rfq_no)}</h1>
     ${items.length === 0 && poCount === 0 ? uploadItemsCard : ""}
     ${poCount === 0 ? importQuotesCard : ""}
-    ${poCount === 0 ? issuePoCard : ""}
+    ${poCount === 0 && awardedVendorCounts.length > 0 ? issuePoCard : ""}
     <div class="card scroll">
       <h3>RFQ Items</h3>
       <table>
-        <tr><th>Item</th><th>Description</th><th>Type</th><th>Qty</th><th>UOM</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th>${vendorHeaders}<th>Issued PO</th><th>Actions</th></tr>
-        ${itemRows.join("")}
+        <tr><th>Item</th><th>Description</th><th>Type</th><th>Qty</th><th>UOM</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th><th>Award Status</th><th>Award Summary</th>${vendorHeaders}<th>Issued PO</th><th>Actions</th></tr>
+        ${itemRows.join("") || `<tr><td colspan="${14 + quoteVendors.length}" class="muted">No RFQ items loaded yet.</td></tr>`}
+      </table>
+    </div>
+    <div class="card scroll">
+      <h3>Recent Imports</h3>
+      <table>
+        <tr><th>Type</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>
+        ${importRows}
       </table>
     </div>
     ${items.length > 0 && poCount === 0 ? uploadItemsCard : ""}
@@ -464,15 +602,39 @@ app.post("/rfq/:id/items/import", requireAuth, requireRole(["admin", "buyer"]), 
   const rfqId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (rows.length === 0) throw new Error("No rows found.");
-  await withTransaction(async (client) => {
-    for (const row of rows) {
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "rfq_items",
+      rfqId,
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || ""
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 2;
       const itemCode = String(row.item_code || "").trim();
-      const qty = Number(row.qty || 0);
-      if (!itemCode || qty <= 0) continue;
+      const qty = num(row.qty);
+      if (!itemCode) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "missing_item_code", "Item code is required.", row);
+        continue;
+      }
+      if (qty <= 0) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "invalid_qty", "Qty must be greater than zero.", row);
+        continue;
+      }
       let materialItemId;
       const existing = await client.query("select id from material_items where item_code = $1", [itemCode]);
       if (existing.rows[0]) {
         materialItemId = existing.rows[0].id;
+        await client.query(
+          "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
+          [materialItemId, row.description || itemCode, row.material_type || "misc", row.uom || "EA"]
+        );
       } else {
         const insert = await client.query(
           "insert into material_items (item_code, description, material_type, uom) values ($1, $2, $3, $4) returning id",
@@ -480,25 +642,61 @@ app.post("/rfq/:id/items/import", requireAuth, requireRole(["admin", "buyer"]), 
         );
         materialItemId = insert.rows[0].id;
       }
-      await client.query(`
-        insert into rfq_items (rfq_id, material_item_id, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, now())
-      `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
+      const existingItem = await client.query(`
+        select id
+        from rfq_items
+        where rfq_id = $1 and material_item_id = $2
+          and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
+          and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
+      `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || ""]);
+      if (existingItem.rows[0]) {
+        await client.query(`
+          update rfq_items
+          set qty = $2, notes = $3, updated_at = now()
+          where id = $1
+        `, [existingItem.rows[0].id, qty, row.notes || ""]);
+        updatedCount += 1;
+      } else {
+        await client.query(`
+          insert into rfq_items (rfq_id, material_item_id, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, now())
+        `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
+        insertedCount += 1;
+      }
     }
-    await auditLog(client, req.user.id, "import", "rfq_items", rfqId, `rows=${rows.length}`);
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "rfq_items", rfqId, `rows=${rows.length};batch=${batchId}`);
+    return batchId;
   });
-  res.redirect(`/rfq/${rfqId}`);
+  res.redirect(`/imports/${batchId}`);
 });
 
 app.post("/rfq/:id/quotes/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (rows.length === 0) throw new Error("No rows found.");
-  await withTransaction(async (client) => {
-    for (const row of rows) {
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "quotes",
+      rfqId,
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || ""
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 2;
       const vendorName = String(row.vendor_name || "").trim();
       const itemCode = String(row.item_code || "").trim();
-      if (!vendorName || !itemCode || !row.unit_price) continue;
+      const unitPrice = num(row.unit_price, NaN);
+      const leadDays = num(row.lead_days);
+      if (!vendorName || !itemCode || !Number.isFinite(unitPrice) || unitPrice <= 0) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "invalid_quote", "Vendor, item code, and unit price are required.", row);
+        continue;
+      }
       let vendorId;
       const vendorRes = await client.query("select id from vendors where name = $1", [vendorName]);
       if (vendorRes.rows[0]) {
@@ -513,23 +711,95 @@ app.post("/rfq/:id/quotes/import", requireAuth, requireRole(["admin", "buyer"]),
         join material_items mi on mi.id = ri.material_item_id
         where ri.rfq_id = $1 and mi.item_code = $2
       `, [rfqId, itemCode]);
-      if (!rfqItemRes.rows[0]) continue;
+      if (!rfqItemRes.rows[0]) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "rfq_item_not_found", "Item code does not exist on this RFQ.", row);
+        continue;
+      }
+      const rfqItemId = rfqItemRes.rows[0].id;
+      const existingQuote = await client.query(
+        "select id from quotes where rfq_item_id = $1 and vendor_id = $2",
+        [rfqItemId, vendorId]
+      );
       await client.query(`
         insert into quotes (rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
         values ($1, $2, $3, $4, now())
         on conflict (rfq_item_id, vendor_id)
         do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-      `, [rfqItemRes.rows[0].id, vendorId, Number(row.unit_price), Number(row.lead_days || 0)]);
+      `, [rfqItemId, vendorId, unitPrice, leadDays]);
+      await client.query(`
+        update rfq_items
+        set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
+        where id = $1 and award_status = 'AWARDED' and awarded_vendor_id = $2
+      `, [rfqItemId, vendorId, unitPrice, leadDays]);
+      await writeQuoteRevision(client, {
+        rfqItemId,
+        vendorId,
+        unitPrice,
+        leadDays,
+        sourceType: "import",
+        sourceBatchId: batchId,
+        createdBy: req.user.id
+      });
+      if (existingQuote.rows[0]) updatedCount += 1;
+      else insertedCount += 1;
     }
-    await auditLog(client, req.user.id, "import", "quotes", rfqId, `rows=${rows.length}`);
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "quotes", rfqId, `rows=${rows.length};batch=${batchId}`);
+    return batchId;
   });
-  res.redirect(`/rfq/${rfqId}`);
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.get("/imports/:id", requireAuth, async (req, res) => {
+  const batch = (await query(`
+    select ib.*, r.rfq_no
+    from import_batches ib
+    left join rfqs r on r.id = ib.rfq_id
+    where ib.id = $1
+  `, [req.params.id])).rows[0];
+  if (!batch) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Import batch not found.</h3></div>`, req.user));
+    return;
+  }
+  const errors = (await query(`
+    select row_number, error_code, message, raw_payload
+    from import_batch_errors
+    where batch_id = $1
+    order by row_number, id
+  `, [req.params.id])).rows;
+  const errorRows = errors.length > 0
+    ? errors.map((error) => `<tr><td>${error.row_number}</td><td>${esc(error.error_code)}</td><td>${esc(error.message)}</td><td><code>${esc(JSON.stringify(error.raw_payload))}</code></td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">No row-level errors.</td></tr>`;
+  res.send(layout("Import Results", `
+    <h1>Import Results</h1>
+    <div class="card">
+      <div class="grid">
+        <div><label>RFQ</label><div>${esc(batch.rfq_no || "N/A")}</div></div>
+        <div><label>Import Type</label><div>${esc(batch.entity_type)}</div></div>
+        <div><label>File</label><div>${esc(batch.filename || "Pasted data")}</div></div>
+        <div><label>Status</label><div>${esc(batch.status)}</div></div>
+      </div>
+      <div class="stats" style="margin-top:18px;">
+        <div class="stat"><div>Inserted</div><strong>${batch.inserted_count}</strong></div>
+        <div class="stat"><div>Updated</div><strong>${batch.updated_count}</strong></div>
+        <div class="stat"><div>Skipped</div><strong>${batch.skipped_count}</strong></div>
+        <div class="stat"><div>Errors</div><strong>${errors.length}</strong></div>
+      </div>
+      <div class="actions" style="margin-top:18px;"><a class="btn btn-secondary" href="/rfq/${batch.rfq_id}">Back To RFQ</a></div>
+    </div>
+    <div class="card scroll">
+      <h3>Row Results</h3>
+      <table><tr><th>Row</th><th>Code</th><th>Message</th><th>Payload</th></tr>${errorRows}</table>
+    </div>
+  `, req.user));
 });
 
 app.post("/po/create", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   const rfqId = Number(req.body.rfq_id);
   const vendorId = Number(req.body.vendor_id);
   const poNo = String(req.body.po_no || "").trim();
+  if (!vendorId) throw new Error("Select a vendor with awarded RFQ lines.");
   await withTransaction(async (client) => {
     const poInsert = await client.query(
       "insert into purchase_orders (po_no, vendor_id, rfq_id, status, updated_at) values ($1, $2, $3, 'OPEN', now()) returning id",
@@ -537,22 +807,129 @@ app.post("/po/create", requireAuth, requireRole(["admin", "buyer"]), async (req,
     );
     const poId = poInsert.rows[0].id;
     const lines = await client.query(`
-      select ri.material_item_id, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.qty, q.unit_price
+      select ri.id as rfq_item_id, ri.material_item_id, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.qty,
+             ri.awarded_unit_price as unit_price
       from rfq_items ri
-      join quotes q on q.rfq_item_id = ri.id
-      where ri.rfq_id = $1 and q.vendor_id = $2
+      where ri.rfq_id = $1 and ri.award_status = 'AWARDED' and ri.awarded_vendor_id = $2
+        and not exists (
+          select 1
+          from po_lines pl
+          join purchase_orders po on po.id = pl.po_id
+          where po.rfq_id = ri.rfq_id and pl.rfq_item_id = ri.id
+        )
     `, [rfqId, vendorId]);
-    if (lines.rows.length === 0) throw new Error("Selected vendor has no quoted lines on this RFQ.");
+    if (lines.rows.length === 0) throw new Error("Selected vendor has no unissued awarded lines on this RFQ.");
     for (const line of lines.rows) {
       await client.query(`
-        insert into po_lines (po_id, material_item_id, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, now())
-      `, [poId, line.material_item_id, line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price]);
+        insert into po_lines (po_id, rfq_item_id, material_item_id, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+      `, [poId, line.rfq_item_id, line.material_item_id, line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price]);
     }
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
   });
   res.redirect("/po");
+});
+
+app.get("/rfq-item/:id/award", requireAuth, async (req, res) => {
+  const [itemRes, quotesRes] = await Promise.all([
+    query(`
+      select ri.id, ri.rfq_id, ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
+             mi.item_code, mi.description
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.id = $1
+    `, [req.params.id]),
+    query(`
+      select v.id as vendor_id, v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
+      from quotes q
+      join vendors v on v.id = q.vendor_id
+      where q.rfq_item_id = $1
+      order by q.unit_price, q.lead_days, v.name
+    `, [req.params.id])
+  ]);
+  const item = itemRes.rows[0];
+  if (!item) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ item not found.</h3></div>`, req.user));
+    return;
+  }
+  const quoteOptions = quotesRes.rows.map((quote) => `<option value="${quote.vendor_id}" ${quote.vendor_id === item.awarded_vendor_id ? "selected" : ""}>${esc(quote.vendor_name)} | ${quoteCell(quote.unit_price, quote.lead_days)}</option>`).join("");
+  const quoteRows = quotesRes.rows.length > 0
+    ? quotesRes.rows.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(quote.quoted_at)}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">Add quotes before awarding this line.</td></tr>`;
+  res.send(layout("Award RFQ Item", `
+    <h1>Award RFQ Item</h1>
+    <div class="card"><strong>${esc(item.item_code)}</strong> | ${esc(item.description)}</div>
+    <div class="card">
+      <form method="post" action="/rfq-item/${item.id}/award" class="stack">
+        <div class="grid">
+          <div><label>Quoted Vendor</label><select name="vendor_id" ${quotesRes.rows.length === 0 ? "disabled" : ""}>${quoteOptions}</select></div>
+          <div><label>Award Notes</label><input name="award_notes" value="${esc(item.award_notes || "")}" /></div>
+        </div>
+        <div class="actions"><button type="submit" ${quotesRes.rows.length === 0 ? "disabled" : ""}>Save Award</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
+      </form>
+    </div>
+    <div class="card scroll"><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Updated</th></tr>${quoteRows}</table></div>
+  `, req.user));
+});
+
+app.post("/rfq-item/:id/award", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const itemId = Number(req.params.id);
+  const rfqId = await withTransaction(async (client) => {
+    const quote = (await client.query(`
+      select ri.rfq_id, q.vendor_id, q.unit_price, q.lead_days
+      from rfq_items ri
+      join quotes q on q.rfq_item_id = ri.id
+      where ri.id = $1 and q.vendor_id = $2
+    `, [itemId, Number(req.body.vendor_id)])).rows[0];
+    if (!quote) throw new Error("Select a quoted vendor before awarding.");
+    await client.query(`
+      update rfq_items
+      set award_status = 'AWARDED',
+          awarded_vendor_id = $2,
+          awarded_unit_price = $3,
+          awarded_lead_days = $4,
+          awarded_at = now(),
+          awarded_by = $5,
+          award_notes = $6,
+          updated_at = now()
+      where id = $1
+    `, [itemId, quote.vendor_id, quote.unit_price, quote.lead_days, req.user.id, req.body.award_notes || ""]);
+    await auditLog(client, req.user.id, "award", "rfq_item", itemId, `vendor=${quote.vendor_id}`);
+    return quote.rfq_id;
+  });
+  res.redirect(`/rfq/${rfqId}`);
+});
+
+app.post("/rfq-item/:id/award/clear", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const itemId = Number(req.params.id);
+  const rfqId = await withTransaction(async (client) => {
+    const current = (await client.query("select rfq_id from rfq_items where id = $1", [itemId])).rows[0];
+    if (!current) throw new Error("RFQ item not found.");
+    const issued = await client.query(`
+      select 1
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id
+      where pl.rfq_item_id = $1
+      limit 1
+    `, [itemId]);
+    if (issued.rows[0]) throw new Error("Cannot clear an award after a PO line has been issued.");
+    await client.query(`
+      update rfq_items
+      set award_status = 'OPEN',
+          awarded_vendor_id = null,
+          awarded_unit_price = null,
+          awarded_lead_days = null,
+          awarded_at = null,
+          awarded_by = null,
+          award_notes = null,
+          updated_at = now()
+      where id = $1
+    `, [itemId]);
+    await auditLog(client, req.user.id, "clear_award", "rfq_item", itemId, "");
+    return current.rfq_id;
+  });
+  res.redirect(`/rfq/${rfqId}`);
 });
 
 app.get("/rfq-item/:id/edit", requireAuth, async (req, res) => {
@@ -625,26 +1002,42 @@ app.post("/rfq-item/:id/delete", requireAuth, requireRole(["admin", "buyer"]), a
 
 app.get("/rfq-item/:id/quotes", requireAuth, async (req, res) => {
   const item = (await query(`
-    select ri.id, ri.rfq_id, mi.item_code, mi.description
+    select ri.id, ri.rfq_id, ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days,
+           mi.item_code, mi.description
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
     where ri.id = $1
   `, [req.params.id])).rows[0];
+  if (!item) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ item not found.</h3></div>`, req.user));
+    return;
+  }
   const vendors = (await query("select id, name from vendors order by name")).rows;
   const quotes = (await query(`
-    select v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
+    select v.id as vendor_id, v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
     from quotes q
     join vendors v on v.id = q.vendor_id
     where q.rfq_item_id = $1
     order by q.unit_price, q.lead_days
   `, [req.params.id])).rows;
+  const revisions = (await query(`
+    select v.name as vendor_name, qr.unit_price, qr.lead_days, qr.source_type, qr.created_at
+    from quote_revisions qr
+    join vendors v on v.id = qr.vendor_id
+    where qr.rfq_item_id = $1
+    order by qr.id desc
+    limit 20
+  `, [req.params.id])).rows;
   const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
   const quoteRows = quotes.length > 0
-    ? quotes.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(quote.quoted_at)}</td></tr>`).join("")
-    : `<tr><td colspan="4" class="muted">No quotes yet</td></tr>`;
+    ? quotes.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(quote.quoted_at)}</td>${item.awarded_vendor_id === quote.vendor_id ? `<td><span class="chip">Awarded</span></td>` : `<td></td>`}</tr>`).join("")
+    : `<tr><td colspan="5" class="muted">No quotes yet</td></tr>`;
+  const revisionRows = revisions.length > 0
+    ? revisions.map((revision) => `<tr><td>${esc(revision.vendor_name)}</td><td>$${Number(revision.unit_price).toFixed(2)}</td><td>${revision.lead_days} days</td><td>${esc(revision.source_type)}</td><td>${esc(revision.created_at)}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="muted">No quote revisions yet</td></tr>`;
   res.send(layout("Manage Quotes", `
     <h1>Manage Quotes</h1>
-    <div class="card"><strong>${esc(item.item_code)}</strong> | ${esc(item.description)}</div>
+    <div class="card"><strong>${esc(item.item_code)}</strong> | ${esc(item.description)} | <strong>Award:</strong> ${item.award_status === "AWARDED" ? `${esc(quotes.find((quote) => quote.vendor_id === item.awarded_vendor_id)?.vendor_name || "Awarded")} @ $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d` : "Open"}</div>
     <div class="card">
       <form method="post" action="/quotes" class="stack">
         <input type="hidden" name="rfq_item_id" value="${item.id}" />
@@ -657,18 +1050,37 @@ app.get("/rfq-item/:id/quotes", requireAuth, async (req, res) => {
         <div class="actions"><button type="submit">Save Quote</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Updated</th></tr>${quoteRows}</table></div>
+    <div class="card scroll"><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Updated</th><th>Award</th></tr>${quoteRows}</table></div>
+    <div class="card scroll"><h3>Quote Revision History</h3><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Source</th><th>Logged</th></tr>${revisionRows}</table></div>
   `, req.user));
 });
 
 app.post("/quotes", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   await withTransaction(async (client) => {
+    const rfqItemId = Number(req.body.rfq_item_id);
+    const vendorId = Number(req.body.vendor_id);
+    const unitPrice = num(req.body.unit_price, NaN);
+    const leadDays = num(req.body.lead_days);
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0) throw new Error("Unit price must be greater than zero.");
     await client.query(`
       insert into quotes (rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
       values ($1, $2, $3, $4, now())
       on conflict (rfq_item_id, vendor_id)
       do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-    `, [Number(req.body.rfq_item_id), Number(req.body.vendor_id), Number(req.body.unit_price), Number(req.body.lead_days || 0)]);
+    `, [rfqItemId, vendorId, unitPrice, leadDays]);
+    await client.query(`
+      update rfq_items
+      set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
+      where id = $1 and award_status = 'AWARDED' and awarded_vendor_id = $2
+    `, [rfqItemId, vendorId, unitPrice, leadDays]);
+    await writeQuoteRevision(client, {
+      rfqItemId,
+      vendorId,
+      unitPrice,
+      leadDays,
+      sourceType: "manual",
+      createdBy: req.user.id
+    });
     await auditLog(client, req.user.id, "upsert", "quote", req.body.rfq_item_id, `vendor=${req.body.vendor_id}`);
   });
   res.redirect(`/rfq/${req.body.rfq_id}`);

@@ -53,6 +53,13 @@ create table if not exists rfq_items (
   thk_2 text,
   qty numeric(18,4) not null,
   notes text,
+  award_status text not null default 'OPEN',
+  awarded_vendor_id bigint references vendors(id),
+  awarded_unit_price numeric(18,4),
+  awarded_lead_days integer,
+  awarded_at timestamptz,
+  awarded_by bigint references users(id),
+  award_notes text,
   updated_at timestamptz not null default now()
 );
 
@@ -64,6 +71,40 @@ create table if not exists quotes (
   lead_days integer not null default 0,
   quoted_at timestamptz not null default now(),
   unique (rfq_item_id, vendor_id)
+);
+
+create table if not exists quote_revisions (
+  id bigserial primary key,
+  rfq_item_id bigint not null references rfq_items(id) on delete cascade,
+  vendor_id bigint not null references vendors(id),
+  unit_price numeric(18,4) not null,
+  lead_days integer not null default 0,
+  source_type text not null,
+  source_batch_id bigint,
+  created_by bigint references users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists import_batches (
+  id bigserial primary key,
+  entity_type text not null,
+  rfq_id bigint references rfqs(id) on delete cascade,
+  uploaded_by bigint references users(id) on delete set null,
+  filename text,
+  status text not null default 'COMPLETED',
+  inserted_count integer not null default 0,
+  updated_count integer not null default 0,
+  skipped_count integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists import_batch_errors (
+  id bigserial primary key,
+  batch_id bigint not null references import_batches(id) on delete cascade,
+  row_number integer not null,
+  error_code text not null,
+  message text not null,
+  raw_payload jsonb not null default '{}'::jsonb
 );
 
 create table if not exists purchase_orders (
@@ -79,6 +120,7 @@ create table if not exists purchase_orders (
 create table if not exists po_lines (
   id bigserial primary key,
   po_id bigint not null references purchase_orders(id) on delete cascade,
+  rfq_item_id bigint references rfq_items(id) on delete set null,
   material_item_id bigint not null references material_items(id),
   size_1 text,
   size_2 text,
@@ -100,7 +142,44 @@ create table if not exists receipts (
   received_at timestamptz not null default now()
 );
 
+alter table rfq_items add column if not exists award_status text not null default 'OPEN';
+alter table rfq_items add column if not exists awarded_vendor_id bigint references vendors(id);
+alter table rfq_items add column if not exists awarded_unit_price numeric(18,4);
+alter table rfq_items add column if not exists awarded_lead_days integer;
+alter table rfq_items add column if not exists awarded_at timestamptz;
+alter table rfq_items add column if not exists awarded_by bigint references users(id);
+alter table rfq_items add column if not exists award_notes text;
+alter table po_lines add column if not exists rfq_item_id bigint references rfq_items(id) on delete set null;
+
+update po_lines pl
+set rfq_item_id = ri.id
+from purchase_orders po
+join rfq_items ri on ri.rfq_id = po.rfq_id
+where pl.po_id = po.id
+  and pl.rfq_item_id is null
+  and ri.material_item_id = pl.material_item_id
+  and coalesce(ri.size_1, '') = coalesce(pl.size_1, '')
+  and coalesce(ri.size_2, '') = coalesce(pl.size_2, '')
+  and coalesce(ri.thk_1, '') = coalesce(pl.thk_1, '')
+  and coalesce(ri.thk_2, '') = coalesce(pl.thk_2, '')
+  and not exists (
+    select 1
+    from rfq_items ri2
+    where ri2.rfq_id = ri.rfq_id
+      and ri2.material_item_id = ri.material_item_id
+      and coalesce(ri2.size_1, '') = coalesce(pl.size_1, '')
+      and coalesce(ri2.size_2, '') = coalesce(pl.size_2, '')
+      and coalesce(ri2.thk_1, '') = coalesce(pl.thk_1, '')
+      and coalesce(ri2.thk_2, '') = coalesce(pl.thk_2, '')
+      and ri2.id <> ri.id
+  );
+
 create index if not exists idx_po_po_no on purchase_orders(po_no);
 create index if not exists idx_po_vendor_id on purchase_orders(vendor_id);
 create index if not exists idx_po_rfq_id on purchase_orders(rfq_id);
 create index if not exists idx_po_status on purchase_orders(status);
+create index if not exists idx_rfq_rfq_no on rfqs(rfq_no);
+create index if not exists idx_rfq_project_name on rfqs(project_name);
+create index if not exists idx_rfq_status on rfqs(status);
+create index if not exists idx_quotes_vendor_id on quotes(vendor_id);
+create index if not exists idx_quotes_rfq_item_id on quotes(rfq_item_id);
