@@ -672,10 +672,10 @@ app.post("/bom/:id/lines/import", requireAuth, requireRole(["admin", "buyer"]), 
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const rowNumber = index + 2;
-      const lineNo = num(row.line_no);
+      const lineNo = String(row.line_no || "").trim();
       const itemCode = String(row.item_code || "").trim();
       const qtyRequired = num(row.qty_required);
-      if (lineNo <= 0 || !itemCode || qtyRequired <= 0) {
+      if (!lineNo || !itemCode || qtyRequired <= 0) {
         skippedCount += 1;
         await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, and qty_required are required.", row);
         continue;
@@ -750,7 +750,7 @@ app.post("/bom-line/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asy
           spec = $8, commodity_code = $9, tag_number = $10, size_1 = $11, size_2 = $12, thk_1 = $13, thk_2 = $14,
           planning_status = $15, notes = $16, updated_at = now()
       where id = $1
-    `, [lineId, num(req.body.line_no), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", num(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.planning_status || "PLANNED", req.body.notes || ""]);
+    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", num(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.planning_status || "PLANNED", req.body.notes || ""]);
     await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
     return current.bom_id;
   });

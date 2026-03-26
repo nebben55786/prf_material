@@ -61,7 +61,7 @@ create table if not exists bom_headers (
 create table if not exists bom_lines (
   id bigserial primary key,
   bom_id bigint not null references bom_headers(id) on delete cascade,
-  line_no integer not null,
+  line_no text not null,
   item_code text not null,
   description text not null,
   material_type text not null default 'misc',
@@ -233,6 +233,7 @@ alter table bom_lines add column if not exists qty_awarded numeric(18,4) not nul
 alter table bom_lines add column if not exists qty_ordered numeric(18,4) not null default 0;
 alter table bom_lines add column if not exists qty_received numeric(18,4) not null default 0;
 alter table bom_lines add column if not exists qty_issued numeric(18,4) not null default 0;
+alter table bom_lines alter column line_no type text using line_no::text;
 
 update po_lines pl
 set rfq_item_id = ri.id
