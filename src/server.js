@@ -456,13 +456,67 @@ app.post("/bom", requireAuth, requireRole(["admin", "buyer"]), async (req, res) 
   res.redirect(`/bom/${bomId}`);
 });
 
+app.get("/bom/:id/edit", requireAuth, async (req, res) => {
+  const bom = (await query("select * from bom_headers where id = $1", [req.params.id])).rows[0];
+  if (!bom) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
+    return;
+  }
+  const typeOptions = bomTypes.map((value) => `<option value="${esc(value)}" ${bom.bom_type === value ? "selected" : ""}>${esc(value)}</option>`).join("");
+  const statusOptions = bomStatuses.map((value) => `<option value="${esc(value)}" ${bom.status === value ? "selected" : ""}>${esc(value)}</option>`).join("");
+  res.send(layout("Edit BOM", `
+    <h1>Edit BOM</h1>
+    <div class="card">
+      <form method="post" action="/bom/${bom.id}/edit" class="stack">
+        <div class="grid-4">
+          <div><label>Job Number</label><input name="job_number" value="${esc(bom.job_number)}" required /></div>
+          <div><label>BOM Number</label><input name="bom_no" value="${esc(bom.bom_no)}" required /></div>
+          <div><label>BOM Type</label><select name="bom_type">${typeOptions}</select></div>
+          <div><label>Status</label><select name="status">${statusOptions}</select></div>
+        </div>
+        <div class="grid">
+          <div><label>Area</label><input name="area" value="${esc(bom.area || "")}" /></div>
+          <div><label>System</label><input name="system" value="${esc(bom.system || "")}" /></div>
+          <div><label>Revision</label><input name="revision" value="${esc(bom.revision || "")}" /></div>
+          <div><label>Description</label><input name="description" value="${esc(bom.description || "")}" /></div>
+        </div>
+        <div><label>Notes</label><textarea name="notes">${esc(bom.notes || "")}</textarea></div>
+        <div class="actions"><button type="submit">Save BOM</button><a class="btn btn-secondary" href="/bom/${bom.id}">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/bom/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    await client.query(`
+      update bom_headers
+      set job_number = $2, bom_no = $3, bom_type = $4, area = $5, system = $6, revision = $7, status = $8, description = $9, notes = $10, updated_at = now()
+      where id = $1
+    `, [
+      req.params.id,
+      String(req.body.job_number || "").trim().toUpperCase(),
+      String(req.body.bom_no || "").trim(),
+      req.body.bom_type || "misc",
+      req.body.area || "",
+      req.body.system || "",
+      req.body.revision || "0",
+      req.body.status || "DRAFT",
+      req.body.description || "",
+      req.body.notes || ""
+    ]);
+    await auditLog(client, req.user.id, "update", "bom_header", req.params.id, req.body.bom_no || "");
+  });
+  res.redirect(`/bom/${req.params.id}`);
+});
+
 app.get("/bom/:id", requireAuth, async (req, res) => {
   const bom = (await query("select * from bom_headers where id = $1", [req.params.id])).rows[0];
   if (!bom) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
     return;
   }
-  const [linesRes, importsRes] = await Promise.all([
+  const [linesRes, importsRes, coverageRes] = await Promise.all([
     query("select * from bom_lines where bom_id = $1 order by line_no, id", [req.params.id]),
     query(`
       select ib.id, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
@@ -471,8 +525,19 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
       where ib.entity_type = 'bom_lines' and ib.rfq_id = $1
       order by ib.id desc
       limit 5
+    `, [req.params.id]),
+    query(`
+      select
+        count(*) as line_count,
+        coalesce(sum(qty_required), 0) as qty_required,
+        count(*) filter (where planning_status = 'ON_RFQ') as on_rfq_count,
+        count(*) filter (where planning_status in ('ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'ISSUED_TO_FIELD', 'CLOSED')) as ordered_count,
+        count(*) filter (where planning_status in ('PARTIALLY_RECEIVED', 'RECEIVED', 'ISSUED_TO_FIELD', 'CLOSED')) as received_count
+      from bom_lines
+      where bom_id = $1
     `, [req.params.id])
   ]);
+  const coverage = coverageRes.rows[0];
   const lineRows = linesRes.rows.map((line) => `<tr>
     <td>${esc(line.line_no)}</td>
     <td>${esc(line.item_code)}</td>
@@ -500,6 +565,24 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
       <p class="muted">Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}</p>
       <p>${esc(bom.description || "")}</p>
       ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
+      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div>Lines</div><strong>${coverage.line_count}</strong></div>
+      <div class="stat"><div>Qty Required</div><strong>${esc(coverage.qty_required)}</strong></div>
+      <div class="stat"><div>On RFQ</div><strong>${coverage.on_rfq_count}</strong></div>
+      <div class="stat"><div>Received+</div><strong>${coverage.received_count}</strong></div>
+    </div>
+    <div class="card">
+      <h3>Create RFQ From BOM</h3>
+      <p class="muted">Creates an RFQ for BOM lines that are still in planning and marks those lines as `ON_RFQ`.</p>
+      <form method="post" action="/bom/${bom.id}/to-rfq" class="stack">
+        <div class="grid">
+          <div><label>Project</label><input name="project_name" value="${esc(bom.description || bom.bom_no)}" required /></div>
+          <div><label>Due Date</label><input type="date" name="due_date" /></div>
+        </div>
+        <div class="actions"><button type="submit">Create RFQ From BOM Lines</button></div>
+      </form>
     </div>
     <div class="card">
       <h3>Upload BOM Lines</h3>
@@ -513,6 +596,63 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     <div class="card scroll"><table><tr><th>Line</th><th>Item</th><th>Description</th><th>Type</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th><th>Status</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="16" class="muted">No BOM lines loaded yet.</td></tr>`}</table></div>
     <div class="card scroll"><table><tr><th>Batch</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>${importRows}</table></div>
   `, req.user));
+});
+
+app.post("/bom/:id/to-rfq", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const bomId = Number(req.params.id);
+  const rfqId = await withTransaction(async (client) => {
+    const bom = (await client.query("select * from bom_headers where id = $1", [bomId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    const lines = (await client.query(`
+      select *
+      from bom_lines
+      where bom_id = $1 and planning_status = 'PLANNED'
+      order by line_no, id
+    `, [bomId])).rows;
+    if (lines.length === 0) throw new Error("No BOM lines are available to move onto an RFQ.");
+    const rfqNo = await getNextRfqNumber(client);
+    const rfqInsert = await client.query(`
+      insert into rfqs (rfq_no, project_name, due_date, status)
+      values ($1, $2, $3, 'OPEN')
+      returning id
+    `, [rfqNo, req.body.project_name?.trim() || bom.description || bom.bom_no, req.body.due_date || null]);
+    const newRfqId = rfqInsert.rows[0].id;
+    for (const line of lines) {
+      let materialItemId;
+      const existingItem = await client.query("select id from material_items where item_code = $1", [line.item_code]);
+      if (existingItem.rows[0]) {
+        materialItemId = existingItem.rows[0].id;
+        await client.query(
+          "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
+          [materialItemId, line.description, line.material_type || "misc", line.uom || "EA"]
+        );
+      } else {
+        const inserted = await client.query(
+          "insert into material_items (item_code, description, material_type, uom) values ($1, $2, $3, $4) returning id",
+          [line.item_code, line.description, line.material_type || "misc", line.uom || "EA"]
+        );
+        materialItemId = inserted.rows[0].id;
+      }
+      await client.query(`
+        insert into rfq_items (rfq_id, bom_line_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+      `, [newRfqId, line.id, materialItemId, line.spec || "", line.commodity_code || "", line.tag_number || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty_required, line.notes || ""]);
+      await client.query(`
+        update bom_lines
+        set planning_status = 'ON_RFQ', qty_quoted = qty_required, updated_at = now()
+        where id = $1
+      `, [line.id]);
+    }
+    await client.query(`
+      update bom_headers
+      set status = case when status = 'DRAFT' then 'ISSUED_FOR_RFQ' else status end, updated_at = now()
+      where id = $1
+    `, [bomId]);
+    await auditLog(client, req.user.id, "create", "rfq", newRfqId, rfqNo);
+    await auditLog(client, req.user.id, "generate_rfq", "bom_header", bomId, rfqNo);
+    return newRfqId;
+  });
+  res.redirect(`/rfq/${rfqId}`);
 });
 
 app.post("/bom/:id/lines/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {

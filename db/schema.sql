@@ -88,6 +88,7 @@ create table if not exists bom_lines (
 create table if not exists rfq_items (
   id bigserial primary key,
   rfq_id bigint not null references rfqs(id) on delete cascade,
+  bom_line_id bigint references bom_lines(id) on delete set null,
   material_item_id bigint not null references material_items(id),
   spec text,
   commodity_code text,
@@ -203,6 +204,7 @@ create table if not exists receipts (
 );
 
 alter table rfq_items add column if not exists award_status text not null default 'OPEN';
+alter table rfq_items add column if not exists bom_line_id bigint references bom_lines(id) on delete set null;
 alter table rfq_items add column if not exists spec text;
 alter table rfq_items add column if not exists commodity_code text;
 alter table rfq_items add column if not exists tag_number text;
