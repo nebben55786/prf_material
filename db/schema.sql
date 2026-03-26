@@ -49,7 +49,7 @@ create table if not exists bom_headers (
   bom_no text not null unique,
   bom_type text not null,
   area text,
-  system text,
+  system_name text,
   notes text,
   revision text,
   status text not null default 'DRAFT',
@@ -224,7 +224,7 @@ alter table purchase_orders add column if not exists buyer_name text;
 alter table purchase_orders add column if not exists issued_at timestamptz;
 alter table purchase_orders add column if not exists closed_at timestamptz;
 alter table purchase_orders add column if not exists cancelled_at timestamptz;
-alter table bom_headers add column if not exists system text;
+alter table bom_headers add column if not exists system_name text;
 alter table bom_headers add column if not exists notes text;
 alter table bom_lines add column if not exists material_type text not null default 'misc';
 alter table bom_lines add column if not exists planning_status text not null default 'PLANNED';

@@ -359,7 +359,7 @@ app.get("/bom", requireAuth, async (req, res) => {
   const bomNo = String(req.query.bom_no || "").trim();
   const bomType = String(req.query.bom_type || "").trim();
   const area = String(req.query.area || "").trim();
-  const system = String(req.query.system || "").trim();
+  const systemName = String(req.query.system || req.query.system_name || "").trim();
   const status = String(req.query.status || "").trim();
   const jobNumber = await getJobNumber();
   const where = [];
@@ -367,7 +367,7 @@ app.get("/bom", requireAuth, async (req, res) => {
   if (bomNo) { params.push(`%${bomNo}%`); where.push(`bh.bom_no ilike $${params.length}`); }
   if (bomType) { params.push(bomType); where.push(`bh.bom_type = $${params.length}`); }
   if (area) { params.push(`%${area}%`); where.push(`bh.area ilike $${params.length}`); }
-  if (system) { params.push(`%${system}%`); where.push(`bh.system ilike $${params.length}`); }
+  if (systemName) { params.push(`%${systemName}%`); where.push(`bh.system_name ilike $${params.length}`); }
   if (status) { params.push(status); where.push(`bh.status = $${params.length}`); }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const boms = (await query(`
@@ -390,7 +390,7 @@ app.get("/bom", requireAuth, async (req, res) => {
     <td>${esc(bom.job_number)}</td>
     <td>${esc(bom.bom_type)}</td>
     <td>${esc(bom.area || "")}</td>
-    <td>${esc(bom.system || "")}</td>
+    <td>${esc(bom.system_name || "")}</td>
     <td>${esc(bom.revision || "")}</td>
     <td>${bom.line_count}</td>
     <td><span class="chip">${esc(bom.status)}</span></td>
@@ -403,7 +403,7 @@ app.get("/bom", requireAuth, async (req, res) => {
           <div><label>BOM #</label><input name="bom_no" value="${esc(bomNo)}" /></div>
           <div><label>Type</label><select name="bom_type">${filterTypeOptions}</select></div>
           <div><label>Area</label><input name="area" value="${esc(area)}" /></div>
-          <div><label>System</label><input name="system" value="${esc(system)}" /></div>
+          <div><label>System</label><input name="system" value="${esc(systemName)}" /></div>
         </div>
         <div class="grid">
           <div><label>Status</label><select name="status">${filterStatusOptions}</select></div>
@@ -436,7 +436,7 @@ app.get("/bom", requireAuth, async (req, res) => {
 app.post("/bom", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   const bomId = await withTransaction(async (client) => {
     const insert = await client.query(`
-      insert into bom_headers (job_number, bom_no, bom_type, area, system, revision, status, description, notes, updated_at)
+      insert into bom_headers (job_number, bom_no, bom_type, area, system_name, revision, status, description, notes, updated_at)
       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
       returning id
     `, [
@@ -444,7 +444,7 @@ app.post("/bom", requireAuth, requireRole(["admin", "buyer"]), async (req, res) 
       String(req.body.bom_no || "").trim(),
       req.body.bom_type || "misc",
       req.body.area || "",
-      req.body.system || "",
+      req.body.system || req.body.system_name || "",
       req.body.revision || "0",
       req.body.status || "DRAFT",
       req.body.description || "",
@@ -476,7 +476,7 @@ app.get("/bom/:id/edit", requireAuth, async (req, res) => {
         </div>
         <div class="grid">
           <div><label>Area</label><input name="area" value="${esc(bom.area || "")}" /></div>
-          <div><label>System</label><input name="system" value="${esc(bom.system || "")}" /></div>
+          <div><label>System</label><input name="system" value="${esc(bom.system_name || "")}" /></div>
           <div><label>Revision</label><input name="revision" value="${esc(bom.revision || "")}" /></div>
           <div><label>Description</label><input name="description" value="${esc(bom.description || "")}" /></div>
         </div>
@@ -491,7 +491,7 @@ app.post("/bom/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (r
   await withTransaction(async (client) => {
     await client.query(`
       update bom_headers
-      set job_number = $2, bom_no = $3, bom_type = $4, area = $5, system = $6, revision = $7, status = $8, description = $9, notes = $10, updated_at = now()
+      set job_number = $2, bom_no = $3, bom_type = $4, area = $5, system_name = $6, revision = $7, status = $8, description = $9, notes = $10, updated_at = now()
       where id = $1
     `, [
       req.params.id,
@@ -499,7 +499,7 @@ app.post("/bom/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (r
       String(req.body.bom_no || "").trim(),
       req.body.bom_type || "misc",
       req.body.area || "",
-      req.body.system || "",
+      req.body.system || req.body.system_name || "",
       req.body.revision || "0",
       req.body.status || "DRAFT",
       req.body.description || "",
@@ -562,7 +562,7 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
   res.send(layout(`BOM ${bom.bom_no}`, `
     <h1>BOM ${esc(bom.bom_no)}</h1>
     <div class="card">
-      <p class="muted">Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}</p>
+      <p class="muted">Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system_name || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}</p>
       <p>${esc(bom.description || "")}</p>
       ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
       <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a></div>
