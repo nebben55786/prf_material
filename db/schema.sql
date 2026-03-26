@@ -63,6 +63,7 @@ create table if not exists bom_lines (
   bom_id bigint not null references bom_headers(id) on delete cascade,
   line_no text not null,
   item_code text not null,
+  source_uid text generated always as (coalesce(line_no, '') || '|' || coalesce(item_code, '')) stored,
   description text not null,
   material_type text not null default 'misc',
   uom text not null,
@@ -82,7 +83,7 @@ create table if not exists bom_lines (
   qty_received numeric(18,4) not null default 0,
   qty_issued numeric(18,4) not null default 0,
   updated_at timestamptz not null default now(),
-  unique (bom_id, line_no)
+  unique (bom_id, source_uid)
 );
 
 create table if not exists rfq_items (
@@ -234,6 +235,10 @@ alter table bom_lines add column if not exists qty_ordered numeric(18,4) not nul
 alter table bom_lines add column if not exists qty_received numeric(18,4) not null default 0;
 alter table bom_lines add column if not exists qty_issued numeric(18,4) not null default 0;
 alter table bom_lines alter column line_no type text using line_no::text;
+alter table bom_lines add column if not exists source_uid text generated always as (coalesce(line_no, '') || '|' || coalesce(item_code, '')) stored;
+alter table bom_lines drop constraint if exists bom_lines_bom_id_line_no_key;
+alter table bom_lines drop constraint if exists bom_lines_bom_id_source_uid_key;
+create unique index if not exists idx_bom_lines_bom_source_uid on bom_lines(bom_id, source_uid);
 
 update po_lines pl
 set rfq_item_id = ri.id

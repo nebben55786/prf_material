@@ -680,7 +680,10 @@ app.post("/bom/:id/lines/import", requireAuth, requireRole(["admin", "buyer"]), 
         await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, and qty_required are required.", row);
         continue;
       }
-      const existingLine = await client.query("select id from bom_lines where bom_id = $1 and line_no = $2", [bomId, lineNo]);
+      const existingLine = await client.query(
+        "select id from bom_lines where bom_id = $1 and source_uid = ($2 || '|' || $3)",
+        [bomId, lineNo, itemCode]
+      );
       if (existingLine.rows[0]) {
         await client.query(`
           update bom_lines
