@@ -43,6 +43,48 @@ create table if not exists rfqs (
   created_at timestamptz not null default now()
 );
 
+create table if not exists bom_headers (
+  id bigserial primary key,
+  job_number text not null,
+  bom_no text not null unique,
+  bom_type text not null,
+  area text,
+  system text,
+  notes text,
+  revision text,
+  status text not null default 'DRAFT',
+  description text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists bom_lines (
+  id bigserial primary key,
+  bom_id bigint not null references bom_headers(id) on delete cascade,
+  line_no integer not null,
+  item_code text not null,
+  description text not null,
+  material_type text not null default 'misc',
+  uom text not null,
+  qty_required numeric(18,4) not null,
+  spec text,
+  commodity_code text,
+  tag_number text,
+  size_1 text,
+  size_2 text,
+  thk_1 text,
+  thk_2 text,
+  notes text,
+  planning_status text not null default 'PLANNED',
+  qty_quoted numeric(18,4) not null default 0,
+  qty_awarded numeric(18,4) not null default 0,
+  qty_ordered numeric(18,4) not null default 0,
+  qty_received numeric(18,4) not null default 0,
+  qty_issued numeric(18,4) not null default 0,
+  updated_at timestamptz not null default now(),
+  unique (bom_id, line_no)
+);
+
 create table if not exists rfq_items (
   id bigserial primary key,
   rfq_id bigint not null references rfqs(id) on delete cascade,
@@ -180,6 +222,15 @@ alter table purchase_orders add column if not exists buyer_name text;
 alter table purchase_orders add column if not exists issued_at timestamptz;
 alter table purchase_orders add column if not exists closed_at timestamptz;
 alter table purchase_orders add column if not exists cancelled_at timestamptz;
+alter table bom_headers add column if not exists system text;
+alter table bom_headers add column if not exists notes text;
+alter table bom_lines add column if not exists material_type text not null default 'misc';
+alter table bom_lines add column if not exists planning_status text not null default 'PLANNED';
+alter table bom_lines add column if not exists qty_quoted numeric(18,4) not null default 0;
+alter table bom_lines add column if not exists qty_awarded numeric(18,4) not null default 0;
+alter table bom_lines add column if not exists qty_ordered numeric(18,4) not null default 0;
+alter table bom_lines add column if not exists qty_received numeric(18,4) not null default 0;
+alter table bom_lines add column if not exists qty_issued numeric(18,4) not null default 0;
 
 update po_lines pl
 set rfq_item_id = ri.id
@@ -221,3 +272,10 @@ create index if not exists idx_rfq_project_name on rfqs(project_name);
 create index if not exists idx_rfq_status on rfqs(status);
 create index if not exists idx_quotes_vendor_id on quotes(vendor_id);
 create index if not exists idx_quotes_rfq_item_id on quotes(rfq_item_id);
+create index if not exists idx_bom_headers_bom_no on bom_headers(bom_no);
+create index if not exists idx_bom_headers_job_number on bom_headers(job_number);
+create index if not exists idx_bom_headers_bom_type on bom_headers(bom_type);
+create index if not exists idx_bom_headers_status on bom_headers(status);
+create index if not exists idx_bom_lines_bom_id on bom_lines(bom_id);
+create index if not exists idx_bom_lines_item_code on bom_lines(item_code);
+create index if not exists idx_bom_lines_tag_number on bom_lines(tag_number);

@@ -10,6 +10,9 @@ const app = express();
 const upload = multer();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
+const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
+const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
+const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
 
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 app.use(cookieParser());
@@ -86,7 +89,7 @@ function layout(title, body, user) {
           <div class="brand">Material Control</div>
           ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
         </div>
-        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a><a href="/settings">Settings</a><a href="/logout">Logout</a></nav>` : ""}
+        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/bom">BOMs</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a><a href="/settings">Settings</a><a href="/logout">Logout</a></nav>` : ""}
       </div>
       ${body}
     </div>
@@ -350,6 +353,280 @@ app.post("/settings/job-number", requireAuth, requireRole(["admin", "buyer"]), a
     await auditLog(client, req.user.id, "update", "app_setting", "job_number", jobNumber);
   });
   res.redirect("/settings");
+});
+
+app.get("/bom", requireAuth, async (req, res) => {
+  const bomNo = String(req.query.bom_no || "").trim();
+  const bomType = String(req.query.bom_type || "").trim();
+  const area = String(req.query.area || "").trim();
+  const system = String(req.query.system || "").trim();
+  const status = String(req.query.status || "").trim();
+  const jobNumber = await getJobNumber();
+  const where = [];
+  const params = [];
+  if (bomNo) { params.push(`%${bomNo}%`); where.push(`bh.bom_no ilike $${params.length}`); }
+  if (bomType) { params.push(bomType); where.push(`bh.bom_type = $${params.length}`); }
+  if (area) { params.push(`%${area}%`); where.push(`bh.area ilike $${params.length}`); }
+  if (system) { params.push(`%${system}%`); where.push(`bh.system ilike $${params.length}`); }
+  if (status) { params.push(status); where.push(`bh.status = $${params.length}`); }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const boms = (await query(`
+    select bh.*, coalesce((select count(*) from bom_lines bl where bl.bom_id = bh.id), 0) as line_count
+    from bom_headers bh
+    ${whereSql}
+    order by bh.id desc
+    limit 300
+  `, params)).rows;
+  const filterTypeOptions = [`<option value="">All Types</option>`].concat(
+    bomTypes.map((value) => `<option value="${esc(value)}" ${bomType === value ? "selected" : ""}>${esc(value)}</option>`)
+  ).join("");
+  const filterStatusOptions = [`<option value="">All Statuses</option>`].concat(
+    bomStatuses.map((value) => `<option value="${esc(value)}" ${status === value ? "selected" : ""}>${esc(value)}</option>`)
+  ).join("");
+  const createTypeOptions = bomTypes.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join("");
+  const createStatusOptions = bomStatuses.map((value) => `<option value="${esc(value)}" ${value === "DRAFT" ? "selected" : ""}>${esc(value)}</option>`).join("");
+  const rows = boms.map((bom) => `<tr>
+    <td><a href="/bom/${bom.id}">${esc(bom.bom_no)}</a></td>
+    <td>${esc(bom.job_number)}</td>
+    <td>${esc(bom.bom_type)}</td>
+    <td>${esc(bom.area || "")}</td>
+    <td>${esc(bom.system || "")}</td>
+    <td>${esc(bom.revision || "")}</td>
+    <td>${bom.line_count}</td>
+    <td><span class="chip">${esc(bom.status)}</span></td>
+  </tr>`).join("");
+  res.send(layout("BOMs", `
+    <h1>BOM Planning</h1>
+    <div class="card">
+      <form method="get" action="/bom" class="stack">
+        <div class="grid-4">
+          <div><label>BOM #</label><input name="bom_no" value="${esc(bomNo)}" /></div>
+          <div><label>Type</label><select name="bom_type">${filterTypeOptions}</select></div>
+          <div><label>Area</label><input name="area" value="${esc(area)}" /></div>
+          <div><label>System</label><input name="system" value="${esc(system)}" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Status</label><select name="status">${filterStatusOptions}</select></div>
+        </div>
+        <div class="actions"><button type="submit">Filter BOMs</button><a class="btn btn-secondary" href="/bom">Clear</a><span class="muted">${boms.length} result(s), max 300 shown</span></div>
+      </form>
+    </div>
+    <div class="card">
+      <form method="post" action="/bom" class="stack">
+        <div class="grid-4">
+          <div><label>Job Number</label><input name="job_number" value="${esc(jobNumber)}" required /></div>
+          <div><label>BOM Number</label><input name="bom_no" required /></div>
+          <div><label>BOM Type</label><select name="bom_type">${createTypeOptions}</select></div>
+          <div><label>Status</label><select name="status">${createStatusOptions}</select></div>
+        </div>
+        <div class="grid">
+          <div><label>Area</label><input name="area" /></div>
+          <div><label>System</label><input name="system" /></div>
+          <div><label>Revision</label><input name="revision" value="0" /></div>
+          <div><label>Description</label><input name="description" /></div>
+        </div>
+        <div><label>Notes</label><textarea name="notes"></textarea></div>
+        <div class="actions"><button type="submit">Create BOM</button></div>
+      </form>
+    </div>
+    <div class="card scroll"><table><tr><th>BOM</th><th>Job</th><th>Type</th><th>Area</th><th>System</th><th>Revision</th><th>Lines</th><th>Status</th></tr>${rows || `<tr><td colspan="8" class="muted">No BOMs match the current filter.</td></tr>`}</table></div>
+  `, req.user));
+});
+
+app.post("/bom", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const bomId = await withTransaction(async (client) => {
+    const insert = await client.query(`
+      insert into bom_headers (job_number, bom_no, bom_type, area, system, revision, status, description, notes, updated_at)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+      returning id
+    `, [
+      String(req.body.job_number || "").trim().toUpperCase(),
+      String(req.body.bom_no || "").trim(),
+      req.body.bom_type || "misc",
+      req.body.area || "",
+      req.body.system || "",
+      req.body.revision || "0",
+      req.body.status || "DRAFT",
+      req.body.description || "",
+      req.body.notes || ""
+    ]);
+    await auditLog(client, req.user.id, "create", "bom_header", insert.rows[0].id, req.body.bom_no || "");
+    return insert.rows[0].id;
+  });
+  res.redirect(`/bom/${bomId}`);
+});
+
+app.get("/bom/:id", requireAuth, async (req, res) => {
+  const bom = (await query("select * from bom_headers where id = $1", [req.params.id])).rows[0];
+  if (!bom) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
+    return;
+  }
+  const [linesRes, importsRes] = await Promise.all([
+    query("select * from bom_lines where bom_id = $1 order by line_no, id", [req.params.id]),
+    query(`
+      select ib.id, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
+             coalesce((select count(*) from import_batch_errors ibe where ibe.batch_id = ib.id), 0) as error_count
+      from import_batches ib
+      where ib.entity_type = 'bom_lines' and ib.rfq_id = $1
+      order by ib.id desc
+      limit 5
+    `, [req.params.id])
+  ]);
+  const lineRows = linesRes.rows.map((line) => `<tr>
+    <td>${esc(line.line_no)}</td>
+    <td>${esc(line.item_code)}</td>
+    <td>${esc(line.description)}</td>
+    <td>${esc(line.material_type)}</td>
+    <td>${esc(line.qty_required)}</td>
+    <td>${esc(line.uom)}</td>
+    <td>${esc(line.spec || "")}</td>
+    <td>${esc(line.commodity_code || "")}</td>
+    <td>${esc(line.tag_number || "")}</td>
+    <td>${esc(line.size_1 || "")}</td>
+    <td>${esc(line.size_2 || "")}</td>
+    <td>${esc(line.thk_1 || "")}</td>
+    <td>${esc(line.thk_2 || "")}</td>
+    <td>${esc(line.notes || "")}</td>
+    <td><span class="chip">${esc(line.planning_status)}</span></td>
+    <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a><form method="post" action="/bom-line/${line.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form></div></td>
+  </tr>`).join("");
+  const importRows = importsRes.rows.length > 0
+    ? importsRes.rows.map((batch) => `<tr><td><a href="/imports/${batch.id}">${batch.id}</a></td><td>${esc(batch.created_at)}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
+    : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
+  res.send(layout(`BOM ${bom.bom_no}`, `
+    <h1>BOM ${esc(bom.bom_no)}</h1>
+    <div class="card">
+      <p class="muted">Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}</p>
+      <p>${esc(bom.description || "")}</p>
+      ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
+    </div>
+    <div class="card">
+      <h3>Upload BOM Lines</h3>
+      <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty_required, notes</p>
+      <form method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
+        <div class="actions"><button type="submit">Import BOM Lines</button></div>
+      </form>
+    </div>
+    <div class="card scroll"><table><tr><th>Line</th><th>Item</th><th>Description</th><th>Type</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th><th>Status</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="16" class="muted">No BOM lines loaded yet.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Batch</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>${importRows}</table></div>
+  `, req.user));
+});
+
+app.post("/bom/:id/lines/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
+  const bomId = Number(req.params.id);
+  const rows = parseUploadedRows(req.file, req.body.csv_text);
+  if (rows.length === 0) throw new Error("No rows found.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "bom_lines",
+      rfqId: bomId,
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || ""
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 2;
+      const lineNo = num(row.line_no);
+      const itemCode = String(row.item_code || "").trim();
+      const qtyRequired = num(row.qty_required);
+      if (lineNo <= 0 || !itemCode || qtyRequired <= 0) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, and qty_required are required.", row);
+        continue;
+      }
+      const existingLine = await client.query("select id from bom_lines where bom_id = $1 and line_no = $2", [bomId, lineNo]);
+      if (existingLine.rows[0]) {
+        await client.query(`
+          update bom_lines
+          set item_code = $2, description = $3, material_type = $4, uom = $5, spec = $6, commodity_code = $7, tag_number = $8,
+              size_1 = $9, size_2 = $10, thk_1 = $11, thk_2 = $12, qty_required = $13, notes = $14, updated_at = now()
+          where id = $1
+        `, [existingLine.rows[0].id, itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA", row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qtyRequired, row.notes || ""]);
+        updatedCount += 1;
+      } else {
+        await client.query(`
+          insert into bom_lines (bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty_required, notes, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+        `, [bomId, lineNo, itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA", row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qtyRequired, row.notes || ""]);
+        insertedCount += 1;
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "bom_lines", bomId, `rows=${rows.length};batch=${batchId}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.get("/bom-line/:id/edit", requireAuth, async (req, res) => {
+  const line = (await query("select bl.*, bh.bom_no from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1", [req.params.id])).rows[0];
+  if (!line) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM line not found.</h3></div>`, req.user));
+    return;
+  }
+  const statusOptions = bomLineStatuses.map((value) => `<option value="${esc(value)}" ${line.planning_status === value ? "selected" : ""}>${esc(value)}</option>`).join("");
+  res.send(layout("Edit BOM Line", `
+    <h1>Edit BOM Line</h1>
+    <div class="card"><strong>BOM:</strong> ${esc(line.bom_no)} | <strong>Line:</strong> ${esc(line.line_no)}</div>
+    <div class="card">
+      <form method="post" action="/bom-line/${line.id}/edit" class="stack">
+        <div class="grid">
+          <div><label>Line No</label><input name="line_no" value="${esc(line.line_no)}" required /></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(line.item_code)}" required /></div>
+          <div><label>Description</label><input name="description" value="${esc(line.description)}" required /></div>
+          <div><label>Material Type</label><input name="material_type" value="${esc(line.material_type)}" /></div>
+          <div><label>UOM</label><input name="uom" value="${esc(line.uom)}" required /></div>
+          <div><label>Qty Required</label><input name="qty_required" value="${esc(line.qty_required)}" required /></div>
+          <div><label>Spec</label><input name="spec" value="${esc(line.spec || "")}" /></div>
+          <div><label>Commodity Code</label><input name="commodity_code" value="${esc(line.commodity_code || "")}" /></div>
+          <div><label>Tag Number</label><input name="tag_number" value="${esc(line.tag_number || "")}" /></div>
+          <div><label>Size 1</label><input name="size_1" value="${esc(line.size_1 || "")}" /></div>
+          <div><label>Size 2</label><input name="size_2" value="${esc(line.size_2 || "")}" /></div>
+          <div><label>Thk 1</label><input name="thk_1" value="${esc(line.thk_1 || "")}" /></div>
+          <div><label>Thk 2</label><input name="thk_2" value="${esc(line.thk_2 || "")}" /></div>
+          <div><label>Status</label><select name="planning_status">${statusOptions}</select></div>
+        </div>
+        <div><label>Notes</label><textarea name="notes">${esc(line.notes || "")}</textarea></div>
+        <div class="actions"><button type="submit">Save BOM Line</button><a class="btn btn-secondary" href="/bom/${line.bom_id}">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/bom-line/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const lineId = Number(req.params.id);
+  const bomId = await withTransaction(async (client) => {
+    const current = (await client.query("select bom_id from bom_lines where id = $1", [lineId])).rows[0];
+    if (!current) throw new Error("BOM line not found.");
+    await client.query(`
+      update bom_lines
+      set line_no = $2, item_code = $3, description = $4, material_type = $5, uom = $6, qty_required = $7,
+          spec = $8, commodity_code = $9, tag_number = $10, size_1 = $11, size_2 = $12, thk_1 = $13, thk_2 = $14,
+          planning_status = $15, notes = $16, updated_at = now()
+      where id = $1
+    `, [lineId, num(req.body.line_no), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", num(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.planning_status || "PLANNED", req.body.notes || ""]);
+    await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
+    return current.bom_id;
+  });
+  res.redirect(`/bom/${bomId}`);
+});
+
+app.post("/bom-line/:id/delete", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const lineId = Number(req.params.id);
+  const bomId = await withTransaction(async (client) => {
+    const current = (await client.query("select bom_id from bom_lines where id = $1", [lineId])).rows[0];
+    if (!current) throw new Error("BOM line not found.");
+    await client.query("delete from bom_lines where id = $1", [lineId]);
+    await auditLog(client, req.user.id, "delete", "bom_line", lineId, "");
+    return current.bom_id;
+  });
+  res.redirect(`/bom/${bomId}`);
 });
 
 app.get("/vendors", requireAuth, async (req, res) => {
