@@ -1790,6 +1790,9 @@ app.get("/requisitions/:id", requireAuth, async (req, res) => {
   if (header.status === "VERIFIED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
   }
+  if (req.user.role === "admin") {
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/delete" onsubmit="return confirm('Delete this requisition? If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Delete Requisition</button></form>`);
+  }
   res.send(layout(`Requisition ${header.requisition_no}`, `
     <h1>Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
@@ -1906,6 +1909,38 @@ app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehous
     await auditLog(client, req.user.id, "issue", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/delete", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    const lines = (await client.query(`
+      select mrl.bom_line_id, mrl.qty_issued, bl.planning_status, bl.qty_required, bl.qty_issued as bom_qty_issued
+      from material_requisition_lines mrl
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where mrl.requisition_id = $1
+    `, [req.params.id])).rows;
+    for (const line of lines) {
+      const issuedRollback = num(line.qty_issued);
+      if (issuedRollback <= 0) continue;
+      const nextIssued = Math.max(num(line.bom_qty_issued) - issuedRollback, 0);
+      let nextStatus = line.planning_status;
+      if (line.planning_status === "ISSUED_TO_FIELD" && nextIssued < num(line.qty_required)) {
+        nextStatus = nextIssued > 0 ? "PARTIALLY_RECEIVED" : "RECEIVED";
+      }
+      await client.query(`
+        update bom_lines
+        set qty_issued = $2,
+            planning_status = $3,
+            updated_at = now()
+        where id = $1
+      `, [line.bom_line_id, nextIssued, nextStatus]);
+    }
+    await client.query("delete from material_requisitions where id = $1", [req.params.id]);
+    await auditLog(client, req.user.id, "delete", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect("/requisitions");
 }));
 
 app.get("/vendors", requireAuth, async (req, res) => {
