@@ -105,6 +105,41 @@ function layout(title, body, user) {
         input.type = nextType;
         button.textContent = nextType === "password" ? "Show" : "Hide";
       }
+      function passwordRuleError(value) {
+        const password = String(value || "");
+        if (password.length < 10) return "Password must be at least 10 characters.";
+        if (!/[A-Z]/.test(password)) return "Password must include at least one uppercase letter.";
+        if (!/[a-z]/.test(password)) return "Password must include at least one lowercase letter.";
+        if (!/[0-9]/.test(password)) return "Password must include at least one number.";
+        return "";
+      }
+      function validatePasswordForm(formId, inputName, messageId) {
+        const form = document.getElementById(formId);
+        if (!form) return true;
+        const input = form.querySelector(`[name="${inputName}"]`);
+        const message = document.getElementById(messageId);
+        if (!input) return true;
+        const value = String(input.value || "");
+        if (!value) {
+          if (message) message.textContent = "";
+          return true;
+        }
+        const error = passwordRuleError(value);
+        if (message) message.textContent = error;
+        return !error;
+      }
+      function attachPasswordValidation(formId, inputName, messageId) {
+        const form = document.getElementById(formId);
+        if (!form) return;
+        const input = form.querySelector(`[name="${inputName}"]`);
+        const run = () => validatePasswordForm(formId, inputName, messageId);
+        if (input) input.addEventListener("input", run);
+        form.addEventListener("submit", (event) => {
+          if (!validatePasswordForm(formId, inputName, messageId)) {
+            event.preventDefault();
+          }
+        });
+      }
       function phoneDigits(value) {
         return String(value || "").replace(/\D/g, "").slice(0, 10);
       }
@@ -168,6 +203,15 @@ function layout(title, body, user) {
           });
         });
       }
+      document.addEventListener("DOMContentLoaded", () => {
+        attachPasswordValidation("new-user-form", "password", "new-user-password-error");
+        document.querySelectorAll("form[data-password-form='edit-user']").forEach((form) => {
+          attachPasswordValidation(form.id, "password", form.dataset.passwordMessageId);
+        });
+        document.querySelectorAll("form[data-password-form='access-approve']").forEach((form) => {
+          attachPasswordValidation(form.id, "temp_password", form.dataset.passwordMessageId);
+        });
+      });
     </script>
   </head>
   <body>
@@ -640,7 +684,7 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
       <td>${esc(record.created_at)}</td>
       <td>
         <div class="stack">
-          <form method="post" action="/settings/users/${record.id}/edit" class="stack">
+          <form id="edit-user-${record.id}" method="post" action="/settings/users/${record.id}/edit" class="stack" data-password-form="edit-user" data-password-message-id="edit-user-${record.id}-password-error">
             <div class="grid">
               <div><input name="username" value="${esc(record.username)}" required /></div>
               <div>
@@ -661,6 +705,7 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
               <input type="password" name="password" placeholder="Enter a new password to reset it" />
               <button type="submit">Save User</button>
             </div>
+            <div id="edit-user-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
             <div class="muted">Passwords are never displayed. Enter a new password only if you want to reset it.</div>
           </form>
           <div class="actions">
@@ -675,7 +720,7 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
       <td>${esc(record.email)}</td>
       <td>${esc(record.created_at)}</td>
       <td>
-        <form method="post" action="/settings/access-requests/${record.id}/approve" class="stack">
+        <form id="access-request-${record.id}" method="post" action="/settings/access-requests/${record.id}/approve" class="stack" data-password-form="access-approve" data-password-message-id="access-request-${record.id}-password-error">
           <div class="grid">
             <div><input name="username" placeholder="Username" required /></div>
             <div><input name="temp_password" placeholder="Temp Password" required /></div>
@@ -691,6 +736,7 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
             <button type="submit">Approve</button>
             <button class="btn btn-danger" type="submit" formaction="/settings/access-requests/${record.id}/deny">Deny</button>
           </div>
+          <div id="access-request-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
         </form>
       </td>
     </tr>
@@ -724,7 +770,7 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
     ${req.user.role === "admin" ? `
     <div class="card">
       <h3>User Management</h3>
-      <form method="post" action="/settings/users/add" class="stack">
+      <form id="new-user-form" method="post" action="/settings/users/add" class="stack">
         <div class="grid">
           <div><label>Username</label><input name="username" required /></div>
           <div>
@@ -743,6 +789,7 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
               <input id="new-user-password" type="password" name="password" required />
               <button type="button" class="btn btn-secondary" onclick="togglePassword(this, 'new-user-password')">Show</button>
             </div>
+            <div id="new-user-password-error" class="muted" style="color:#a23622;"></div>
             <div class="muted">Minimum 10 characters, at least 1 uppercase letter, 1 lowercase letter, and 1 number.</div>
           </div>
         </div>
@@ -816,7 +863,7 @@ app.post("/settings/vendor-categories", requireAuth, requireRole(["admin"]), asy
   res.redirect("/settings");
 });
 
-app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
   const requestId = Number(req.params.id);
   const username = String(req.body.username || "").trim();
   const tempPassword = String(req.body.temp_password || "");
@@ -845,7 +892,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
     await auditLog(client, req.user.id, "approve", "access_request", requestId, `${requestRecord.email}|${username}|${role}`);
   });
   res.redirect("/settings");
-});
+}));
 
 app.post("/settings/access-requests/:id/deny", requireAuth, requireRole(["admin"]), async (req, res) => {
   const requestId = Number(req.params.id);
