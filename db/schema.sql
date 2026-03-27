@@ -21,6 +21,7 @@ create table if not exists vendors (
   id bigserial primary key,
   name text not null unique,
   contact_name text,
+  website text,
   email text,
   phone text,
   categories text not null default '',
@@ -28,6 +29,7 @@ create table if not exists vendors (
 );
 
 alter table vendors add column if not exists contact_name text;
+alter table vendors add column if not exists website text;
 
 create table if not exists vendor_contacts (
   id bigserial primary key,

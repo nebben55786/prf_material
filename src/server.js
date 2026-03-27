@@ -1651,6 +1651,7 @@ app.get("/vendors", requireAuth, async (req, res) => {
   const vendorSortColumns = {
     name: "name",
     contact_name: "contact_name",
+    website: "website",
     email: "email",
     phone: "phone",
     categories: "categories"
@@ -1660,7 +1661,7 @@ app.get("/vendors", requireAuth, async (req, res) => {
   const params = [];
   if (search) {
     params.push(`%${search}%`);
-    where.push(`(name ilike $${params.length} or coalesce(contact_name, '') ilike $${params.length} or coalesce(email, '') ilike $${params.length} or coalesce(phone, '') ilike $${params.length})`);
+    where.push(`(name ilike $${params.length} or coalesce(contact_name, '') ilike $${params.length} or coalesce(website, '') ilike $${params.length} or coalesce(email, '') ilike $${params.length} or coalesce(phone, '') ilike $${params.length})`);
   }
   if (category) {
     params.push(`%${category}%`);
@@ -1683,6 +1684,7 @@ app.get("/vendors", requireAuth, async (req, res) => {
   const rows = vendors.map((vendor) => `<tr>
         <td>${esc(vendor.name)}</td>
         <td>${esc(vendor.contact_name || "")}</td>
+        <td>${vendor.website ? `<a href="${esc(vendor.website)}" target="_blank" rel="noopener noreferrer">${esc(vendor.website)}</a>` : ""}</td>
         <td>${esc(vendor.email || "")}</td>
         <td>${esc(normalizePhone(vendor.phone || ""))}</td>
         <td>${(vendor.categories || "").split(",").filter(Boolean).map((value) => `<span class="chip">${esc(value)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
@@ -1700,13 +1702,13 @@ app.get("/vendors", requireAuth, async (req, res) => {
         <div class="card">
           <form method="get" action="/vendors" class="stack">
             <div class="grid">
-              <div><label>Search</label><input name="search" value="${esc(search)}" placeholder="Name, contact, email, or phone" /></div>
+              <div><label>Search</label><input name="search" value="${esc(search)}" placeholder="Name, contact, website, email, or phone" /></div>
               <div><label>Category</label><select name="category">${categoryOptions}</select></div>
             </div>
             <div class="actions"><button type="submit">Filter Vendors</button><a class="btn btn-secondary" href="/vendors">Clear</a><span class="muted">${vendors.length} vendor(s)</span></div>
           </form>
         </div>
-        <div class="card scroll"><table><tr><th><a href="${sortLink("name")}">Name</a></th><th><a href="${sortLink("contact_name")}">Primary Contact</a></th><th><a href="${sortLink("email")}">Email</a></th><th><a href="${sortLink("phone")}">Phone</a></th><th><a href="${sortLink("categories")}">Categories</a></th><th>Contacts</th><th>Action</th></tr>${rows}</table></div>
+        <div class="card scroll"><table><tr><th><a href="${sortLink("name")}">Name</a></th><th><a href="${sortLink("contact_name")}">Primary Contact</a></th><th><a href="${sortLink("website")}">Website</a></th><th><a href="${sortLink("email")}">Email</a></th><th><a href="${sortLink("phone")}">Phone</a></th><th><a href="${sortLink("categories")}">Categories</a></th><th>Contacts</th><th>Action</th></tr>${rows}</table></div>
       `, req.user));
 });
 
@@ -1719,6 +1721,7 @@ app.get("/vendors/new", requireAuth, async (req, res) => {
         <div class="grid">
           <div><label>Name</label><input name="name" required /></div>
           <div><label>Contact Name</label><input name="contact_name" /></div>
+          <div><label>Website</label><input name="website" placeholder="https://example.com" /></div>
           <div><label>Email</label><input name="email" /></div>
           <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onfocus="editPhoneInput(this)" oninput="sanitizePhoneInput(this)" onblur="formatPhoneOnBlur(this)" /><div class="muted">Format: 000-000-0000</div></div>
         </div>
@@ -1732,8 +1735,8 @@ app.get("/vendors/new", requireAuth, async (req, res) => {
 app.post("/vendors/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   await withTransaction(async (client) => {
       const result = await client.query(
-        "insert into vendors (name, contact_name, email, phone, categories) values ($1, $2, $3, $4, $5) returning id",
-      [req.body.name?.trim(), req.body.contact_name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+        "insert into vendors (name, contact_name, website, email, phone, categories) values ($1, $2, $3, $4, $5, $6) returning id",
+      [req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
       );
     await syncLegacyVendorContact(client, result.rows[0].id);
     await auditLog(client, req.user.id, "create", "vendor", result.rows[0].id, req.body.name?.trim() || "");
@@ -1773,6 +1776,7 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
           <div class="grid">
             <div><label>Name</label><input name="name" value="${esc(vendor.name)}" required /></div>
             <div><label>Contact Name</label><input name="contact_name" value="${esc(vendor.contact_name || "")}" /></div>
+            <div><label>Website</label><input name="website" value="${esc(vendor.website || "")}" placeholder="https://example.com" /></div>
             <div><label>Email</label><input name="email" value="${esc(vendor.email || "")}" /></div>
             <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(vendor.phone || ""))}" inputmode="tel" autocomplete="off" onfocus="editPhoneInput(this)" oninput="sanitizePhoneInput(this)" onblur="formatPhoneOnBlur(this)" /><div class="muted">Format: 000-000-0000</div></div>
           </div>
@@ -1798,8 +1802,8 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
 app.post("/vendors/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   await withTransaction(async (client) => {
       await client.query(
-        "update vendors set name = $2, contact_name = $3, email = $4, phone = $5, categories = $6 where id = $1",
-      [req.params.id, req.body.name?.trim(), req.body.contact_name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+        "update vendors set name = $2, contact_name = $3, website = $4, email = $5, phone = $6, categories = $7 where id = $1",
+      [req.params.id, req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
       );
     await syncLegacyVendorContact(client, req.params.id);
     await auditLog(client, req.user.id, "update", "vendor", req.params.id, req.body.name?.trim() || "");
