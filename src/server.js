@@ -603,16 +603,18 @@ app.get("/", async (req, res) => {
 });
 
 app.get("/dashboard", requireAuth, async (req, res) => {
-  const [rfqs, pos, receipts, vendors, osd, jobNumber] = await Promise.all([
+  const [rfqs, pos, receipts, vendors, osd, jobNumber, pendingAccessRequests] = await Promise.all([
     query("select count(*) from rfqs"),
     query("select count(*) from purchase_orders"),
     query("select count(*) from receipts"),
     query("select count(*) from vendors"),
     query("select count(*) from receipts where osd_status <> 'OK'"),
-    getJobNumber()
+    getJobNumber(),
+    req.user.role === "admin" ? query("select count(*) from access_requests where status = 'PENDING'") : Promise.resolve({ rows: [{ count: 0 }] })
   ]);
   res.send(layout("Dashboard", `
     <h1>Operations Dashboard</h1>
+    ${req.user.role === "admin" && Number(pendingAccessRequests.rows[0].count) > 0 ? `<div class="card error"><strong>${pendingAccessRequests.rows[0].count} pending access request(s)</strong><div class="actions" style="margin-top:10px;"><a class="btn btn-primary" href="/settings">Review Requests</a></div></div>` : ""}
     <div class="card"><strong>Job Number:</strong> ${esc(jobNumber)}</div>
     <div class="stats">
       <div class="stat"><div>RFQs</div><strong>${rfqs.rows[0].count}</strong></div>
