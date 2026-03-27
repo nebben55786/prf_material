@@ -76,6 +76,12 @@ function layout(title, body, user) {
       table { width: 100%; border-collapse: collapse; font-size: 14px; }
       th, td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
       th { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+      .data-grid { table-layout: fixed; min-width: 1400px; }
+      .data-grid th { position: relative; user-select: none; }
+      .data-grid td { overflow: hidden; text-overflow: ellipsis; }
+      .data-grid td.wrap, .data-grid th.wrap { white-space: normal; }
+      .data-grid td.nowrap, .data-grid th.nowrap { white-space: nowrap; }
+      .resize-handle { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: col-resize; }
       .chip { display: inline-block; padding: 4px 10px; border-radius: 999px; background: rgba(14,90,109,.08); color: var(--brand); font-weight: 700; }
       .error { border-color: rgba(180,35,24,.22); background: rgba(180,35,24,.06); color: var(--warn); }
       .stack { display: grid; gap: 18px; }
@@ -97,6 +103,32 @@ function layout(title, body, user) {
         const rows = table.querySelectorAll("tbody tr");
         rows.forEach((row) => {
           row.style.display = row.innerText.toLowerCase().includes(term) ? "" : "none";
+        });
+      }
+      function enableResizableTable(tableId) {
+        const table = document.getElementById(tableId);
+        if (!table) return;
+        const headers = table.querySelectorAll("th[data-resizable='true']");
+        headers.forEach((header) => {
+          if (header.querySelector(".resize-handle")) return;
+          const handle = document.createElement("span");
+          handle.className = "resize-handle";
+          header.appendChild(handle);
+          handle.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+            const startX = event.pageX;
+            const startWidth = header.offsetWidth;
+            const onMove = (moveEvent) => {
+              const nextWidth = Math.max(60, startWidth + (moveEvent.pageX - startX));
+              header.style.width = nextWidth + "px";
+            };
+            const onUp = () => {
+              document.removeEventListener("mousemove", onMove);
+              document.removeEventListener("mouseup", onUp);
+            };
+            document.addEventListener("mousemove", onMove);
+            document.addEventListener("mouseup", onUp);
+          });
         });
       }
     </script>
@@ -867,8 +899,49 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
         <div class="actions"><button type="submit">Import BOM Lines</button></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>Item</th><th>Description</th><th>Type</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th><th>Status</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="16" class="muted">No BOM lines loaded yet.</td></tr>`}</table></div>
+    <div class="card scroll">
+      <table id="bom-lines-table-${bom.id}" class="data-grid">
+        <colgroup>
+          <col style="width:170px" />
+          <col style="width:120px" />
+          <col style="width:380px" />
+          <col style="width:90px" />
+          <col style="width:80px" />
+          <col style="width:80px" />
+          <col style="width:120px" />
+          <col style="width:140px" />
+          <col style="width:130px" />
+          <col style="width:80px" />
+          <col style="width:80px" />
+          <col style="width:80px" />
+          <col style="width:80px" />
+          <col style="width:180px" />
+          <col style="width:120px" />
+          <col style="width:140px" />
+        </colgroup>
+        <tr>
+          <th class="wrap" data-resizable="true">Line</th>
+          <th class="nowrap" data-resizable="true">Item</th>
+          <th class="wrap" data-resizable="true">Description</th>
+          <th class="nowrap" data-resizable="true">Type</th>
+          <th class="nowrap" data-resizable="true">Qty</th>
+          <th class="nowrap" data-resizable="true">UOM</th>
+          <th class="nowrap" data-resizable="true">Spec</th>
+          <th class="wrap" data-resizable="true">Commodity Code</th>
+          <th class="wrap" data-resizable="true">Tag Number</th>
+          <th class="nowrap" data-resizable="true">Size 1</th>
+          <th class="nowrap" data-resizable="true">Size 2</th>
+          <th class="nowrap" data-resizable="true">Thk 1</th>
+          <th class="nowrap" data-resizable="true">Thk 2</th>
+          <th class="wrap" data-resizable="true">Notes</th>
+          <th class="nowrap" data-resizable="true">Status</th>
+          <th class="nowrap" data-resizable="true">Actions</th>
+        </tr>
+        ${lineRows || `<tr><td colspan="16" class="muted">No BOM lines loaded yet.</td></tr>`}
+      </table>
+    </div>
     <div class="card scroll"><table><tr><th>Batch</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>${importRows}</table></div>
+    <script>enableResizableTable("bom-lines-table-${bom.id}");</script>
   `, req.user));
 });
 
