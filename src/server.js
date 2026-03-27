@@ -987,14 +987,57 @@ app.post("/bom/:id/requisitions", requireAuth, asyncHandler(async (req, res) => 
     for (const lineId of selectedLineIds) {
       const qtyRequested = num(req.body[`request_qty_${lineId}`]);
       const line = (await client.query(`
-        select id, item_code, qty_required, qty_issued
-        from bom_lines
-        where id = $1 and bom_id = $2
+        select
+          bl.id,
+          bl.item_code,
+          bl.qty_required,
+          bl.qty_issued,
+          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0), 0) as qty_available
+        from bom_lines bl
+        left join (
+          select
+            mi.item_code,
+            coalesce(pl.size_1, '') as size_1,
+            coalesce(pl.size_2, '') as size_2,
+            coalesce(pl.thk_1, '') as thk_1,
+            coalesce(pl.thk_2, '') as thk_2,
+            sum(r.qty_received) as qty_on_hand
+          from receipts r
+          join po_lines pl on pl.id = r.po_line_id
+          join material_items mi on mi.id = pl.material_item_id
+          where coalesce(r.osd_status, 'OK') = 'OK'
+          group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+        ) inv
+          on inv.item_code = bl.item_code
+         and inv.size_1 = coalesce(bl.size_1, '')
+         and inv.size_2 = coalesce(bl.size_2, '')
+         and inv.thk_1 = coalesce(bl.thk_1, '')
+         and inv.thk_2 = coalesce(bl.thk_2, '')
+        left join (
+          select
+            item_code,
+            coalesce(size_1, '') as size_1,
+            coalesce(size_2, '') as size_2,
+            coalesce(thk_1, '') as thk_1,
+            coalesce(thk_2, '') as thk_2,
+            sum(qty_issued) as qty_issued_total
+          from bom_lines
+          group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+        ) issued
+          on issued.item_code = bl.item_code
+         and issued.size_1 = coalesce(bl.size_1, '')
+         and issued.size_2 = coalesce(bl.size_2, '')
+         and issued.thk_1 = coalesce(bl.thk_1, '')
+         and issued.thk_2 = coalesce(bl.thk_2, '')
+        where bl.id = $1 and bl.bom_id = $2
       `, [lineId, bomId])).rows[0];
       if (!line) continue;
       const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
       if (qtyRequested <= 0 || qtyRequested > remaining) {
         throw new Error(`Requested qty for ${line.item_code} must be greater than zero and cannot exceed the remaining BOM qty.`);
+      }
+      if (qtyRequested > num(line.qty_available)) {
+        throw new Error(`Requested qty for ${line.item_code} exceeds available received stock.`);
       }
       await client.query(`
         insert into material_requisition_lines (requisition_id, bom_line_id, qty_requested)
@@ -1165,7 +1208,52 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
     if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
     const lineWhereSql = lineWhere.join(" and ");
     const [linesRes, filteredCountRes] = await Promise.all([
-      query(`select *, greatest(qty_required - qty_issued, 0) as qty_remaining from bom_lines where ${lineWhereSql} order by coalesce(iwp_no, ''), coalesce(iso_no, ''), line_no, id limit ${lineFilter.limit}`, lineParams),
+      query(`
+        select
+          bl.*,
+          greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining,
+          coalesce(inv.qty_on_hand, 0) as qty_on_hand,
+          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0), 0) as qty_available
+        from bom_lines bl
+        left join (
+          select
+            mi.item_code,
+            coalesce(pl.size_1, '') as size_1,
+            coalesce(pl.size_2, '') as size_2,
+            coalesce(pl.thk_1, '') as thk_1,
+            coalesce(pl.thk_2, '') as thk_2,
+            sum(r.qty_received) as qty_on_hand
+          from receipts r
+          join po_lines pl on pl.id = r.po_line_id
+          join material_items mi on mi.id = pl.material_item_id
+          where coalesce(r.osd_status, 'OK') = 'OK'
+          group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+        ) inv
+          on inv.item_code = bl.item_code
+         and inv.size_1 = coalesce(bl.size_1, '')
+         and inv.size_2 = coalesce(bl.size_2, '')
+         and inv.thk_1 = coalesce(bl.thk_1, '')
+         and inv.thk_2 = coalesce(bl.thk_2, '')
+        left join (
+          select
+            item_code,
+            coalesce(size_1, '') as size_1,
+            coalesce(size_2, '') as size_2,
+            coalesce(thk_1, '') as thk_1,
+            coalesce(thk_2, '') as thk_2,
+            sum(qty_issued) as qty_issued_total
+          from bom_lines
+          group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+        ) issued
+          on issued.item_code = bl.item_code
+         and issued.size_1 = coalesce(bl.size_1, '')
+         and issued.size_2 = coalesce(bl.size_2, '')
+         and issued.thk_1 = coalesce(bl.thk_1, '')
+         and issued.thk_2 = coalesce(bl.thk_2, '')
+        where ${lineWhereSql.replace(/\bbom_id\b/g, "bl.bom_id").replace(/\bitem_code\b/g, "bl.item_code").replace(/\bline_no\b/g, "bl.line_no")}
+        order by coalesce(bl.iwp_no, ''), coalesce(bl.iso_no, ''), bl.line_no, bl.id
+        limit ${lineFilter.limit}
+      `, lineParams),
       query(`select count(*) as filtered_count from bom_lines where ${lineWhereSql}`, lineParams)
     ]);
     filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
@@ -1180,7 +1268,8 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
       <td>${esc(line.qty_required)}</td>
       <td>${esc(line.qty_issued)}</td>
       <td>${esc(line.qty_remaining)}</td>
-      <td><input name="request_qty_${line.id}" value="${esc(line.qty_remaining)}" /></td>
+      <td>${esc(line.qty_available)}</td>
+      <td><input name="request_qty_${line.id}" value="${esc(Math.min(num(line.qty_remaining), num(line.qty_available)))}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.spec || "")}</td>
       <td>${esc(line.commodity_code || "")}</td>
@@ -1235,6 +1324,7 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
                 <col style="width:90px" />
                 <col style="width:90px" />
                 <col style="width:100px" />
+                <col style="width:100px" />
                 <col style="width:110px" />
                 <col style="width:80px" />
                 <col style="width:120px" />
@@ -1259,6 +1349,7 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
                 <th class="nowrap" data-resizable="true">Req Qty</th>
                 <th class="nowrap" data-resizable="true">Issued</th>
                 <th class="nowrap" data-resizable="true">Remaining</th>
+                <th class="nowrap" data-resizable="true">Available</th>
                 <th class="nowrap" data-resizable="true">Request</th>
                 <th class="nowrap" data-resizable="true">UOM</th>
                 <th class="nowrap" data-resizable="true">Spec</th>
@@ -1272,7 +1363,7 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
                 <th class="nowrap" data-resizable="true">Status</th>
                 <th class="nowrap" data-resizable="true">Actions</th>
               </tr>
-              ${lineRows || `<tr><td colspan="22" class="muted">No BOM lines match the current filter.</td></tr>`}
+              ${lineRows || `<tr><td colspan="23" class="muted">No BOM lines match the current filter.</td></tr>`}
             </table>
           </div>
           <div class="actions"><button type="submit">Create Material Requisition</button></div>
