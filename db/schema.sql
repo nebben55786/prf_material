@@ -29,6 +29,18 @@ create table if not exists vendors (
 
 alter table vendors add column if not exists contact_name text;
 
+create table if not exists vendor_contacts (
+  id bigserial primary key,
+  vendor_id bigint not null references vendors(id) on delete cascade,
+  contact_name text not null,
+  email text,
+  phone text,
+  is_primary boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_vendor_contacts_vendor_id on vendor_contacts(vendor_id);
+
 create table if not exists material_items (
   id bigserial primary key,
   item_code text not null unique,

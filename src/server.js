@@ -204,6 +204,31 @@ function nextSortDir(currentSort, currentDir, column) {
   return currentDir === "asc" ? "desc" : "asc";
 }
 
+async function syncLegacyVendorContact(client, vendorId) {
+  const vendor = (await client.query("select contact_name, email, phone from vendors where id = $1", [vendorId])).rows[0];
+  if (!vendor) return;
+  const contactName = String(vendor.contact_name || "").trim();
+  const email = normalizeEmail(vendor.email);
+  const phone = normalizePhone(vendor.phone);
+  if (!contactName && !email && !phone) return;
+  const existing = (await client.query(`
+    select id
+    from vendor_contacts
+    where vendor_id = $1
+      and coalesce(contact_name, '') = $2
+      and coalesce(email, '') = $3
+      and coalesce(phone, '') = $4
+  `, [vendorId, contactName, email, phone])).rows[0];
+  if (existing) {
+    await client.query("update vendor_contacts set is_primary = true where id = $1", [existing.id]);
+    return;
+  }
+  await client.query(`
+    insert into vendor_contacts (vendor_id, contact_name, email, phone, is_primary)
+    values ($1, $2, $3, $4, true)
+  `, [vendorId, contactName || "Primary Contact", email, phone]);
+}
+
 function parseUploadedRows(file, pastedText) {
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (file?.buffer?.length) {
@@ -1642,7 +1667,18 @@ app.get("/vendors", requireAuth, async (req, res) => {
     where.push(`coalesce(categories, '') ilike $${params.length}`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  const vendors = (await query(`select * from vendors ${whereSql} order by coalesce(${sortColumn}, '') ${dir}, name asc`, params)).rows;
+  const vendors = (await query(`
+    select v.*,
+           coalesce(vc.contact_count, 0) as contact_count
+    from vendors v
+    left join (
+      select vendor_id, count(*) as contact_count
+      from vendor_contacts
+      group by vendor_id
+    ) vc on vc.vendor_id = v.id
+    ${whereSql.replaceAll("name", "v.name").replaceAll("contact_name", "v.contact_name").replaceAll("email", "v.email").replaceAll("phone", "v.phone").replaceAll("categories", "v.categories")}
+    order by coalesce(v.${sortColumn}, '') ${dir}, v.name asc
+  `, params)).rows;
   const sortLink = (column) => `/vendors?search=${encodeURIComponent(search)}&category=${encodeURIComponent(category)}&sort=${encodeURIComponent(column)}&dir=${encodeURIComponent(nextSortDir(sort, dir, column))}`;
   const rows = vendors.map((vendor) => `<tr>
         <td>${esc(vendor.name)}</td>
@@ -1650,6 +1686,7 @@ app.get("/vendors", requireAuth, async (req, res) => {
         <td>${esc(vendor.email || "")}</td>
         <td>${esc(normalizePhone(vendor.phone || ""))}</td>
         <td>${(vendor.categories || "").split(",").filter(Boolean).map((value) => `<span class="chip">${esc(value)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
+        <td>${esc(vendor.contact_count)}</td>
         <td><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a></td>
       </tr>`).join("");
   const categoryOptions = [`<option value="">All Categories</option>`]
@@ -1669,7 +1706,7 @@ app.get("/vendors", requireAuth, async (req, res) => {
             <div class="actions"><button type="submit">Filter Vendors</button><a class="btn btn-secondary" href="/vendors">Clear</a><span class="muted">${vendors.length} vendor(s)</span></div>
           </form>
         </div>
-        <div class="card scroll"><table><tr><th><a href="${sortLink("name")}">Name</a></th><th><a href="${sortLink("contact_name")}">Contact</a></th><th><a href="${sortLink("email")}">Email</a></th><th><a href="${sortLink("phone")}">Phone</a></th><th><a href="${sortLink("categories")}">Categories</a></th><th>Action</th></tr>${rows}</table></div>
+        <div class="card scroll"><table><tr><th><a href="${sortLink("name")}">Name</a></th><th><a href="${sortLink("contact_name")}">Primary Contact</a></th><th><a href="${sortLink("email")}">Email</a></th><th><a href="${sortLink("phone")}">Phone</a></th><th><a href="${sortLink("categories")}">Categories</a></th><th>Contacts</th><th>Action</th></tr>${rows}</table></div>
       `, req.user));
 });
 
@@ -1698,19 +1735,37 @@ app.post("/vendors/add", requireAuth, requireRole(["admin", "buyer"]), async (re
         "insert into vendors (name, contact_name, email, phone, categories) values ($1, $2, $3, $4, $5) returning id",
       [req.body.name?.trim(), req.body.contact_name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
       );
+    await syncLegacyVendorContact(client, result.rows[0].id);
     await auditLog(client, req.user.id, "create", "vendor", result.rows[0].id, req.body.name?.trim() || "");
   });
   res.redirect("/vendors");
 });
 
 app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
-  const vendor = (await query("select * from vendors where id = $1", [req.params.id])).rows[0];
+  const [vendorRes, contactsRes] = await Promise.all([
+    query("select * from vendors where id = $1", [req.params.id]),
+    query("select * from vendor_contacts where vendor_id = $1 order by is_primary desc, contact_name asc, id asc", [req.params.id])
+  ]);
+  const vendor = vendorRes.rows[0];
   if (!vendor) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Vendor not found.</h3></div>`, req.user));
     return;
   }
+  const contacts = contactsRes.rows;
   const selected = new Set((vendor.categories || "").split(",").filter(Boolean));
   const checks = vendorCategories.map((category) => `<label class="check-option"><input type="checkbox" name="categories" value="${esc(category)}" ${selected.has(category) ? "checked" : ""}/><span>${esc(category)}</span></label>`).join("");
+  const contactRows = contacts.map((contact) => `<tr>
+    <td>${esc(contact.contact_name)}</td>
+    <td>${esc(contact.email || "")}</td>
+    <td>${esc(normalizePhone(contact.phone || ""))}</td>
+    <td>${contact.is_primary ? `<span class="chip">Primary</span>` : ""}</td>
+    <td>
+      <div class="actions">
+        ${!contact.is_primary ? `<form method="post" action="/vendors/${vendor.id}/contacts/${contact.id}/primary"><button type="submit" class="btn btn-secondary">Make Primary</button></form>` : ""}
+        <form method="post" action="/vendors/${vendor.id}/contacts/${contact.id}/delete"><button type="submit" class="btn btn-danger">Delete</button></form>
+      </div>
+    </td>
+  </tr>`).join("");
   res.send(layout("Edit Vendor", `
       <h1>Edit Vendor</h1>
       <div class="card">
@@ -1725,6 +1780,18 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
           <div class="actions"><button type="submit">Save Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
         </form>
       </div>
+      <div class="card">
+        <h3>Vendor Contacts</h3>
+        <form method="post" action="/vendors/${vendor.id}/contacts/add" class="stack">
+          <div class="grid">
+            <div><label>Contact Name</label><input name="contact_name" required /></div>
+            <div><label>Email</label><input name="email" /></div>
+            <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onfocus="editPhoneInput(this)" oninput="sanitizePhoneInput(this)" onblur="formatPhoneOnBlur(this)" /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Contact</button></div>
+        </form>
+        <div class="scroll" style="margin-top:12px;"><table><tr><th>Contact</th><th>Email</th><th>Phone</th><th>Primary</th><th>Action</th></tr>${contactRows || `<tr><td colspan="5" class="muted">No contacts yet.</td></tr>`}</table></div>
+      </div>
     `, req.user));
 });
 
@@ -1734,9 +1801,57 @@ app.post("/vendors/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asyn
         "update vendors set name = $2, contact_name = $3, email = $4, phone = $5, categories = $6 where id = $1",
       [req.params.id, req.body.name?.trim(), req.body.contact_name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
       );
+    await syncLegacyVendorContact(client, req.params.id);
     await auditLog(client, req.user.id, "update", "vendor", req.params.id, req.body.name?.trim() || "");
   });
   res.redirect("/vendors");
+});
+
+app.post("/vendors/:id/contacts/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    const vendorId = Number(req.params.id);
+    const vendor = (await client.query("select id from vendors where id = $1", [vendorId])).rows[0];
+    if (!vendor) throw new Error("Vendor not found.");
+    const contactName = String(req.body.contact_name || "").trim();
+    if (!contactName) throw new Error("Contact name is required.");
+    await client.query(`
+      insert into vendor_contacts (vendor_id, contact_name, email, phone, is_primary)
+      values ($1, $2, $3, $4, false)
+    `, [vendorId, contactName, normalizeEmail(req.body.email), normalizePhone(req.body.phone)]);
+    await auditLog(client, req.user.id, "create", "vendor_contact", vendorId, contactName);
+  });
+  res.redirect(`/vendors/${req.params.id}/edit`);
+});
+
+app.post("/vendors/:id/contacts/:contactId/primary", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    const vendorId = Number(req.params.id);
+    const contactId = Number(req.params.contactId);
+    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2", [contactId, vendorId])).rows[0];
+    if (!contact) throw new Error("Vendor contact not found.");
+    await client.query("update vendor_contacts set is_primary = false where vendor_id = $1", [vendorId]);
+    await client.query("update vendor_contacts set is_primary = true where id = $1", [contactId]);
+    await client.query(`
+      update vendors
+      set contact_name = $2, email = $3, phone = $4
+      where id = $1
+    `, [vendorId, contact.contact_name, normalizeEmail(contact.email), normalizePhone(contact.phone)]);
+    await auditLog(client, req.user.id, "set_primary", "vendor_contact", contactId, contact.contact_name);
+  });
+  res.redirect(`/vendors/${req.params.id}/edit`);
+});
+
+app.post("/vendors/:id/contacts/:contactId/delete", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    const vendorId = Number(req.params.id);
+    const contactId = Number(req.params.contactId);
+    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2", [contactId, vendorId])).rows[0];
+    if (!contact) throw new Error("Vendor contact not found.");
+    if (contact.is_primary) throw new Error("Set another primary contact before deleting this one.");
+    await client.query("delete from vendor_contacts where id = $1", [contactId]);
+    await auditLog(client, req.user.id, "delete", "vendor_contact", contactId, contact.contact_name);
+  });
+  res.redirect(`/vendors/${req.params.id}/edit`);
 });
 
 app.get("/rfq", requireAuth, async (req, res) => {
