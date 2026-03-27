@@ -20,11 +20,14 @@ create table if not exists audit_log (
 create table if not exists vendors (
   id bigserial primary key,
   name text not null unique,
+  contact_name text,
   email text,
   phone text,
   categories text not null default '',
   created_at timestamptz not null default now()
 );
+
+alter table vendors add column if not exists contact_name text;
 
 create table if not exists material_items (
   id bigserial primary key,

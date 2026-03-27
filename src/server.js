@@ -181,6 +181,11 @@ function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function nextSortDir(currentSort, currentDir, column) {
+  if (currentSort !== column) return "asc";
+  return currentDir === "asc" ? "desc" : "asc";
+}
+
 function parseUploadedRows(file, pastedText) {
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (file?.buffer?.length) {
@@ -1598,20 +1603,32 @@ app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehous
 app.get("/vendors", requireAuth, async (req, res) => {
   const search = String(req.query.search || "").trim();
   const category = String(req.query.category || "").trim();
+  const sort = String(req.query.sort || "name").trim().toLowerCase();
+  const dir = String(req.query.dir || "asc").trim().toLowerCase() === "desc" ? "desc" : "asc";
+  const vendorSortColumns = {
+    name: "name",
+    contact_name: "contact_name",
+    email: "email",
+    phone: "phone",
+    categories: "categories"
+  };
+  const sortColumn = vendorSortColumns[sort] || "name";
   const where = [];
   const params = [];
   if (search) {
     params.push(`%${search}%`);
-    where.push(`(name ilike $${params.length} or coalesce(email, '') ilike $${params.length} or coalesce(phone, '') ilike $${params.length})`);
+    where.push(`(name ilike $${params.length} or coalesce(contact_name, '') ilike $${params.length} or coalesce(email, '') ilike $${params.length} or coalesce(phone, '') ilike $${params.length})`);
   }
   if (category) {
     params.push(`%${category}%`);
     where.push(`coalesce(categories, '') ilike $${params.length}`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  const vendors = (await query(`select * from vendors ${whereSql} order by name`, params)).rows;
+  const vendors = (await query(`select * from vendors ${whereSql} order by coalesce(${sortColumn}, '') ${dir}, name asc`, params)).rows;
+  const sortLink = (column) => `/vendors?search=${encodeURIComponent(search)}&category=${encodeURIComponent(category)}&sort=${encodeURIComponent(column)}&dir=${encodeURIComponent(nextSortDir(sort, dir, column))}`;
   const rows = vendors.map((vendor) => `<tr>
         <td>${esc(vendor.name)}</td>
+        <td>${esc(vendor.contact_name || "")}</td>
         <td>${esc(vendor.email || "")}</td>
         <td>${esc(normalizePhone(vendor.phone || ""))}</td>
         <td>${(vendor.categories || "").split(",").filter(Boolean).map((value) => `<span class="chip">${esc(value)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
@@ -1628,13 +1645,13 @@ app.get("/vendors", requireAuth, async (req, res) => {
         <div class="card">
           <form method="get" action="/vendors" class="stack">
             <div class="grid">
-              <div><label>Search</label><input name="search" value="${esc(search)}" placeholder="Name, email, or phone" /></div>
+              <div><label>Search</label><input name="search" value="${esc(search)}" placeholder="Name, contact, email, or phone" /></div>
               <div><label>Category</label><select name="category">${categoryOptions}</select></div>
             </div>
             <div class="actions"><button type="submit">Filter Vendors</button><a class="btn btn-secondary" href="/vendors">Clear</a><span class="muted">${vendors.length} vendor(s)</span></div>
           </form>
         </div>
-        <div class="card scroll"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Categories</th><th>Action</th></tr>${rows}</table></div>
+        <div class="card scroll"><table><tr><th><a href="${sortLink("name")}">Name</a></th><th><a href="${sortLink("contact_name")}">Contact</a></th><th><a href="${sortLink("email")}">Email</a></th><th><a href="${sortLink("phone")}">Phone</a></th><th><a href="${sortLink("categories")}">Categories</a></th><th>Action</th></tr>${rows}</table></div>
       `, req.user));
 });
 
@@ -1646,6 +1663,7 @@ app.get("/vendors/new", requireAuth, async (req, res) => {
       <form method="post" action="/vendors/add" class="stack">
         <div class="grid">
           <div><label>Name</label><input name="name" required /></div>
+          <div><label>Contact Name</label><input name="contact_name" /></div>
           <div><label>Email</label><input name="email" /></div>
           <div><label>Phone</label><input name="phone" inputmode="numeric" maxlength="12" placeholder="000-000-0000" oninput="applyPhoneMask(this)" /></div>
         </div>
@@ -1659,8 +1677,8 @@ app.get("/vendors/new", requireAuth, async (req, res) => {
 app.post("/vendors/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   await withTransaction(async (client) => {
       const result = await client.query(
-        "insert into vendors (name, email, phone, categories) values ($1, $2, $3, $4) returning id",
-      [req.body.name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+        "insert into vendors (name, contact_name, email, phone, categories) values ($1, $2, $3, $4, $5) returning id",
+      [req.body.name?.trim(), req.body.contact_name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
       );
     await auditLog(client, req.user.id, "create", "vendor", result.rows[0].id, req.body.name?.trim() || "");
   });
@@ -1681,6 +1699,7 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
         <form method="post" action="/vendors/${vendor.id}/edit" class="stack">
           <div class="grid">
             <div><label>Name</label><input name="name" value="${esc(vendor.name)}" required /></div>
+            <div><label>Contact Name</label><input name="contact_name" value="${esc(vendor.contact_name || "")}" /></div>
             <div><label>Email</label><input name="email" value="${esc(vendor.email || "")}" /></div>
             <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(vendor.phone || ""))}" inputmode="numeric" maxlength="12" placeholder="000-000-0000" oninput="applyPhoneMask(this)" /></div>
           </div>
@@ -1694,8 +1713,8 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
 app.post("/vendors/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   await withTransaction(async (client) => {
       await client.query(
-        "update vendors set name = $2, email = $3, phone = $4, categories = $5 where id = $1",
-      [req.params.id, req.body.name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+        "update vendors set name = $2, contact_name = $3, email = $4, phone = $5, categories = $6 where id = $1",
+      [req.params.id, req.body.name?.trim(), req.body.contact_name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
       );
     await auditLog(client, req.user.id, "update", "vendor", req.params.id, req.body.name?.trim() || "");
   });
