@@ -124,7 +124,7 @@ function layout(title, body, user) {
       function validatePasswordForm(formId, inputName, messageId) {
         const form = document.getElementById(formId);
         if (!form) return true;
-        const input = form.querySelector(`[name="${inputName}"]`);
+        const input = form.querySelector('[name="' + inputName + '"]');
         const message = document.getElementById(messageId);
         if (!input) return true;
         const value = String(input.value || "");
@@ -145,7 +145,7 @@ function layout(title, body, user) {
       function attachPasswordValidation(formId, inputName, messageId) {
         const form = document.getElementById(formId);
         if (!form) return;
-        const input = form.querySelector(`[name="${inputName}"]`);
+        const input = form.querySelector('[name="' + inputName + '"]');
         const run = () => validatePasswordForm(formId, inputName, messageId);
         if (input) input.addEventListener("input", run);
         form.addEventListener("submit", (event) => {
