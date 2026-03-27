@@ -89,6 +89,16 @@ function layout(title, body, user) {
         input.type = nextType;
         button.textContent = nextType === "password" ? "Show" : "Hide";
       }
+      function filterTableRows(inputId, tableId) {
+        const input = document.getElementById(inputId);
+        const table = document.getElementById(tableId);
+        if (!input || !table) return;
+        const term = input.value.toLowerCase();
+        const rows = table.querySelectorAll("tbody tr");
+        rows.forEach((row) => {
+          row.style.display = row.innerText.toLowerCase().includes(term) ? "" : "none";
+        });
+      }
     </script>
   </head>
   <body>
@@ -1261,9 +1271,41 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
   const recentImports = recentImportsRes.rows;
   const materialItems = materialItemsRes.rows;
   const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
-  const materialItemOptions = materialItems
-    .map((item) => `<option value="${esc(item.item_code)}">${esc(item.description)} | ${esc(item.material_type)} | ${esc(item.uom)}</option>`)
+  const materialItemRows = materialItems
+    .map((item) => `<tr>
+      <td>${esc(item.item_code)}</td>
+      <td>${esc(item.description)}</td>
+      <td>${esc(item.material_type)}</td>
+      <td>${esc(item.uom)}</td>
+      <td>
+        <form method="post" action="/rfq/${rfqId}/items/add">
+          <input type="hidden" name="item_code" value="${esc(item.item_code)}" />
+          <input type="hidden" name="description" value="${esc(item.description)}" />
+          <input type="hidden" name="material_type" value="${esc(item.material_type)}" />
+          <input type="hidden" name="uom" value="${esc(item.uom)}" />
+          <input type="hidden" name="qty" value="1" />
+          <button type="submit">Add</button>
+        </form>
+      </td>
+    </tr>`)
     .join("");
+  const newItemRows = Array.from({ length: 8 }, (_, index) => `
+    <tr>
+      <td><input name="item_code_${index}" /></td>
+      <td><input name="description_${index}" /></td>
+      <td><input name="material_type_${index}" /></td>
+      <td><input name="uom_${index}" /></td>
+      <td><input name="spec_${index}" /></td>
+      <td><input name="commodity_code_${index}" /></td>
+      <td><input name="tag_number_${index}" /></td>
+      <td><input name="size_1_${index}" /></td>
+      <td><input name="size_2_${index}" /></td>
+      <td><input name="thk_1_${index}" /></td>
+      <td><input name="thk_2_${index}" /></td>
+      <td><input name="qty_${index}" /></td>
+      <td><input name="notes_${index}" /></td>
+    </tr>
+  `).join("");
 
   const itemRows = [];
   for (const item of items) {
@@ -1334,31 +1376,29 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
   const addItemCard = `
     <div class="card">
-      <h3>Add RFQ Item</h3>
-      <p class="muted">Pick an existing item by code or type in a new one. New items are added to the master item table automatically.</p>
-      <form method="post" action="/rfq/${rfqId}/items/add" class="stack">
-        <datalist id="item-codes-${rfqId}">${materialItemOptions}</datalist>
+      <h3>Existing Items</h3>
+      <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
+      <div class="grid">
+        <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" oninput="filterTableRows('existing-items-filter-${rfqId}', 'existing-items-table-${rfqId}')" placeholder="Search item code, description, type, or UOM" /></div>
+      </div>
+      <div class="scroll">
+        <table id="existing-items-table-${rfqId}">
+          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Add</th></tr></thead>
+          <tbody>${materialItemRows || `<tr><td colspan="5" class="muted">No existing items found.</td></tr>`}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Add New RFQ Items</h3>
+      <p class="muted">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
+      <form method="post" action="/rfq/${rfqId}/items/grid" class="stack">
         <div class="scroll">
           <table>
-            <tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr>
-            <tr>
-              <td><input name="item_code" list="item-codes-${rfqId}" required /></td>
-              <td><input name="description" /></td>
-              <td><input name="material_type" /></td>
-              <td><input name="uom" /></td>
-              <td><input name="spec" /></td>
-              <td><input name="commodity_code" /></td>
-              <td><input name="tag_number" /></td>
-              <td><input name="size_1" /></td>
-              <td><input name="size_2" /></td>
-              <td><input name="thk_1" /></td>
-              <td><input name="thk_2" /></td>
-              <td><input name="qty" required /></td>
-              <td><input name="notes" /></td>
-            </tr>
+            <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
+            <tbody>${newItemRows}</tbody>
           </table>
         </div>
-        <div class="actions"><button type="submit">Add Item To RFQ</button></div>
+        <div class="actions"><button type="submit">Save Grid Rows</button></div>
       </form>
     </div>`;
   const pasteTableCard = `
@@ -1476,6 +1516,50 @@ app.post("/rfq/:id/items/add", requireAuth, requireRole(["admin", "buyer"]), asy
     await auditLog(client, req.user.id, "upsert", "rfq_item", rfqId, `item=${req.body.item_code || ""}`);
   });
   res.redirect(`/rfq/${rfqId}`);
+});
+
+app.post("/rfq/:id/items/grid", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const rows = Array.from({ length: 8 }, (_, index) => ({
+    item_code: req.body[`item_code_${index}`],
+    description: req.body[`description_${index}`],
+    material_type: req.body[`material_type_${index}`],
+    uom: req.body[`uom_${index}`],
+    spec: req.body[`spec_${index}`],
+    commodity_code: req.body[`commodity_code_${index}`],
+    tag_number: req.body[`tag_number_${index}`],
+    size_1: req.body[`size_1_${index}`],
+    size_2: req.body[`size_2_${index}`],
+    thk_1: req.body[`thk_1_${index}`],
+    thk_2: req.body[`thk_2_${index}`],
+    qty: req.body[`qty_${index}`],
+    notes: req.body[`notes_${index}`]
+  })).filter((row) => String(row.item_code || "").trim() || String(row.description || "").trim() || String(row.qty || "").trim());
+  if (rows.length === 0) throw new Error("No grid rows were entered.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "rfq_items",
+      rfqId,
+      uploadedBy: req.user.id,
+      filename: "manual-grid"
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertRfqItemRow(client, rfqId, rows[index]);
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 1, result.errorCode, result.message, rows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "grid_add", "rfq_items", rfqId, `rows=${rows.length};batch=${batchId}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
 });
 
 app.post("/rfq/:id/items/paste", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
