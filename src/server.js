@@ -16,8 +16,16 @@ const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", 
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
 const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CLOSED"];
 
+function safeCookieDecode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
-app.use(cookieParser());
+app.use(cookieParser(undefined, { decode: safeCookieDecode }));
 app.use("/public", express.static(path.join(process.cwd(), "public")));
 
 function esc(value) {
