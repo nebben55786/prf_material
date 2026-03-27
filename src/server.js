@@ -13,7 +13,7 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
-const requisitionStatuses = ["OPEN", "PICKING", "READY", "ISSUED", "CLOSED"];
+const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CLOSED"];
 
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 app.use(cookieParser());
@@ -978,12 +978,12 @@ app.post("/bom/:id/requisitions", requireAuth, asyncHandler(async (req, res) => 
     const bom = (await client.query("select * from bom_headers where id = $1", [bomId])).rows[0];
     if (!bom) throw new Error("BOM not found.");
     const requisitionNo = await getNextRequisitionNumber(client);
-    const insertReq = await client.query(`
-      insert into material_requisitions (requisition_no, bom_id, requested_by_user_id, requested_by_name, iwp_no, iso_no, status, notes)
-      values ($1, $2, $3, $4, $5, $6, $7, $8)
-      returning id
-    `, [requisitionNo, bomId, req.user.id, String(req.body.requested_by_name || req.user.username).trim(), req.body.iwp_no || "", req.body.iso_no || "", req.body.status || "OPEN", req.body.notes || ""]);
-    let createdLineCount = 0;
+      const insertReq = await client.query(`
+        insert into material_requisitions (requisition_no, bom_id, requested_by_user_id, requested_by_name, iwp_no, iso_no, status, notes)
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        returning id
+      `, [requisitionNo, bomId, req.user.id, String(req.body.requested_by_name || req.user.username).trim(), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
+      let createdLineCount = 0;
     for (const lineId of selectedLineIds) {
       const qtyRequested = num(req.body[`request_qty_${lineId}`]);
       const line = (await client.query(`
@@ -1039,22 +1039,12 @@ app.post("/bom/:id/requisitions", requireAuth, asyncHandler(async (req, res) => 
       if (qtyRequested > num(line.qty_available)) {
         throw new Error(`Requested qty for ${line.item_code} exceeds available received stock.`);
       }
-      await client.query(`
-        insert into material_requisition_lines (requisition_id, bom_line_id, qty_requested)
-        values ($1, $2, $3)
-      `, [insertReq.rows[0].id, lineId, qtyRequested]);
-      await client.query(`
-        update bom_lines
-        set qty_issued = qty_issued + $2,
-            planning_status = case
-              when qty_issued + $2 >= qty_required then 'ISSUED_TO_FIELD'
-              else planning_status
-            end,
-            updated_at = now()
-        where id = $1
-      `, [lineId, qtyRequested]);
-      createdLineCount += 1;
-    }
+        await client.query(`
+          insert into material_requisition_lines (requisition_id, bom_line_id, qty_requested)
+          values ($1, $2, $3)
+        `, [insertReq.rows[0].id, lineId, qtyRequested]);
+        createdLineCount += 1;
+      }
     if (createdLineCount === 0) throw new Error("No valid requisition lines were created.");
     await auditLog(client, req.user.id, "create", "material_requisition", insertReq.rows[0].id, requisitionNo);
     return insertReq.rows[0].id;
@@ -1306,7 +1296,7 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
         <form method="post" action="/bom/${selectedBom.id}/requisitions" class="stack">
           <div class="grid">
             <div><label>Requested By</label><input name="requested_by_name" value="${esc(req.user.username)}" required /></div>
-            <div><label>Status</label><select name="status">${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${value === "OPEN" ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
+            <div><label>Status</label><select name="status">${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${value === "REQUESTED" ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
             <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
             <div><label>ISO</label><input name="iso_no" value="${esc(lineFilter.iso)}" /></div>
           </div>
@@ -1436,7 +1426,7 @@ app.get("/requisitions/:id", requireAuth, async (req, res) => {
     return;
   }
   const lines = (await query(`
-    select mrl.qty_requested, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
+    select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
     from material_requisition_lines mrl
     join bom_lines bl on bl.id = mrl.bom_line_id
     where mrl.requisition_id = $1
@@ -1449,6 +1439,7 @@ app.get("/requisitions/:id", requireAuth, async (req, res) => {
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
     <td>${esc(line.qty_requested)}</td>
+    <td>${esc(line.qty_issued)}</td>
     <td>${esc(line.uom)}</td>
     <td>${esc(line.spec || "")}</td>
     <td>${esc(line.size_1 || "")}</td>
@@ -1456,16 +1447,130 @@ app.get("/requisitions/:id", requireAuth, async (req, res) => {
     <td>${esc(line.thk_1 || "")}</td>
     <td>${esc(line.thk_2 || "")}</td>
   </tr>`).join("");
+  const headerActions = [];
+  if (header.status === "REQUESTED") {
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Verify Request</button></form>`);
+  }
+  if (header.status === "VERIFIED") {
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
+  }
   res.send(layout(`Requisition ${header.requisition_no}`, `
     <h1>Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
       <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_no)}</a> | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(header.created_at)}</p>
       <p class="muted">IWP: ${esc(header.iwp_no || "")} | ISO: ${esc(header.iso_no || "")}</p>
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
+      ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>ISO</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th></tr>${lineRows || `<tr><td colspan="12" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>ISO</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th></tr>${lineRows || `<tr><td colspan="13" class="muted">No lines on this requisition.</td></tr>`}</table></div>
   `, req.user));
 });
+
+app.post("/requisitions/:id/verify", requireAuth, requireRole(["admin", "warehouse", "buyer"]), asyncHandler(async (req, res) => {
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "REQUESTED") throw new Error("Only requested requisitions can be verified.");
+    await client.query(`
+      update material_requisitions
+      set status = 'VERIFIED',
+          verified_at = now(),
+          verified_by_user_id = $2
+      where id = $1
+    `, [req.params.id, req.user.id]);
+    await auditLog(client, req.user.id, "verify", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehouse"]), asyncHandler(async (req, res) => {
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "VERIFIED") throw new Error("Requisition must be verified before issue.");
+    const lines = (await client.query(`
+      select
+        mrl.id as requisition_line_id,
+        mrl.qty_requested,
+        bl.id as bom_line_id,
+        bl.item_code,
+        bl.qty_required,
+        bl.qty_issued,
+        greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0), 0) as qty_available
+      from material_requisition_lines mrl
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      left join (
+        select
+          mi.item_code,
+          coalesce(pl.size_1, '') as size_1,
+          coalesce(pl.size_2, '') as size_2,
+          coalesce(pl.thk_1, '') as thk_1,
+          coalesce(pl.thk_2, '') as thk_2,
+          sum(r.qty_received) as qty_on_hand
+        from receipts r
+        join po_lines pl on pl.id = r.po_line_id
+        join material_items mi on mi.id = pl.material_item_id
+        where coalesce(r.osd_status, 'OK') = 'OK'
+        group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+      ) inv
+        on inv.item_code = bl.item_code
+       and inv.size_1 = coalesce(bl.size_1, '')
+       and inv.size_2 = coalesce(bl.size_2, '')
+       and inv.thk_1 = coalesce(bl.thk_1, '')
+       and inv.thk_2 = coalesce(bl.thk_2, '')
+      left join (
+        select
+          item_code,
+          coalesce(size_1, '') as size_1,
+          coalesce(size_2, '') as size_2,
+          coalesce(thk_1, '') as thk_1,
+          coalesce(thk_2, '') as thk_2,
+          sum(qty_issued) as qty_issued_total
+        from bom_lines
+        group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+      ) issued
+        on issued.item_code = bl.item_code
+       and issued.size_1 = coalesce(bl.size_1, '')
+       and issued.size_2 = coalesce(bl.size_2, '')
+       and issued.thk_1 = coalesce(bl.thk_1, '')
+       and issued.thk_2 = coalesce(bl.thk_2, '')
+      where mrl.requisition_id = $1
+      order by bl.line_no, bl.id
+    `, [req.params.id])).rows;
+    if (lines.length === 0) throw new Error("No requisition lines found.");
+    for (const line of lines) {
+      if (num(line.qty_requested) > num(line.qty_available)) {
+        throw new Error(`Cannot issue ${line.item_code}; requested qty exceeds available stock.`);
+      }
+    }
+    for (const line of lines) {
+      await client.query(`
+        update bom_lines
+        set qty_issued = qty_issued + $2,
+            planning_status = case
+              when qty_issued + $2 >= qty_required then 'ISSUED_TO_FIELD'
+              else planning_status
+            end,
+            updated_at = now()
+        where id = $1
+      `, [line.bom_line_id, line.qty_requested]);
+      await client.query(`
+        update material_requisition_lines
+        set qty_issued = qty_requested
+        where id = $1
+      `, [line.requisition_line_id]);
+    }
+    await client.query(`
+      update material_requisitions
+      set status = 'ISSUED',
+          issued_at = now(),
+          issued_by_user_id = $2
+      where id = $1
+    `, [req.params.id, req.user.id]);
+    await auditLog(client, req.user.id, "issue", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
 
 app.get("/vendors", requireAuth, async (req, res) => {
   const vendors = (await query("select * from vendors order by name")).rows;

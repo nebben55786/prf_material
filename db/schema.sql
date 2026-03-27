@@ -97,8 +97,12 @@ create table if not exists material_requisitions (
   requested_by_name text not null,
   iwp_no text,
   iso_no text,
-  status text not null default 'OPEN',
+  status text not null default 'REQUESTED',
   notes text,
+  verified_at timestamptz,
+  verified_by_user_id bigint references users(id) on delete set null,
+  issued_at timestamptz,
+  issued_by_user_id bigint references users(id) on delete set null,
   created_at timestamptz not null default now()
 );
 
@@ -107,8 +111,16 @@ create table if not exists material_requisition_lines (
   requisition_id bigint not null references material_requisitions(id) on delete cascade,
   bom_line_id bigint not null references bom_lines(id) on delete cascade,
   qty_requested numeric(18,4) not null,
+  qty_issued numeric(18,4) not null default 0,
   created_at timestamptz not null default now()
 );
+
+alter table material_requisitions add column if not exists verified_at timestamptz;
+alter table material_requisitions add column if not exists verified_by_user_id bigint references users(id) on delete set null;
+alter table material_requisitions add column if not exists issued_at timestamptz;
+alter table material_requisitions add column if not exists issued_by_user_id bigint references users(id) on delete set null;
+alter table material_requisition_lines add column if not exists qty_issued numeric(18,4) not null default 0;
+update material_requisitions set status = 'REQUESTED' where status = 'OPEN';
 
 create table if not exists rfq_items (
   id bigserial primary key,
