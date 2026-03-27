@@ -397,7 +397,38 @@ app.get("/", requireAuth, async (req, res) => {
 });
 
 app.get("/settings", requireAuth, async (req, res) => {
-  const jobNumber = await getJobNumber();
+  const [jobNumber, usersRes] = await Promise.all([
+    getJobNumber(),
+    query("select id, username, role, created_at from users order by username")
+  ]);
+  const userRows = usersRes.rows.map((record) => `
+    <tr>
+      <td>${esc(record.username)}</td>
+      <td>${esc(record.role)}</td>
+      <td>${esc(record.created_at)}</td>
+      <td>
+        <div class="stack">
+          <form method="post" action="/settings/users/${record.id}/edit" class="stack">
+            <div class="grid">
+              <div><input name="username" value="${esc(record.username)}" required /></div>
+              <div>
+                <select name="role">
+                  <option value="admin" ${record.role === "admin" ? "selected" : ""}>admin</option>
+                  <option value="buyer" ${record.role === "buyer" ? "selected" : ""}>buyer</option>
+                  <option value="warehouse" ${record.role === "warehouse" ? "selected" : ""}>warehouse</option>
+                </select>
+              </div>
+              <div><input type="password" name="password" placeholder="Leave blank to keep password" /></div>
+            </div>
+            <div class="actions"><button type="submit">Save User</button></div>
+          </form>
+          <div class="actions">
+            ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<form method="post" action="/settings/users/${record.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>`}
+          </div>
+        </div>
+      </td>
+    </tr>
+  `).join("");
   res.send(layout("Settings", `
     <h1>Settings</h1>
     <div class="card">
@@ -408,6 +439,33 @@ app.get("/settings", requireAuth, async (req, res) => {
         <p class="muted">Future RFQs will use this format: <strong>${esc(jobNumber)}-RFQ-00001</strong></p>
         <div class="actions"><button type="submit">Save Job Number</button></div>
       </form>
+    </div>
+    <div class="card">
+      <h3>User Management</h3>
+      <form method="post" action="/settings/users/add" class="stack">
+        <div class="grid">
+          <div><label>Username</label><input name="username" required /></div>
+          <div>
+            <label>Role</label>
+            <select name="role">
+              <option value="buyer">buyer</option>
+              <option value="warehouse">warehouse</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid">
+          <div><label>Password</label><input type="password" name="password" required /></div>
+        </div>
+        <div class="actions"><button type="submit">Add User</button></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <h3>Existing Users</h3>
+      <table>
+        <tr><th>Username</th><th>Role</th><th>Created</th><th>Edit / Delete</th></tr>
+        ${userRows || `<tr><td colspan="4" class="muted">No users found.</td></tr>`}
+      </table>
     </div>
   `, req.user));
 });
@@ -423,6 +481,62 @@ app.post("/settings/job-number", requireAuth, requireRole(["admin", "buyer"]), a
       set value = excluded.value, updated_at = now()
     `, [jobNumber]);
     await auditLog(client, req.user.id, "update", "app_setting", "job_number", jobNumber);
+  });
+  res.redirect("/settings");
+});
+
+app.post("/settings/users/add", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const username = String(req.body.username || "").trim();
+  const password = String(req.body.password || "");
+  const role = String(req.body.role || "buyer").trim();
+  if (!username) throw new Error("Username is required.");
+  if (!password) throw new Error("Password is required.");
+  if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
+  const passwordHash = await bcrypt.hash(password, 10);
+  await withTransaction(async (client) => {
+    await client.query("insert into users (username, password_hash, role) values ($1, $2, $3)", [username, passwordHash, role]);
+    await auditLog(client, req.user.id, "create", "user", username, role);
+  });
+  res.redirect("/settings");
+});
+
+app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const userId = Number(req.params.id);
+  const username = String(req.body.username || "").trim();
+  const password = String(req.body.password || "");
+  const role = String(req.body.role || "buyer").trim();
+  if (!username) throw new Error("Username is required.");
+  if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
+  await withTransaction(async (client) => {
+    const current = (await client.query("select id, username, role from users where id = $1", [userId])).rows[0];
+    if (!current) throw new Error("User not found.");
+    if (current.role === "admin" && role !== "admin") {
+      const adminCount = Number((await client.query("select count(*) from users where role = 'admin'")).rows[0].count);
+      if (adminCount <= 1) throw new Error("At least one admin user is required.");
+    }
+    if (password) {
+      const passwordHash = await bcrypt.hash(password, 10);
+      await client.query("update users set username = $2, role = $3, password_hash = $4 where id = $1", [userId, username, role, passwordHash]);
+    } else {
+      await client.query("update users set username = $2, role = $3 where id = $1", [userId, username, role]);
+    }
+    await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}`);
+  });
+  res.redirect("/settings");
+});
+
+app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const userId = Number(req.params.id);
+  if (req.user.id === userId) throw new Error("You cannot delete your own user.");
+  await withTransaction(async (client) => {
+    const current = (await client.query("select id, username, role from users where id = $1", [userId])).rows[0];
+    if (!current) throw new Error("User not found.");
+    if (current.role === "admin") {
+      const adminCount = Number((await client.query("select count(*) from users where role = 'admin'")).rows[0].count);
+      if (adminCount <= 1) throw new Error("At least one admin user is required.");
+    }
+    await client.query("delete from users where id = $1", [userId]);
+    await auditLog(client, req.user.id, "delete", "user", userId, current.username);
   });
   res.redirect("/settings");
 });
