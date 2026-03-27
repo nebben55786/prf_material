@@ -111,10 +111,10 @@ function layout(title, body, user) {
           return;
         }
         if (digits.length <= 6) {
-          input.value = `${digits.slice(0, 3)}-${digits.slice(3)}`;
+          input.value = digits.slice(0, 3) + "-" + digits.slice(3);
           return;
         }
-        input.value = `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
+        input.value = digits.slice(0, 3) + "-" + digits.slice(3, 6) + "-" + digits.slice(6, 10);
       }
       function filterTableRows(inputId, tableId) {
         const input = document.getElementById(inputId);
