@@ -24,12 +24,14 @@ create table if not exists vendors (
   website text,
   email text,
   phone text,
+  is_active boolean not null default true,
   categories text not null default '',
   created_at timestamptz not null default now()
 );
 
 alter table vendors add column if not exists contact_name text;
 alter table vendors add column if not exists website text;
+alter table vendors add column if not exists is_active boolean not null default true;
 
 create table if not exists vendor_contacts (
   id bigserial primary key,

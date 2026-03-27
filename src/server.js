@@ -1646,6 +1646,7 @@ app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehous
 app.get("/vendors", requireAuth, async (req, res) => {
   const search = String(req.query.search || "").trim();
   const category = String(req.query.category || "").trim();
+  const showInactive = String(req.query.show_inactive || "").trim() === "1";
   const sort = String(req.query.sort || "name").trim().toLowerCase();
   const dir = String(req.query.dir || "asc").trim().toLowerCase() === "desc" ? "desc" : "asc";
   const vendorSortColumns = {
@@ -1659,6 +1660,9 @@ app.get("/vendors", requireAuth, async (req, res) => {
   const sortColumn = vendorSortColumns[sort] || "name";
   const where = [];
   const params = [];
+  if (!showInactive) {
+    where.push("v.is_active = true");
+  }
   if (search) {
     params.push(`%${search}%`);
     where.push(`(name ilike $${params.length} or coalesce(contact_name, '') ilike $${params.length} or coalesce(website, '') ilike $${params.length} or coalesce(email, '') ilike $${params.length} or coalesce(phone, '') ilike $${params.length})`);
@@ -1680,7 +1684,7 @@ app.get("/vendors", requireAuth, async (req, res) => {
     ${whereSql.replaceAll("name", "v.name").replaceAll("contact_name", "v.contact_name").replaceAll("email", "v.email").replaceAll("phone", "v.phone").replaceAll("categories", "v.categories")}
     order by coalesce(v.${sortColumn}, '') ${dir}, v.name asc
   `, params)).rows;
-  const sortLink = (column) => `/vendors?search=${encodeURIComponent(search)}&category=${encodeURIComponent(category)}&sort=${encodeURIComponent(column)}&dir=${encodeURIComponent(nextSortDir(sort, dir, column))}`;
+  const sortLink = (column) => `/vendors?search=${encodeURIComponent(search)}&category=${encodeURIComponent(category)}&show_inactive=${showInactive ? "1" : ""}&sort=${encodeURIComponent(column)}&dir=${encodeURIComponent(nextSortDir(sort, dir, column))}`;
   const rows = vendors.map((vendor) => `<tr>
         <td>${esc(vendor.name)}</td>
         <td>${esc(vendor.contact_name || "")}</td>
@@ -1689,7 +1693,8 @@ app.get("/vendors", requireAuth, async (req, res) => {
         <td>${esc(normalizePhone(vendor.phone || ""))}</td>
         <td>${(vendor.categories || "").split(",").filter(Boolean).map((value) => `<span class="chip">${esc(value)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
         <td>${esc(vendor.contact_count)}</td>
-        <td><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a></td>
+        <td>${vendor.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+        <td><div class="actions"><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit#contacts">Contacts</a>${vendor.is_active ? `<form method="post" action="/vendors/${vendor.id}/deactivate"><button class="btn btn-danger" type="submit">Deactivate</button></form>` : `<form method="post" action="/vendors/${vendor.id}/activate"><button class="btn btn-primary" type="submit">Activate</button></form>`}</div></td>
       </tr>`).join("");
   const categoryOptions = [`<option value="">All Categories</option>`]
     .concat(vendorCategories.map((value) => `<option value="${esc(value)}" ${category === value ? "selected" : ""}>${esc(value)}</option>`))
@@ -1705,10 +1710,10 @@ app.get("/vendors", requireAuth, async (req, res) => {
               <div><label>Search</label><input name="search" value="${esc(search)}" placeholder="Name, contact, website, email, or phone" /></div>
               <div><label>Category</label><select name="category">${categoryOptions}</select></div>
             </div>
-            <div class="actions"><button type="submit">Filter Vendors</button><a class="btn btn-secondary" href="/vendors">Clear</a><span class="muted">${vendors.length} vendor(s)</span></div>
+            <div class="actions"><label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;text-transform:none;"><input type="checkbox" name="show_inactive" value="1" ${showInactive ? "checked" : ""} style="width:auto;" /> Show inactive</label><button type="submit">Filter Vendors</button><a class="btn btn-secondary" href="/vendors">Clear</a><span class="muted">${vendors.length} vendor(s)</span></div>
           </form>
         </div>
-        <div class="card scroll"><table><tr><th><a href="${sortLink("name")}">Name</a></th><th><a href="${sortLink("contact_name")}">Primary Contact</a></th><th><a href="${sortLink("website")}">Website</a></th><th><a href="${sortLink("email")}">Email</a></th><th><a href="${sortLink("phone")}">Phone</a></th><th><a href="${sortLink("categories")}">Categories</a></th><th>Contacts</th><th>Action</th></tr>${rows}</table></div>
+        <div class="card scroll"><table><tr><th><a href="${sortLink("name")}">Name</a></th><th><a href="${sortLink("contact_name")}">Primary Contact</a></th><th><a href="${sortLink("website")}">Website</a></th><th><a href="${sortLink("email")}">Email</a></th><th><a href="${sortLink("phone")}">Phone</a></th><th><a href="${sortLink("categories")}">Categories</a></th><th>Contacts</th><th>Status</th><th>Action</th></tr>${rows}</table></div>
       `, req.user));
 });
 
@@ -1784,7 +1789,7 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
           <div class="actions"><button type="submit">Save Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
         </form>
       </div>
-      <div class="card">
+      <div class="card" id="contacts">
         <h3>Vendor Contacts</h3>
         <form method="post" action="/vendors/${vendor.id}/contacts/add" class="stack">
           <div class="grid">
@@ -1825,6 +1830,22 @@ app.post("/vendors/:id/contacts/add", requireAuth, requireRole(["admin", "buyer"
     await auditLog(client, req.user.id, "create", "vendor_contact", vendorId, contactName);
   });
   res.redirect(`/vendors/${req.params.id}/edit`);
+});
+
+app.post("/vendors/:id/deactivate", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    await client.query("update vendors set is_active = false where id = $1", [req.params.id]);
+    await auditLog(client, req.user.id, "deactivate", "vendor", req.params.id, "");
+  });
+  res.redirect("/vendors");
+});
+
+app.post("/vendors/:id/activate", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    await client.query("update vendors set is_active = true where id = $1", [req.params.id]);
+    await auditLog(client, req.user.id, "activate", "vendor", req.params.id, "");
+  });
+  res.redirect("/vendors");
 });
 
 app.post("/vendors/:id/contacts/:contactId/primary", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
