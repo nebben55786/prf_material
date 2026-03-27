@@ -98,7 +98,7 @@ function layout(title, body, user) {
           <div class="brand">Material Control</div>
           ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
         </div>
-        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/bom">BOMs</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a><a href="/settings">Settings</a><a href="/logout">Logout</a></nav>` : ""}
+        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/bom">BOMs</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a>${user.role === "admin" ? `<a href="/settings">Settings</a>` : ""}<a href="/logout">Logout</a></nav>` : ""}
       </div>
       ${body}
     </div>
@@ -422,7 +422,7 @@ app.get("/", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/settings", requireAuth, async (req, res) => {
+app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
   const jobNumber = await getJobNumber();
   const usersRes = req.user.role === "admin"
     ? await query("select id, username, role, is_active, created_at from users order by username")
