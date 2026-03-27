@@ -234,10 +234,12 @@ alter table bom_lines add column if not exists qty_awarded numeric(18,4) not nul
 alter table bom_lines add column if not exists qty_ordered numeric(18,4) not null default 0;
 alter table bom_lines add column if not exists qty_received numeric(18,4) not null default 0;
 alter table bom_lines add column if not exists qty_issued numeric(18,4) not null default 0;
-alter table bom_lines alter column line_no type text using line_no::text;
-alter table bom_lines add column if not exists source_uid text generated always as (coalesce(line_no, '') || '|' || coalesce(item_code, '')) stored;
+drop index if exists idx_bom_lines_bom_source_uid;
 alter table bom_lines drop constraint if exists bom_lines_bom_id_line_no_key;
 alter table bom_lines drop constraint if exists bom_lines_bom_id_source_uid_key;
+alter table bom_lines drop column if exists source_uid;
+alter table bom_lines alter column line_no type text using line_no::text;
+alter table bom_lines add column if not exists source_uid text generated always as (coalesce(line_no, '') || '|' || coalesce(item_code, '')) stored;
 create unique index if not exists idx_bom_lines_bom_source_uid on bom_lines(bom_id, source_uid);
 
 update po_lines pl
