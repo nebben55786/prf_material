@@ -1196,7 +1196,6 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
       from bom_lines
       where bom_id = $1
     `, [req.params.id]),
-    query(`select count(*) as filtered_count from bom_lines where ${lineWhereSql}`, lineParams),
     query(`
       select count(*) as requisition_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
       from material_requisitions mr
