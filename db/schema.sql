@@ -77,6 +77,8 @@ create table if not exists bom_lines (
   thk_1 text,
   thk_2 text,
   notes text,
+  iwp_no text,
+  iso_no text,
   planning_status text not null default 'PLANNED',
   qty_quoted numeric(18,4) not null default 0,
   qty_awarded numeric(18,4) not null default 0,
@@ -85,6 +87,27 @@ create table if not exists bom_lines (
   qty_issued numeric(18,4) not null default 0,
   updated_at timestamptz not null default now(),
   unique (bom_id, source_uid)
+);
+
+create table if not exists material_requisitions (
+  id bigserial primary key,
+  requisition_no text not null unique,
+  bom_id bigint not null references bom_headers(id) on delete cascade,
+  requested_by_user_id bigint references users(id) on delete set null,
+  requested_by_name text not null,
+  iwp_no text,
+  iso_no text,
+  status text not null default 'OPEN',
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists material_requisition_lines (
+  id bigserial primary key,
+  requisition_id bigint not null references material_requisitions(id) on delete cascade,
+  bom_line_id bigint not null references bom_lines(id) on delete cascade,
+  qty_requested numeric(18,4) not null,
+  created_at timestamptz not null default now()
 );
 
 create table if not exists rfq_items (
@@ -230,6 +253,8 @@ alter table purchase_orders add column if not exists cancelled_at timestamptz;
 alter table bom_headers add column if not exists system_name text;
 alter table bom_headers add column if not exists notes text;
 alter table bom_lines add column if not exists material_type text not null default 'misc';
+alter table bom_lines add column if not exists iwp_no text;
+alter table bom_lines add column if not exists iso_no text;
 alter table bom_lines add column if not exists planning_status text not null default 'PLANNED';
 alter table bom_lines add column if not exists qty_quoted numeric(18,4) not null default 0;
 alter table bom_lines add column if not exists qty_awarded numeric(18,4) not null default 0;

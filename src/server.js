@@ -13,6 +13,7 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
+const requisitionStatuses = ["OPEN", "PICKING", "READY", "ISSUED", "CLOSED"];
 
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 app.use(cookieParser());
@@ -140,7 +141,7 @@ function layout(title, body, user) {
           <div class="brand">Material Control</div>
           ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
         </div>
-        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/bom">BOMs</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a>${user.role === "admin" ? `<a href="/settings">Settings</a>` : ""}<a href="/logout">Logout</a></nav>` : ""}
+        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/bom">BOMs</a><a href="/requisitions">Requisitions</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a>${user.role === "admin" ? `<a href="/settings">Settings</a>` : ""}<a href="/logout">Logout</a></nav>` : ""}
       </div>
       ${body}
     </div>
@@ -398,6 +399,18 @@ async function getNextRfqNumber(client = null) {
   `);
   const nextNumber = num(result.rows[0]?.max_no) + 1;
   return `${jobNumber}-RFQ-${String(nextNumber).padStart(5, "0")}`;
+}
+
+async function getNextRequisitionNumber(client = null) {
+  const runner = client || { query };
+  const jobNumber = await getJobNumber(client);
+  const result = await runner.query(`
+    select coalesce(max(cast(right(requisition_no, 5) as integer)), 0) as max_no
+    from material_requisitions
+    where requisition_no ~ '-MR-[0-9]{5}$'
+  `);
+  const nextNumber = num(result.rows[0]?.max_no) + 1;
+  return `${jobNumber}-MR-${String(nextNumber).padStart(5, "0")}`;
 }
 
 function loginPage(error = "") {
@@ -822,8 +835,22 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
     return;
   }
-  const [linesRes, importsRes, coverageRes] = await Promise.all([
-    query("select * from bom_lines where bom_id = $1 order by line_no, id", [req.params.id]),
+  const lineFilter = {
+    iwp: String(req.query.iwp || "").trim(),
+    iso: String(req.query.iso || "").trim(),
+    itemCode: String(req.query.item_code || "").trim(),
+    lineNo: String(req.query.line_no || "").trim(),
+    limit: Math.min(Math.max(num(req.query.limit, 250), 50), 1000)
+  };
+  const lineWhere = ["bom_id = $1"];
+  const lineParams = [req.params.id];
+  if (lineFilter.iwp) { lineParams.push(`%${lineFilter.iwp}%`); lineWhere.push(`coalesce(iwp_no, '') ilike $${lineParams.length}`); }
+  if (lineFilter.iso) { lineParams.push(`%${lineFilter.iso}%`); lineWhere.push(`coalesce(iso_no, '') ilike $${lineParams.length}`); }
+  if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
+  if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
+  const lineWhereSql = lineWhere.join(" and ");
+  const [linesRes, importsRes, coverageRes, filteredCountRes, requisitionSummaryRes] = await Promise.all([
+    query(`select *, greatest(qty_required - qty_issued, 0) as qty_remaining from bom_lines where ${lineWhereSql} order by coalesce(iwp_no, ''), coalesce(iso_no, ''), line_no, id limit ${lineFilter.limit}`, lineParams),
     query(`
       select ib.id, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
              coalesce((select count(*) from import_batch_errors ibe where ibe.batch_id = ib.id), 0) as error_count
@@ -836,20 +863,36 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
       select
         count(*) as line_count,
         coalesce(sum(qty_required), 0) as qty_required,
+        coalesce(sum(qty_issued), 0) as qty_issued,
         count(*) filter (where planning_status = 'ON_RFQ') as on_rfq_count,
         count(*) filter (where planning_status in ('ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'ISSUED_TO_FIELD', 'CLOSED')) as ordered_count,
         count(*) filter (where planning_status in ('PARTIALLY_RECEIVED', 'RECEIVED', 'ISSUED_TO_FIELD', 'CLOSED')) as received_count
       from bom_lines
       where bom_id = $1
+    `, [req.params.id]),
+    query(`select count(*) as filtered_count from bom_lines where ${lineWhereSql}`, lineParams),
+    query(`
+      select count(*) as requisition_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
+      from material_requisitions mr
+      join material_requisition_lines mrl on mrl.requisition_id = mr.id
+      where mr.bom_id = $1
     `, [req.params.id])
   ]);
   const coverage = coverageRes.rows[0];
+  const filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
+  const requisitionSummary = requisitionSummaryRes.rows[0];
   const lineRows = linesRes.rows.map((line) => `<tr>
+    <td><input type="checkbox" name="selected_line_ids" value="${line.id}" /></td>
     <td>${esc(line.line_no)}</td>
+    <td>${esc(line.iwp_no || "")}</td>
+    <td>${esc(line.iso_no || "")}</td>
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
     <td>${esc(line.material_type)}</td>
     <td>${esc(line.qty_required)}</td>
+    <td>${esc(line.qty_issued)}</td>
+    <td>${esc(line.qty_remaining)}</td>
+    <td><input name="request_qty_${line.id}" value="${esc(line.qty_remaining)}" /></td>
     <td>${esc(line.uom)}</td>
     <td>${esc(line.spec || "")}</td>
     <td>${esc(line.commodity_code || "")}</td>
@@ -860,7 +903,7 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     <td>${esc(line.thk_2 || "")}</td>
     <td>${esc(line.notes || "")}</td>
     <td><span class="chip">${esc(line.planning_status)}</span></td>
-    <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a><form method="post" action="/bom-line/${line.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form></div></td>
+    <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a></div></td>
   </tr>`).join("");
   const importRows = importsRes.rows.length > 0
     ? importsRes.rows.map((batch) => `<tr><td><a href="/imports/${batch.id}">${batch.id}</a></td><td>${esc(batch.created_at)}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
@@ -876,8 +919,91 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     <div class="stats">
       <div class="stat"><div>Lines</div><strong>${coverage.line_count}</strong></div>
       <div class="stat"><div>Qty Required</div><strong>${esc(coverage.qty_required)}</strong></div>
-      <div class="stat"><div>On RFQ</div><strong>${coverage.on_rfq_count}</strong></div>
-      <div class="stat"><div>Received+</div><strong>${coverage.received_count}</strong></div>
+      <div class="stat"><div>Qty Issued</div><strong>${esc(coverage.qty_issued)}</strong></div>
+      <div class="stat"><div>Requisitioned</div><strong>${esc(requisitionSummary.qty_requested)}</strong></div>
+    </div>
+    <div class="card">
+      <h3>Piping Filters</h3>
+      <p class="muted">Supervisors can filter the piping BOM by IWP or ISO before building a material requisition. Showing ${linesRes.rows.length} of ${filteredCount} matching lines.</p>
+      <form method="get" action="/bom/${bom.id}" class="stack">
+        <div class="grid-4">
+          <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
+          <div><label>ISO</label><input name="iso" value="${esc(lineFilter.iso)}" /></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
+          <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
+        </div>
+        <div class="actions"><button type="submit">Filter BOM Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}">Clear</a></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Create Material Requisition</h3>
+      <p class="muted">Filter first, then select the needed piping lines and generate a requisition for the foreman.</p>
+      <form method="post" action="/bom/${bom.id}/requisitions" class="stack">
+        <div class="grid">
+          <div><label>Requested By</label><input name="requested_by_name" value="${esc(req.user.username)}" required /></div>
+          <div><label>Status</label><select name="status">${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${value === "OPEN" ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
+          <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
+          <div><label>ISO</label><input name="iso_no" value="${esc(lineFilter.iso)}" /></div>
+        </div>
+        <div><label>Notes</label><textarea name="notes"></textarea></div>
+        <div class="scroll">
+          <table id="bom-lines-table-${bom.id}" class="data-grid">
+            <colgroup>
+              <col style="width:80px" />
+              <col style="width:170px" />
+              <col style="width:120px" />
+              <col style="width:180px" />
+              <col style="width:120px" />
+              <col style="width:380px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:100px" />
+              <col style="width:110px" />
+              <col style="width:80px" />
+              <col style="width:120px" />
+              <col style="width:140px" />
+              <col style="width:130px" />
+              <col style="width:80px" />
+              <col style="width:80px" />
+              <col style="width:80px" />
+              <col style="width:80px" />
+              <col style="width:180px" />
+              <col style="width:120px" />
+              <col style="width:140px" />
+            </colgroup>
+            <tr>
+              <th class="nowrap" data-resizable="true">Pick</th>
+              <th class="wrap" data-resizable="true">Line</th>
+              <th class="nowrap" data-resizable="true">IWP</th>
+              <th class="nowrap" data-resizable="true">ISO</th>
+              <th class="nowrap" data-resizable="true">Item</th>
+              <th class="wrap" data-resizable="true">Description</th>
+              <th class="nowrap" data-resizable="true">Type</th>
+              <th class="nowrap" data-resizable="true">Req Qty</th>
+              <th class="nowrap" data-resizable="true">Issued</th>
+              <th class="nowrap" data-resizable="true">Remaining</th>
+              <th class="nowrap" data-resizable="true">Request</th>
+              <th class="nowrap" data-resizable="true">UOM</th>
+              <th class="nowrap" data-resizable="true">Spec</th>
+              <th class="wrap" data-resizable="true">Commodity Code</th>
+              <th class="wrap" data-resizable="true">Tag Number</th>
+              <th class="nowrap" data-resizable="true">Size 1</th>
+              <th class="nowrap" data-resizable="true">Size 2</th>
+              <th class="nowrap" data-resizable="true">Thk 1</th>
+              <th class="nowrap" data-resizable="true">Thk 2</th>
+              <th class="wrap" data-resizable="true">Notes</th>
+              <th class="nowrap" data-resizable="true">Status</th>
+              <th class="nowrap" data-resizable="true">Actions</th>
+            </tr>
+            ${lineRows || `<tr><td colspan="22" class="muted">No BOM lines match the current filter.</td></tr>`}
+          </table>
+        </div>
+        <div class="actions"><button type="submit">Create Material Requisition</button><a class="btn btn-secondary" href="/requisitions">View Requisitions</a></div>
+      </form>
     </div>
     <div class="card">
       <h3>Create RFQ From BOM</h3>
@@ -892,53 +1018,12 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     </div>
     <div class="card">
       <h3>Upload BOM Lines</h3>
-      <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty_required, notes</p>
+      <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes</p>
       <form method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
         <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
         <div class="actions"><button type="submit">Import BOM Lines</button></div>
       </form>
-    </div>
-    <div class="card scroll">
-      <table id="bom-lines-table-${bom.id}" class="data-grid">
-        <colgroup>
-          <col style="width:170px" />
-          <col style="width:120px" />
-          <col style="width:380px" />
-          <col style="width:90px" />
-          <col style="width:80px" />
-          <col style="width:80px" />
-          <col style="width:120px" />
-          <col style="width:140px" />
-          <col style="width:130px" />
-          <col style="width:80px" />
-          <col style="width:80px" />
-          <col style="width:80px" />
-          <col style="width:80px" />
-          <col style="width:180px" />
-          <col style="width:120px" />
-          <col style="width:140px" />
-        </colgroup>
-        <tr>
-          <th class="wrap" data-resizable="true">Line</th>
-          <th class="nowrap" data-resizable="true">Item</th>
-          <th class="wrap" data-resizable="true">Description</th>
-          <th class="nowrap" data-resizable="true">Type</th>
-          <th class="nowrap" data-resizable="true">Qty</th>
-          <th class="nowrap" data-resizable="true">UOM</th>
-          <th class="nowrap" data-resizable="true">Spec</th>
-          <th class="wrap" data-resizable="true">Commodity Code</th>
-          <th class="wrap" data-resizable="true">Tag Number</th>
-          <th class="nowrap" data-resizable="true">Size 1</th>
-          <th class="nowrap" data-resizable="true">Size 2</th>
-          <th class="nowrap" data-resizable="true">Thk 1</th>
-          <th class="nowrap" data-resizable="true">Thk 2</th>
-          <th class="wrap" data-resizable="true">Notes</th>
-          <th class="nowrap" data-resizable="true">Status</th>
-          <th class="nowrap" data-resizable="true">Actions</th>
-        </tr>
-        ${lineRows || `<tr><td colspan="16" class="muted">No BOM lines loaded yet.</td></tr>`}
-      </table>
     </div>
     <div class="card scroll"><table><tr><th>Batch</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>${importRows}</table></div>
     <script>enableResizableTable("bom-lines-table-${bom.id}");</script>
@@ -1002,6 +1087,58 @@ app.post("/bom/:id/to-rfq", requireAuth, requireRole(["admin", "buyer"]), async 
   res.redirect(`/rfq/${rfqId}`);
 });
 
+app.post("/bom/:id/requisitions", requireAuth, asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const selectedLineIds = []
+    .concat(req.body.selected_line_ids || [])
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (selectedLineIds.length === 0) throw new Error("Select at least one BOM line for the requisition.");
+  const requisitionId = await withTransaction(async (client) => {
+    const bom = (await client.query("select * from bom_headers where id = $1", [bomId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    const requisitionNo = await getNextRequisitionNumber(client);
+    const insertReq = await client.query(`
+      insert into material_requisitions (requisition_no, bom_id, requested_by_user_id, requested_by_name, iwp_no, iso_no, status, notes)
+      values ($1, $2, $3, $4, $5, $6, $7, $8)
+      returning id
+    `, [requisitionNo, bomId, req.user.id, String(req.body.requested_by_name || req.user.username).trim(), req.body.iwp_no || "", req.body.iso_no || "", req.body.status || "OPEN", req.body.notes || ""]);
+    let createdLineCount = 0;
+    for (const lineId of selectedLineIds) {
+      const qtyRequested = num(req.body[`request_qty_${lineId}`]);
+      const line = (await client.query(`
+        select id, item_code, qty_required, qty_issued
+        from bom_lines
+        where id = $1 and bom_id = $2
+      `, [lineId, bomId])).rows[0];
+      if (!line) continue;
+      const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
+      if (qtyRequested <= 0 || qtyRequested > remaining) {
+        throw new Error(`Requested qty for ${line.item_code} must be greater than zero and cannot exceed the remaining BOM qty.`);
+      }
+      await client.query(`
+        insert into material_requisition_lines (requisition_id, bom_line_id, qty_requested)
+        values ($1, $2, $3)
+      `, [insertReq.rows[0].id, lineId, qtyRequested]);
+      await client.query(`
+        update bom_lines
+        set qty_issued = qty_issued + $2,
+            planning_status = case
+              when qty_issued + $2 >= qty_required then 'ISSUED_TO_FIELD'
+              else planning_status
+            end,
+            updated_at = now()
+        where id = $1
+      `, [lineId, qtyRequested]);
+      createdLineCount += 1;
+    }
+    if (createdLineCount === 0) throw new Error("No valid requisition lines were created.");
+    await auditLog(client, req.user.id, "create", "material_requisition", insertReq.rows[0].id, requisitionNo);
+    return insertReq.rows[0].id;
+  });
+  res.redirect(`/requisitions/${requisitionId}`);
+}));
+
 app.post("/bom/:id/lines/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
   const bomId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text);
@@ -1035,15 +1172,15 @@ app.post("/bom/:id/lines/import", requireAuth, requireRole(["admin", "buyer"]), 
         await client.query(`
           update bom_lines
           set item_code = $2, description = $3, material_type = $4, uom = $5, spec = $6, commodity_code = $7, tag_number = $8,
-              size_1 = $9, size_2 = $10, thk_1 = $11, thk_2 = $12, qty_required = $13, notes = $14, updated_at = now()
+              iwp_no = $9, iso_no = $10, size_1 = $11, size_2 = $12, thk_1 = $13, thk_2 = $14, qty_required = $15, notes = $16, updated_at = now()
           where id = $1
-        `, [existingLine.rows[0].id, itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA", row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qtyRequired, row.notes || ""]);
+        `, [existingLine.rows[0].id, itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA", row.spec || "", row.commodity_code || "", row.tag_number || "", row.iwp_no || row.iwp || "", row.iso_no || row.iso || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qtyRequired, row.notes || ""]);
         updatedCount += 1;
       } else {
         await client.query(`
-          insert into bom_lines (bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty_required, notes, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
-        `, [bomId, lineNo, itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA", row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qtyRequired, row.notes || ""]);
+          insert into bom_lines (bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+        `, [bomId, lineNo, itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA", row.spec || "", row.commodity_code || "", row.tag_number || "", row.iwp_no || row.iwp || "", row.iso_no || row.iso || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qtyRequired, row.notes || ""]);
         insertedCount += 1;
       }
     }
@@ -1076,6 +1213,8 @@ app.get("/bom-line/:id/edit", requireAuth, async (req, res) => {
           <div><label>Spec</label><input name="spec" value="${esc(line.spec || "")}" /></div>
           <div><label>Commodity Code</label><input name="commodity_code" value="${esc(line.commodity_code || "")}" /></div>
           <div><label>Tag Number</label><input name="tag_number" value="${esc(line.tag_number || "")}" /></div>
+          <div><label>IWP</label><input name="iwp_no" value="${esc(line.iwp_no || "")}" /></div>
+          <div><label>ISO</label><input name="iso_no" value="${esc(line.iso_no || "")}" /></div>
           <div><label>Size 1</label><input name="size_1" value="${esc(line.size_1 || "")}" /></div>
           <div><label>Size 2</label><input name="size_2" value="${esc(line.size_2 || "")}" /></div>
           <div><label>Thk 1</label><input name="thk_1" value="${esc(line.thk_1 || "")}" /></div>
@@ -1097,10 +1236,10 @@ app.post("/bom-line/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asy
     await client.query(`
       update bom_lines
       set line_no = $2, item_code = $3, description = $4, material_type = $5, uom = $6, qty_required = $7,
-          spec = $8, commodity_code = $9, tag_number = $10, size_1 = $11, size_2 = $12, thk_1 = $13, thk_2 = $14,
-          planning_status = $15, notes = $16, updated_at = now()
+          spec = $8, commodity_code = $9, tag_number = $10, iwp_no = $11, iso_no = $12, size_1 = $13, size_2 = $14, thk_1 = $15, thk_2 = $16,
+          planning_status = $17, notes = $18, updated_at = now()
       where id = $1
-    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", num(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.planning_status || "PLANNED", req.body.notes || ""]);
+    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", num(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.planning_status || "PLANNED", req.body.notes || ""]);
     await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
     return current.bom_id;
   });
@@ -1117,6 +1256,96 @@ app.post("/bom-line/:id/delete", requireAuth, requireRole(["admin", "buyer"]), a
     return current.bom_id;
   });
   res.redirect(`/bom/${bomId}`);
+});
+
+app.get("/requisitions", requireAuth, async (req, res) => {
+  const iwp = String(req.query.iwp || "").trim();
+  const iso = String(req.query.iso || "").trim();
+  const status = String(req.query.status || "").trim();
+  const where = [];
+  const params = [];
+  if (iwp) { params.push(`%${iwp}%`); where.push(`coalesce(mr.iwp_no, '') ilike $${params.length}`); }
+  if (iso) { params.push(`%${iso}%`); where.push(`coalesce(mr.iso_no, '') ilike $${params.length}`); }
+  if (status) { params.push(status); where.push(`mr.status = $${params.length}`); }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const rows = (await query(`
+    select mr.*, bh.bom_no, count(mrl.id) as line_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
+    from material_requisitions mr
+    join bom_headers bh on bh.id = mr.bom_id
+    left join material_requisition_lines mrl on mrl.requisition_id = mr.id
+    ${whereSql}
+    group by mr.id, bh.bom_no
+    order by mr.id desc
+    limit 300
+  `, params)).rows;
+  const tableRows = rows.map((row) => `<tr>
+    <td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
+    <td>${esc(row.bom_no)}</td>
+    <td>${esc(row.requested_by_name)}</td>
+    <td>${esc(row.iwp_no || "")}</td>
+    <td>${esc(row.iso_no || "")}</td>
+    <td>${row.line_count}</td>
+    <td>${esc(row.qty_requested)}</td>
+    <td><span class="chip">${esc(row.status)}</span></td>
+    <td>${esc(row.created_at)}</td>
+  </tr>`).join("");
+  res.send(layout("Requisitions", `
+    <h1>Material Requisitions</h1>
+    <div class="card">
+      <form method="get" action="/requisitions" class="stack">
+        <div class="grid">
+          <div><label>IWP</label><input name="iwp" value="${esc(iwp)}" /></div>
+          <div><label>ISO</label><input name="iso" value="${esc(iso)}" /></div>
+          <div><label>Status</label><select name="status"><option value="">All Statuses</option>${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${status === value ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
+        </div>
+        <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
+      </form>
+    </div>
+    <div class="card scroll"><table><tr><th>Req #</th><th>BOM</th><th>Requested By</th><th>IWP</th><th>ISO</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th></tr>${tableRows || `<tr><td colspan="9" class="muted">No requisitions yet.</td></tr>`}</table></div>
+  `, req.user));
+});
+
+app.get("/requisitions/:id", requireAuth, async (req, res) => {
+  const header = (await query(`
+    select mr.*, bh.bom_no, bh.description as bom_description
+    from material_requisitions mr
+    join bom_headers bh on bh.id = mr.bom_id
+    where mr.id = $1
+  `, [req.params.id])).rows[0];
+  if (!header) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Requisition not found.</h3></div>`, req.user));
+    return;
+  }
+  const lines = (await query(`
+    select mrl.qty_requested, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mrl.requisition_id = $1
+    order by bl.line_no, bl.id
+  `, [req.params.id])).rows;
+  const lineRows = lines.map((line) => `<tr>
+    <td>${esc(line.line_no)}</td>
+    <td>${esc(line.iwp_no || "")}</td>
+    <td>${esc(line.iso_no || "")}</td>
+    <td>${esc(line.item_code)}</td>
+    <td>${esc(line.description)}</td>
+    <td>${esc(line.qty_requested)}</td>
+    <td>${esc(line.uom)}</td>
+    <td>${esc(line.spec || "")}</td>
+    <td>${esc(line.size_1 || "")}</td>
+    <td>${esc(line.size_2 || "")}</td>
+    <td>${esc(line.thk_1 || "")}</td>
+    <td>${esc(line.thk_2 || "")}</td>
+  </tr>`).join("");
+  res.send(layout(`Requisition ${header.requisition_no}`, `
+    <h1>Requisition ${esc(header.requisition_no)}</h1>
+    <div class="card">
+      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_no)}</a> | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(header.created_at)}</p>
+      <p class="muted">IWP: ${esc(header.iwp_no || "")} | ISO: ${esc(header.iso_no || "")}</p>
+      ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
+    </div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>ISO</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th></tr>${lineRows || `<tr><td colspan="12" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+  `, req.user));
 });
 
 app.get("/vendors", requireAuth, async (req, res) => {
