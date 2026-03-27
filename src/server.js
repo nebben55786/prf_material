@@ -839,22 +839,7 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
     return;
   }
-  const lineFilter = {
-    iwp: String(req.query.iwp || "").trim(),
-    iso: String(req.query.iso || "").trim(),
-    itemCode: String(req.query.item_code || "").trim(),
-    lineNo: String(req.query.line_no || "").trim(),
-    limit: Math.min(Math.max(num(req.query.limit, 250), 50), 1000)
-  };
-  const lineWhere = ["bom_id = $1"];
-  const lineParams = [req.params.id];
-  if (lineFilter.iwp) { lineParams.push(`%${lineFilter.iwp}%`); lineWhere.push(`coalesce(iwp_no, '') ilike $${lineParams.length}`); }
-  if (lineFilter.iso) { lineParams.push(`%${lineFilter.iso}%`); lineWhere.push(`coalesce(iso_no, '') ilike $${lineParams.length}`); }
-  if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
-  if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
-  const lineWhereSql = lineWhere.join(" and ");
-  const [linesRes, importsRes, coverageRes, filteredCountRes, requisitionSummaryRes] = await Promise.all([
-    query(`select *, greatest(qty_required - qty_issued, 0) as qty_remaining from bom_lines where ${lineWhereSql} order by coalesce(iwp_no, ''), coalesce(iso_no, ''), line_no, id limit ${lineFilter.limit}`, lineParams),
+  const [importsRes, coverageRes, requisitionSummaryRes] = await Promise.all([
     query(`
       select ib.id, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
              coalesce((select count(*) from import_batch_errors ibe where ibe.batch_id = ib.id), 0) as error_count
@@ -883,32 +868,7 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     `, [req.params.id])
   ]);
   const coverage = coverageRes.rows[0];
-  const filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
   const requisitionSummary = requisitionSummaryRes.rows[0];
-  const lineRows = linesRes.rows.map((line) => `<tr>
-    <td><input type="checkbox" name="selected_line_ids" value="${line.id}" /></td>
-    <td>${esc(line.line_no)}</td>
-    <td>${esc(line.iwp_no || "")}</td>
-    <td>${esc(line.iso_no || "")}</td>
-    <td>${esc(line.item_code)}</td>
-    <td>${esc(line.description)}</td>
-    <td>${esc(line.material_type)}</td>
-    <td>${esc(line.qty_required)}</td>
-    <td>${esc(line.qty_issued)}</td>
-    <td>${esc(line.qty_remaining)}</td>
-    <td><input name="request_qty_${line.id}" value="${esc(line.qty_remaining)}" /></td>
-    <td>${esc(line.uom)}</td>
-    <td>${esc(line.spec || "")}</td>
-    <td>${esc(line.commodity_code || "")}</td>
-    <td>${esc(line.tag_number || "")}</td>
-    <td>${esc(line.size_1 || "")}</td>
-    <td>${esc(line.size_2 || "")}</td>
-    <td>${esc(line.thk_1 || "")}</td>
-    <td>${esc(line.thk_2 || "")}</td>
-    <td>${esc(line.notes || "")}</td>
-    <td><span class="chip">${esc(line.planning_status)}</span></td>
-    <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a></div></td>
-  </tr>`).join("");
   const importRows = importsRes.rows.length > 0
     ? importsRes.rows.map((batch) => `<tr><td><a href="/imports/${batch.id}">${batch.id}</a></td><td>${esc(batch.created_at)}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
@@ -925,89 +885,6 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
       <div class="stat"><div>Qty Required</div><strong>${esc(coverage.qty_required)}</strong></div>
       <div class="stat"><div>Qty Issued</div><strong>${esc(coverage.qty_issued)}</strong></div>
       <div class="stat"><div>Requisitioned</div><strong>${esc(requisitionSummary.qty_requested)}</strong></div>
-    </div>
-    <div class="card">
-      <h3>Piping Filters</h3>
-      <p class="muted">Supervisors can filter the piping BOM by IWP or ISO before building a material requisition. Showing ${linesRes.rows.length} of ${filteredCount} matching lines.</p>
-      <form method="get" action="/bom/${bom.id}" class="stack">
-        <div class="grid-4">
-          <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
-          <div><label>ISO</label><input name="iso" value="${esc(lineFilter.iso)}" /></div>
-          <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
-          <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" /></div>
-        </div>
-        <div class="grid">
-          <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
-        </div>
-        <div class="actions"><button type="submit">Filter BOM Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}">Clear</a></div>
-      </form>
-    </div>
-    <div class="card">
-      <h3>Create Material Requisition</h3>
-      <p class="muted">Filter first, then select the needed piping lines and generate a requisition for the foreman.</p>
-      <form method="post" action="/bom/${bom.id}/requisitions" class="stack">
-        <div class="grid">
-          <div><label>Requested By</label><input name="requested_by_name" value="${esc(req.user.username)}" required /></div>
-          <div><label>Status</label><select name="status">${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${value === "OPEN" ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
-          <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
-          <div><label>ISO</label><input name="iso_no" value="${esc(lineFilter.iso)}" /></div>
-        </div>
-        <div><label>Notes</label><textarea name="notes"></textarea></div>
-        <div class="scroll">
-          <table id="bom-lines-table-${bom.id}" class="data-grid">
-            <colgroup>
-              <col style="width:80px" />
-              <col style="width:170px" />
-              <col style="width:120px" />
-              <col style="width:180px" />
-              <col style="width:120px" />
-              <col style="width:380px" />
-              <col style="width:90px" />
-              <col style="width:90px" />
-              <col style="width:90px" />
-              <col style="width:100px" />
-              <col style="width:110px" />
-              <col style="width:80px" />
-              <col style="width:120px" />
-              <col style="width:140px" />
-              <col style="width:130px" />
-              <col style="width:80px" />
-              <col style="width:80px" />
-              <col style="width:80px" />
-              <col style="width:80px" />
-              <col style="width:180px" />
-              <col style="width:120px" />
-              <col style="width:140px" />
-            </colgroup>
-            <tr>
-              <th class="nowrap" data-resizable="true">Pick</th>
-              <th class="wrap" data-resizable="true">Line</th>
-              <th class="nowrap" data-resizable="true">IWP</th>
-              <th class="nowrap" data-resizable="true">ISO</th>
-              <th class="nowrap" data-resizable="true">Item</th>
-              <th class="wrap" data-resizable="true">Description</th>
-              <th class="nowrap" data-resizable="true">Type</th>
-              <th class="nowrap" data-resizable="true">Req Qty</th>
-              <th class="nowrap" data-resizable="true">Issued</th>
-              <th class="nowrap" data-resizable="true">Remaining</th>
-              <th class="nowrap" data-resizable="true">Request</th>
-              <th class="nowrap" data-resizable="true">UOM</th>
-              <th class="nowrap" data-resizable="true">Spec</th>
-              <th class="wrap" data-resizable="true">Commodity Code</th>
-              <th class="wrap" data-resizable="true">Tag Number</th>
-              <th class="nowrap" data-resizable="true">Size 1</th>
-              <th class="nowrap" data-resizable="true">Size 2</th>
-              <th class="nowrap" data-resizable="true">Thk 1</th>
-              <th class="nowrap" data-resizable="true">Thk 2</th>
-              <th class="wrap" data-resizable="true">Notes</th>
-              <th class="nowrap" data-resizable="true">Status</th>
-              <th class="nowrap" data-resizable="true">Actions</th>
-            </tr>
-            ${lineRows || `<tr><td colspan="22" class="muted">No BOM lines match the current filter.</td></tr>`}
-          </table>
-        </div>
-        <div class="actions"><button type="submit">Create Material Requisition</button><a class="btn btn-secondary" href="/requisitions">View Requisitions</a></div>
-      </form>
     </div>
     <div class="card">
       <h3>Create RFQ From BOM</h3>
@@ -1030,7 +907,6 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
       </form>
     </div>
     <div class="card scroll"><table><tr><th>Batch</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>${importRows}</table></div>
-    <script>enableResizableTable("bom-lines-table-${bom.id}");</script>
   `, req.user));
 });
 
@@ -1262,6 +1138,151 @@ app.post("/bom-line/:id/delete", requireAuth, requireRole(["admin", "buyer"]), a
   res.redirect(`/bom/${bomId}`);
 });
 
+app.get("/requisitions/new", requireAuth, async (req, res) => {
+  const availableBoms = (await query(`
+    select id, bom_no, description, status
+    from bom_headers
+    where bom_type = 'pipe'
+    order by id desc
+  `)).rows;
+  const selectedBomId = Number(req.query.bom_id || availableBoms[0]?.id || 0);
+  const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
+  const lineFilter = {
+    iwp: String(req.query.iwp || "").trim(),
+    iso: String(req.query.iso || "").trim(),
+    itemCode: String(req.query.item_code || "").trim(),
+    lineNo: String(req.query.line_no || "").trim(),
+    limit: Math.min(Math.max(num(req.query.limit, 250), 50), 1000)
+  };
+  let filteredCount = 0;
+  let lineRows = "";
+  if (selectedBom) {
+    const lineWhere = ["bom_id = $1"];
+    const lineParams = [selectedBom.id];
+    if (lineFilter.iwp) { lineParams.push(`%${lineFilter.iwp}%`); lineWhere.push(`coalesce(iwp_no, '') ilike $${lineParams.length}`); }
+    if (lineFilter.iso) { lineParams.push(`%${lineFilter.iso}%`); lineWhere.push(`coalesce(iso_no, '') ilike $${lineParams.length}`); }
+    if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
+    if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
+    const lineWhereSql = lineWhere.join(" and ");
+    const [linesRes, filteredCountRes] = await Promise.all([
+      query(`select *, greatest(qty_required - qty_issued, 0) as qty_remaining from bom_lines where ${lineWhereSql} order by coalesce(iwp_no, ''), coalesce(iso_no, ''), line_no, id limit ${lineFilter.limit}`, lineParams),
+      query(`select count(*) as filtered_count from bom_lines where ${lineWhereSql}`, lineParams)
+    ]);
+    filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
+    lineRows = linesRes.rows.map((line) => `<tr>
+      <td><input type="checkbox" name="selected_line_ids" value="${line.id}" /></td>
+      <td>${esc(line.line_no)}</td>
+      <td>${esc(line.iwp_no || "")}</td>
+      <td>${esc(line.iso_no || "")}</td>
+      <td>${esc(line.item_code)}</td>
+      <td>${esc(line.description)}</td>
+      <td>${esc(line.material_type)}</td>
+      <td>${esc(line.qty_required)}</td>
+      <td>${esc(line.qty_issued)}</td>
+      <td>${esc(line.qty_remaining)}</td>
+      <td><input name="request_qty_${line.id}" value="${esc(line.qty_remaining)}" /></td>
+      <td>${esc(line.uom)}</td>
+      <td>${esc(line.spec || "")}</td>
+      <td>${esc(line.commodity_code || "")}</td>
+      <td>${esc(line.tag_number || "")}</td>
+      <td>${esc(line.size_1 || "")}</td>
+      <td>${esc(line.size_2 || "")}</td>
+      <td>${esc(line.thk_1 || "")}</td>
+      <td>${esc(line.thk_2 || "")}</td>
+      <td>${esc(line.notes || "")}</td>
+      <td><span class="chip">${esc(line.planning_status)}</span></td>
+      <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a></div></td>
+    </tr>`).join("");
+  }
+  const bomOptions = availableBoms.map((row) => `<option value="${row.id}" ${Number(row.id) === selectedBomId ? "selected" : ""}>${esc(row.bom_no)}${row.description ? ` | ${esc(row.description)}` : ""}</option>`).join("");
+  res.send(layout("New Request", `
+    <h1>New Material Request</h1>
+    <div class="card">
+      <form method="get" action="/requisitions/new" class="stack">
+        <div class="grid">
+          <div><label>Piping BOM</label><select name="bom_id">${bomOptions || `<option value="">No piping BOMs found</option>`}</select></div>
+          <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
+          <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
+          <div><label>ISO</label><input name="iso" value="${esc(lineFilter.iso)}" /></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
+          <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" /></div>
+        </div>
+        <div class="actions"><button type="submit">Load Lines</button><a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a></div>
+      </form>
+    </div>
+    ${selectedBom ? `
+      <div class="card">
+        <h3>Create Material Requisition</h3>
+        <p class="muted">BOM: ${esc(selectedBom.bom_no)}${selectedBom.description ? ` | ${esc(selectedBom.description)}` : ""}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
+        <form method="post" action="/bom/${selectedBom.id}/requisitions" class="stack">
+          <div class="grid">
+            <div><label>Requested By</label><input name="requested_by_name" value="${esc(req.user.username)}" required /></div>
+            <div><label>Status</label><select name="status">${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${value === "OPEN" ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
+            <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
+            <div><label>ISO</label><input name="iso_no" value="${esc(lineFilter.iso)}" /></div>
+          </div>
+          <div><label>Notes</label><textarea name="notes"></textarea></div>
+          <div class="scroll">
+            <table id="requisition-builder-table" class="data-grid">
+              <colgroup>
+                <col style="width:80px" />
+                <col style="width:170px" />
+                <col style="width:120px" />
+                <col style="width:180px" />
+                <col style="width:120px" />
+                <col style="width:380px" />
+                <col style="width:90px" />
+                <col style="width:90px" />
+                <col style="width:90px" />
+                <col style="width:100px" />
+                <col style="width:110px" />
+                <col style="width:80px" />
+                <col style="width:120px" />
+                <col style="width:140px" />
+                <col style="width:130px" />
+                <col style="width:80px" />
+                <col style="width:80px" />
+                <col style="width:80px" />
+                <col style="width:80px" />
+                <col style="width:180px" />
+                <col style="width:120px" />
+                <col style="width:140px" />
+              </colgroup>
+              <tr>
+                <th class="nowrap" data-resizable="true">Pick</th>
+                <th class="wrap" data-resizable="true">Line</th>
+                <th class="nowrap" data-resizable="true">IWP</th>
+                <th class="nowrap" data-resizable="true">ISO</th>
+                <th class="nowrap" data-resizable="true">Item</th>
+                <th class="wrap" data-resizable="true">Description</th>
+                <th class="nowrap" data-resizable="true">Type</th>
+                <th class="nowrap" data-resizable="true">Req Qty</th>
+                <th class="nowrap" data-resizable="true">Issued</th>
+                <th class="nowrap" data-resizable="true">Remaining</th>
+                <th class="nowrap" data-resizable="true">Request</th>
+                <th class="nowrap" data-resizable="true">UOM</th>
+                <th class="nowrap" data-resizable="true">Spec</th>
+                <th class="wrap" data-resizable="true">Commodity Code</th>
+                <th class="wrap" data-resizable="true">Tag Number</th>
+                <th class="nowrap" data-resizable="true">Size 1</th>
+                <th class="nowrap" data-resizable="true">Size 2</th>
+                <th class="nowrap" data-resizable="true">Thk 1</th>
+                <th class="nowrap" data-resizable="true">Thk 2</th>
+                <th class="wrap" data-resizable="true">Notes</th>
+                <th class="nowrap" data-resizable="true">Status</th>
+                <th class="nowrap" data-resizable="true">Actions</th>
+              </tr>
+              ${lineRows || `<tr><td colspan="22" class="muted">No BOM lines match the current filter.</td></tr>`}
+            </table>
+          </div>
+          <div class="actions"><button type="submit">Create Material Requisition</button></div>
+        </form>
+      </div>
+      <script>enableResizableTable("requisition-builder-table");</script>
+    ` : `<div class="card error"><h3>No Piping BOM Found</h3><p>Select or create a piping BOM first.</p></div>`}
+  `, req.user));
+});
+
 app.get("/requisitions", requireAuth, async (req, res) => {
   const iwp = String(req.query.iwp || "").trim();
   const iso = String(req.query.iso || "").trim();
@@ -1295,6 +1316,9 @@ app.get("/requisitions", requireAuth, async (req, res) => {
   </tr>`).join("");
   res.send(layout("Requisitions", `
     <h1>Material Requisitions</h1>
+    <div class="card">
+      <div class="actions"><a class="btn btn-primary" href="/requisitions/new">New Request</a></div>
+    </div>
     <div class="card">
       <form method="get" action="/requisitions" class="stack">
         <div class="grid">
