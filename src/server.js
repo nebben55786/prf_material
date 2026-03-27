@@ -131,6 +131,78 @@ function quoteCell(unitPrice, leadDays) {
   return `$${Number(unitPrice).toFixed(2)} | ${num(leadDays)}d`;
 }
 
+const rfqItemColumns = ["item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
+
+function parseDelimitedRows(text, columns = rfqItemColumns) {
+  if (!text?.trim()) return [];
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim());
+  if (lines.length === 0) return [];
+  const delimiter = lines.some((line) => line.includes("\t")) ? "\t" : ",";
+  const splitLine = (line) => line.split(delimiter).map((cell) => String(cell ?? "").trim());
+  const firstRow = splitLine(lines[0]);
+  const normalizedFirstRow = firstRow.map((cell) => String(cell ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""));
+  const hasHeaders = normalizedFirstRow.some((cell) => columns.includes(cell));
+  const headers = hasHeaders ? normalizedFirstRow : columns;
+  const dataLines = hasHeaders ? lines.slice(1) : lines;
+  return dataLines.map((line) => {
+    const values = splitLine(line);
+    return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").trim()]));
+  });
+}
+
+async function upsertMaterialItem(client, row) {
+  const itemCode = String(row.item_code || "").trim();
+  const description = String(row.description || "").trim();
+  const materialType = String(row.material_type || "").trim();
+  const uom = String(row.uom || "").trim();
+  if (!itemCode) throw new Error("Item code is required.");
+  const existing = await client.query("select id, description, material_type, uom from material_items where item_code = $1", [itemCode]);
+  if (existing.rows[0]) {
+    const current = existing.rows[0];
+    await client.query(
+      "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
+      [current.id, description || current.description, materialType || current.material_type, uom || current.uom]
+    );
+    return current.id;
+  }
+  const insert = await client.query(
+    "insert into material_items (item_code, description, material_type, uom) values ($1, $2, $3, $4) returning id",
+    [itemCode, description || itemCode, materialType || "misc", uom || "EA"]
+  );
+  return insert.rows[0].id;
+}
+
+async function upsertRfqItemRow(client, rfqId, row) {
+  const itemCode = String(row.item_code || "").trim();
+  const qty = num(row.qty);
+  if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
+  if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
+  const materialItemId = await upsertMaterialItem(client, row);
+  const existingItem = await client.query(`
+    select id
+    from rfq_items
+    where rfq_id = $1 and material_item_id = $2
+      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
+      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
+  `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || ""]);
+  if (existingItem.rows[0]) {
+    await client.query(`
+      update rfq_items
+      set spec = $2, commodity_code = $3, tag_number = $4, qty = $5, notes = $6, updated_at = now()
+      where id = $1
+    `, [existingItem.rows[0].id, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
+    return { status: "updated" };
+  }
+  await client.query(`
+    insert into rfq_items (rfq_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+  `, [rfqId, materialItemId, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
+  return { status: "inserted" };
+}
+
 async function writeQuoteRevision(client, { rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId = null, createdBy = null }) {
   await client.query(`
     insert into quote_revisions (rfq_item_id, vendor_id, unit_price, lead_days, source_type, source_batch_id, created_by)
@@ -959,7 +1031,7 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
     return;
   }
-  const [itemsRes, vendorsRes, quoteVendorsRes, poCountRes, recentImportsRes] = await Promise.all([
+  const [itemsRes, vendorsRes, quoteVendorsRes, poCountRes, recentImportsRes, materialItemsRes] = await Promise.all([
     query(`
       select ri.id, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
              ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
@@ -986,7 +1058,8 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
       where ib.rfq_id = $1
       order by ib.id desc
       limit 5
-    `, [rfqId])
+    `, [rfqId]),
+    query("select item_code, description, material_type, uom from material_items order by item_code limit 500")
   ]);
 
   const items = itemsRes.rows;
@@ -994,7 +1067,11 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
   const quoteVendors = quoteVendorsRes.rows;
   const poCount = Number(poCountRes.rows[0].count);
   const recentImports = recentImportsRes.rows;
+  const materialItems = materialItemsRes.rows;
   const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
+  const materialItemOptions = materialItems
+    .map((item) => `<option value="${esc(item.item_code)}">${esc(item.description)} | ${esc(item.material_type)} | ${esc(item.uom)}</option>`)
+    .join("");
 
   const itemRows = [];
   for (const item of items) {
@@ -1063,14 +1140,56 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
   const importRows = recentImports.length > 0
     ? recentImports.map((batch) => `<tr><td><a href="/imports/${batch.id}">${esc(batch.entity_type)}</a></td><td>${esc(batch.created_at)}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
+  const addItemCard = `
+    <div class="card">
+      <h3>Add RFQ Item</h3>
+      <p class="muted">Pick an existing item by code or type in a new one. New items are added to the master item table automatically.</p>
+      <form method="post" action="/rfq/${rfqId}/items/add" class="stack">
+        <datalist id="item-codes-${rfqId}">${materialItemOptions}</datalist>
+        <div class="scroll">
+          <table>
+            <tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr>
+            <tr>
+              <td><input name="item_code" list="item-codes-${rfqId}" required /></td>
+              <td><input name="description" /></td>
+              <td><input name="material_type" /></td>
+              <td><input name="uom" /></td>
+              <td><input name="spec" /></td>
+              <td><input name="commodity_code" /></td>
+              <td><input name="tag_number" /></td>
+              <td><input name="size_1" /></td>
+              <td><input name="size_2" /></td>
+              <td><input name="thk_1" /></td>
+              <td><input name="thk_2" /></td>
+              <td><input name="qty" required /></td>
+              <td><input name="notes" /></td>
+            </tr>
+          </table>
+        </div>
+        <div class="actions"><button type="submit">Add Item To RFQ</button></div>
+      </form>
+    </div>`;
+  const pasteTableCard = `
+    <div class="card">
+      <h3>Paste RFQ Table</h3>
+      <p class="muted">Paste rows directly from Excel. Header row is optional. Expected column order: item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes</p>
+      <div class="scroll">
+        <table>
+          <tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr>
+        </table>
+      </div>
+      <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
+        <div><label>Paste Table</label><textarea name="table_text" style="min-height:220px;font-family:Consolas,monospace;" placeholder="item_code	description	material_type	uom	spec	commodity_code	tag_number	size_1	size_2	thk_1	thk_2	qty	notes&#10;P-1001	6&quot; CS Pipe	Pipe	LF	AS01CR			6		sch40		40"></textarea></div>
+        <div class="actions"><button type="submit">Paste Into RFQ</button></div>
+      </form>
+    </div>`;
   const uploadItemsCard = `
     <div class="card">
-      <h3>Upload RFQ Items</h3>
+      <h3>Import RFQ Items From File</h3>
       <p class="muted">CSV/XLSX columns: item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes</p>
       <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/items/import" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
-        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
-        <div class="actions"><button type="submit">Import Items</button></div>
+        <div class="actions"><button type="submit">Import File</button></div>
       </form>
     </div>`;
   const importQuotesCard = `
@@ -1103,7 +1222,8 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
 
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>RFQ ${esc(rfq.rfq_no)}</h1>
-    ${items.length === 0 && poCount === 0 ? uploadItemsCard : ""}
+    ${poCount === 0 ? addItemCard : ""}
+    ${poCount === 0 ? pasteTableCard : ""}
     ${poCount === 0 ? importQuotesCard : ""}
     ${awardedVendorCounts.length > 0 ? issuePoCard : issuePoHelpCard}
     <div class="card scroll">
@@ -1120,7 +1240,7 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
         ${importRows}
       </table>
     </div>
-    ${items.length > 0 && poCount === 0 ? uploadItemsCard : ""}
+    ${poCount === 0 ? uploadItemsCard : ""}
   `, req.user));
 });
 
@@ -1141,57 +1261,58 @@ app.post("/rfq/:id/items/import", requireAuth, requireRole(["admin", "buyer"]), 
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const rowNumber = index + 2;
-      const itemCode = String(row.item_code || "").trim();
-      const qty = num(row.qty);
-      if (!itemCode) {
+      const result = await upsertRfqItemRow(client, rfqId, row);
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
         skippedCount += 1;
-        await addImportBatchError(client, batchId, rowNumber, "missing_item_code", "Item code is required.", row);
-        continue;
-      }
-      if (qty <= 0) {
-        skippedCount += 1;
-        await addImportBatchError(client, batchId, rowNumber, "invalid_qty", "Qty must be greater than zero.", row);
-        continue;
-      }
-      let materialItemId;
-      const existing = await client.query("select id from material_items where item_code = $1", [itemCode]);
-      if (existing.rows[0]) {
-        materialItemId = existing.rows[0].id;
-        await client.query(
-          "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
-          [materialItemId, row.description || itemCode, row.material_type || "misc", row.uom || "EA"]
-        );
-      } else {
-        const insert = await client.query(
-          "insert into material_items (item_code, description, material_type, uom) values ($1, $2, $3, $4) returning id",
-          [itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA"]
-        );
-        materialItemId = insert.rows[0].id;
-      }
-      const existingItem = await client.query(`
-        select id
-        from rfq_items
-        where rfq_id = $1 and material_item_id = $2
-          and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
-          and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
-      `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || ""]);
-      if (existingItem.rows[0]) {
-        await client.query(`
-          update rfq_items
-          set spec = $2, commodity_code = $3, tag_number = $4, qty = $5, notes = $6, updated_at = now()
-          where id = $1
-        `, [existingItem.rows[0].id, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
-        updatedCount += 1;
-      } else {
-        await client.query(`
-          insert into rfq_items (rfq_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
-        `, [rfqId, materialItemId, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
-        insertedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, result.errorCode, result.message, row);
       }
     }
     await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
     await auditLog(client, req.user.id, "import", "rfq_items", rfqId, `rows=${rows.length};batch=${batchId}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.post("/rfq/:id/items/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const rfqId = Number(req.params.id);
+  await withTransaction(async (client) => {
+    const result = await upsertRfqItemRow(client, rfqId, req.body);
+    if (result.status === "skipped") throw new Error(result.message);
+    await auditLog(client, req.user.id, "upsert", "rfq_item", rfqId, `item=${req.body.item_code || ""}`);
+  });
+  res.redirect(`/rfq/${rfqId}`);
+});
+
+app.post("/rfq/:id/items/paste", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const rows = parseDelimitedRows(req.body.table_text);
+  if (rows.length === 0) throw new Error("No pasted rows found.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "rfq_items",
+      rfqId,
+      uploadedBy: req.user.id,
+      filename: "pasted-table"
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 1;
+      const result = await upsertRfqItemRow(client, rfqId, row);
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, result.errorCode, result.message, row);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "paste", "rfq_items", rfqId, `rows=${rows.length};batch=${batchId}`);
     return batchId;
   });
   res.redirect(`/imports/${batchId}`);
