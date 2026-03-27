@@ -103,9 +103,12 @@ function layout(title, body, user) {
         input.type = nextType;
         button.textContent = nextType === "password" ? "Show" : "Hide";
       }
+      function phoneDigits(value) {
+        return String(value || "").replace(/\D/g, "").slice(0, 10);
+      }
       function applyPhoneMask(input) {
         if (!input) return;
-        const digits = String(input.value || "").replace(/\D/g, "").slice(0, 10);
+        const digits = phoneDigits(input.value);
         if (digits.length <= 3) {
           input.value = digits;
           return;
@@ -115,6 +118,17 @@ function layout(title, body, user) {
           return;
         }
         input.value = digits.slice(0, 3) + "-" + digits.slice(3, 6) + "-" + digits.slice(6, 10);
+      }
+      function editPhoneInput(input) {
+        if (!input) return;
+        input.value = phoneDigits(input.value);
+      }
+      function sanitizePhoneInput(input) {
+        if (!input) return;
+        input.value = phoneDigits(input.value);
+      }
+      function formatPhoneOnBlur(input) {
+        applyPhoneMask(input);
       }
       function filterTableRows(inputId, tableId) {
         const input = document.getElementById(inputId);
@@ -1669,7 +1683,7 @@ app.get("/vendors/new", requireAuth, async (req, res) => {
           <div><label>Name</label><input name="name" required /></div>
           <div><label>Contact Name</label><input name="contact_name" /></div>
           <div><label>Email</label><input name="email" /></div>
-          <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" oninput="applyPhoneMask(this)" /><div class="muted">Format: 000-000-0000</div></div>
+          <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onfocus="editPhoneInput(this)" oninput="sanitizePhoneInput(this)" onblur="formatPhoneOnBlur(this)" /><div class="muted">Format: 000-000-0000</div></div>
         </div>
         <div><label>Categories</label><div class="check-grid">${checks}</div></div>
         <div class="actions"><button type="submit">Add Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
@@ -1705,7 +1719,7 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
             <div><label>Name</label><input name="name" value="${esc(vendor.name)}" required /></div>
             <div><label>Contact Name</label><input name="contact_name" value="${esc(vendor.contact_name || "")}" /></div>
             <div><label>Email</label><input name="email" value="${esc(vendor.email || "")}" /></div>
-            <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(vendor.phone || ""))}" inputmode="tel" autocomplete="off" oninput="applyPhoneMask(this)" /><div class="muted">Format: 000-000-0000</div></div>
+            <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(vendor.phone || ""))}" inputmode="tel" autocomplete="off" onfocus="editPhoneInput(this)" oninput="sanitizePhoneInput(this)" onblur="formatPhoneOnBlur(this)" /><div class="muted">Format: 000-000-0000</div></div>
           </div>
           <div><label>Categories</label><div class="check-grid">${checks}</div></div>
           <div class="actions"><button type="submit">Save Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
