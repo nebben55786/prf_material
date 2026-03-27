@@ -121,11 +121,17 @@ function layout(title, body, user) {
         if (!input) return true;
         const value = String(input.value || "");
         if (!value) {
-          if (message) message.textContent = "";
+          if (message) {
+            message.textContent = "";
+            message.style.color = "#4d5b69";
+          }
           return true;
         }
         const error = passwordRuleError(value);
-        if (message) message.textContent = error;
+        if (message) {
+          message.textContent = error || "Password meets requirements.";
+          message.style.color = error ? "#a23622" : "#1f6b3a";
+        }
         return !error;
       }
       function attachPasswordValidation(formId, inputName, messageId) {
@@ -141,28 +147,20 @@ function layout(title, body, user) {
         });
       }
       function phoneDigits(value) {
-        return String(value || "").replace(/\D/g, "").slice(0, 10);
+        return String(value || "").replace(/\D/g, "").slice(0, 11);
+      }
+      function formatPhoneValue(value) {
+        const digits = phoneDigits(value);
+        if (digits.length === 11 && digits.startsWith("1")) {
+          return "1-" + digits.slice(1, 4) + "-" + digits.slice(4, 7) + "-" + digits.slice(7, 11);
+        }
+        if (digits.length <= 3) return digits;
+        if (digits.length <= 6) return digits.slice(0, 3) + "-" + digits.slice(3);
+        return digits.slice(0, 3) + "-" + digits.slice(3, 6) + "-" + digits.slice(6, 10);
       }
       function applyPhoneMask(input) {
         if (!input) return;
-        const digits = phoneDigits(input.value);
-        if (digits.length <= 3) {
-          input.value = digits;
-          return;
-        }
-        if (digits.length <= 6) {
-          input.value = digits.slice(0, 3) + "-" + digits.slice(3);
-          return;
-        }
-        input.value = digits.slice(0, 3) + "-" + digits.slice(3, 6) + "-" + digits.slice(6, 10);
-      }
-      function editPhoneInput(input) {
-        if (!input) return;
-        input.value = phoneDigits(input.value);
-      }
-      function sanitizePhoneInput(input) {
-        if (!input) return;
-        input.value = phoneDigits(input.value);
+        input.value = formatPhoneValue(input.value);
       }
       function formatPhoneOnBlur(input) {
         applyPhoneMask(input);
@@ -243,10 +241,13 @@ function normalizeCategoryList(text) {
 }
 
 function normalizePhone(value) {
-  const digits = String(value || "").replace(/\D/g, "").slice(0, 10);
+  const digits = String(value || "").replace(/\D/g, "").slice(0, 11);
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return `1-${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7, 11)}`;
+  }
   if (digits.length <= 3) return digits;
   if (digits.length <= 6) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
-  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
 }
 
 function normalizeEmail(value) {
@@ -1979,7 +1980,7 @@ app.get("/vendors/new", requireAuth, async (req, res) => {
           <div><label>Contact Name</label><input name="contact_name" /></div>
           <div><label>Website</label><input name="website" placeholder="https://example.com" /></div>
           <div><label>Email</label><input name="email" /></div>
-          <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onfocus="editPhoneInput(this)" oninput="sanitizePhoneInput(this)" onblur="formatPhoneOnBlur(this)" /><div class="muted">Format: 000-000-0000</div></div>
+          <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
         </div>
         <div><label>Categories</label><div class="check-grid">${checks}</div></div>
         <div class="actions"><button type="submit">Add Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
@@ -2034,7 +2035,7 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
             <div><label>Contact Name</label><input name="contact_name" value="${esc(vendor.contact_name || "")}" /></div>
             <div><label>Website</label><input name="website" value="${esc(vendor.website || "")}" placeholder="https://example.com" /></div>
             <div><label>Email</label><input name="email" value="${esc(vendor.email || "")}" /></div>
-            <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(vendor.phone || ""))}" inputmode="tel" autocomplete="off" onfocus="editPhoneInput(this)" oninput="sanitizePhoneInput(this)" onblur="formatPhoneOnBlur(this)" /><div class="muted">Format: 000-000-0000</div></div>
+            <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(vendor.phone || ""))}" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
           </div>
           <div><label>Categories</label><div class="check-grid">${checks}</div></div>
           <div class="actions"><button type="submit">Save Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
@@ -2046,7 +2047,7 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
           <div class="grid">
             <div><label>Contact Name</label><input name="contact_name" required /></div>
             <div><label>Email</label><input name="email" /></div>
-            <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onfocus="editPhoneInput(this)" oninput="sanitizePhoneInput(this)" onblur="formatPhoneOnBlur(this)" /></div>
+            <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
           </div>
           <div class="actions"><button type="submit">Add Contact</button></div>
         </form>
