@@ -76,6 +76,9 @@ function layout(title, body, user) {
       .btn-secondary { background: linear-gradient(180deg, #6a7681 0%, var(--brand-2) 100%); color: white; }
       .btn-danger { background: linear-gradient(180deg, #bf5b49 0%, var(--warn) 100%); color: white; }
       .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+      .check-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 14px; }
+      .check-option { display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 6px; padding: 4px 0; font-size: 12px; text-transform: uppercase; }
+      .check-option input { width: 14px; height: 14px; margin: 0; justify-self: center; }
       .scroll { overflow-x: auto; }
       table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; }
       th, td { padding: 6px 7px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
@@ -99,6 +102,15 @@ function layout(title, body, user) {
         const nextType = input.type === "password" ? "text" : "password";
         input.type = nextType;
         button.textContent = nextType === "password" ? "Show" : "Hide";
+      }
+      function applyPhoneMask(input) {
+        if (!input) return;
+        const digits = String(input.value || "").replace(/\D/g, "").slice(0, 10);
+        const parts = [];
+        if (digits.length > 0) parts.push(digits.slice(0, 3));
+        if (digits.length >= 4) parts.push(digits.slice(3, 6));
+        if (digits.length >= 7) parts.push(digits.slice(6, 10));
+        input.value = parts.join("-");
       }
       function filterTableRows(inputId, tableId) {
         const input = document.getElementById(inputId);
@@ -156,6 +168,13 @@ function layout(title, body, user) {
 function normalizeCategories(input) {
   const values = Array.isArray(input) ? input : input ? [input] : [];
   return vendorCategories.filter((category) => values.includes(category)).join(",");
+}
+
+function normalizePhone(value) {
+  const digits = String(value || "").replace(/\D/g, "").slice(0, 10);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
 }
 
 function parseUploadedRows(file, pastedText) {
@@ -1574,28 +1593,37 @@ app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehous
 
 app.get("/vendors", requireAuth, async (req, res) => {
   const vendors = (await query("select * from vendors order by name")).rows;
-  const checks = vendorCategories.map((category) => `<label><input type="checkbox" name="categories" value="${esc(category)}" /> ${esc(category)}</label>`).join("");
   const rows = vendors.map((vendor) => `<tr>
-    <td>${esc(vendor.name)}</td>
-    <td>${esc(vendor.email || "")}</td>
-    <td>${esc(vendor.phone || "")}</td>
-    <td>${esc((vendor.categories || "").split(",").filter(Boolean).join(", "))}</td>
-    <td><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a></td>
-  </tr>`).join("");
+      <td>${esc(vendor.name)}</td>
+      <td>${esc(vendor.email || "")}</td>
+      <td>${esc(normalizePhone(vendor.phone || ""))}</td>
+      <td>${esc((vendor.categories || "").split(",").filter(Boolean).join(", "))}</td>
+      <td><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a></td>
+    </tr>`).join("");
   res.send(layout("Vendors", `
-    <h1>Vendors</h1>
+      <h1>Vendors</h1>
+      <div class="card">
+        <div class="actions"><a class="btn btn-primary" href="/vendors/new">Add Vendor</a></div>
+      </div>
+      <div class="card scroll"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Categories</th><th>Action</th></tr>${rows}</table></div>
+    `, req.user));
+});
+
+app.get("/vendors/new", requireAuth, async (req, res) => {
+  const checks = vendorCategories.map((category) => `<label class="check-option"><input type="checkbox" name="categories" value="${esc(category)}" /><span>${esc(category)}</span></label>`).join("");
+  res.send(layout("Add Vendor", `
+    <h1>Add Vendor</h1>
     <div class="card">
       <form method="post" action="/vendors/add" class="stack">
         <div class="grid">
           <div><label>Name</label><input name="name" required /></div>
           <div><label>Email</label><input name="email" /></div>
-          <div><label>Phone</label><input name="phone" /></div>
+          <div><label>Phone</label><input name="phone" inputmode="numeric" maxlength="12" placeholder="000-000-0000" oninput="applyPhoneMask(this)" /></div>
         </div>
-        <div><label>Categories</label><div class="grid-4">${checks}</div></div>
-        <div class="actions"><button type="submit">Add Vendor</button></div>
+        <div><label>Categories</label><div class="check-grid">${checks}</div></div>
+        <div class="actions"><button type="submit">Add Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Categories</th><th>Action</th></tr>${rows}</table></div>
   `, req.user));
 });
 
@@ -1603,7 +1631,7 @@ app.post("/vendors/add", requireAuth, requireRole(["admin", "buyer"]), async (re
   await withTransaction(async (client) => {
     const result = await client.query(
       "insert into vendors (name, email, phone, categories) values ($1, $2, $3, $4) returning id",
-      [req.body.name?.trim(), req.body.email?.trim() || "", req.body.phone?.trim() || "", normalizeCategories(req.body.categories)]
+      [req.body.name?.trim(), req.body.email?.trim() || "", normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
     );
     await auditLog(client, req.user.id, "create", "vendor", result.rows[0].id, req.body.name?.trim() || "");
   });
@@ -1617,28 +1645,28 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
     return;
   }
   const selected = new Set((vendor.categories || "").split(",").filter(Boolean));
-  const checks = vendorCategories.map((category) => `<label><input type="checkbox" name="categories" value="${esc(category)}" ${selected.has(category) ? "checked" : ""}/> ${esc(category)}</label>`).join("");
+  const checks = vendorCategories.map((category) => `<label class="check-option"><input type="checkbox" name="categories" value="${esc(category)}" ${selected.has(category) ? "checked" : ""}/><span>${esc(category)}</span></label>`).join("");
   res.send(layout("Edit Vendor", `
-    <h1>Edit Vendor</h1>
-    <div class="card">
-      <form method="post" action="/vendors/${vendor.id}/edit" class="stack">
-        <div class="grid">
-          <div><label>Name</label><input name="name" value="${esc(vendor.name)}" required /></div>
-          <div><label>Email</label><input name="email" value="${esc(vendor.email || "")}" /></div>
-          <div><label>Phone</label><input name="phone" value="${esc(vendor.phone || "")}" /></div>
-        </div>
-        <div><label>Categories</label><div class="grid-4">${checks}</div></div>
-        <div class="actions"><button type="submit">Save Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
-      </form>
-    </div>
-  `, req.user));
+      <h1>Edit Vendor</h1>
+      <div class="card">
+        <form method="post" action="/vendors/${vendor.id}/edit" class="stack">
+          <div class="grid">
+            <div><label>Name</label><input name="name" value="${esc(vendor.name)}" required /></div>
+            <div><label>Email</label><input name="email" value="${esc(vendor.email || "")}" /></div>
+            <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(vendor.phone || ""))}" inputmode="numeric" maxlength="12" placeholder="000-000-0000" oninput="applyPhoneMask(this)" /></div>
+          </div>
+          <div><label>Categories</label><div class="check-grid">${checks}</div></div>
+          <div class="actions"><button type="submit">Save Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
+        </form>
+      </div>
+    `, req.user));
 });
 
 app.post("/vendors/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   await withTransaction(async (client) => {
     await client.query(
       "update vendors set name = $2, email = $3, phone = $4, categories = $5 where id = $1",
-      [req.params.id, req.body.name?.trim(), req.body.email?.trim() || "", req.body.phone?.trim() || "", normalizeCategories(req.body.categories)]
+      [req.params.id, req.body.name?.trim(), req.body.email?.trim() || "", normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
     );
     await auditLog(client, req.user.id, "update", "vendor", req.params.id, req.body.name?.trim() || "");
   });
