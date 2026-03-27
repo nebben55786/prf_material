@@ -81,6 +81,15 @@ function layout(title, body, user) {
       .stack { display: grid; gap: 18px; }
       @media (max-width: 900px) { .grid, .grid-4, .stats { grid-template-columns: 1fr; } .topbar { flex-direction: column; align-items: flex-start; } }
     </style>
+    <script>
+      function togglePassword(button, targetId) {
+        const input = document.getElementById(targetId);
+        if (!input) return;
+        const nextType = input.type === "password" ? "text" : "password";
+        input.type = nextType;
+        button.textContent = nextType === "password" ? "Show" : "Hide";
+      }
+    </script>
   </head>
   <body>
     <div class="shell">
@@ -129,6 +138,15 @@ function num(value, fallback = 0) {
 
 function quoteCell(unitPrice, leadDays) {
   return `$${Number(unitPrice).toFixed(2)} | ${num(leadDays)}d`;
+}
+
+function validatePasswordRules(password) {
+  const value = String(password || "");
+  if (value.length < 10) return "Password must be at least 10 characters.";
+  if (!/[A-Z]/.test(value)) return "Password must include at least one uppercase letter.";
+  if (!/[a-z]/.test(value)) return "Password must include at least one lowercase letter.";
+  if (!/[0-9]/.test(value)) return "Password must include at least one number.";
+  return "";
 }
 
 const rfqItemColumns = ["item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
@@ -359,8 +377,12 @@ app.get("/login", (req, res) => {
 
 app.post("/login", async (req, res) => {
   const { username = "", password = "" } = req.body;
-  const result = await query("select id, username, role, password_hash from users where username = $1", [username.trim()]);
+  const result = await query("select id, username, role, password_hash, is_active from users where username = $1", [username.trim()]);
   const user = result.rows[0];
+  if (user && !user.is_active) {
+    res.status(401).send(loginPage("This user is inactive. Contact an administrator."));
+    return;
+  }
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
     res.status(401).send(loginPage("Invalid username or password."));
     return;
@@ -399,12 +421,13 @@ app.get("/", requireAuth, async (req, res) => {
 app.get("/settings", requireAuth, async (req, res) => {
   const [jobNumber, usersRes] = await Promise.all([
     getJobNumber(),
-    query("select id, username, role, created_at from users order by username")
+    query("select id, username, role, is_active, created_at from users order by username")
   ]);
   const userRows = usersRes.rows.map((record) => `
     <tr>
       <td>${esc(record.username)}</td>
       <td>${esc(record.role)}</td>
+      <td>${record.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>${esc(record.created_at)}</td>
       <td>
         <div class="stack">
@@ -418,12 +441,22 @@ app.get("/settings", requireAuth, async (req, res) => {
                   <option value="warehouse" ${record.role === "warehouse" ? "selected" : ""}>warehouse</option>
                 </select>
               </div>
-              <div><input type="password" name="password" placeholder="Leave blank to keep password" /></div>
+              <div>
+                <select name="is_active">
+                  <option value="true" ${record.is_active ? "selected" : ""}>active</option>
+                  <option value="false" ${!record.is_active ? "selected" : ""}>inactive</option>
+                </select>
+              </div>
             </div>
-            <div class="actions"><button type="submit">Save User</button></div>
+            <div class="actions">
+              <input id="edit-password-${record.id}" type="password" name="password" placeholder="Leave blank to keep password" />
+              <button type="button" class="btn btn-secondary" onclick="togglePassword(this, 'edit-password-${record.id}')">Show</button>
+              <button type="submit">Save User</button>
+            </div>
+            <div class="muted">Password rules: minimum 10 characters, at least 1 uppercase letter, 1 lowercase letter, and 1 number.</div>
           </form>
           <div class="actions">
-            ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<form method="post" action="/settings/users/${record.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>`}
+            ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="/settings/users/${record.id}/delete">Delete</a>`}
           </div>
         </div>
       </td>
@@ -455,7 +488,14 @@ app.get("/settings", requireAuth, async (req, res) => {
           </div>
         </div>
         <div class="grid">
-          <div><label>Password</label><input type="password" name="password" required /></div>
+          <div>
+            <label>Password</label>
+            <div class="actions">
+              <input id="new-user-password" type="password" name="password" required />
+              <button type="button" class="btn btn-secondary" onclick="togglePassword(this, 'new-user-password')">Show</button>
+            </div>
+            <div class="muted">Minimum 10 characters, at least 1 uppercase letter, 1 lowercase letter, and 1 number.</div>
+          </div>
         </div>
         <div class="actions"><button type="submit">Add User</button></div>
       </form>
@@ -463,8 +503,8 @@ app.get("/settings", requireAuth, async (req, res) => {
     <div class="card scroll">
       <h3>Existing Users</h3>
       <table>
-        <tr><th>Username</th><th>Role</th><th>Created</th><th>Edit / Delete</th></tr>
-        ${userRows || `<tr><td colspan="4" class="muted">No users found.</td></tr>`}
+        <tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Edit / Delete</th></tr>
+        ${userRows || `<tr><td colspan="5" class="muted">No users found.</td></tr>`}
       </table>
     </div>
   `, req.user));
@@ -492,9 +532,11 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), async (req,
   if (!username) throw new Error("Username is required.");
   if (!password) throw new Error("Password is required.");
   if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
+  const passwordError = validatePasswordRules(password);
+  if (passwordError) throw new Error(passwordError);
   const passwordHash = await bcrypt.hash(password, 10);
   await withTransaction(async (client) => {
-    await client.query("insert into users (username, password_hash, role) values ($1, $2, $3)", [username, passwordHash, role]);
+    await client.query("insert into users (username, password_hash, role, is_active) values ($1, $2, $3, true)", [username, passwordHash, role]);
     await auditLog(client, req.user.id, "create", "user", username, role);
   });
   res.redirect("/settings");
@@ -505,38 +547,66 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), async 
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
   const role = String(req.body.role || "buyer").trim();
+  const isActive = String(req.body.is_active || "true") === "true";
   if (!username) throw new Error("Username is required.");
   if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
   await withTransaction(async (client) => {
-    const current = (await client.query("select id, username, role from users where id = $1", [userId])).rows[0];
+    const current = (await client.query("select id, username, role, is_active from users where id = $1", [userId])).rows[0];
     if (!current) throw new Error("User not found.");
     if (current.role === "admin" && role !== "admin") {
       const adminCount = Number((await client.query("select count(*) from users where role = 'admin'")).rows[0].count);
       if (adminCount <= 1) throw new Error("At least one admin user is required.");
     }
-    if (password) {
-      const passwordHash = await bcrypt.hash(password, 10);
-      await client.query("update users set username = $2, role = $3, password_hash = $4 where id = $1", [userId, username, role, passwordHash]);
-    } else {
-      await client.query("update users set username = $2, role = $3 where id = $1", [userId, username, role]);
+    if (current.role === "admin" && !isActive) {
+      const activeAdminCount = Number((await client.query("select count(*) from users where role = 'admin' and is_active = true")).rows[0].count);
+      if (activeAdminCount <= 1) throw new Error("At least one active admin user is required.");
     }
-    await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}`);
+    if (req.user.id === userId && !isActive) throw new Error("You cannot deactivate your own user.");
+    if (password) {
+      const passwordError = validatePasswordRules(password);
+      if (passwordError) throw new Error(passwordError);
+      const passwordHash = await bcrypt.hash(password, 10);
+      await client.query("update users set username = $2, role = $3, password_hash = $4, is_active = $5 where id = $1", [userId, username, role, passwordHash, isActive]);
+    } else {
+      await client.query("update users set username = $2, role = $3, is_active = $4 where id = $1", [userId, username, role, isActive]);
+    }
+    await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}|${isActive ? "active" : "inactive"}`);
   });
   res.redirect("/settings");
 });
 
+app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const userId = Number(req.params.id);
+  const current = (await query("select id, username, role, is_active, created_at from users where id = $1", [userId])).rows[0];
+  if (!current) throw new Error("User not found.");
+  if (req.user.id === userId) throw new Error("You cannot deactivate your own user.");
+  res.send(layout("Confirm User Deactivation", `
+    <h1>Confirm User Deactivation</h1>
+    <div class="card">
+      <p><strong>User:</strong> ${esc(current.username)}</p>
+      <p><strong>Role:</strong> ${esc(current.role)}</p>
+      <p><strong>Status:</strong> ${current.is_active ? "Active" : "Inactive"}</p>
+      <p class="muted">This will mark the user inactive. They will no longer be able to sign in, but their history will remain in the system.</p>
+      <div class="actions">
+        <form method="post" action="/settings/users/${current.id}/delete"><button class="btn btn-danger" type="submit">Confirm Deactivate</button></form>
+        <a class="btn btn-secondary" href="/settings">Cancel</a>
+      </div>
+    </div>
+  `, req.user));
+});
+
 app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), async (req, res) => {
   const userId = Number(req.params.id);
-  if (req.user.id === userId) throw new Error("You cannot delete your own user.");
+  if (req.user.id === userId) throw new Error("You cannot deactivate your own user.");
   await withTransaction(async (client) => {
-    const current = (await client.query("select id, username, role from users where id = $1", [userId])).rows[0];
+    const current = (await client.query("select id, username, role, is_active from users where id = $1", [userId])).rows[0];
     if (!current) throw new Error("User not found.");
-    if (current.role === "admin") {
-      const adminCount = Number((await client.query("select count(*) from users where role = 'admin'")).rows[0].count);
-      if (adminCount <= 1) throw new Error("At least one admin user is required.");
+    if (current.role === "admin" && current.is_active) {
+      const activeAdminCount = Number((await client.query("select count(*) from users where role = 'admin' and is_active = true")).rows[0].count);
+      if (activeAdminCount <= 1) throw new Error("At least one active admin user is required.");
     }
-    await client.query("delete from users where id = $1", [userId]);
-    await auditLog(client, req.user.id, "delete", "user", userId, current.username);
+    await client.query("update users set is_active = false where id = $1", [userId]);
+    await auditLog(client, req.user.id, "deactivate", "user", userId, current.username);
   });
   res.redirect("/settings");
 });

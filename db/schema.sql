@@ -3,6 +3,7 @@ create table if not exists users (
   username text not null unique,
   password_hash text not null,
   role text not null check (role in ('admin', 'buyer', 'warehouse')),
+  is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
 
@@ -205,6 +206,7 @@ create table if not exists receipts (
 );
 
 alter table rfq_items add column if not exists award_status text not null default 'OPEN';
+alter table users add column if not exists is_active boolean not null default true;
 alter table rfq_items add column if not exists bom_line_id bigint references bom_lines(id) on delete set null;
 alter table rfq_items add column if not exists spec text;
 alter table rfq_items add column if not exists commodity_code text;
