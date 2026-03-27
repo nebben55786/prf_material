@@ -177,6 +177,10 @@ function normalizePhone(value) {
   return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
 }
 
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
 function parseUploadedRows(file, pastedText) {
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (file?.buffer?.length) {
@@ -1592,21 +1596,46 @@ app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehous
 }));
 
 app.get("/vendors", requireAuth, async (req, res) => {
-  const vendors = (await query("select * from vendors order by name")).rows;
+  const search = String(req.query.search || "").trim();
+  const category = String(req.query.category || "").trim();
+  const where = [];
+  const params = [];
+  if (search) {
+    params.push(`%${search}%`);
+    where.push(`(name ilike $${params.length} or coalesce(email, '') ilike $${params.length} or coalesce(phone, '') ilike $${params.length})`);
+  }
+  if (category) {
+    params.push(`%${category}%`);
+    where.push(`coalesce(categories, '') ilike $${params.length}`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const vendors = (await query(`select * from vendors ${whereSql} order by name`, params)).rows;
   const rows = vendors.map((vendor) => `<tr>
-      <td>${esc(vendor.name)}</td>
-      <td>${esc(vendor.email || "")}</td>
-      <td>${esc(normalizePhone(vendor.phone || ""))}</td>
-      <td>${esc((vendor.categories || "").split(",").filter(Boolean).join(", "))}</td>
-      <td><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a></td>
-    </tr>`).join("");
+        <td>${esc(vendor.name)}</td>
+        <td>${esc(vendor.email || "")}</td>
+        <td>${esc(normalizePhone(vendor.phone || ""))}</td>
+        <td>${(vendor.categories || "").split(",").filter(Boolean).map((value) => `<span class="chip">${esc(value)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
+        <td><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a></td>
+      </tr>`).join("");
+  const categoryOptions = [`<option value="">All Categories</option>`]
+    .concat(vendorCategories.map((value) => `<option value="${esc(value)}" ${category === value ? "selected" : ""}>${esc(value)}</option>`))
+    .join("");
   res.send(layout("Vendors", `
-      <h1>Vendors</h1>
-      <div class="card">
-        <div class="actions"><a class="btn btn-primary" href="/vendors/new">Add Vendor</a></div>
-      </div>
-      <div class="card scroll"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Categories</th><th>Action</th></tr>${rows}</table></div>
-    `, req.user));
+        <h1>Vendors</h1>
+        <div class="card">
+          <div class="actions"><a class="btn btn-primary" href="/vendors/new">Add Vendor</a></div>
+        </div>
+        <div class="card">
+          <form method="get" action="/vendors" class="stack">
+            <div class="grid">
+              <div><label>Search</label><input name="search" value="${esc(search)}" placeholder="Name, email, or phone" /></div>
+              <div><label>Category</label><select name="category">${categoryOptions}</select></div>
+            </div>
+            <div class="actions"><button type="submit">Filter Vendors</button><a class="btn btn-secondary" href="/vendors">Clear</a><span class="muted">${vendors.length} vendor(s)</span></div>
+          </form>
+        </div>
+        <div class="card scroll"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Categories</th><th>Action</th></tr>${rows}</table></div>
+      `, req.user));
 });
 
 app.get("/vendors/new", requireAuth, async (req, res) => {
@@ -1629,10 +1658,10 @@ app.get("/vendors/new", requireAuth, async (req, res) => {
 
 app.post("/vendors/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   await withTransaction(async (client) => {
-    const result = await client.query(
-      "insert into vendors (name, email, phone, categories) values ($1, $2, $3, $4) returning id",
-      [req.body.name?.trim(), req.body.email?.trim() || "", normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
-    );
+      const result = await client.query(
+        "insert into vendors (name, email, phone, categories) values ($1, $2, $3, $4) returning id",
+      [req.body.name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+      );
     await auditLog(client, req.user.id, "create", "vendor", result.rows[0].id, req.body.name?.trim() || "");
   });
   res.redirect("/vendors");
@@ -1664,10 +1693,10 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
 
 app.post("/vendors/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   await withTransaction(async (client) => {
-    await client.query(
-      "update vendors set name = $2, email = $3, phone = $4, categories = $5 where id = $1",
-      [req.params.id, req.body.name?.trim(), req.body.email?.trim() || "", normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
-    );
+      await client.query(
+        "update vendors set name = $2, email = $3, phone = $4, categories = $5 where id = $1",
+      [req.params.id, req.body.name?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+      );
     await auditLog(client, req.user.id, "update", "vendor", req.params.id, req.body.name?.trim() || "");
   });
   res.redirect("/vendors");
