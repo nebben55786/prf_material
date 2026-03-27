@@ -423,10 +423,10 @@ app.get("/", requireAuth, async (req, res) => {
 });
 
 app.get("/settings", requireAuth, async (req, res) => {
-  const [jobNumber, usersRes] = await Promise.all([
-    getJobNumber(),
-    query("select id, username, role, is_active, created_at from users order by username")
-  ]);
+  const jobNumber = await getJobNumber();
+  const usersRes = req.user.role === "admin"
+    ? await query("select id, username, role, is_active, created_at from users order by username")
+    : { rows: [] };
   const userRows = usersRes.rows.map((record) => `
     <tr>
       <td>${esc(record.username)}</td>
@@ -453,11 +453,10 @@ app.get("/settings", requireAuth, async (req, res) => {
               </div>
             </div>
             <div class="actions">
-              <input id="edit-password-${record.id}" type="password" name="password" placeholder="Leave blank to keep password" />
-              <button type="button" class="btn btn-secondary" onclick="togglePassword(this, 'edit-password-${record.id}')">Show</button>
+              <input type="password" name="password" placeholder="Enter a new password to reset it" />
               <button type="submit">Save User</button>
             </div>
-            <div class="muted">Password rules: minimum 10 characters, at least 1 uppercase letter, 1 lowercase letter, and 1 number.</div>
+            <div class="muted">Passwords are never displayed. Enter a new password only if you want to reset it.</div>
           </form>
           <div class="actions">
             ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="/settings/users/${record.id}/delete">Delete</a>`}
@@ -477,6 +476,7 @@ app.get("/settings", requireAuth, async (req, res) => {
         <div class="actions"><button type="submit">Save Job Number</button></div>
       </form>
     </div>
+    ${req.user.role === "admin" ? `
     <div class="card">
       <h3>User Management</h3>
       <form method="post" action="/settings/users/add" class="stack">
@@ -511,6 +511,7 @@ app.get("/settings", requireAuth, async (req, res) => {
         ${userRows || `<tr><td colspan="5" class="muted">No users found.</td></tr>`}
       </table>
     </div>
+    ` : ""}
   `, req.user));
 });
 
