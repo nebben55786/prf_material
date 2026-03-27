@@ -4,7 +4,7 @@ import cookieParser from "cookie-parser";
 import multer from "multer";
 import bcrypt from "bcryptjs";
 import XLSX from "xlsx";
-import { initDb, query, withTransaction, auditLog, vendorCategories, pool } from "./db.js";
+import { initDb, query, withTransaction, auditLog, vendorCategories, setVendorCategories, pool } from "./db.js";
 
 const app = express();
 const upload = multer();
@@ -186,6 +186,14 @@ function layout(title, body, user) {
 function normalizeCategories(input) {
   const values = Array.isArray(input) ? input : input ? [input] : [];
   return vendorCategories.filter((category) => values.includes(category)).join(",");
+}
+
+function normalizeCategoryList(text) {
+  const seen = new Set();
+  return String(text || "")
+    .split(/\r?\n|,/)
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value && !seen.has(value) && seen.add(value));
 }
 
 function normalizePhone(value) {
@@ -554,6 +562,7 @@ app.get("/", requireAuth, async (req, res) => {
 
 app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
   const jobNumber = await getJobNumber();
+  const vendorCategoryText = vendorCategories.join("\n");
   const usersRes = req.user.role === "admin"
     ? await query("select id, username, role, is_active, created_at from users order by username")
     : { rows: [] };
@@ -604,6 +613,14 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
         </div>
         <p class="muted">Future RFQs will use this format: <strong>${esc(jobNumber)}-RFQ-00001</strong></p>
         <div class="actions"><button type="submit">Save Job Number</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Vendor Categories</h3>
+      <form method="post" action="/settings/vendor-categories" class="stack">
+        <div><label>One Category Per Line</label><textarea name="vendor_categories">${esc(vendorCategoryText)}</textarea></div>
+        <div class="muted">These values control the category checkboxes on vendor screens.</div>
+        <div class="actions"><button type="submit">Save Vendor Categories</button></div>
       </form>
     </div>
     ${req.user.role === "admin" ? `
@@ -657,6 +674,22 @@ app.post("/settings/job-number", requireAuth, requireRole(["admin", "buyer"]), a
     `, [jobNumber]);
     await auditLog(client, req.user.id, "update", "app_setting", "job_number", jobNumber);
   });
+  res.redirect("/settings");
+});
+
+app.post("/settings/vendor-categories", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const categories = normalizeCategoryList(req.body.vendor_categories);
+  if (categories.length === 0) throw new Error("At least one vendor category is required.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      insert into app_settings (key, value, updated_at)
+      values ('vendor_categories', $1, now())
+      on conflict (key) do update
+      set value = excluded.value, updated_at = now()
+    `, [categories.join(",")]);
+    await auditLog(client, req.user.id, "update", "app_setting", "vendor_categories", categories.join(", "));
+  });
+  setVendorCategories(categories);
   res.redirect("/settings");
 });
 

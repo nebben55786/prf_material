@@ -23,7 +23,7 @@ export const pool = new Pool({
   ssl: useSsl ? { rejectUnauthorized: false } : false
 });
 
-export const vendorCategories = [
+const defaultVendorCategories = [
   "pipe",
   "civil",
   "steel",
@@ -32,6 +32,12 @@ export const vendorCategories = [
   "grout",
   "tubing"
 ];
+
+export let vendorCategories = [...defaultVendorCategories];
+
+export function setVendorCategories(values) {
+  vendorCategories = [...values];
+}
 
 export async function query(text, params = []) {
   return pool.query(text, params);
@@ -79,6 +85,22 @@ export async function initDb() {
     `,
     [defaultJobNumber]
   );
+
+  await pool.query(
+    `
+      insert into app_settings (key, value)
+      values ('vendor_categories', $1)
+      on conflict (key) do nothing
+    `,
+    [defaultVendorCategories.join(",")]
+  );
+
+  const categorySetting = await pool.query("select value from app_settings where key = 'vendor_categories'");
+  const loadedCategories = String(categorySetting.rows[0]?.value || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  vendorCategories = loadedCategories.length ? loadedCategories : [...defaultVendorCategories];
 }
 
 export async function auditLog(client, userId, action, entityType, entityId = "", details = "") {
