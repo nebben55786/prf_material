@@ -614,10 +614,14 @@ function loginPage(error = "") {
 }
 
 app.get("/login", (req, res) => {
+  if (currentUser(req)) {
+    res.redirect("/dashboard");
+    return;
+  }
   res.send(loginPage());
 });
 
-app.post("/login", async (req, res) => {
+app.post("/login", asyncHandler(async (req, res) => {
   const { username = "", password = "" } = req.body;
   const result = await query("select id, username, role, password_hash, is_active from users where username = $1", [username.trim()]);
   const user = result.rows[0];
@@ -631,8 +635,8 @@ app.post("/login", async (req, res) => {
   }
   const token = signSession({ id: user.id, username: user.username, role: user.role });
   res.cookie("session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
-  res.redirect("/");
-});
+  res.redirect("/dashboard");
+}));
 
 app.get("/logout", (req, res) => {
   res.clearCookie("session_token", { path: "/" });
@@ -655,7 +659,9 @@ app.get("/dashboard", requireAuth, async (req, res) => {
     query("select count(*) from vendors"),
     query("select count(*) from receipts where osd_status <> 'OK'"),
     getJobNumber(),
-    req.user.role === "admin" ? query("select count(*) from access_requests where status = 'PENDING'") : Promise.resolve({ rows: [{ count: 0 }] })
+    req.user.role === "admin"
+      ? query("select count(*) from access_requests where status = 'PENDING'").catch(() => ({ rows: [{ count: 0 }] }))
+      : Promise.resolve({ rows: [{ count: 0 }] })
   ]);
   res.send(layout("Dashboard", `
     <h1>Operations Dashboard</h1>
