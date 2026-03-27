@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import express from "express";
 import cookieParser from "cookie-parser";
 import multer from "multer";
@@ -17,6 +18,7 @@ const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CLOSED"];
 
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 app.use(cookieParser());
+app.use("/public", express.static(path.join(process.cwd(), "public")));
 
 function esc(value) {
   return String(value ?? "")
@@ -279,6 +281,59 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+function landingPage() {
+  return `<!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PRF Material Control</title>
+    <style>
+      body { margin: 0; font-family: "Segoe UI", Tahoma, Verdana, sans-serif; background: linear-gradient(180deg, #dfe3e8 0%, #c7d0da 100%); color: #16212b; }
+      .hero { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+      .panel { width: min(760px, 100%); background: #fff; border: 1px solid #798693; padding: 24px; text-align: center; }
+      .logo { max-width: 280px; width: 100%; height: auto; margin-bottom: 20px; }
+      h1 { margin: 0 0 8px; font-size: 34px; }
+      p { margin: 0 0 20px; color: #4d5b69; }
+      .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+      .btn { display: inline-flex; align-items: center; justify-content: center; min-width: 150px; height: 40px; padding: 0 14px; text-decoration: none; font-weight: 700; border: 1px solid rgba(0,0,0,.15); }
+      .btn-primary { background: linear-gradient(180deg, #4278a9 0%, #2d5d87 100%); color: #fff; }
+      .btn-secondary { background: linear-gradient(180deg, #6a7681 0%, #4b5966 100%); color: #fff; }
+    </style>
+  </head>
+  <body>
+    <div class="hero">
+      <div class="panel">
+        <img class="logo" src="/public/prf-logo.png" alt="PRF Logo" />
+        <h1>Material Control</h1>
+        <p>Procurement, receiving, inventory, and field issue tracking for Performance Contractors.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="/login">Sign In</a>
+          <a class="btn btn-secondary" href="/request-access">Request Access</a>
+        </div>
+      </div>
+    </div>
+  </body>
+  </html>`;
+}
+
+function requestAccessPage(error = "", success = "") {
+  return layout("Request Access", `
+    ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
+    ${success ? `<div class="card"><strong>${esc(success)}</strong></div>` : ""}
+    <div class="card">
+      <h2>Request Access</h2>
+      <p class="muted">Enter your email address and an administrator will review the request, assign a username, and create a temporary password.</p>
+      <form method="post" action="/request-access" class="stack">
+        <div class="grid">
+          <div><label>Email Address</label><input type="email" name="email" required /></div>
+        </div>
+        <div class="actions"><button type="submit">Submit Request</button><a class="btn btn-secondary" href="/">Back</a></div>
+      </form>
+    </div>
+  `, null);
+}
+
 const rfqItemColumns = ["item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
 
 function parseDelimitedRows(text, columns = rfqItemColumns) {
@@ -539,7 +594,15 @@ app.get("/logout", (req, res) => {
   res.redirect("/login");
 });
 
-app.get("/", requireAuth, async (req, res) => {
+app.get("/", async (req, res) => {
+  if (currentUser(req)) {
+    res.redirect("/dashboard");
+    return;
+  }
+  res.send(landingPage());
+});
+
+app.get("/dashboard", requireAuth, async (req, res) => {
   const [rfqs, pos, receipts, vendors, osd, jobNumber] = await Promise.all([
     query("select count(*) from rfqs"),
     query("select count(*) from purchase_orders"),
@@ -563,6 +626,7 @@ app.get("/", requireAuth, async (req, res) => {
 app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
   const jobNumber = await getJobNumber();
   const vendorCategoryText = vendorCategories.join("\n");
+  const accessRequestsRes = await query("select * from access_requests where status = 'PENDING' order by created_at asc");
   const usersRes = req.user.role === "admin"
     ? await query("select id, username, role, is_active, created_at from users order by username")
     : { rows: [] };
@@ -604,6 +668,31 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
       </td>
     </tr>
   `).join("");
+  const accessRequestRows = accessRequestsRes.rows.map((record) => `
+    <tr>
+      <td>${esc(record.email)}</td>
+      <td>${esc(record.created_at)}</td>
+      <td>
+        <form method="post" action="/settings/access-requests/${record.id}/approve" class="stack">
+          <div class="grid">
+            <div><input name="username" placeholder="Username" required /></div>
+            <div><input name="temp_password" placeholder="Temp Password" required /></div>
+            <div>
+              <select name="role">
+                <option value="buyer">buyer</option>
+                <option value="warehouse">warehouse</option>
+                <option value="admin">admin</option>
+              </select>
+            </div>
+          </div>
+          <div class="actions">
+            <button type="submit">Approve</button>
+            <button class="btn btn-danger" type="submit" formaction="/settings/access-requests/${record.id}/deny">Deny</button>
+          </div>
+        </form>
+      </td>
+    </tr>
+  `).join("");
   res.send(layout("Settings", `
     <h1>Settings</h1>
     <div class="card">
@@ -622,6 +711,13 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
         <div class="muted">These values control the category checkboxes on vendor screens.</div>
         <div class="actions"><button type="submit">Save Vendor Categories</button></div>
       </form>
+    </div>
+    <div class="card scroll">
+      <h3>Access Requests</h3>
+      <table>
+        <tr><th>Email</th><th>Requested</th><th>Approve / Deny</th></tr>
+        ${accessRequestRows || `<tr><td colspan="3" class="muted">No pending access requests.</td></tr>`}
+      </table>
     </div>
     ${req.user.role === "admin" ? `
     <div class="card">
@@ -662,6 +758,31 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
   `, req.user));
 });
 
+app.get("/request-access", (req, res) => {
+  res.send(requestAccessPage());
+});
+
+app.post("/request-access", async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  if (!email) {
+    res.status(400).send(requestAccessPage("Email address is required."));
+    return;
+  }
+  const existing = (await query(
+    "select id from access_requests where email = $1 and status = 'PENDING' order by id desc limit 1",
+    [email]
+  )).rows[0];
+  if (existing) {
+    res.send(requestAccessPage("", "Your request is already pending review."));
+    return;
+  }
+  await withTransaction(async (client) => {
+    await client.query("insert into access_requests (email, status) values ($1, 'PENDING')", [email]);
+    await auditLog(client, null, "create", "access_request", email, "pending");
+  });
+  res.send(requestAccessPage("", "Request submitted. An administrator will review it."));
+});
+
 app.post("/settings/job-number", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
   if (!jobNumber) throw new Error("Job number is required.");
@@ -690,6 +811,54 @@ app.post("/settings/vendor-categories", requireAuth, requireRole(["admin"]), asy
     await auditLog(client, req.user.id, "update", "app_setting", "vendor_categories", categories.join(", "));
   });
   setVendorCategories(categories);
+  res.redirect("/settings");
+});
+
+app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const requestId = Number(req.params.id);
+  const username = String(req.body.username || "").trim();
+  const tempPassword = String(req.body.temp_password || "");
+  const role = String(req.body.role || "buyer").trim();
+  if (!username) throw new Error("Username is required.");
+  if (!tempPassword) throw new Error("Temporary password is required.");
+  if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
+  const passwordError = validatePasswordRules(tempPassword);
+  if (passwordError) throw new Error(passwordError);
+  const passwordHash = await bcrypt.hash(tempPassword, 8);
+  await withTransaction(async (client) => {
+    const requestRecord = (await client.query("select * from access_requests where id = $1 and status = 'PENDING'", [requestId])).rows[0];
+    if (!requestRecord) throw new Error("Access request not found.");
+    await client.query(
+      "insert into users (username, password_hash, role, is_active) values ($1, $2, $3, true)",
+      [username, passwordHash, role]
+    );
+    await client.query(`
+      update access_requests
+      set status = 'APPROVED',
+          approved_by_user_id = $2,
+          assigned_username = $3,
+          approved_at = now()
+      where id = $1
+    `, [requestId, req.user.id, username]);
+    await auditLog(client, req.user.id, "approve", "access_request", requestId, `${requestRecord.email}|${username}|${role}`);
+  });
+  res.redirect("/settings");
+});
+
+app.post("/settings/access-requests/:id/deny", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const requestId = Number(req.params.id);
+  await withTransaction(async (client) => {
+    const requestRecord = (await client.query("select * from access_requests where id = $1 and status = 'PENDING'", [requestId])).rows[0];
+    if (!requestRecord) throw new Error("Access request not found.");
+    await client.query(`
+      update access_requests
+      set status = 'DENIED',
+          approved_by_user_id = $2,
+          approved_at = now()
+      where id = $1
+    `, [requestId, req.user.id]);
+    await auditLog(client, req.user.id, "deny", "access_request", requestId, requestRecord.email);
+  });
   res.redirect("/settings");
 });
 

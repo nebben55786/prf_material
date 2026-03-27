@@ -17,6 +17,18 @@ create table if not exists audit_log (
   created_at timestamptz not null default now()
 );
 
+create table if not exists access_requests (
+  id bigserial primary key,
+  email text not null,
+  status text not null default 'PENDING',
+  approved_by_user_id bigint references users(id) on delete set null,
+  assigned_username text,
+  approved_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_access_requests_status on access_requests(status);
+
 create table if not exists vendors (
   id bigserial primary key,
   name text not null unique,
