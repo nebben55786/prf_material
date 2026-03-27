@@ -149,6 +149,10 @@ function validatePasswordRules(password) {
   return "";
 }
 
+function asyncHandler(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
 const rfqItemColumns = ["item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
 
 function parseDelimitedRows(text, columns = rfqItemColumns) {
@@ -525,7 +529,7 @@ app.post("/settings/job-number", requireAuth, requireRole(["admin", "buyer"]), a
   res.redirect("/settings");
 });
 
-app.post("/settings/users/add", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
   const role = String(req.body.role || "buyer").trim();
@@ -540,9 +544,9 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), async (req,
     await auditLog(client, req.user.id, "create", "user", username, role);
   });
   res.redirect("/settings");
-});
+}));
 
-app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
   const userId = Number(req.params.id);
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
@@ -576,9 +580,9 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), async 
     await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}|${isActive ? "active" : "inactive"}`);
   });
   res.redirect("/settings");
-});
+}));
 
-app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
   const userId = Number(req.params.id);
   const current = (await query("select id, username, role, is_active, created_at from users where id = $1", [userId])).rows[0];
   if (!current) throw new Error("User not found.");
@@ -596,9 +600,9 @@ app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), async
       </div>
     </div>
   `, req.user));
-});
+}));
 
-app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
   const userId = Number(req.params.id);
   if (req.user.id === userId) throw new Error("You cannot deactivate your own user.");
   await withTransaction(async (client) => {
@@ -612,7 +616,7 @@ app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyn
     await auditLog(client, req.user.id, "deactivate", "user", userId, current.username);
   });
   res.redirect("/settings");
-});
+}));
 
 app.get("/bom", requireAuth, async (req, res) => {
   const bomNo = String(req.query.bom_no || "").trim();
