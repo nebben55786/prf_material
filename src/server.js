@@ -534,7 +534,7 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), async (req,
   if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
   const passwordError = validatePasswordRules(password);
   if (passwordError) throw new Error(passwordError);
-  const passwordHash = await bcrypt.hash(password, 10);
+  const passwordHash = await bcrypt.hash(password, 8);
   await withTransaction(async (client) => {
     await client.query("insert into users (username, password_hash, role, is_active) values ($1, $2, $3, true)", [username, passwordHash, role]);
     await auditLog(client, req.user.id, "create", "user", username, role);
@@ -550,6 +550,12 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), async 
   const isActive = String(req.body.is_active || "true") === "true";
   if (!username) throw new Error("Username is required.");
   if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
+  let passwordHash = "";
+  if (password) {
+    const passwordError = validatePasswordRules(password);
+    if (passwordError) throw new Error(passwordError);
+    passwordHash = await bcrypt.hash(password, 8);
+  }
   await withTransaction(async (client) => {
     const current = (await client.query("select id, username, role, is_active from users where id = $1", [userId])).rows[0];
     if (!current) throw new Error("User not found.");
@@ -562,10 +568,7 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), async 
       if (activeAdminCount <= 1) throw new Error("At least one active admin user is required.");
     }
     if (req.user.id === userId && !isActive) throw new Error("You cannot deactivate your own user.");
-    if (password) {
-      const passwordError = validatePasswordRules(password);
-      if (passwordError) throw new Error(passwordError);
-      const passwordHash = await bcrypt.hash(password, 10);
+    if (passwordHash) {
       await client.query("update users set username = $2, role = $3, password_hash = $4, is_active = $5 where id = $1", [userId, username, role, passwordHash, isActive]);
     } else {
       await client.query("update users set username = $2, role = $3, is_active = $4 where id = $1", [userId, username, role, isActive]);
