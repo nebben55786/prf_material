@@ -441,6 +441,7 @@ create table if not exists mrr_logs (
   discipline text not null default '',
   mrr_number text not null unique,
   vendor_name text not null default '',
+  app_po_id bigint references purchase_orders(id) on delete set null,
   po_number text not null default '',
   pick_ticket text not null default '',
   material_description text not null default '',
@@ -497,6 +498,8 @@ create table if not exists opi_logs (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table mrr_logs add column if not exists app_po_id bigint references purchase_orders(id) on delete set null;
 
 alter table receipts add column if not exists mrr_log_id bigint references mrr_logs(id) on delete set null;
 
