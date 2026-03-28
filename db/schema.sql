@@ -480,6 +480,8 @@ create table if not exists opi_logs (
   updated_at timestamptz not null default now()
 );
 
+alter table receipts add column if not exists mrr_log_id bigint references mrr_logs(id) on delete set null;
+
 create index if not exists idx_po_po_no on purchase_orders(po_no);
 create index if not exists idx_po_vendor_id on purchase_orders(vendor_id);
 create index if not exists idx_po_rfq_id on purchase_orders(rfq_id);
