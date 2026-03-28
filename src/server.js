@@ -964,6 +964,11 @@ function requireRole(roles) {
   };
 }
 
+function canEditRequisition(user, header) {
+  if (!user || !header) return false;
+  return header.status === "REQUESTED" && ["admin", "buyer", "warehouse", "field", "supervisor"].includes(user.role);
+}
+
 async function recalcRfqStatus(client, rfqId) {
   const total = Number((await client.query("select count(*) from rfq_items where rfq_id = $1", [rfqId])).rows[0].count);
   const issued = Number((await client.query(`
@@ -1812,7 +1817,7 @@ app.post("/bom/:id/requisitions", requireAuth, asyncHandler(async (req, res) => 
           bl.item_code,
           bl.qty_required,
           bl.qty_issued,
-          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0), 0) as qty_available
+          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
         from bom_lines bl
         left join (
           select
@@ -1849,6 +1854,25 @@ app.post("/bom/:id/requisitions", requireAuth, asyncHandler(async (req, res) => 
          and issued.size_2 = coalesce(bl.size_2, '')
          and issued.thk_1 = coalesce(bl.thk_1, '')
          and issued.thk_2 = coalesce(bl.thk_2, '')
+        left join (
+          select
+            bl2.item_code,
+            coalesce(bl2.size_1, '') as size_1,
+            coalesce(bl2.size_2, '') as size_2,
+            coalesce(bl2.thk_1, '') as thk_1,
+            coalesce(bl2.thk_2, '') as thk_2,
+            sum(mrl2.qty_requested) as qty_allocated_total
+          from material_requisition_lines mrl2
+          join material_requisitions mr2 on mr2.id = mrl2.requisition_id
+          join bom_lines bl2 on bl2.id = mrl2.bom_line_id
+          where mr2.status = 'VERIFIED'
+          group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
+        ) alloc
+          on alloc.item_code = bl.item_code
+         and alloc.size_1 = coalesce(bl.size_1, '')
+         and alloc.size_2 = coalesce(bl.size_2, '')
+         and alloc.thk_1 = coalesce(bl.thk_1, '')
+         and alloc.thk_2 = coalesce(bl.thk_2, '')
         where bl.id = $1 and bl.bom_id = $2
       `, [lineId, bomId])).rows[0];
       if (!line) continue;
@@ -2023,7 +2047,7 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
           bl.*,
           greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining,
           coalesce(inv.qty_on_hand, 0) as qty_on_hand,
-          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0), 0) as qty_available
+          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
         from bom_lines bl
         left join (
           select
@@ -2060,6 +2084,25 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
          and issued.size_2 = coalesce(bl.size_2, '')
          and issued.thk_1 = coalesce(bl.thk_1, '')
          and issued.thk_2 = coalesce(bl.thk_2, '')
+        left join (
+          select
+            bl2.item_code,
+            coalesce(bl2.size_1, '') as size_1,
+            coalesce(bl2.size_2, '') as size_2,
+            coalesce(bl2.thk_1, '') as thk_1,
+            coalesce(bl2.thk_2, '') as thk_2,
+            sum(mrl2.qty_requested) as qty_allocated_total
+          from material_requisition_lines mrl2
+          join material_requisitions mr2 on mr2.id = mrl2.requisition_id
+          join bom_lines bl2 on bl2.id = mrl2.bom_line_id
+          where mr2.status = 'VERIFIED'
+          group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
+        ) alloc
+          on alloc.item_code = bl.item_code
+         and alloc.size_1 = coalesce(bl.size_1, '')
+         and alloc.size_2 = coalesce(bl.size_2, '')
+         and alloc.thk_1 = coalesce(bl.thk_1, '')
+         and alloc.thk_2 = coalesce(bl.thk_2, '')
         where ${lineWhereSql.replace(/\bbom_id\b/g, "bl.bom_id").replace(/\bitem_code\b/g, "bl.item_code").replace(/\bline_no\b/g, "bl.line_no")}
         order by coalesce(bl.iwp_no, ''), coalesce(bl.iso_no, ''), bl.line_no, bl.id
         limit ${lineFilter.limit}
@@ -2269,10 +2312,16 @@ app.get("/requisitions/:id", requireAuth, async (req, res) => {
     <td>${esc(line.thk_2 || "")}</td>
   </tr>`).join("");
   const headerActions = [];
+  if (canEditRequisition(req.user, header)) {
+    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Edit Request</a>`);
+  }
   if (header.status === "REQUESTED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Verify Request</button></form>`);
   }
   if (header.status === "VERIFIED") {
+    if (["admin", "warehouse"].includes(req.user.role)) {
+      headerActions.push(`<form method="post" action="/requisitions/${header.id}/unverify"><button class="btn btn-secondary" type="submit">Set To Un-Verified</button></form>`);
+    }
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
   }
   if (req.user.role === "admin") {
@@ -2307,11 +2356,133 @@ app.post("/requisitions/:id/verify", requireAuth, requireRole(["admin", "warehou
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehouse"]), asyncHandler(async (req, res) => {
+app.get("/requisitions/:id/edit", requireAuth, asyncHandler(async (req, res) => {
+  const header = (await query(`
+    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
+    from material_requisitions mr
+    join bom_headers bh on bh.id = mr.bom_id
+    where mr.id = $1
+  `, [req.params.id])).rows[0];
+  if (!header) throw new Error("Requisition not found.");
+  if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
+  const lines = (await query(`
+    select
+      mrl.id as requisition_line_id,
+      mrl.qty_requested,
+      bl.id as bom_line_id,
+      bl.line_no,
+      bl.iwp_no,
+      bl.iso_no,
+      bl.item_code,
+      bl.description,
+      bl.uom,
+      bl.qty_required,
+      bl.qty_issued,
+      greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    left join (
+      select
+        mi.item_code,
+        coalesce(pl.size_1, '') as size_1,
+        coalesce(pl.size_2, '') as size_2,
+        coalesce(pl.thk_1, '') as thk_1,
+        coalesce(pl.thk_2, '') as thk_2,
+        sum(r.qty_received) as qty_on_hand
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join material_items mi on mi.id = pl.material_item_id
+      where coalesce(r.osd_status, 'OK') = 'OK'
+      group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+    ) inv
+      on inv.item_code = bl.item_code
+     and inv.size_1 = coalesce(bl.size_1, '')
+     and inv.size_2 = coalesce(bl.size_2, '')
+     and inv.thk_1 = coalesce(bl.thk_1, '')
+     and inv.thk_2 = coalesce(bl.thk_2, '')
+    left join (
+      select
+        item_code,
+        coalesce(size_1, '') as size_1,
+        coalesce(size_2, '') as size_2,
+        coalesce(thk_1, '') as thk_1,
+        coalesce(thk_2, '') as thk_2,
+        sum(qty_issued) as qty_issued_total
+      from bom_lines
+      group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+    ) issued
+      on issued.item_code = bl.item_code
+     and issued.size_1 = coalesce(bl.size_1, '')
+     and issued.size_2 = coalesce(bl.size_2, '')
+     and issued.thk_1 = coalesce(bl.thk_1, '')
+     and issued.thk_2 = coalesce(bl.thk_2, '')
+    left join (
+      select
+        bl2.item_code,
+        coalesce(bl2.size_1, '') as size_1,
+        coalesce(bl2.size_2, '') as size_2,
+        coalesce(bl2.thk_1, '') as thk_1,
+        coalesce(bl2.thk_2, '') as thk_2,
+        sum(mrl2.qty_requested) as qty_allocated_total
+      from material_requisition_lines mrl2
+      join material_requisitions mr2 on mr2.id = mrl2.requisition_id
+      join bom_lines bl2 on bl2.id = mrl2.bom_line_id
+      where mr2.status = 'VERIFIED'
+      group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
+    ) alloc
+      on alloc.item_code = bl.item_code
+     and alloc.size_1 = coalesce(bl.size_1, '')
+     and alloc.size_2 = coalesce(bl.size_2, '')
+     and alloc.thk_1 = coalesce(bl.thk_1, '')
+     and alloc.thk_2 = coalesce(bl.thk_2, '')
+    where mrl.requisition_id = $1
+    order by bl.line_no, bl.id
+  `, [req.params.id])).rows;
+  const lineRows = lines.map((line) => {
+    const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_available) + num(line.qty_requested));
+    return `<tr>
+      <td>${esc(line.line_no)}</td>
+      <td>${esc(line.iwp_no || "")}</td>
+      <td>${esc(line.iso_no || "")}</td>
+      <td>${esc(line.item_code)}</td>
+      <td>${esc(line.description)}</td>
+      <td>${esc(line.qty_required)}</td>
+      <td>${esc(line.qty_issued)}</td>
+      <td>${esc(line.qty_available)}</td>
+      <td>${esc(line.uom)}</td>
+      <td><input name="qty_requested_${line.requisition_line_id}" value="${esc(line.qty_requested)}" /></td>
+      <td><button class="btn btn-danger" type="submit" name="remove_line_id" value="${line.requisition_line_id}">Remove</button></td>
+      <td class="muted">Max ${esc(maxQty)}</td>
+    </tr>`;
+  }).join("");
+  res.send(layout(`Edit ${header.requisition_no}`, `
+    <h1>Edit Requisition ${esc(header.requisition_no)}</h1>
+    <div class="card">
+      <p class="muted">BOM: ${esc(header.bom_name || header.bom_description || header.bom_no)} | BOM #: ${esc(header.bom_no)} | Status: ${esc(header.status)}</p>
+      <form method="post" action="/requisitions/${header.id}/edit" class="stack">
+        <div class="grid">
+          <div><label>Requested By</label><input name="requested_by_name" value="${esc(header.requested_by_name)}" required /></div>
+          <div><label>IWP</label><input name="iwp_no" value="${esc(header.iwp_no || "")}" /></div>
+          <div><label>ISO</label><input name="iso_no" value="${esc(header.iso_no || "")}" /></div>
+        </div>
+        <div><label>Notes</label><textarea name="notes">${esc(header.notes || "")}</textarea></div>
+        <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>ISO</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Available</th><th>UOM</th><th>New Qty</th><th>Remove</th><th>Limit</th></tr>${lineRows || `<tr><td colspan="12" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+        <div class="actions"><button type="submit">Save Requisition</button><a class="btn btn-secondary" href="/requisitions/${header.id}">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/requisitions/:id/edit", requireAuth, asyncHandler(async (req, res) => {
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (header.status !== "VERIFIED") throw new Error("Requisition must be verified before issue.");
+    if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
+    await client.query(`
+      update material_requisitions
+      set requested_by_name = $2, iwp_no = $3, iso_no = $4, notes = $5
+      where id = $1
+    `, [req.params.id, String(req.body.requested_by_name || "").trim(), req.body.iwp_no || "", req.body.iso_no || "", req.body.notes || ""]);
     const lines = (await client.query(`
       select
         mrl.id as requisition_line_id,
@@ -2320,7 +2491,7 @@ app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehous
         bl.item_code,
         bl.qty_required,
         bl.qty_issued,
-        greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0), 0) as qty_available
+        greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
       left join (
@@ -2358,9 +2529,136 @@ app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehous
        and issued.size_2 = coalesce(bl.size_2, '')
        and issued.thk_1 = coalesce(bl.thk_1, '')
        and issued.thk_2 = coalesce(bl.thk_2, '')
+      left join (
+        select
+          bl2.item_code,
+          coalesce(bl2.size_1, '') as size_1,
+          coalesce(bl2.size_2, '') as size_2,
+          coalesce(bl2.thk_1, '') as thk_1,
+          coalesce(bl2.thk_2, '') as thk_2,
+          sum(mrl2.qty_requested) as qty_allocated_total
+        from material_requisition_lines mrl2
+        join material_requisitions mr2 on mr2.id = mrl2.requisition_id
+        join bom_lines bl2 on bl2.id = mrl2.bom_line_id
+        where mr2.status = 'VERIFIED'
+        group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
+      ) alloc
+        on alloc.item_code = bl.item_code
+       and alloc.size_1 = coalesce(bl.size_1, '')
+       and alloc.size_2 = coalesce(bl.size_2, '')
+       and alloc.thk_1 = coalesce(bl.thk_1, '')
+       and alloc.thk_2 = coalesce(bl.thk_2, '')
+      where mrl.requisition_id = $1
+    `, [req.params.id])).rows;
+    const removeLineId = Number(req.body.remove_line_id || 0);
+    for (const line of lines) {
+      if (removeLineId && line.requisition_line_id === removeLineId) {
+        await client.query("delete from material_requisition_lines where id = $1", [removeLineId]);
+        continue;
+      }
+      const requestedQty = num(req.body[`qty_requested_${line.requisition_line_id}`]);
+      if (requestedQty <= 0) throw new Error(`Requested qty for ${line.item_code} must be greater than zero.`);
+      const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_available) + num(line.qty_requested));
+      if (requestedQty > maxQty) throw new Error(`Requested qty for ${line.item_code} exceeds available stock.`);
+      await client.query("update material_requisition_lines set qty_requested = $2 where id = $1", [line.requisition_line_id, requestedQty]);
+    }
+    const remainingCount = Number((await client.query("select count(*) from material_requisition_lines where requisition_id = $1", [req.params.id])).rows[0].count);
+    if (remainingCount <= 0) throw new Error("At least one line is required on the requisition.");
+    await auditLog(client, req.user.id, "update", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/unverify", requireAuth, requireRole(["admin", "warehouse"]), asyncHandler(async (req, res) => {
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "VERIFIED") throw new Error("Only verified requisitions can be set to un-verified.");
+    await client.query(`
+      update material_requisitions
+      set status = 'REQUESTED',
+          verified_at = null,
+          verified_by_user_id = null
+      where id = $1
+    `, [req.params.id]);
+    await auditLog(client, req.user.id, "unverify", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehouse"]), asyncHandler(async (req, res) => {
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "VERIFIED") throw new Error("Requisition must be verified before issue.");
+    const lines = (await client.query(`
+      select
+        mrl.id as requisition_line_id,
+        mrl.qty_requested,
+        bl.id as bom_line_id,
+        bl.item_code,
+        bl.qty_required,
+        bl.qty_issued,
+        greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+      from material_requisition_lines mrl
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      left join (
+        select
+          mi.item_code,
+          coalesce(pl.size_1, '') as size_1,
+          coalesce(pl.size_2, '') as size_2,
+          coalesce(pl.thk_1, '') as thk_1,
+          coalesce(pl.thk_2, '') as thk_2,
+          sum(r.qty_received) as qty_on_hand
+        from receipts r
+        join po_lines pl on pl.id = r.po_line_id
+        join material_items mi on mi.id = pl.material_item_id
+        where coalesce(r.osd_status, 'OK') = 'OK'
+        group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+      ) inv
+        on inv.item_code = bl.item_code
+       and inv.size_1 = coalesce(bl.size_1, '')
+       and inv.size_2 = coalesce(bl.size_2, '')
+       and inv.thk_1 = coalesce(bl.thk_1, '')
+       and inv.thk_2 = coalesce(bl.thk_2, '')
+      left join (
+        select
+          item_code,
+          coalesce(size_1, '') as size_1,
+          coalesce(size_2, '') as size_2,
+          coalesce(thk_1, '') as thk_1,
+          coalesce(thk_2, '') as thk_2,
+          sum(qty_issued) as qty_issued_total
+        from bom_lines
+        group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+      ) issued
+        on issued.item_code = bl.item_code
+       and issued.size_1 = coalesce(bl.size_1, '')
+       and issued.size_2 = coalesce(bl.size_2, '')
+       and issued.thk_1 = coalesce(bl.thk_1, '')
+       and issued.thk_2 = coalesce(bl.thk_2, '')
+      left join (
+        select
+          bl2.item_code,
+          coalesce(bl2.size_1, '') as size_1,
+          coalesce(bl2.size_2, '') as size_2,
+          coalesce(bl2.thk_1, '') as thk_1,
+          coalesce(bl2.thk_2, '') as thk_2,
+          sum(mrl2.qty_requested) as qty_allocated_total
+        from material_requisition_lines mrl2
+        join material_requisitions mr2 on mr2.id = mrl2.requisition_id
+        join bom_lines bl2 on bl2.id = mrl2.bom_line_id
+        where mr2.status = 'VERIFIED' and mr2.id <> $2
+        group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
+      ) alloc
+        on alloc.item_code = bl.item_code
+       and alloc.size_1 = coalesce(bl.size_1, '')
+       and alloc.size_2 = coalesce(bl.size_2, '')
+       and alloc.thk_1 = coalesce(bl.thk_1, '')
+       and alloc.thk_2 = coalesce(bl.thk_2, '')
       where mrl.requisition_id = $1
       order by bl.line_no, bl.id
-    `, [req.params.id])).rows;
+    `, [req.params.id, req.params.id])).rows;
     if (lines.length === 0) throw new Error("No requisition lines found.");
     for (const line of lines) {
       if (num(line.qty_requested) > num(line.qty_available)) {
