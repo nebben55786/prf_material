@@ -296,6 +296,24 @@ function layout(title, body, user) {
         }
         return true;
       }
+      function promptPoNumber(button, vendorSelectId, targetFormId) {
+        const vendorSelect = document.getElementById(vendorSelectId);
+        const targetForm = document.getElementById(targetFormId);
+        if (!vendorSelect || !targetForm) return false;
+        if (!vendorSelect.value) {
+          window.alert("Select a vendor first.");
+          return false;
+        }
+        const poNumber = window.prompt("Enter PO number");
+        if (!poNumber || !String(poNumber).trim()) return false;
+        const poInput = targetForm.querySelector('input[name="po_no"]');
+        const vendorInput = targetForm.querySelector('input[name="vendor_id"]');
+        if (!poInput || !vendorInput) return false;
+        poInput.value = String(poNumber).trim();
+        vendorInput.value = vendorSelect.value;
+        targetForm.submit();
+        return false;
+      }
       function filterTableRows(inputId, tableId) {
         const input = document.getElementById(inputId);
         const table = document.getElementById(tableId);
@@ -3332,22 +3350,6 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
     </tr>`);
   }
 
-  const awardedVendorCounts = (await query(`
-    select awarded_vendor_id as vendor_id, count(*) as line_count
-    from rfq_items
-    where rfq_id = $1 and award_status = 'AWARDED' and awarded_vendor_id is not null
-      and not exists (
-        select 1
-        from po_lines pl
-        join purchase_orders po on po.id = pl.po_id
-        where po.rfq_id = rfq_items.rfq_id and pl.rfq_item_id = rfq_items.id
-      )
-    group by awarded_vendor_id
-    order by awarded_vendor_id
-  `, [rfqId])).rows;
-  const poVendorOptions = awardedVendorCounts
-    .map((row) => `<option value="${row.vendor_id}">${esc(vendorNameMap.get(row.vendor_id) || `Vendor ${row.vendor_id}`)} (${row.line_count} awarded line(s))</option>`)
-    .join("");
   const quoteVendorOptions = [`<option value="">Select vendor</option>`]
     .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === activeQuoteVendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
@@ -3401,47 +3403,33 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
         <div class="actions"><button type="submit">Import Quotes</button></div>
       </form>
     </div>`;
-  const issuePoCard = `
-    <div class="card">
-      <h3>Issue PO From Awarded Lines</h3>
-      <form method="post" action="/po/create" class="stack">
-        <input type="hidden" name="rfq_id" value="${rfqId}" />
-        <div class="grid">
-          <div><label>PO Number</label><input name="po_no" required /></div>
-          <div><label>Vendor</label><select name="vendor_id" required><option value="">Select awarded vendor</option>${poVendorOptions}</select></div>
-        </div>
-        <div class="actions"><button type="submit">Create PO From Awarded Lines</button></div>
-      </form>
-    </div>`;
-  const issuePoHelpCard = `
-    <div class="card">
-      <h3>Issue PO From Awarded Lines</h3>
-      <p class="muted">Award at least one RFQ item line first. Once lines are awarded, they will appear here by vendor so you can create the PO.</p>
-    </div>`;
-
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</h1>
     <div class="card scroll">
       <h3>RFQ Items</h3>
       <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
         <div class="grid" style="grid-template-columns: minmax(0, 360px) 1fr;">
-          <div><label>Quote Vendor</label><select name="vendor_id">${quoteVendorOptions}</select></div>
+          <div><label>Quote Vendor</label><select id="rfq-quote-vendor-${rfqId}" name="vendor_id">${quoteVendorOptions}</select></div>
           <div style="align-self:end;"><span class="muted">Select the vendor once, then enter unit price and lead time by line. Use <strong>Award Populated Rows</strong> to award every row that has a unit price.</span></div>
+        </div>
+        <div class="actions">
+          <button type="submit" name="award_all" value="1" onclick="return validateBulkAward(this.form)">Award Populated Rows</button>
+          <button type="button" onclick="return promptPoNumber(this, 'rfq-quote-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}')">Create PO From Awarded Lines</button>
         </div>
         <table>
           <tr><th>Item</th><th>Description</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Thk</th><th>Notes</th><th>Unit Price</th><th>Lead Days</th><th>Award Status</th><th>Award Summary</th><th>Issued PO</th><th>Actions</th></tr>
           ${itemRows.join("") || `<tr><td colspan="14" class="muted">No RFQ items loaded yet.</td></tr>`}
         </table>
-        <div class="actions">
-          <button type="submit">Save ${esc(activeQuoteVendorName || "Vendor")} Quotes</button>
-          <button type="submit" name="award_all" value="1" onclick="return validateBulkAward(this.form)">Award Populated Rows</button>
-        </div>
+      </form>
+      <form id="rfq-po-create-form-${rfqId}" method="post" action="/po/create" style="display:none;">
+        <input type="hidden" name="rfq_id" value="${rfqId}" />
+        <input type="hidden" name="po_no" value="" />
+        <input type="hidden" name="vendor_id" value="" />
       </form>
     </div>
     ${poCount === 0 ? addItemCard : ""}
     ${poCount === 0 ? uploadItemsCard : ""}
     ${poCount === 0 ? importQuotesCard : ""}
-    ${awardedVendorCounts.length > 0 ? issuePoCard : issuePoHelpCard}
     <div class="card scroll">
       <h3>Recent Imports</h3>
       <table>
