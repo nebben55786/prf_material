@@ -209,6 +209,44 @@ function layout(title, body, user) {
           });
         });
       }
+      function randomSixDigitCode() {
+        return String(Math.floor(100000 + Math.random() * 900000));
+      }
+      function prepareRfqGrid(formId, rowCount) {
+        const form = document.getElementById(formId);
+        if (!form) return true;
+        const rowsMissingCode = [];
+        const usedCodes = new Set();
+        form.querySelectorAll('[name^="item_code_"]').forEach((input) => {
+          const value = String(input.value || "").trim();
+          if (value) usedCodes.add(value);
+        });
+        for (let index = 0; index < rowCount; index += 1) {
+          const itemCodeInput = form.querySelector('[name="item_code_' + index + '"]');
+          const descriptionInput = form.querySelector('[name="description_' + index + '"]');
+          const qtyInput = form.querySelector('[name="qty_' + index + '"]');
+          const materialTypeInput = form.querySelector('[name="material_type_' + index + '"]');
+          const uomInput = form.querySelector('[name="uom_' + index + '"]');
+          const hasRowData = [descriptionInput, qtyInput, materialTypeInput, uomInput]
+            .some((input) => input && String(input.value || "").trim());
+          if (itemCodeInput && !String(itemCodeInput.value || "").trim() && hasRowData) {
+            rowsMissingCode.push(itemCodeInput);
+          }
+        }
+        if (!rowsMissingCode.length) return true;
+        if (!window.confirm("No Item Code Entered. Do you want me to create on for you?")) {
+          return false;
+        }
+        rowsMissingCode.forEach((input) => {
+          let nextCode = randomSixDigitCode();
+          while (usedCodes.has(nextCode)) {
+            nextCode = randomSixDigitCode();
+          }
+          usedCodes.add(nextCode);
+          input.value = nextCode;
+        });
+        return true;
+      }
       document.addEventListener("DOMContentLoaded", () => {
         attachPasswordValidation("new-user-form", "password", "new-user-password-error");
         document.querySelectorAll("form[data-password-form='edit-user']").forEach((form) => {
@@ -256,6 +294,15 @@ function normalizePhone(value) {
   if (digits.length <= 3) return digits;
   if (digits.length <= 6) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
   return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
+}
+
+function randomSixDigitItemCode(used = new Set()) {
+  let nextCode = "";
+  do {
+    nextCode = String(Math.floor(100000 + Math.random() * 900000));
+  } while (used.has(nextCode));
+  used.add(nextCode);
+  return nextCode;
 }
 
 function normalizeEmail(value) {
@@ -2456,9 +2503,9 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     <div class="card">
       <h3>Add New RFQ Items</h3>
       <p class="muted">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
-      <form method="post" action="/rfq/${rfqId}/items/grid" class="stack">
+      <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
         <div class="scroll">
-          <table>
+          <table class="data-grid">
             <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
             <tbody>${newItemRows}</tbody>
           </table>
@@ -2585,6 +2632,7 @@ app.post("/rfq/:id/items/add", requireAuth, requireRole(["admin", "buyer"]), asy
 
 app.post("/rfq/:id/items/grid", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   const rfqId = Number(req.params.id);
+  const usedItemCodes = new Set();
   const rows = Array.from({ length: 8 }, (_, index) => ({
     item_code: req.body[`item_code_${index}`],
     description: req.body[`description_${index}`],
@@ -2599,7 +2647,18 @@ app.post("/rfq/:id/items/grid", requireAuth, requireRole(["admin", "buyer"]), as
     thk_2: req.body[`thk_2_${index}`],
     qty: req.body[`qty_${index}`],
     notes: req.body[`notes_${index}`]
-  })).filter((row) => String(row.item_code || "").trim() || String(row.description || "").trim() || String(row.qty || "").trim());
+  })).map((row) => {
+    const normalizedCode = String(row.item_code || "").trim();
+    if (normalizedCode) {
+      usedItemCodes.add(normalizedCode);
+      return row;
+    }
+    const hasRowData = String(row.description || "").trim() || String(row.qty || "").trim() || String(row.material_type || "").trim() || String(row.uom || "").trim();
+    if (hasRowData) {
+      row.item_code = randomSixDigitItemCode(usedItemCodes);
+    }
+    return row;
+  }).filter((row) => String(row.item_code || "").trim() || String(row.description || "").trim() || String(row.qty || "").trim());
   if (rows.length === 0) throw new Error("No grid rows were entered.");
   const batchId = await withTransaction(async (client) => {
     const batchId = await createImportBatch(client, {
