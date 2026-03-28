@@ -324,6 +324,30 @@ function layout(title, body, user) {
           row.style.display = row.innerText.toLowerCase().includes(term) ? "" : "none";
         });
       }
+      function syncLocationOptions(warehouseSelectId, locationSelectId, optionsByWarehouse, selectedValue) {
+        const warehouseSelect = document.getElementById(warehouseSelectId);
+        const locationSelect = document.getElementById(locationSelectId);
+        if (!warehouseSelect || !locationSelect) return;
+        const warehouseName = String(warehouseSelect.value || "");
+        const locations = optionsByWarehouse[warehouseName] || [];
+        const keepValue = selectedValue !== undefined ? String(selectedValue || "") : String(locationSelect.value || "");
+        const placeholder = locationSelect.getAttribute("data-placeholder") || "Select location";
+        locationSelect.innerHTML = "";
+        const placeholderOption = document.createElement("option");
+        placeholderOption.value = "";
+        placeholderOption.textContent = placeholder;
+        locationSelect.appendChild(placeholderOption);
+        locations.forEach((locationName) => {
+          const option = document.createElement("option");
+          option.value = locationName;
+          option.textContent = locationName;
+          if (locationName === keepValue) option.selected = true;
+          locationSelect.appendChild(option);
+        });
+        if (!locations.includes(keepValue)) {
+          locationSelect.value = "";
+        }
+      }
       function enableResizableTable(tableId) {
         const table = document.getElementById(tableId);
         if (!table) return;
@@ -920,6 +944,55 @@ async function getMaterialLogLookupOptions(kind) {
   return result.rows.map((row) => row.value);
 }
 
+async function getWarehouseOptions() {
+  const result = await query(`
+    select id, name
+    from warehouses
+    where is_active = true
+    order by name
+  `);
+  return result.rows;
+}
+
+async function getWarehouseLocationOptions() {
+  const result = await query(`
+    select wl.id, wl.name, wl.warehouse_id, w.name as warehouse_name
+    from warehouse_locations wl
+    join warehouses w on w.id = wl.warehouse_id
+    where wl.is_active = true and w.is_active = true
+    order by w.name, wl.name
+  `);
+  return result.rows;
+}
+
+async function getWarehouseLocationMap() {
+  const rows = await getWarehouseLocationOptions();
+  const map = {};
+  for (const row of rows) {
+    if (!map[row.warehouse_name]) map[row.warehouse_name] = [];
+    map[row.warehouse_name].push(row.name);
+  }
+  return map;
+}
+
+async function assertValidWarehouseLocation(client, warehouseName, locationName) {
+  const warehouse = String(warehouseName || "").trim();
+  const location = String(locationName || "").trim();
+  if (!warehouse) throw new Error("Warehouse is required.");
+  if (!location) throw new Error("Location is required.");
+  const match = (await client.query(`
+    select wl.id
+    from warehouse_locations wl
+    join warehouses w on w.id = wl.warehouse_id
+    where w.is_active = true
+      and wl.is_active = true
+      and lower(w.name) = lower($1)
+      and lower(wl.name) = lower($2)
+    limit 1
+  `, [warehouse, location])).rows[0];
+  if (!match) throw new Error("Select a valid location for the chosen warehouse.");
+}
+
 async function getNextMrrNumber() {
   const latest = (await query(`
     select mrr_number
@@ -1213,6 +1286,17 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
   const jobNumber = await getJobNumber();
   const vendorCategoryText = vendorCategories.join("\n");
   const accessRequestsRes = await query("select * from access_requests where status = 'PENDING' order by created_at asc");
+  const warehousesRes = req.user.role === "admin"
+    ? await query("select id, name, is_active from warehouses order by name")
+    : { rows: [] };
+  const warehouseLocationsRes = req.user.role === "admin"
+    ? await query(`
+        select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
+        from warehouse_locations wl
+        join warehouses w on w.id = wl.warehouse_id
+        order by w.name, wl.name
+      `)
+    : { rows: [] };
   const usersRes = req.user.role === "admin"
     ? await query("select id, username, role, is_active, created_at from users order by username")
     : { rows: [] };
@@ -1314,6 +1398,30 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
       </td>
     </tr>
   `).join("");
+  const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
+  const warehouseRows = warehousesRes.rows.map((row) => `
+    <tr>
+      <td>${esc(row.name)}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>
+        <form method="post" action="/settings/warehouses/${row.id}/toggle">
+          <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
+        </form>
+      </td>
+    </tr>
+  `).join("");
+  const warehouseLocationRows = warehouseLocationsRes.rows.map((row) => `
+    <tr>
+      <td>${esc(row.warehouse_name)}</td>
+      <td>${esc(row.name)}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>
+        <form method="post" action="/settings/warehouse-locations/${row.id}/toggle">
+          <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
+        </form>
+      </td>
+    </tr>
+  `).join("");
   res.send(layout("Settings", `
     <h1>Settings</h1>
     <div class="card">
@@ -1358,6 +1466,37 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
       </table>
     </div>
     ${req.user.role === "admin" ? `
+    <div class="card">
+      <h3>Warehouses</h3>
+      <form method="post" action="/settings/warehouses/add" class="stack">
+        <div class="grid">
+          <div><label>Warehouse Name</label><input name="name" required /></div>
+        </div>
+        <div class="actions"><button type="submit">Add Warehouse</button></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Warehouse</th><th>Status</th><th>Action</th></tr>
+        ${warehouseRows || `<tr><td colspan="3" class="muted">No warehouses saved yet.</td></tr>`}
+      </table>
+    </div>
+    <div class="card">
+      <h3>Warehouse Locations</h3>
+      <form method="post" action="/settings/warehouse-locations/add" class="stack">
+        <div class="grid">
+          <div><label>Warehouse</label><select name="warehouse_id" required><option value="">Select warehouse</option>${warehouseOptions}</select></div>
+          <div><label>Location Name</label><input name="name" required /></div>
+        </div>
+        <div class="actions"><button type="submit">Add Location</button></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Warehouse</th><th>Location</th><th>Status</th><th>Action</th></tr>
+        ${warehouseLocationRows || `<tr><td colspan="4" class="muted">No warehouse locations saved yet.</td></tr>`}
+      </table>
+    </div>
     <div class="card">
       <h3>User Management</h3>
       <form id="new-user-form" method="post" action="/settings/users/add" class="stack">
@@ -1454,6 +1593,69 @@ app.post("/settings/vendor-categories", requireAuth, requirePermission("settings
   setVendorCategories(categories);
   res.redirect("/settings");
 });
+
+app.post("/settings/warehouses/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const name = String(req.body.name || "").trim();
+  if (!name) throw new Error("Warehouse name is required.");
+  await withTransaction(async (client) => {
+    const insert = await client.query(`
+      insert into warehouses (name, is_active)
+      values ($1, true)
+      on conflict (name) do update
+      set is_active = true
+      returning id
+    `, [name]);
+    await auditLog(client, req.user.id, "create", "warehouse", insert.rows[0].id, name);
+  });
+  res.redirect("/settings");
+}));
+
+app.post("/settings/warehouses/:id/toggle", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  await withTransaction(async (client) => {
+    const current = (await client.query("select * from warehouses where id = $1", [req.params.id])).rows[0];
+    if (!current) throw new Error("Warehouse not found.");
+    const nextState = !current.is_active;
+    await client.query("update warehouses set is_active = $2 where id = $1", [req.params.id, nextState]);
+    await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse", req.params.id, current.name);
+  });
+  res.redirect("/settings");
+}));
+
+app.post("/settings/warehouse-locations/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const warehouseId = Number(req.body.warehouse_id);
+  const name = String(req.body.name || "").trim();
+  if (!warehouseId) throw new Error("Warehouse is required.");
+  if (!name) throw new Error("Location name is required.");
+  await withTransaction(async (client) => {
+    const warehouse = (await client.query("select name from warehouses where id = $1", [warehouseId])).rows[0];
+    if (!warehouse) throw new Error("Warehouse not found.");
+    const insert = await client.query(`
+      insert into warehouse_locations (warehouse_id, name, is_active)
+      values ($1, $2, true)
+      on conflict (warehouse_id, name) do update
+      set is_active = true
+      returning id
+    `, [warehouseId, name]);
+    await auditLog(client, req.user.id, "create", "warehouse_location", insert.rows[0].id, `${warehouse.name}:${name}`);
+  });
+  res.redirect("/settings");
+}));
+
+app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  await withTransaction(async (client) => {
+    const current = (await client.query(`
+      select wl.id, wl.name, wl.is_active, w.name as warehouse_name
+      from warehouse_locations wl
+      join warehouses w on w.id = wl.warehouse_id
+      where wl.id = $1
+    `, [req.params.id])).rows[0];
+    if (!current) throw new Error("Warehouse location not found.");
+    const nextState = !current.is_active;
+    await client.query("update warehouse_locations set is_active = $2 where id = $1", [req.params.id, nextState]);
+    await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse_location", req.params.id, `${current.warehouse_name}:${current.name}`);
+  });
+  res.redirect("/settings");
+}));
 
 app.post("/settings/permissions", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const nextMatrix = {};
@@ -4443,6 +4645,11 @@ app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), 
     return;
   }
   const po = mrr.po_number ? (await query("select id, po_no from purchase_orders where po_no = $1", [mrr.po_number])).rows[0] : null;
+  const warehouseOptions = await getWarehouseOptions();
+  const locationMap = await getWarehouseLocationMap();
+  const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
+    .join("");
   const openLines = po ? (await query(`
     select pl.id, mi.item_code, mi.description, pl.qty_ordered, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2,
            coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as qty_received
@@ -4479,13 +4686,14 @@ app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), 
         `}
         <div class="grid">
           <div><label>Qty Received</label><input name="qty_received" required inputmode="decimal" /></div>
-          <div><label>Warehouse</label><input name="warehouse" required /></div>
-          <div><label>Location</label><input name="location" required /></div>
+          <div><label>Warehouse</label><select id="receive-warehouse-${mrr.id}" name="warehouse" required onchange='syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
+          <div><label>Location</label><select id="receive-location-${mrr.id}" name="location" data-placeholder="Select location" required><option value="">Select location</option></select></div>
           <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions"><button type="submit">${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="/receive">Back</a></div>
       </form>
+      <script>syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${JSON.stringify(locationMap)});</script>
       ${po ? "" : `<p class="muted">No-PO receipts are logged for traceability, but they do not post into PO-based inventory until a PO line exists.</p>`}
     </div>
   `, req.user));
@@ -4498,6 +4706,7 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
     if (!mrr) throw new Error("MRR not found.");
     const qtyReceived = Number(req.body.qty_received || 0);
     if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
     if (String(req.body.mode || "") === "po") {
       const insert = await client.query(`
         insert into receipts (mrr_log_id, po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
@@ -5163,6 +5372,11 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requirePermission("mat
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Receiving log row not found.</h3></div>`, req.user));
     return;
   }
+  const warehouseOptions = await getWarehouseOptions();
+  const locationMap = await getWarehouseLocationMap();
+  const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
+    .concat(warehouseOptions.map((warehouse) => `<option value="${esc(warehouse.name)}" ${warehouse.name === row.warehouse ? "selected" : ""}>${esc(warehouse.name)}</option>`))
+    .join("");
   res.send(layout("Edit Receiving Log", `
     <h1>Edit Material Receiving Line</h1>
     <div class="card">
@@ -5178,19 +5392,21 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requirePermission("mat
           <div><label>Qty Unit</label><input name="qty_unit" value="${esc(row.qty_unit)}" /></div>
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
           <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" /></div>
-          <div><label>Warehouse</label><input name="warehouse" value="${esc(row.warehouse)}" /></div>
-          <div><label>Location</label><input name="location" value="${esc(row.location)}" /></div>
+          <div><label>Warehouse</label><select id="receiving-log-warehouse-${row.id}" name="warehouse" onchange='syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(row.location || "")}")'>${warehouseOptionsHtml}</select></div>
+          <div><label>Location</label><select id="receiving-log-location-${row.id}" name="location" data-placeholder="Select location"><option value="">Select location</option></select></div>
         </div>
         <div><label>Received Date</label><input name="recv_date" value="${esc(row.recv_date)}" /></div>
         <div><label>Comments</label><textarea name="comments">${esc(row.comments)}</textarea></div>
         <div class="actions"><button type="submit">Save Receiving Line</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
       </form>
+      <script>syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${JSON.stringify(locationMap)}, ${JSON.stringify(row.location || "")});</script>
     </div>
   `, req.user));
 });
 
 app.post("/material-logs/receiving/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
     await client.query(`
       update material_receiving_logs
       set legacy_row_id = $2, discipline = $3, vendor_name = $4, po_number = $5, item_code = $6, description = $7, received_qty = $8,

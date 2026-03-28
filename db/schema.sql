@@ -221,6 +221,24 @@ create table if not exists material_log_lookup_values (
 
 create index if not exists idx_material_log_lookup_values_kind on material_log_lookup_values(kind);
 
+create table if not exists warehouses (
+  id bigserial primary key,
+  name text not null unique,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists warehouse_locations (
+  id bigserial primary key,
+  warehouse_id bigint not null references warehouses(id) on delete cascade,
+  name text not null,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique (warehouse_id, name)
+);
+
+create index if not exists idx_warehouse_locations_warehouse_id on warehouse_locations(warehouse_id);
+
 create table if not exists import_batches (
   id bigserial primary key,
   entity_type text not null,
