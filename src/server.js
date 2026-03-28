@@ -5281,6 +5281,7 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
 
 app.post("/material-logs/receiving/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
     const result = await client.query(`
       insert into material_receiving_logs (
         legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date, updated_at
