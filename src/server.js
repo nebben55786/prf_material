@@ -479,6 +479,22 @@ async function upsertMaterialItem(client, row) {
   return insert.rows[0].id;
 }
 
+async function findOrCreateVendorByName(client, vendorName) {
+  const normalized = String(vendorName || "").trim();
+  if (!normalized) throw new Error("Vendor name is required.");
+  const existing = (await client.query("select id from vendors where lower(name) = lower($1) limit 1", [normalized])).rows[0];
+  if (existing) {
+    await client.query("update vendors set is_active = true where id = $1", [existing.id]);
+    return existing.id;
+  }
+  const insert = await client.query(`
+    insert into vendors (name, contact_name, website, email, phone, categories, is_active)
+    values ($1, '', '', '', '', '', true)
+    returning id
+  `, [normalized]);
+  return insert.rows[0].id;
+}
+
 async function upsertRfqItemRow(client, rfqId, row) {
   const itemCode = String(row.item_code || "").trim();
   const qty = num(row.qty);
@@ -504,6 +520,102 @@ async function upsertRfqItemRow(client, rfqId, row) {
     insert into rfq_items (rfq_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
   `, [rfqId, materialItemId, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
+  return { status: "inserted" };
+}
+
+async function upsertPurchaseOrderRow(client, row) {
+  const poNo = String(row.po_no || row.po_number || "").trim();
+  const vendorName = String(row.vendor_name || row.vendor || "").trim();
+  const itemCode = String(row.item_code || "").trim();
+  const qtyOrdered = num(row.qty_ordered || row.qty || row.quantity);
+  const unitPrice = num(row.unit_price || row.price || row.unitcost || row.unit_cost);
+  if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
+  if (!vendorName) return { status: "skipped", errorCode: "missing_vendor", message: "Vendor name is required." };
+  if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
+  if (qtyOrdered <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty ordered must be greater than zero." };
+  if (unitPrice < 0) return { status: "skipped", errorCode: "invalid_unit_price", message: "Unit price cannot be negative." };
+
+  const vendorId = await findOrCreateVendorByName(client, vendorName);
+  const materialItemId = await upsertMaterialItem(client, {
+    item_code: itemCode,
+    description: row.description || row.item_description || itemCode,
+    material_type: row.material_type || row.type || "misc",
+    uom: row.uom || row.unit || "EA"
+  });
+
+  const poRow = (await client.query("select id from purchase_orders where po_no = $1", [poNo])).rows[0];
+  let poId;
+  let headerStatus = "updated";
+  if (poRow) {
+    poId = poRow.id;
+    await client.query(`
+      update purchase_orders
+      set vendor_id = $2,
+          vendor_contact = $3,
+          freight_terms = $4,
+          ship_to = $5,
+          bill_to = $6,
+          notes = $7,
+          buyer_name = $8,
+          status = $9,
+          updated_at = now()
+      where id = $1
+    `, [
+      poId,
+      vendorId,
+      String(row.vendor_contact || row.contact_name || "").trim(),
+      String(row.freight_terms || "").trim(),
+      String(row.ship_to || "").trim(),
+      String(row.bill_to || "").trim(),
+      String(row.notes || "").trim(),
+      String(row.buyer_name || row.buyer || "").trim(),
+      String(row.status || "OPEN").trim() || "OPEN"
+    ]);
+  } else {
+    const insertPo = await client.query(`
+      insert into purchase_orders (po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status, updated_at)
+      values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, now())
+      returning id
+    `, [
+      poNo,
+      vendorId,
+      String(row.vendor_contact || row.contact_name || "").trim(),
+      String(row.freight_terms || "").trim(),
+      String(row.ship_to || "").trim(),
+      String(row.bill_to || "").trim(),
+      String(row.notes || "").trim(),
+      String(row.buyer_name || row.buyer || "").trim(),
+      String(row.status || "OPEN").trim() || "OPEN"
+    ]);
+    poId = insertPo.rows[0].id;
+    headerStatus = "inserted";
+  }
+
+  const size1 = String(row.size_1 || "").trim();
+  const size2 = String(row.size_2 || "").trim();
+  const thk1 = String(row.thk_1 || "").trim();
+  const thk2 = String(row.thk_2 || "").trim();
+  const existingLine = (await client.query(`
+    select id
+    from po_lines
+    where po_id = $1 and material_item_id = $2
+      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
+      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
+    limit 1
+  `, [poId, materialItemId, size1, size2, thk1, thk2])).rows[0];
+  if (existingLine) {
+    await client.query(`
+      update po_lines
+      set qty_ordered = $2, unit_price = $3, size_1 = $4, size_2 = $5, thk_1 = $6, thk_2 = $7, updated_at = now()
+      where id = $1
+    `, [existingLine.id, qtyOrdered, unitPrice, size1, size2, thk1, thk2]);
+    return { status: headerStatus === "inserted" ? "inserted" : "updated" };
+  }
+
+  await client.query(`
+    insert into po_lines (po_id, rfq_item_id, material_item_id, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
+    values ($1, null, $2, $3, $4, $5, $6, $7, $8, now())
+  `, [poId, materialItemId, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
   return { status: "inserted" };
 }
 
@@ -3429,8 +3541,55 @@ app.get("/po", requireAuth, async (req, res) => {
         <div class="actions"><button type="submit">Filter POs</button><a class="btn btn-secondary" href="/po">Clear</a><span class="muted">${pos.length} result(s), max 300 shown</span></div>
       </form>
     </div>
+    <div class="card">
+      <div class="actions"><a class="btn btn-primary" href="/po/import">Import Existing POs</a></div>
+    </div>
     ${blocks.join("") || `<div class="card"><p class="muted">No POs match the current filter.</p></div>`}
   `, req.user));
+});
+
+app.get("/po/import", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  res.send(layout("Import Existing POs", `
+    <h1>Import Existing POs</h1>
+    <div class="card">
+      <p class="muted">Upload a CSV/XLSX file to create or update PO headers and lines. Missing vendors are added to the vendors table, missing item codes are added to the items table, and imported PO lines are tied to those item records.</p>
+      <p class="muted">Supported columns: po_no, vendor_name, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status.</p>
+      <form method="post" enctype="multipart/form-data" action="/po/import" class="stack">
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
+        <div class="actions"><button type="submit">Import POs</button><a class="btn btn-secondary" href="/po">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/po/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
+  const rows = parseUploadedRows(req.file, req.body.csv_text);
+  if (rows.length === 0) throw new Error("No rows found.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "purchase_orders",
+      rfqId: null,
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || ""
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertPurchaseOrderRow(client, rows[index]);
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 2, result.errorCode, result.message, rows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "purchase_orders", batchId, `rows=${rows.length}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
 });
 
 app.get("/po/new", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
