@@ -980,6 +980,18 @@ async function getNextRequisitionNumber(client = null) {
   return `${jobNumber}-MR-${String(nextNumber).padStart(5, "0")}`;
 }
 
+async function getNextBomNumber(client = null) {
+  const runner = client || { query };
+  const jobNumber = await getJobNumber(client);
+  const result = await runner.query(`
+    select coalesce(max(cast(right(bom_no, 5) as integer)), 0) as max_no
+    from bom_headers
+    where bom_no ~ '-BOM-[0-9]{5}$'
+  `);
+  const nextNumber = num(result.rows[0]?.max_no) + 1;
+  return `${jobNumber}-BOM-${String(nextNumber).padStart(5, "0")}`;
+}
+
 function loginPage(error = "") {
   return layout("Login", `
     ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
@@ -1414,14 +1426,17 @@ app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyn
 
 app.get("/bom", requireAuth, async (req, res) => {
   const bomNo = String(req.query.bom_no || "").trim();
+  const bomName = String(req.query.bom_name || "").trim();
   const bomType = String(req.query.bom_type || "").trim();
   const area = String(req.query.area || "").trim();
   const systemName = String(req.query.system || req.query.system_name || "").trim();
   const status = String(req.query.status || "").trim();
   const jobNumber = await getJobNumber();
+  const nextBomNumber = await getNextBomNumber();
   const where = [];
   const params = [];
   if (bomNo) { params.push(`%${bomNo}%`); where.push(`bh.bom_no ilike $${params.length}`); }
+  if (bomName) { params.push(`%${bomName}%`); where.push(`coalesce(bh.bom_name, bh.description, '') ilike $${params.length}`); }
   if (bomType) { params.push(bomType); where.push(`bh.bom_type = $${params.length}`); }
   if (area) { params.push(`%${area}%`); where.push(`bh.area ilike $${params.length}`); }
   if (systemName) { params.push(`%${systemName}%`); where.push(`bh.system_name ilike $${params.length}`); }
@@ -1443,7 +1458,8 @@ app.get("/bom", requireAuth, async (req, res) => {
   const createTypeOptions = bomTypes.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join("");
   const createStatusOptions = bomStatuses.map((value) => `<option value="${esc(value)}" ${value === "DRAFT" ? "selected" : ""}>${esc(value)}</option>`).join("");
   const rows = boms.map((bom) => `<tr>
-    <td><a href="/bom/${bom.id}">${esc(bom.bom_no)}</a></td>
+    <td><a href="/bom/${bom.id}">${esc(bom.bom_name || bom.description || bom.bom_no)}</a></td>
+    <td>${esc(bom.bom_no)}</td>
     <td>${esc(bom.job_number)}</td>
     <td>${esc(bom.bom_type)}</td>
     <td>${esc(bom.area || "")}</td>
@@ -1458,11 +1474,12 @@ app.get("/bom", requireAuth, async (req, res) => {
       <form method="get" action="/bom" class="stack">
         <div class="grid-4">
           <div><label>BOM #</label><input name="bom_no" value="${esc(bomNo)}" /></div>
+          <div><label>BOM Name</label><input name="bom_name" value="${esc(bomName)}" /></div>
           <div><label>Type</label><select name="bom_type">${filterTypeOptions}</select></div>
           <div><label>Area</label><input name="area" value="${esc(area)}" /></div>
-          <div><label>System</label><input name="system" value="${esc(systemName)}" /></div>
         </div>
         <div class="grid">
+          <div><label>System</label><input name="system" value="${esc(systemName)}" /></div>
           <div><label>Status</label><select name="status">${filterStatusOptions}</select></div>
         </div>
         <div class="actions"><button type="submit">Filter BOMs</button><a class="btn btn-secondary" href="/bom">Clear</a><span class="muted">${boms.length} result(s), max 300 shown</span></div>
@@ -1471,34 +1488,40 @@ app.get("/bom", requireAuth, async (req, res) => {
     <div class="card">
       <form method="post" action="/bom" class="stack">
         <div class="grid-4">
-          <div><label>Job Number</label><input name="job_number" value="${esc(jobNumber)}" required /></div>
-          <div><label>BOM Number</label><input name="bom_no" required /></div>
+          <div><label>Job Number</label><input name="job_number" value="${esc(jobNumber)}" readonly /></div>
+          <div><label>BOM Number</label><input name="bom_no" value="${esc(nextBomNumber)}" readonly /></div>
+          <div><label>BOM Name</label><input name="bom_name" required /></div>
           <div><label>BOM Type</label><select name="bom_type">${createTypeOptions}</select></div>
-          <div><label>Status</label><select name="status">${createStatusOptions}</select></div>
         </div>
         <div class="grid">
+          <div><label>Status</label><select name="status">${createStatusOptions}</select></div>
           <div><label>Area</label><input name="area" /></div>
           <div><label>System</label><input name="system" /></div>
           <div><label>Revision</label><input name="revision" value="0" /></div>
-          <div><label>Description</label><input name="description" /></div>
         </div>
+        <div><label>Description</label><input name="description" /></div>
         <div><label>Notes</label><textarea name="notes"></textarea></div>
         <div class="actions"><button type="submit">Create BOM</button></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>BOM</th><th>Job</th><th>Type</th><th>Area</th><th>System</th><th>Revision</th><th>Lines</th><th>Status</th></tr>${rows || `<tr><td colspan="8" class="muted">No BOMs match the current filter.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>BOM Name</th><th>BOM #</th><th>Job</th><th>Type</th><th>Area</th><th>System</th><th>Revision</th><th>Lines</th><th>Status</th></tr>${rows || `<tr><td colspan="9" class="muted">No BOMs match the current filter.</td></tr>`}</table></div>
   `, req.user));
 });
 
 app.post("/bom", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   const bomId = await withTransaction(async (client) => {
+    const jobNumber = String((req.body.job_number || await getJobNumber(client))).trim().toUpperCase();
+    const bomNo = String(req.body.bom_no || "").trim() || await getNextBomNumber(client);
+    const bomName = String(req.body.bom_name || "").trim();
+    if (!bomName) throw new Error("BOM name is required.");
     const insert = await client.query(`
-      insert into bom_headers (job_number, bom_no, bom_type, area, system_name, revision, status, description, notes, updated_at)
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+      insert into bom_headers (job_number, bom_no, bom_name, bom_type, area, system_name, revision, status, description, notes, updated_at)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
       returning id
     `, [
-      String(req.body.job_number || "").trim().toUpperCase(),
-      String(req.body.bom_no || "").trim(),
+      jobNumber,
+      bomNo,
+      bomName,
       req.body.bom_type || "misc",
       req.body.area || "",
       req.body.system || req.body.system_name || "",
@@ -1507,7 +1530,7 @@ app.post("/bom", requireAuth, requireRole(["admin", "buyer"]), async (req, res) 
       req.body.description || "",
       req.body.notes || ""
     ]);
-    await auditLog(client, req.user.id, "create", "bom_header", insert.rows[0].id, req.body.bom_no || "");
+    await auditLog(client, req.user.id, "create", "bom_header", insert.rows[0].id, bomNo);
     return insert.rows[0].id;
   });
   res.redirect(`/bom/${bomId}`);
@@ -1528,15 +1551,16 @@ app.get("/bom/:id/edit", requireAuth, async (req, res) => {
         <div class="grid-4">
           <div><label>Job Number</label><input name="job_number" value="${esc(bom.job_number)}" required /></div>
           <div><label>BOM Number</label><input name="bom_no" value="${esc(bom.bom_no)}" required /></div>
+          <div><label>BOM Name</label><input name="bom_name" value="${esc(bom.bom_name || "")}" required /></div>
           <div><label>BOM Type</label><select name="bom_type">${typeOptions}</select></div>
-          <div><label>Status</label><select name="status">${statusOptions}</select></div>
         </div>
         <div class="grid">
+          <div><label>Status</label><select name="status">${statusOptions}</select></div>
           <div><label>Area</label><input name="area" value="${esc(bom.area || "")}" /></div>
           <div><label>System</label><input name="system" value="${esc(bom.system_name || "")}" /></div>
           <div><label>Revision</label><input name="revision" value="${esc(bom.revision || "")}" /></div>
-          <div><label>Description</label><input name="description" value="${esc(bom.description || "")}" /></div>
         </div>
+        <div><label>Description</label><input name="description" value="${esc(bom.description || "")}" /></div>
         <div><label>Notes</label><textarea name="notes">${esc(bom.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save BOM</button><a class="btn btn-secondary" href="/bom/${bom.id}">Back</a></div>
       </form>
@@ -1548,12 +1572,13 @@ app.post("/bom/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (r
   await withTransaction(async (client) => {
     await client.query(`
       update bom_headers
-      set job_number = $2, bom_no = $3, bom_type = $4, area = $5, system_name = $6, revision = $7, status = $8, description = $9, notes = $10, updated_at = now()
+      set job_number = $2, bom_no = $3, bom_name = $4, bom_type = $5, area = $6, system_name = $7, revision = $8, status = $9, description = $10, notes = $11, updated_at = now()
       where id = $1
     `, [
       req.params.id,
       String(req.body.job_number || "").trim().toUpperCase(),
       String(req.body.bom_no || "").trim(),
+      String(req.body.bom_name || "").trim(),
       req.body.bom_type || "misc",
       req.body.area || "",
       req.body.system || req.body.system_name || "",
@@ -1605,10 +1630,10 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
   const importRows = importsRes.rows.length > 0
     ? importsRes.rows.map((batch) => `<tr><td><a href="/imports/${batch.id}">${batch.id}</a></td><td>${esc(batch.created_at)}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
-  res.send(layout(`BOM ${bom.bom_no}`, `
-    <h1>BOM ${esc(bom.bom_no)}</h1>
+  res.send(layout(`BOM ${bom.bom_name || bom.description || bom.bom_no}`, `
+    <h1>${esc(bom.bom_name || bom.description || bom.bom_no)}</h1>
     <div class="card">
-      <p class="muted">Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system_name || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}</p>
+      <p class="muted">BOM #: ${esc(bom.bom_no)} | Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system_name || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}</p>
       <p>${esc(bom.description || "")}</p>
       ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
       <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a></div>
@@ -1621,10 +1646,10 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     </div>
     <div class="card">
       <h3>Create RFQ From BOM</h3>
-      <p class="muted">Creates an RFQ for BOM lines that are still in planning and marks those lines as <code>ON_RFQ</code>.</p>
+        <p class="muted">Creates an RFQ for BOM lines that are still in planning and marks those lines as <code>ON_RFQ</code>.</p>
       <form method="post" action="/bom/${bom.id}/to-rfq" class="stack">
         <div class="grid">
-          <div><label>Project</label><input name="project_name" value="${esc(bom.description || bom.bom_no)}" required /></div>
+          <div><label>Project</label><input name="project_name" value="${esc(bom.bom_name || bom.description || bom.bom_no)}" required /></div>
           <div><label>Due Date</label><input type="date" name="due_date" /></div>
         </div>
         <div class="actions"><button type="submit">Create RFQ From BOM Lines</button></div>
@@ -1660,7 +1685,7 @@ app.post("/bom/:id/to-rfq", requireAuth, requireRole(["admin", "buyer"]), async 
       insert into rfqs (rfq_no, project_name, due_date, status)
       values ($1, $2, $3, 'OPEN')
       returning id
-    `, [rfqNo, req.body.project_name?.trim() || bom.description || bom.bom_no, req.body.due_date || null]);
+    `, [rfqNo, req.body.project_name?.trim() || bom.bom_name || bom.description || bom.bom_no, req.body.due_date || null]);
     const newRfqId = rfqInsert.rows[0].id;
     for (const line of lines) {
       let materialItemId;
@@ -1906,7 +1931,7 @@ app.post("/bom-line/:id/delete", requireAuth, requireRole(["admin", "buyer"]), a
 
 app.get("/requisitions/new", requireAuth, async (req, res) => {
   const availableBoms = (await query(`
-    select id, bom_no, description, status
+    select id, bom_no, bom_name, description, status
     from bom_headers
     where bom_type = 'pipe'
     order by id desc
@@ -2006,7 +2031,7 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
       <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a></div></td>
     </tr>`).join("");
   }
-  const bomOptions = availableBoms.map((row) => `<option value="${row.id}" ${Number(row.id) === selectedBomId ? "selected" : ""}>${esc(row.bom_no)}${row.description ? ` | ${esc(row.description)}` : ""}</option>`).join("");
+  const bomOptions = availableBoms.map((row) => `<option value="${row.id}" ${Number(row.id) === selectedBomId ? "selected" : ""}>${esc(row.bom_name || row.description || row.bom_no)} | ${esc(row.bom_no)}</option>`).join("");
   res.send(layout("New Request", `
     <h1>New Material Request</h1>
     <div class="card">
@@ -2025,7 +2050,7 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
     ${selectedBom ? `
       <div class="card">
         <h3>Create Material Requisition</h3>
-        <p class="muted">BOM: ${esc(selectedBom.bom_no)}${selectedBom.description ? ` | ${esc(selectedBom.description)}` : ""}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
+        <p class="muted">BOM: ${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
         <form method="post" action="/bom/${selectedBom.id}/requisitions" class="stack">
           <div class="grid">
             <div><label>Requested By</label><input name="requested_by_name" value="${esc(req.user.username)}" required /></div>
@@ -2108,17 +2133,18 @@ app.get("/requisitions", requireAuth, async (req, res) => {
   if (status) { params.push(status); where.push(`mr.status = $${params.length}`); }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const rows = (await query(`
-    select mr.*, bh.bom_no, count(mrl.id) as line_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
+    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description, count(mrl.id) as line_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
     from material_requisitions mr
     join bom_headers bh on bh.id = mr.bom_id
     left join material_requisition_lines mrl on mrl.requisition_id = mr.id
     ${whereSql}
-    group by mr.id, bh.bom_no
+    group by mr.id, bh.bom_no, bh.bom_name, bh.description
     order by mr.id desc
     limit 300
   `, params)).rows;
   const tableRows = rows.map((row) => `<tr>
     <td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
+    <td>${esc(row.bom_name || row.bom_description || row.bom_no)}</td>
     <td>${esc(row.bom_no)}</td>
     <td>${esc(row.requested_by_name)}</td>
     <td>${esc(row.iwp_no || "")}</td>
@@ -2143,13 +2169,13 @@ app.get("/requisitions", requireAuth, async (req, res) => {
         <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Req #</th><th>BOM</th><th>Requested By</th><th>IWP</th><th>ISO</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th></tr>${tableRows || `<tr><td colspan="9" class="muted">No requisitions yet.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Req #</th><th>BOM Name</th><th>BOM #</th><th>Requested By</th><th>IWP</th><th>ISO</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th></tr>${tableRows || `<tr><td colspan="10" class="muted">No requisitions yet.</td></tr>`}</table></div>
   `, req.user));
 });
 
 app.get("/requisitions/:id", requireAuth, async (req, res) => {
   const header = (await query(`
-    select mr.*, bh.bom_no, bh.description as bom_description
+    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
     from material_requisitions mr
     join bom_headers bh on bh.id = mr.bom_id
     where mr.id = $1
@@ -2193,7 +2219,7 @@ app.get("/requisitions/:id", requireAuth, async (req, res) => {
   res.send(layout(`Requisition ${header.requisition_no}`, `
     <h1>Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
-      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_no)}</a> | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(header.created_at)}</p>
+      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(header.created_at)}</p>
       <p class="muted">IWP: ${esc(header.iwp_no || "")} | ISO: ${esc(header.iso_no || "")}</p>
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
       ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}

@@ -79,6 +79,7 @@ create table if not exists bom_headers (
   id bigserial primary key,
   job_number text not null,
   bom_no text not null unique,
+  bom_name text,
   bom_type text not null,
   area text,
   system_name text,
@@ -204,6 +205,8 @@ create table if not exists app_settings (
   value text not null,
   updated_at timestamptz not null default now()
 );
+
+alter table bom_headers add column if not exists bom_name text;
 
 create table if not exists material_log_lookup_values (
   id bigserial primary key,
