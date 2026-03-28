@@ -975,6 +975,19 @@ async function getWarehouseLocationMap() {
   return map;
 }
 
+function normalizeWarehouseLocationImportRow(row) {
+  const normalized = {};
+  const aliases = {
+    warehouse_name: ["warehouse_name", "warehouse", "warehouse_code"],
+    location_name: ["location_name", "location", "bin", "slot"]
+  };
+  for (const [target, keys] of Object.entries(aliases)) {
+    const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] || "").trim() !== "");
+    normalized[target] = sourceKey ? String(row[sourceKey] || "").trim() : "";
+  }
+  return normalized;
+}
+
 async function assertValidWarehouseLocation(client, warehouseName, locationName) {
   const warehouse = String(warehouseName || "").trim();
   const location = String(locationName || "").trim();
@@ -1490,6 +1503,11 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
         </div>
         <div class="actions"><button type="submit">Add Location</button></div>
       </form>
+      <form method="post" enctype="multipart/form-data" action="/settings/warehouse-locations/import" class="stack" style="margin-top:16px;">
+        <div><label>Import Warehouses / Locations From .xlsx</label><input type="file" name="sheet" accept=".xlsx,.csv" required /></div>
+        <div class="muted">Supported columns: <code>warehouse</code> and <code>location</code>. Repeat the warehouse name on each row that belongs to it.</div>
+        <div class="actions"><button type="submit">Import Warehouse Locations</button></div>
+      </form>
     </div>
     <div class="card scroll">
       <table>
@@ -1653,6 +1671,36 @@ app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireRole(["
     const nextState = !current.is_active;
     await client.query("update warehouse_locations set is_active = $2 where id = $1", [req.params.id, nextState]);
     await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse_location", req.params.id, `${current.warehouse_name}:${current.name}`);
+  });
+  res.redirect("/settings");
+}));
+
+app.post("/settings/warehouse-locations/import", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeWarehouseLocationImportRow);
+  if (rows.length === 0) throw new Error("No rows found.");
+  await withTransaction(async (client) => {
+    let importedCount = 0;
+    for (const row of rows) {
+      const warehouseName = String(row.warehouse_name || "").trim();
+      const locationName = String(row.location_name || "").trim();
+      if (!warehouseName || !locationName) continue;
+      const warehouse = (await client.query(`
+        insert into warehouses (name, is_active)
+        values ($1, true)
+        on conflict (name) do update
+        set is_active = true
+        returning id, name
+      `, [warehouseName])).rows[0];
+      await client.query(`
+        insert into warehouse_locations (warehouse_id, name, is_active)
+        values ($1, $2, true)
+        on conflict (warehouse_id, name) do update
+        set is_active = true
+      `, [warehouse.id, locationName]);
+      importedCount += 1;
+    }
+    if (!importedCount) throw new Error("No valid warehouse/location rows were found. Use columns named warehouse and location.");
+    await auditLog(client, req.user.id, "import", "warehouse_locations", "settings", `rows=${importedCount}`);
   });
   res.redirect("/settings");
 }));
