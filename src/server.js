@@ -2503,8 +2503,9 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     <div class="card">
       <h3>Existing Items</h3>
       <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
-      <div class="grid">
-        <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" oninput="filterTableRows('existing-items-filter-${rfqId}', 'existing-items-table-${rfqId}')" placeholder="Search item code, description, type, or UOM" /></div>
+      <div class="grid" style="grid-template-columns: 1fr auto;">
+        <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" placeholder="Search item code, description, type, or UOM" /></div>
+        <div style="align-self:end;"><button type="button" onclick="filterTableRows('existing-items-filter-${rfqId}', 'existing-items-table-${rfqId}')">Apply Filter</button></div>
       </div>
       <div class="scroll">
         <table id="existing-items-table-${rfqId}">
@@ -2524,20 +2525,6 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
           </table>
         </div>
         <div class="actions"><button type="submit">Save Grid Rows</button></div>
-      </form>
-    </div>`;
-  const pasteTableCard = `
-    <div class="card">
-      <h3>Paste RFQ Table</h3>
-      <p class="muted">Paste rows directly from Excel. Header row is optional. Expected column order: item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes</p>
-      <div class="scroll">
-        <table>
-          <tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr>
-        </table>
-      </div>
-      <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
-        <div><label>Paste Table</label><textarea name="table_text" style="min-height:220px;font-family:Consolas,monospace;" placeholder="item_code	description	material_type	uom	spec	commodity_code	tag_number	size_1	size_2	thk_1	thk_2	qty	notes&#10;P-1001	6&quot; CS Pipe	Pipe	LF	AS01CR			6		sch40		40"></textarea></div>
-        <div class="actions"><button type="submit">Paste Into RFQ</button></div>
       </form>
     </div>`;
   const uploadItemsCard = `
@@ -2578,9 +2565,9 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
     </div>`;
 
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
-    <h1>RFQ ${esc(rfq.rfq_no)}</h1>
+    <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</h1>
     ${poCount === 0 ? addItemCard : ""}
-    ${poCount === 0 ? pasteTableCard : ""}
+    ${poCount === 0 ? uploadItemsCard : ""}
     ${poCount === 0 ? importQuotesCard : ""}
     ${awardedVendorCounts.length > 0 ? issuePoCard : issuePoHelpCard}
     <div class="card scroll">
@@ -2597,7 +2584,6 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
         ${importRows}
       </table>
     </div>
-    ${poCount === 0 ? uploadItemsCard : ""}
   `, req.user));
 });
 
