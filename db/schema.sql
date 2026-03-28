@@ -2,10 +2,13 @@ create table if not exists users (
   id bigserial primary key,
   username text not null unique,
   password_hash text not null,
-  role text not null check (role in ('admin', 'buyer', 'warehouse')),
+  role text not null check (role in ('admin', 'buyer', 'warehouse', 'field', 'supervisor')),
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
+
+alter table users drop constraint if exists users_role_check;
+alter table users add constraint users_role_check check (role in ('admin', 'buyer', 'warehouse', 'field', 'supervisor'));
 
 create table if not exists audit_log (
   id bigserial primary key,

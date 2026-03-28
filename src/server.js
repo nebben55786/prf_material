@@ -38,6 +38,62 @@ function esc(value) {
 }
 
 function layout(title, body, user) {
+  const navByRole = {
+    admin: [
+      ["Dashboard", "/"],
+      ["Material Logs", "/material-logs"],
+      ["Vendors", "/vendors"],
+      ["RFQs", "/rfq"],
+      ["POs", "/po"],
+      ["BOM", "/bom"],
+      ["Receiving", "/receive"],
+      ["Inventory", "/inventory"],
+      ["REQs", "/requisitions"],
+      ["Settings", "/settings"],
+      ["Logout", "/logout"]
+    ],
+    buyer: [
+      ["Dashboard", "/"],
+      ["Material Logs", "/material-logs"],
+      ["Vendors", "/vendors"],
+      ["RFQs", "/rfq"],
+      ["POs", "/po"],
+      ["BOM", "/bom"],
+      ["Receiving", "/receive"],
+      ["Inventory", "/inventory"],
+      ["REQs", "/requisitions"],
+      ["Settings", "/settings"],
+      ["Logout", "/logout"]
+    ],
+    warehouse: [
+      ["Dashboard", "/"],
+      ["Material Logs", "/material-logs"],
+      ["POs", "/po"],
+      ["Receiving", "/receive"],
+      ["Inventory", "/inventory"],
+      ["REQs", "/requisitions"],
+      ["Logout", "/logout"]
+    ],
+    field: [
+      ["Dashboard", "/"],
+      ["Inventory", "/inventory"],
+      ["REQs", "/requisitions"],
+      ["Logout", "/logout"]
+    ],
+    supervisor: [
+      ["Dashboard", "/"],
+      ["Material Logs", "/material-logs"],
+      ["Vendors", "/vendors"],
+      ["RFQs", "/rfq"],
+      ["POs", "/po"],
+      ["BOM", "/bom"],
+      ["Receiving", "/receive"],
+      ["Inventory", "/inventory"],
+      ["REQs", "/requisitions"],
+      ["Logout", "/logout"]
+    ]
+  };
+  const navLinks = user ? (navByRole[user.role] || navByRole.field).map(([label, href]) => `<a href="${href}">${label}</a>`).join("") : "";
   return `<!doctype html>
   <html>
   <head>
@@ -288,7 +344,7 @@ function layout(title, body, user) {
           <div class="brand">Material Control</div>
           ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
         </div>
-        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/bom">BOMs</a><a href="/requisitions">Requisitions</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a><a href="/material-logs">Material Logs</a>${user.role === "admin" ? `<a href="/settings">Settings</a>` : ""}<a href="/logout">Logout</a></nav>` : ""}
+        ${user ? `<nav>${navLinks}</nav>` : ""}
       </div>
       ${body}
     </div>
@@ -1072,7 +1128,7 @@ app.get("/dashboard", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.get("/settings", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   const jobNumber = await getJobNumber();
   const vendorCategoryText = vendorCategories.join("\n");
   const accessRequestsRes = await query("select * from access_requests where status = 'PENDING' order by created_at asc");
@@ -1095,6 +1151,8 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
                   <option value="admin" ${record.role === "admin" ? "selected" : ""}>admin</option>
                   <option value="buyer" ${record.role === "buyer" ? "selected" : ""}>buyer</option>
                   <option value="warehouse" ${record.role === "warehouse" ? "selected" : ""}>warehouse</option>
+                  <option value="field" ${record.role === "field" ? "selected" : ""}>field</option>
+                  <option value="supervisor" ${record.role === "supervisor" ? "selected" : ""}>supervisor</option>
                 </select>
               </div>
               <div>
@@ -1131,6 +1189,8 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
               <select name="role">
                 <option value="buyer">buyer</option>
                 <option value="warehouse">warehouse</option>
+                <option value="field">field</option>
+                <option value="supervisor">supervisor</option>
                 <option value="admin">admin</option>
               </select>
             </div>
@@ -1186,6 +1246,8 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
             <select name="role">
               <option value="buyer">buyer</option>
               <option value="warehouse">warehouse</option>
+              <option value="field">field</option>
+              <option value="supervisor">supervisor</option>
               <option value="admin">admin</option>
             </select>
           </div>
@@ -1255,7 +1317,7 @@ app.post("/settings/job-number", requireAuth, requireRole(["admin", "buyer"]), a
   res.redirect("/settings");
 });
 
-app.post("/settings/vendor-categories", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.post("/settings/vendor-categories", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   const categories = normalizeCategoryList(req.body.vendor_categories);
   if (categories.length === 0) throw new Error("At least one vendor category is required.");
   await withTransaction(async (client) => {
@@ -1271,7 +1333,7 @@ app.post("/settings/vendor-categories", requireAuth, requireRole(["admin"]), asy
   res.redirect("/settings");
 });
 
-app.get("/settings/material-log-imports", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.get("/settings/material-log-imports", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
   res.send(layout("Material Log Imports", `
     <h1>Material Log Imports</h1>
     <div class="card">
@@ -1294,7 +1356,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
   const role = String(req.body.role || "buyer").trim();
   if (!username) throw new Error("Username is required.");
   if (!tempPassword) throw new Error("Temporary password is required.");
-  if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
+  if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
   const passwordError = validatePasswordRules(tempPassword);
   if (passwordError) throw new Error(passwordError);
   const passwordHash = await bcrypt.hash(tempPassword, 8);
@@ -1341,7 +1403,7 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandle
   const role = String(req.body.role || "buyer").trim();
   if (!username) throw new Error("Username is required.");
   if (!password) throw new Error("Password is required.");
-  if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
+  if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
   const passwordError = validatePasswordRules(password);
   if (passwordError) throw new Error(passwordError);
   const passwordHash = await bcrypt.hash(password, 8);
@@ -1359,7 +1421,7 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
   const role = String(req.body.role || "buyer").trim();
   const isActive = String(req.body.is_active || "true") === "true";
   if (!username) throw new Error("Username is required.");
-  if (!["admin", "buyer", "warehouse"].includes(role)) throw new Error("Invalid role.");
+  if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
   let passwordHash = "";
   if (password) {
     const passwordError = validatePasswordRules(password);
