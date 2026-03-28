@@ -15,6 +15,14 @@ const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing",
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
 const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CLOSED"];
+const rfqStatuses = [
+  { value: "SEND_FOR_QUOTES", label: "Send for Quotes" },
+  { value: "WAITING_ON_QUOTES", label: "Waiting on Quotes" },
+  { value: "AWARDED", label: "Awarded" },
+  { value: "WAITING_ON_CLIENT", label: "Waiting on Client" },
+  { value: "PURCHASED", label: "Purchased" },
+  { value: "RECEIVED", label: "Received" }
+];
 const permissionSections = [
   { key: "dashboard", label: "Dashboard", href: "/" },
   { key: "material_logs", label: "Material Logs", href: "/material-logs" },
@@ -1144,13 +1152,25 @@ function canEditRequisition(user, header) {
 
 async function recalcRfqStatus(client, rfqId) {
   const total = Number((await client.query("select count(*) from rfq_items where rfq_id = $1", [rfqId])).rows[0].count);
-  const issued = Number((await client.query(`
+  const totals = (await client.query(`
     select count(distinct pl.rfq_item_id)
+      filter (where pl.rfq_item_id is not null) as issued_count,
+      count(distinct pl.rfq_item_id)
+      filter (
+        where pl.rfq_item_id is not null
+          and coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) >= pl.qty_ordered
+      ) as fully_received_count
     from purchase_orders po
     join po_lines pl on pl.po_id = po.id
-    where po.rfq_id = $1 and pl.rfq_item_id is not null
-  `, [rfqId])).rows[0].count);
-  await client.query("update rfqs set status = $2 where id = $1", [rfqId, total > 0 && issued >= total ? "CLOSED" : "OPEN"]);
+    where po.rfq_id = $1
+  `, [rfqId])).rows[0];
+  const issued = Number(totals?.issued_count || 0);
+  const fullyReceived = Number(totals?.fully_received_count || 0);
+  if (total > 0 && fullyReceived >= total) {
+    await client.query("update rfqs set status = 'RECEIVED' where id = $1", [rfqId]);
+  } else if (issued > 0) {
+    await client.query("update rfqs set status = 'PURCHASED' where id = $1 and status <> 'RECEIVED'", [rfqId]);
+  }
 }
 
 async function recalcPoStatus(client, poId) {
@@ -1282,7 +1302,7 @@ app.get("/", async (req, res) => {
 });
 
 app.get("/dashboard", requireAuth, requirePermission("dashboard", "view"), async (req, res) => {
-  const [rfqs, pos, receipts, vendors, osd, jobNumber, pendingAccessRequests] = await Promise.all([
+  const [rfqs, pos, receipts, vendors, osd, jobNumber, pendingAccessRequests, rfqStatusCounts] = await Promise.all([
     query("select count(*) from rfqs"),
     query("select count(*) from purchase_orders"),
     query("select count(*) from receipts"),
@@ -1291,8 +1311,21 @@ app.get("/dashboard", requireAuth, requirePermission("dashboard", "view"), async
     getJobNumber(),
     req.user.role === "admin"
       ? query("select count(*) from access_requests where status = 'PENDING'").catch(() => ({ rows: [{ count: 0 }] }))
-      : Promise.resolve({ rows: [{ count: 0 }] })
+      : Promise.resolve({ rows: [{ count: 0 }] }),
+    ["admin", "buyer"].includes(req.user.role)
+      ? query(`
+          select status, count(*)::int as count
+          from rfqs
+          group by status
+        `)
+      : Promise.resolve({ rows: [] })
   ]);
+  const rfqStatusMap = Object.fromEntries(rfqStatusCounts.rows.map((row) => [row.status, Number(row.count || 0)]));
+  const rfqStatusCards = ["admin", "buyer"].includes(req.user.role)
+    ? `<div class="card"><h3>RFQ Status</h3><div class="stats">${
+        rfqStatuses.map((status) => `<div class="stat"><div>${esc(status.label)}</div><strong>${rfqStatusMap[status.value] || 0}</strong></div>`).join("")
+      }</div></div>`
+    : "";
   res.send(layout("Dashboard", `
     <h1>Operations Dashboard</h1>
     ${req.user.role === "admin" && Number(pendingAccessRequests.rows[0].count) > 0 ? `<div class="card error"><strong>${pendingAccessRequests.rows[0].count} pending access request(s)</strong><div class="actions" style="margin-top:10px;"><a class="btn btn-primary" href="/settings">Review Requests</a></div></div>` : ""}
@@ -1303,6 +1336,7 @@ app.get("/dashboard", requireAuth, requirePermission("dashboard", "view"), async
       <div class="stat"><div>Receipts</div><strong>${receipts.rows[0].count}</strong></div>
       <div class="stat"><div>OS&D Cases</div><strong>${osd.rows[0].count}</strong></div>
     </div>
+    ${rfqStatusCards}
   `, req.user));
 });
 
@@ -3428,11 +3462,14 @@ app.get("/rfq", requireAuth, requirePermission("rfqs", "view"), async (req, res)
   const vendorOptions = [`<option value="">All Vendors</option>`]
     .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === vendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
+  const rfqStatusOptions = [`<option value="">All Statuses</option>`]
+    .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
+    .join("");
   const rows = rfqs.map((rfq) => `<tr>
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.due_date || "")}</td>
-    <td><span class="chip">${esc(rfq.status)}</span></td>
+    <td><span class="chip">${esc((rfqStatuses.find((item) => item.value === rfq.status) || { label: rfq.status }).label)}</span></td>
   </tr>`).join("");
   res.send(layout("RFQs", `
     <h1>RFQs</h1>
@@ -3441,7 +3478,7 @@ app.get("/rfq", requireAuth, requirePermission("rfqs", "view"), async (req, res)
         <div class="grid-4">
           <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
           <div><label>Description</label><input name="project" value="${esc(project)}" /></div>
-          <div><label>Status</label><select name="status"><option value="">All Statuses</option><option value="OPEN" ${status === "OPEN" ? "selected" : ""}>OPEN</option><option value="CLOSED" ${status === "CLOSED" ? "selected" : ""}>CLOSED</option></select></div>
+          <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
           <div><label>Item Code</label><input name="item_code" value="${esc(itemCode)}" /></div>
         </div>
         <div class="grid">
@@ -3466,6 +3503,7 @@ app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, 
     getNextRfqNumber(),
     getJobNumber()
   ]);
+  const rfqStatusOptions = rfqStatuses.map((status) => `<option value="${status.value}" ${status.value === "SEND_FOR_QUOTES" ? "selected" : ""}>${esc(status.label)}</option>`).join("");
   res.send(layout("Create RFQ", `
     <h1>Create RFQ</h1>
     <div class="card">
@@ -3477,6 +3515,9 @@ app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, 
         <div class="grid">
           <div><label>Description</label><input name="project_name" required /></div>
           <div><label>Due Date</label><input type="date" name="due_date" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
         <div class="actions">
           <button type="submit">Create RFQ</button>
@@ -3490,14 +3531,30 @@ app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, 
 app.post("/rfq", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const id = await withTransaction(async (client) => {
     const rfqNo = await getNextRfqNumber(client);
+    const requestedStatus = String(req.body.status || "SEND_FOR_QUOTES").trim();
+    const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "SEND_FOR_QUOTES";
     const insert = await client.query(
-      "insert into rfqs (rfq_no, project_name, due_date, status) values ($1, $2, $3, 'OPEN') returning id",
-      [rfqNo, req.body.project_name?.trim(), req.body.due_date || null]
+      "insert into rfqs (rfq_no, project_name, due_date, status) values ($1, $2, $3, $4) returning id",
+      [rfqNo, req.body.project_name?.trim(), req.body.due_date || null, status]
     );
     await auditLog(client, req.user.id, "create", "rfq", insert.rows[0].id, rfqNo);
     return insert.rows[0].id;
   });
   res.redirect(`/rfq/${id}`);
+});
+
+app.post("/rfq/:id/status", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const requestedStatus = String(req.body.status || "").trim();
+  const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "";
+  if (!status) throw new Error("Choose a valid RFQ status.");
+  await withTransaction(async (client) => {
+    const rfq = (await client.query("select rfq_no from rfqs where id = $1", [rfqId])).rows[0];
+    if (!rfq) throw new Error("RFQ not found.");
+    await client.query("update rfqs set status = $2 where id = $1", [rfqId, status]);
+    await auditLog(client, req.user.id, "update_status", "rfq", rfqId, `${rfq.rfq_no}:${status}`);
+  });
+  res.redirect(`/rfq/${rfqId}`);
 });
 
 app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, res) => {
@@ -3618,6 +3675,10 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
   const quoteVendorOptions = [`<option value="">Select vendor</option>`]
     .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === activeQuoteVendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
+  const rfqStatusOptions = rfqStatuses
+    .map((status) => `<option value="${status.value}" ${rfq.status === status.value ? "selected" : ""}>${esc(status.label)}</option>`)
+    .join("");
+  const rfqStatusLabel = (rfqStatuses.find((status) => status.value === rfq.status) || { label: rfq.status }).label;
   const importRows = recentImports.length > 0
     ? recentImports.map((batch) => `<tr><td><a href="/imports/${batch.id}">${esc(batch.entity_type)}</a></td><td>${esc(batch.created_at)}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
@@ -3670,6 +3731,15 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
     </div>`;
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</h1>
+    <div class="card">
+      <form method="post" action="/rfq/${rfqId}/status" class="stack">
+        <div class="grid" style="grid-template-columns: minmax(0, 280px) auto 1fr;">
+          <div><label>RFQ Status</label><select name="status">${rfqStatusOptions}</select></div>
+          <div style="align-self:end;"><button type="submit">Save Status</button></div>
+          <div style="align-self:end;"><span class="chip">${esc(rfqStatusLabel)}</span></div>
+        </div>
+      </form>
+    </div>
     <div class="card scroll">
       <h3>RFQ Items</h3>
       <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
@@ -4584,11 +4654,14 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
     const qtyReceived = Number(req.body.qty_received || 0);
     if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
     await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
+    const po = (await client.query("select rfq_id from purchase_orders where id = $1", [poId])).rows[0];
     const insert = await client.query(`
       insert into receipts (po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
       values ($1, $2, $3, $4, $5, $6)
       returning id
     `, [Number(req.body.po_line_id), qtyReceived, req.body.warehouse?.trim(), req.body.location?.trim(), req.body.osd_status || "OK", req.body.osd_notes || ""]);
+    await recalcPoStatus(client, poId);
+    if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
     await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `po=${poId};po_line=${req.body.po_line_id}`);
   });
   res.redirect(`/po/${poId}/receive`);
@@ -4812,11 +4885,19 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
     if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
     await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
     if (String(req.body.mode || "") === "po") {
+      const poLine = (await client.query(`
+        select po.id as po_id, po.rfq_id
+        from po_lines pl
+        join purchase_orders po on po.id = pl.po_id
+        where pl.id = $1
+      `, [Number(req.body.po_line_id)])).rows[0];
       const insert = await client.query(`
         insert into receipts (mrr_log_id, po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
         values ($1, $2, $3, $4, $5, $6, $7)
         returning id
       `, [mrrId, Number(req.body.po_line_id), qtyReceived, req.body.warehouse?.trim(), req.body.location?.trim(), req.body.osd_status || "OK", req.body.osd_notes || ""]);
+      if (poLine?.po_id) await recalcPoStatus(client, poLine.po_id);
+      if (poLine?.rfq_id) await recalcRfqStatus(client, poLine.rfq_id);
       await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `mrr=${mrr.mrr_number};po_line=${req.body.po_line_id}`);
     } else {
       const result = await client.query(`

@@ -74,9 +74,17 @@ create table if not exists rfqs (
   rfq_no text not null unique,
   project_name text not null,
   due_date date,
-  status text not null default 'OPEN',
+  status text not null default 'SEND_FOR_QUOTES',
   created_at timestamptz not null default now()
 );
+
+update rfqs
+set status = case
+  when status = 'OPEN' then 'SEND_FOR_QUOTES'
+  when status = 'CLOSED' then 'RECEIVED'
+  else status
+end
+where status in ('OPEN', 'CLOSED');
 
 create table if not exists bom_headers (
   id bigserial primary key,
