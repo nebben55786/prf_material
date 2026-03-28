@@ -2717,7 +2717,7 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
   const materialItems = materialItemsRes.rows;
   const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
   const activeQuoteVendorId = selectedVendorId || String(vendors[0]?.id || "");
-  const activeQuoteVendorName = vendorNameMap.get(Number(activeQuoteVendorId)) || "";
+  const activeQuoteVendorName = vendors.find((vendor) => String(vendor.id) === activeQuoteVendorId)?.name || "";
   const materialItemRows = materialItems
     .map((item) => `<tr>
       <td>${esc(item.item_code)}</td>
@@ -2787,7 +2787,7 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
       <td>${esc(awardSummary)}</td>
       <td>${esc(poRefs)}</td>
       <td><div class="actions">
-        <a class="btn btn-secondary" href="/rfq-item/${item.id}/award">${item.award_status === "AWARDED" ? "Change Award" : "Award"}</a>
+        <button class="btn btn-secondary" type="submit" name="award_item_id" value="${item.id}">${item.award_status === "AWARDED" ? "Change Award" : "Award"}</button>
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/edit">Edit</a>
         ${item.award_status === "AWARDED" ? `<form method="post" action="/rfq-item/${item.id}/award/clear"><button class="btn btn-secondary" type="submit">Clear Award</button></form>` : ""}
         <form method="post" action="/rfq-item/${item.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>
@@ -2884,19 +2884,13 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
 
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</h1>
-    <div class="card">
-      <form method="get" action="/rfq/${rfqId}" class="stack">
-        <div class="grid" style="grid-template-columns: minmax(0, 360px) auto auto 1fr;">
-          <div><label>Quote Vendor</label><select name="quote_vendor_id">${quoteVendorOptions}</select></div>
-          <div style="align-self:end;"><button type="submit">Apply Vendor</button></div>
-          <div style="align-self:end;"><span class="chip">${esc(activeQuoteVendorName || "No vendor selected")}</span></div>
-        </div>
-      </form>
-    </div>
     <div class="card scroll">
       <h3>RFQ Items</h3>
       <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
-        <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
+        <div class="grid" style="grid-template-columns: minmax(0, 360px) 1fr;">
+          <div><label>Quote Vendor</label><select name="vendor_id">${quoteVendorOptions}</select></div>
+          <div style="align-self:end;"><span class="muted">Select the vendor once, then enter unit price and lead time by line. Press <strong>Award</strong> on a row to award it to the selected vendor without opening another page.</span></div>
+        </div>
         <table>
           <tr><th>Item</th><th>Description</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Thk</th><th>Notes</th><th>Unit Price</th><th>Lead Days</th><th>Award Status</th><th>Award Summary</th><th>Issued PO</th><th>Actions</th></tr>
           ${itemRows.join("") || `<tr><td colspan="14" class="muted">No RFQ items loaded yet.</td></tr>`}
@@ -3472,10 +3466,11 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireRole(["admin", "buyer"]), a
   if (!vendorId) throw new Error("Select a quote vendor first.");
   await withTransaction(async (client) => {
     const items = (await client.query("select id, awarded_vendor_id, award_status from rfq_items where rfq_id = $1", [rfqId])).rows;
+    const awardItemId = req.body.award_item_id ? Number(req.body.award_item_id) : null;
     for (const item of items) {
       const unitPriceRaw = String(req.body[`unit_price_${item.id}`] || "").trim();
       const leadDaysRaw = String(req.body[`lead_days_${item.id}`] || "").trim();
-      if (!unitPriceRaw && !leadDaysRaw) continue;
+      if (!unitPriceRaw && !leadDaysRaw && awardItemId !== item.id) continue;
       const unitPrice = num(unitPriceRaw, NaN);
       const leadDays = leadDaysRaw ? num(leadDaysRaw) : 0;
       if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
@@ -3501,6 +3496,23 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireRole(["admin", "buyer"]), a
         createdBy: req.user.id
       });
       await auditLog(client, req.user.id, "upsert", "quote", item.id, `vendor=${vendorId}`);
+      if (awardItemId === item.id) {
+        await client.query(`
+          update rfq_items
+          set award_status = 'AWARDED',
+              awarded_vendor_id = $2,
+              awarded_unit_price = $3,
+              awarded_lead_days = $4,
+              awarded_at = now(),
+              awarded_by = $5,
+              updated_at = now()
+          where id = $1
+        `, [item.id, vendorId, unitPrice, leadDays, req.user.id]);
+        await auditLog(client, req.user.id, "award", "rfq_item", item.id, `vendor=${vendorId}`);
+      }
+    }
+    if (awardItemId) {
+      await recalcRfqStatus(client, rfqId);
     }
   });
   res.redirect(`/rfq/${rfqId}?quote_vendor_id=${encodeURIComponent(String(vendorId))}`);
