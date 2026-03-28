@@ -174,6 +174,28 @@ function layout(title, body, user) {
       function formatPhoneOnBlur(input) {
         applyPhoneMask(input);
       }
+      function validateBulkAward(form) {
+        if (!form) return true;
+        const prices = Array.from(form.querySelectorAll('input[name^="unit_price_"]'));
+        let populatedCount = 0;
+        for (const priceInput of prices) {
+          const itemId = priceInput.name.replace("unit_price_", "");
+          const leadInput = form.querySelector('input[name="lead_days_' + itemId + '"]');
+          const priceValue = String(priceInput.value || "").trim();
+          const leadValue = String(leadInput ? leadInput.value || "" : "").trim();
+          if (!priceValue) continue;
+          populatedCount += 1;
+          if (!leadValue) {
+            window.alert("Lead time is required for every row with a unit price before awarding.");
+            return false;
+          }
+        }
+        if (!populatedCount) {
+          window.alert("Enter at least one unit price before awarding.");
+          return false;
+        }
+        return true;
+      }
       function filterTableRows(inputId, tableId) {
         const input = document.getElementById(inputId);
         const table = document.getElementById(tableId);
@@ -2787,7 +2809,6 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
       <td>${esc(awardSummary)}</td>
       <td>${esc(poRefs)}</td>
       <td><div class="actions">
-        <button class="btn btn-secondary" type="submit" name="award_item_id" value="${item.id}">${item.award_status === "AWARDED" ? "Change Award" : "Award"}</button>
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/edit">Edit</a>
         ${item.award_status === "AWARDED" ? `<form method="post" action="/rfq-item/${item.id}/award/clear"><button class="btn btn-secondary" type="submit">Clear Award</button></form>` : ""}
         <form method="post" action="/rfq-item/${item.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>
@@ -2889,13 +2910,16 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
       <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
         <div class="grid" style="grid-template-columns: minmax(0, 360px) 1fr;">
           <div><label>Quote Vendor</label><select name="vendor_id">${quoteVendorOptions}</select></div>
-          <div style="align-self:end;"><span class="muted">Select the vendor once, then enter unit price and lead time by line. Press <strong>Award</strong> on a row to award it to the selected vendor without opening another page.</span></div>
+          <div style="align-self:end;"><span class="muted">Select the vendor once, then enter unit price and lead time by line. Use <strong>Award Populated Rows</strong> to award every row that has a unit price.</span></div>
         </div>
         <table>
           <tr><th>Item</th><th>Description</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Thk</th><th>Notes</th><th>Unit Price</th><th>Lead Days</th><th>Award Status</th><th>Award Summary</th><th>Issued PO</th><th>Actions</th></tr>
           ${itemRows.join("") || `<tr><td colspan="14" class="muted">No RFQ items loaded yet.</td></tr>`}
         </table>
-        <div class="actions"><button type="submit">Save ${esc(activeQuoteVendorName || "Vendor")} Quotes</button></div>
+        <div class="actions">
+          <button type="submit">Save ${esc(activeQuoteVendorName || "Vendor")} Quotes</button>
+          <button type="submit" name="award_all" value="1" onclick="return validateBulkAward(this.form)">Award Populated Rows</button>
+        </div>
       </form>
     </div>
     ${poCount === 0 ? addItemCard : ""}
@@ -3466,16 +3490,20 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireRole(["admin", "buyer"]), a
   if (!vendorId) throw new Error("Select a quote vendor first.");
   await withTransaction(async (client) => {
     const items = (await client.query("select id, awarded_vendor_id, award_status from rfq_items where rfq_id = $1", [rfqId])).rows;
-    const awardItemId = req.body.award_item_id ? Number(req.body.award_item_id) : null;
+    const awardAll = String(req.body.award_all || "") === "1";
+    let awardedCount = 0;
     for (const item of items) {
       const unitPriceRaw = String(req.body[`unit_price_${item.id}`] || "").trim();
       const leadDaysRaw = String(req.body[`lead_days_${item.id}`] || "").trim();
-      if (!unitPriceRaw && !leadDaysRaw && awardItemId !== item.id) continue;
+      if (!unitPriceRaw && !leadDaysRaw) continue;
       const unitPrice = num(unitPriceRaw, NaN);
-      const leadDays = leadDaysRaw ? num(leadDaysRaw) : 0;
       if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
         throw new Error(`Unit price for RFQ item ${item.id} must be greater than zero.`);
       }
+      if (awardAll && !leadDaysRaw) {
+        throw new Error(`Lead time is required for RFQ item ${item.id} before awarding.`);
+      }
+      const leadDays = leadDaysRaw ? num(leadDaysRaw) : 0;
       await client.query(`
         insert into quotes (rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
         values ($1, $2, $3, $4, now())
@@ -3496,7 +3524,7 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireRole(["admin", "buyer"]), a
         createdBy: req.user.id
       });
       await auditLog(client, req.user.id, "upsert", "quote", item.id, `vendor=${vendorId}`);
-      if (awardItemId === item.id) {
+      if (awardAll) {
         await client.query(`
           update rfq_items
           set award_status = 'AWARDED',
@@ -3509,9 +3537,11 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireRole(["admin", "buyer"]), a
           where id = $1
         `, [item.id, vendorId, unitPrice, leadDays, req.user.id]);
         await auditLog(client, req.user.id, "award", "rfq_item", item.id, `vendor=${vendorId}`);
+        awardedCount += 1;
       }
     }
-    if (awardItemId) {
+    if (awardAll) {
+      if (awardedCount === 0) throw new Error("Enter at least one populated unit price before awarding.");
       await recalcRfqStatus(client, rfqId);
     }
   });
