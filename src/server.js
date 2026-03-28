@@ -89,6 +89,7 @@ function layout(title, body, user) {
       .check-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 14px; }
       .check-option { display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 6px; padding: 4px 0; font-size: 12px; text-transform: uppercase; }
       .check-option input { width: 14px; height: 14px; margin: 0; justify-self: center; }
+      .inline-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
       .scroll { overflow-x: auto; }
       table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; }
       th, td { padding: 6px 7px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
@@ -631,6 +632,58 @@ async function getMaterialLogLookupOptions(kind) {
     order by value
   `, [kind]);
   return result.rows.map((row) => row.value);
+}
+
+async function getNextMrrNumber() {
+  const latest = (await query(`
+    select mrr_number
+    from mrr_logs
+    where coalesce(mrr_number, '') <> '' and mrr_number ~ '\\d+$'
+    order by ((regexp_match(mrr_number, '(\\d+)$'))[1])::bigint desc, id desc
+    limit 1
+  `)).rows[0];
+  const current = String(latest?.mrr_number || "").trim();
+  if (!current) return "MRR-000001";
+  const match = current.match(/^(.*?)(\d+)$/);
+  if (!match) return "MRR-000001";
+  const prefix = match[1];
+  const nextValue = String(Number(match[2]) + 1).padStart(match[2].length, "0");
+  return `${prefix}${nextValue}`;
+}
+
+async function syncMrrVendorsIntoVendorTable(client) {
+  await client.query(`
+    insert into vendors (name, contact_name, website, email, phone, categories)
+    select distinct trim(m.vendor_name), '', '', '', '', ''
+    from mrr_logs m
+    left join vendors v on lower(v.name) = lower(trim(m.vendor_name))
+    where trim(coalesce(m.vendor_name, '')) <> ''
+      and v.id is null
+  `);
+}
+
+async function syncOpiLogsFromMrr(client) {
+  await client.query(`
+    delete from opi_logs o
+    where not exists (
+      select 1
+      from mrr_logs m
+      where trim(coalesce(m.opi_number, '')) <> ''
+        and trim(m.opi_number) = o.opi_number
+    )
+  `);
+  await client.query(`
+    insert into opi_logs (opi_number, vendor_name, material_description, load_number, mrr_number, updated_at)
+    select distinct trim(m.opi_number), coalesce(m.vendor_name, ''), coalesce(m.material_description, ''), coalesce(m.load_number, ''), coalesce(m.mrr_number, ''), now()
+    from mrr_logs m
+    where trim(coalesce(m.opi_number, '')) <> ''
+    on conflict (opi_number) do update set
+      vendor_name = excluded.vendor_name,
+      material_description = excluded.material_description,
+      load_number = excluded.load_number,
+      mrr_number = excluded.mrr_number,
+      updated_at = now()
+  `);
 }
 
 async function ensureUniqueFmrContainer(client, containerNo, excludeId = null) {
@@ -3337,6 +3390,36 @@ app.get("/po", requireAuth, async (req, res) => {
   `, req.user));
 });
 
+app.get("/po/new", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const vendors = (await query("select id, name from vendors where is_active = true order by name")).rows;
+  const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
+  res.send(layout("Add PO", `
+    <h1>Add PO</h1>
+    <div class="card">
+      <form method="post" action="/po/add" class="stack">
+        <div class="grid">
+          <div><label>PO Number</label><input name="po_no" required /></div>
+          <div><label>Vendor</label><select name="vendor_id" required><option value="">Select vendor</option>${vendorOptions}</select></div>
+          <div><label>Status</label><select name="status"><option value="OPEN">OPEN</option><option value="CLOSED">CLOSED</option></select></div>
+        </div>
+        <div class="actions"><button type="submit">Add PO</button><a class="btn btn-secondary" href="/po">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/po/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    const result = await client.query(`
+      insert into purchase_orders (po_no, vendor_id, rfq_id, status, updated_at)
+      values ($1, $2, null, $3, now())
+      returning id
+    `, [String(req.body.po_no || "").trim(), Number(req.body.vendor_id), req.body.status || "OPEN"]);
+    await auditLog(client, req.user.id, "create", "purchase_order", result.rows[0].id, String(req.body.po_no || "").trim());
+  });
+  res.redirect("/po");
+});
+
 app.get("/po/:id/edit", requireAuth, async (req, res) => {
   const [po, vendors] = await Promise.all([
     query(`
@@ -3536,6 +3619,7 @@ app.get("/material-logs", requireAuth, async (req, res) => {
       <div class="actions">
         <a class="btn btn-primary" href="/material-logs/mrr">MRR Log</a>
         <a class="btn btn-primary" href="/material-logs/fmr">FMR Log</a>
+        <a class="btn btn-primary" href="/material-logs/opi">OPI Log</a>
         <a class="btn btn-primary" href="/material-logs/issue-report">Issue Report</a>
       </div>
     </div>
@@ -3582,11 +3666,15 @@ app.get("/material-logs/mrr", requireAuth, async (req, res) => {
 });
 
 app.get("/material-logs/mrr/new", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
-  const [disciplines, vendors, pos, receivers] = await Promise.all([
+  await withTransaction(async (client) => {
+    await syncMrrVendorsIntoVendorTable(client);
+  });
+  const [disciplines, vendors, pos, receivers, nextMrrNumber] = await Promise.all([
     getMaterialLogLookupOptions("discipline"),
     getMaterialLogLookupOptions("vendor_name"),
     getMaterialLogLookupOptions("po_number"),
-    getMaterialLogLookupOptions("received_by")
+    getMaterialLogLookupOptions("received_by"),
+    getNextMrrNumber()
   ]);
   const optionList = (values, placeholder) => [`<option value="">${esc(placeholder)}</option>`]
     .concat(values.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`))
@@ -3596,16 +3684,16 @@ app.get("/material-logs/mrr/new", requireAuth, requireRole(["admin", "buyer", "w
     <div class="card">
       <form method="post" action="/material-logs/mrr/add" class="stack">
         <div class="grid">
-          <div><label>MRR Number</label><input name="mrr_number" required /></div>
+          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly /></div>
           <div><label>Discipline</label><select name="discipline">${optionList(disciplines, "Select discipline")}</select></div>
-          <div><label>Vendor</label><select name="vendor_name">${optionList(vendors, "Select vendor")}</select></div>
-          <div><label>PO</label><select name="po_number">${optionList(pos, "Select PO")}</select></div>
+          <div><label>Vendor</label><div class="inline-field"><select name="vendor_name">${optionList(vendors, "Select vendor")}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
+          <div><label>PO</label><div class="inline-field"><select name="po_number">${optionList(pos, "Select PO")}</select><a class="btn btn-secondary" href="/po/new">Add PO</a></div></div>
           <div><label>Pick Ticket</label><input name="pick_ticket" /></div>
-          <div><label>Received Date</label><input name="received_date" /></div>
-          <div><label>Received By</label><select name="received_by">${optionList(receivers, "Select received by")}</select></div>
+          <div><label>Received Date</label><input type="date" name="received_date" /></div>
+          <div><label>Received By</label><div class="inline-field"><select name="received_by">${optionList(receivers, "Select received by")}</select><a class="btn btn-secondary" href="/material-logs/received-by/new">Add Person</a></div></div>
           <div><label>Load #</label><input name="load_number" /></div>
           <div><label>OPI #</label><input name="opi_number" /></div>
-          <div><label>OPI Date</label><input name="opi_date" /></div>
+          <div><label>OPI Date</label><input type="date" name="opi_date" /></div>
         </div>
         <div><label>Material Description</label><textarea name="material_description"></textarea></div>
         <div><label>Notes</label><textarea name="notes"></textarea></div>
@@ -3654,6 +3742,41 @@ app.get("/material-logs/fmr", requireAuth, async (req, res) => {
   `, req.user));
 });
 
+app.get("/material-logs/opi", requireAuth, async (req, res) => {
+  await withTransaction(async (client) => {
+    await syncOpiLogsFromMrr(client);
+  });
+  const q = String(req.query.q || "").trim();
+  const rows = (await query(`
+    select id, opi_number, vendor_name, material_description, load_number, mrr_number
+    from opi_logs
+    ${q ? "where (coalesce(opi_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(material_description, '') ilike $1 or coalesce(load_number, '') ilike $1 or coalesce(mrr_number, '') ilike $1)" : ""}
+    order by id desc
+    limit 300
+  `, q ? [`%${q}%`] : [])).rows;
+  const tableRows = rows.map((row) => `<tr>
+    <td>${esc(row.opi_number)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.material_description)}</td>
+    <td>${esc(row.load_number)}</td>
+    <td>${esc(row.mrr_number)}</td>
+  </tr>`).join("");
+  res.send(layout("OPI Log", `
+    <h1>OPI Log</h1>
+    <div class="card">
+      <form method="get" action="/material-logs/opi" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto;">
+          <div><label>Filter OPI Log</label><input name="q" value="${esc(q)}" placeholder="OPI, vendor, description, load, MRR" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+        </div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>OPI #</th><th>Vendor</th><th>Description</th><th>Load #</th><th>MRR #</th></tr>${tableRows || `<tr><td colspan="5" class="muted">No OPI rows found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
 app.get("/material-logs/fmr/new", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
   res.send(layout("Add FMR", `
     <h1>Add FMR</h1>
@@ -3677,6 +3800,31 @@ app.get("/material-logs/fmr/new", requireAuth, requireRole(["admin", "buyer", "w
       </form>
     </div>
   `, req.user));
+});
+
+app.get("/material-logs/received-by/new", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  const values = await getMaterialLogLookupOptions("received_by");
+  const rows = values.map((value) => `<tr><td>${esc(value)}</td></tr>`).join("");
+  res.send(layout("Add Received By", `
+    <h1>Add Received By</h1>
+    <div class="card">
+      <form method="post" action="/material-logs/received-by/add" class="stack">
+        <div><label>Name</label><input name="value" required /></div>
+        <div class="actions"><button type="submit">Add Person</button><a class="btn btn-secondary" href="/material-logs/mrr/new">Back to Add MRR</a></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>Existing Names</th></tr>${rows || `<tr><td class="muted">No names saved yet.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/material-logs/received-by/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    await saveMaterialLogLookup(client, "received_by", req.body.value);
+    await auditLog(client, req.user.id, "create", "material_log_lookup", "received_by", String(req.body.value || "").trim());
+  });
+  res.redirect("/material-logs/mrr/new");
 });
 
 app.get("/material-logs/issue-report", requireAuth, async (req, res) => {
@@ -3911,6 +4059,8 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
           textValue(row.opi_date)
         ]);
       }
+      await syncMrrVendorsIntoVendorTable(client);
+      await syncOpiLogsFromMrr(client);
     } else if (logType === "fmr") {
       for (const row of rows) {
         const fmrNumber = textValue(row.fmr);
@@ -4007,6 +4157,7 @@ app.post("/material-logs/receiving/add", requireAuth, requireRole(["admin", "buy
 
 app.post("/material-logs/mrr/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
   await withTransaction(async (client) => {
+    const mrrNumber = await getNextMrrNumber();
     const result = await client.query(`
       insert into mrr_logs (
         discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
@@ -4014,7 +4165,7 @@ app.post("/material-logs/mrr/add", requireAuth, requireRole(["admin", "buyer", "
       returning id
     `, [
       req.body.discipline?.trim() || "",
-      req.body.mrr_number?.trim(),
+      mrrNumber,
       req.body.vendor_name?.trim() || "",
       req.body.po_number?.trim() || "",
       req.body.pick_ticket?.trim() || "",
@@ -4030,7 +4181,9 @@ app.post("/material-logs/mrr/add", requireAuth, requireRole(["admin", "buyer", "
     await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name);
     await saveMaterialLogLookup(client, "po_number", req.body.po_number);
     await saveMaterialLogLookup(client, "received_by", req.body.received_by);
-    await auditLog(client, req.user.id, "create", "mrr_log", result.rows[0].id, req.body.mrr_number?.trim() || "");
+    await syncMrrVendorsIntoVendorTable(client);
+    await syncOpiLogsFromMrr(client);
+    await auditLog(client, req.user.id, "create", "mrr_log", result.rows[0].id, mrrNumber);
   });
   res.redirect("/material-logs/mrr");
 });
@@ -4124,30 +4277,42 @@ app.post("/material-logs/receiving/:id/edit", requireAuth, requireRole(["admin",
 });
 
 app.get("/material-logs/mrr/:id/edit", requireAuth, async (req, res) => {
+  await withTransaction(async (client) => {
+    await syncMrrVendorsIntoVendorTable(client);
+  });
   const row = (await query("select * from mrr_logs where id = $1", [req.params.id])).rows[0];
   if (!row) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR log row not found.</h3></div>`, req.user));
     return;
   }
+  const [disciplines, vendors, pos, receivers] = await Promise.all([
+    getMaterialLogLookupOptions("discipline"),
+    getMaterialLogLookupOptions("vendor_name"),
+    getMaterialLogLookupOptions("po_number"),
+    getMaterialLogLookupOptions("received_by")
+  ]);
+  const optionList = (values, selectedValue, placeholder) => [`<option value="">${esc(placeholder)}</option>`]
+    .concat(values.map((value) => `<option value="${esc(value)}" ${value === selectedValue ? "selected" : ""}>${esc(value)}</option>`))
+    .join("");
   res.send(layout("Edit MRR Log", `
     <h1>Edit MRR Header</h1>
     <div class="card">
       <form method="post" action="/material-logs/mrr/${row.id}/edit" class="stack">
         <div class="grid">
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(row.mrr_number)}" required /></div>
-          <div><label>Discipline</label><input name="discipline" value="${esc(row.discipline)}" /></div>
-          <div><label>Vendor</label><input name="vendor_name" value="${esc(row.vendor_name)}" /></div>
-          <div><label>PO</label><input name="po_number" value="${esc(row.po_number)}" /></div>
+          <div><label>Discipline</label><select name="discipline">${optionList(disciplines, row.discipline, "Select discipline")}</select></div>
+          <div><label>Vendor</label><div class="inline-field"><select name="vendor_name">${optionList(vendors, row.vendor_name, "Select vendor")}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
+          <div><label>PO</label><div class="inline-field"><select name="po_number">${optionList(pos, row.po_number, "Select PO")}</select><a class="btn btn-secondary" href="/po/new">Add PO</a></div></div>
           <div><label>Pick Ticket</label><input name="pick_ticket" value="${esc(row.pick_ticket)}" /></div>
-          <div><label>Received Date</label><input name="received_date" value="${esc(row.received_date)}" /></div>
-          <div><label>Received By</label><input name="received_by" value="${esc(row.received_by)}" /></div>
+          <div><label>Received Date</label><input type="date" name="received_date" value="${esc(row.received_date)}" /></div>
+          <div><label>Received By</label><div class="inline-field"><select name="received_by">${optionList(receivers, row.received_by, "Select received by")}</select><a class="btn btn-secondary" href="/material-logs/received-by/new">Add Person</a></div></div>
           <div><label>Load #</label><input name="load_number" value="${esc(row.load_number)}" /></div>
           <div><label>OPI #</label><input name="opi_number" value="${esc(row.opi_number)}" /></div>
-          <div><label>OPI Date</label><input name="opi_date" value="${esc(row.opi_date)}" /></div>
+          <div><label>OPI Date</label><input type="date" name="opi_date" value="${esc(row.opi_date)}" /></div>
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
         <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
-        <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
+        <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
       </form>
     </div>
   `, req.user));
@@ -4179,6 +4344,8 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireRole(["admin", "buye
     await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name);
     await saveMaterialLogLookup(client, "po_number", req.body.po_number);
     await saveMaterialLogLookup(client, "received_by", req.body.received_by);
+    await syncMrrVendorsIntoVendorTable(client);
+    await syncOpiLogsFromMrr(client);
     await auditLog(client, req.user.id, "update", "mrr_log", req.params.id, req.body.mrr_number?.trim() || "");
   });
   res.redirect("/material-logs/mrr");

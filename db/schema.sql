@@ -461,6 +461,17 @@ create table if not exists fmr_logs (
   unique (fmr_number, container_no, fluor_id)
 );
 
+create table if not exists opi_logs (
+  id bigserial primary key,
+  opi_number text not null unique,
+  vendor_name text not null default '',
+  material_description text not null default '',
+  load_number text not null default '',
+  mrr_number text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create index if not exists idx_po_po_no on purchase_orders(po_no);
 create index if not exists idx_po_vendor_id on purchase_orders(vendor_id);
 create index if not exists idx_po_rfq_id on purchase_orders(rfq_id);
@@ -485,3 +496,5 @@ create index if not exists idx_material_receiving_logs_container_no on material_
 create index if not exists idx_mrr_logs_mrr_number on mrr_logs(mrr_number);
 create index if not exists idx_fmr_logs_fmr_number on fmr_logs(fmr_number);
 create index if not exists idx_fmr_logs_container_no on fmr_logs(container_no);
+create index if not exists idx_opi_logs_opi_number on opi_logs(opi_number);
+create index if not exists idx_opi_logs_mrr_number on opi_logs(mrr_number);
