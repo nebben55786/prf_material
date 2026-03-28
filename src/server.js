@@ -3561,7 +3561,9 @@ app.get("/po", requireAuth, async (req, res) => {
   if (status) { params.push(status); where.push(`po.status = $${params.length}`); }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const pos = (await query(`
-        select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token, v.name as vendor, coalesce(r.rfq_no, '') as rfq_no
+        select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
+               v.name as vendor, coalesce(r.rfq_no, '') as rfq_no, coalesce(po.vendor_contact, '') as vendor_contact,
+               coalesce(po.freight_terms, '') as freight_terms, coalesce(po.ship_to, '') as ship_to, coalesce(po.buyer_name, '') as buyer_name
     from purchase_orders po
     join vendors v on v.id = po.vendor_id
     left join rfqs r on r.id = po.rfq_id
@@ -3570,34 +3572,23 @@ app.get("/po", requireAuth, async (req, res) => {
     limit 300
   `, params)).rows;
   const vendors = (await query("select id, name from vendors order by name")).rows;
-  const blocks = [];
-  for (const po of pos) {
-    const lines = (await query(`
-      select pl.id, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, pl.qty_ordered, pl.unit_price, pl.updated_at,
-             mi.item_code, mi.description,
-             coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as qty_received
-      from po_lines pl
-      join material_items mi on mi.id = pl.material_item_id
-      where pl.po_id = $1
-      order by pl.id
-    `, [po.id])).rows;
-    const lineRows = lines.map((line) => `<tr>
-      <td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(line.size_1 || "")}</td><td>${esc(line.size_2 || "")}</td>
-      <td>${esc(line.thk_1 || "")}</td><td>${esc(line.thk_2 || "")}</td><td>${esc(line.qty_ordered)}</td><td>$${Number(line.unit_price).toFixed(2)}</td>
-      <td>${esc(line.qty_received)}</td><td><a class="btn btn-secondary" href="/po-line/${line.id}/edit">Edit</a></td>
-    </tr>`).join("");
-    blocks.push(`
-      <div class="card">
-        <h3>${esc(po.po_no)} - ${esc(po.vendor)}</h3>
-        <p class="muted">RFQ: ${esc(po.rfq_no || "N/A")} | Status: ${esc(po.status)} | Created: ${esc(po.created_at)}</p>
-        <div class="actions" style="margin-bottom:12px;">
-          <a class="btn btn-secondary" href="/po/${po.id}/edit">Edit PO</a>
-          <form method="post" action="/po/${po.id}/delete"><button class="btn btn-danger" type="submit">Delete PO</button></form>
-        </div>
-        <div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty Ordered</th><th>Unit Price</th><th>Qty Received</th><th>Action</th></tr>${lineRows}</table></div>
+  const poRows = pos.map((po) => `<tr>
+    <td>${esc(po.po_no)}</td>
+    <td>${esc(po.vendor)}</td>
+    <td>${esc(po.rfq_no || "")}</td>
+    <td>${esc(po.vendor_contact || "")}</td>
+    <td>${esc(po.freight_terms || "")}</td>
+    <td>${esc(po.ship_to || "")}</td>
+    <td>${esc(po.buyer_name || "")}</td>
+    <td>${esc(po.status)}</td>
+    <td>${esc(po.created_at)}</td>
+    <td>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/po/${po.id}/edit">Edit</a>
+        <form method="post" action="/po/${po.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>
       </div>
-    `);
-  }
+    </td>
+  </tr>`).join("");
   const vendorOptions = [`<option value="">All Vendors</option>`]
     .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === vendorId ? "selected" : ""}>${esc(vendor.name)}</option>`)).join("");
   res.send(layout("POs", `
@@ -3616,7 +3607,9 @@ app.get("/po", requireAuth, async (req, res) => {
     <div class="card">
       <div class="actions"><a class="btn btn-primary" href="/po/import">Import Existing POs</a></div>
     </div>
-    ${blocks.join("") || `<div class="card"><p class="muted">No POs match the current filter.</p></div>`}
+    <div class="card scroll">
+      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="10" class="muted">No POs match the current filter.</td></tr>`}</table>
+    </div>
   `, req.user));
 });
 
