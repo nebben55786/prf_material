@@ -2266,16 +2266,14 @@ app.get("/rfq", requireAuth, async (req, res) => {
     )`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  const [rfqsRes, nextRfqNo, jobNumber] = await Promise.all([
+  const [rfqsRes] = await Promise.all([
     query(`
     select r.*
     from rfqs r
     ${whereSql}
     order by r.id desc
     limit 300
-  `, params),
-    getNextRfqNumber(),
-    getJobNumber()
+  `, params)
   ]);
   const rfqs = rfqsRes.rows;
   const vendorOptions = [`<option value="">All Vendors</option>`]
@@ -2290,12 +2288,6 @@ app.get("/rfq", requireAuth, async (req, res) => {
   res.send(layout("RFQs", `
     <h1>RFQs</h1>
     <div class="card">
-      <div class="actions" style="margin-bottom:12px;">
-        <span class="muted">${rfqs.length} result(s), max 300 shown</span>
-      </div>
-      <div class="card scroll" style="margin-bottom:12px;">
-        <table><tr><th>RFQ</th><th>Description</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="4" class="muted">No RFQs match the current filter.</td></tr>`}</table>
-      </div>
       <form method="get" action="/rfq" class="stack">
         <div class="grid-4">
           <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
@@ -2306,20 +2298,41 @@ app.get("/rfq", requireAuth, async (req, res) => {
         <div class="grid">
           <div><label>Quoted Vendor</label><select name="vendor_id">${vendorOptions}</select></div>
         </div>
-        <div class="muted">Use the filters above and press Enter to refresh the list.</div>
+        <div class="actions">
+          <button type="submit">Filter RFQs</button>
+          <a class="btn btn-secondary" href="/rfq">Clear</a>
+          <a class="btn btn-primary" href="/rfq/new">Create RFQ</a>
+          <span class="muted">${rfqs.length} result(s), max 300 shown</span>
+        </div>
       </form>
+      <div class="scroll" style="margin-top:12px;">
+        <table><tr><th>RFQ</th><th>Description</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="4" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+      </div>
     </div>
+  `, req.user));
+});
+
+app.get("/rfq/new", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const [nextRfqNo, jobNumber] = await Promise.all([
+    getNextRfqNumber(),
+    getJobNumber()
+  ]);
+  res.send(layout("Create RFQ", `
+    <h1>Create RFQ</h1>
     <div class="card">
       <form method="post" action="/rfq" class="stack">
         <div class="grid">
           <div><label>Job Number</label><input value="${esc(jobNumber)}" readonly /></div>
-        <div><label>Next RFQ Number</label><input value="${esc(nextRfqNo)}" readonly /></div>
+          <div><label>Next RFQ Number</label><input value="${esc(nextRfqNo)}" readonly /></div>
         </div>
         <div class="grid">
           <div><label>Description</label><input name="project_name" required /></div>
           <div><label>Due Date</label><input type="date" name="due_date" /></div>
         </div>
-        <div class="actions"><button type="submit">Create RFQ</button></div>
+        <div class="actions">
+          <button type="submit">Create RFQ</button>
+          <a class="btn btn-secondary" href="/rfq">Back</a>
+        </div>
       </form>
     </div>
   `, req.user));
