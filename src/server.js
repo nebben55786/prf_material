@@ -4344,6 +4344,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
     <td>${esc(po.created_at)}</td>
     <td>
       <div class="actions">
+        <a class="btn btn-secondary" href="/po/${po.id}/receive">Receive</a>
         <a class="btn btn-secondary" href="/po/${po.id}/edit">Edit</a>
         <form method="post" action="/po/${po.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>
       </div>
@@ -4488,6 +4489,100 @@ app.post("/po/add", requireAuth, requirePermission("pos", "edit"), async (req, r
   res.redirect("/po");
 });
 
+app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
+  const poId = Number(req.params.id);
+  const [po, warehouseOptions, locationMap] = await Promise.all([
+    query(`
+      select po.id, po.po_no, coalesce(po.description, '') as description, v.name as vendor_name
+      from purchase_orders po
+      join vendors v on v.id = po.vendor_id
+      where po.id = $1
+    `, [poId]),
+    getWarehouseOptions(),
+    getWarehouseLocationMap()
+  ]);
+  const record = po.rows[0];
+  if (!record) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>PO not found.</h3></div>`, req.user));
+    return;
+  }
+  const openLines = (await query(`
+    select pl.id, mi.item_code, mi.description, pl.qty_ordered, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2,
+           coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as qty_received
+    from po_lines pl
+    join material_items mi on mi.id = pl.material_item_id
+    where pl.po_id = $1
+      and coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) < pl.qty_ordered
+    order by pl.id
+  `, [poId])).rows;
+  const history = (await query(`
+    select r.received_at, mi.item_code, mi.description, r.qty_received, r.warehouse, r.location, r.osd_status, r.osd_notes
+    from receipts r
+    join po_lines pl on pl.id = r.po_line_id
+    join material_items mi on mi.id = pl.material_item_id
+    where pl.po_id = $1
+    order by r.id desc
+    limit 30
+  `, [poId])).rows;
+  const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(line.qty_ordered)} | Rec ${esc(line.qty_received)} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`).join("");
+  const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
+    .join("");
+  const historyRows = history.map((row) => `<tr>
+    <td>${esc(row.received_at)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.qty_received)}</td>
+    <td>${esc(row.warehouse)}</td>
+    <td>${esc(row.location)}</td>
+    <td>${esc(row.osd_status)}</td>
+    <td>${esc(row.osd_notes || "")}</td>
+  </tr>`).join("");
+  res.send(layout("Receive PO", `
+    <h1>Receive PO ${esc(record.po_no)}</h1>
+    <div class="card">
+      <div class="stats">
+        <div class="stat"><div>Vendor</div><strong>${esc(record.vendor_name)}</strong></div>
+        <div class="stat"><div>Description</div><strong>${esc(record.description || "")}</strong></div>
+        <div class="stat"><div>Open Lines</div><strong>${openLines.length}</strong></div>
+      </div>
+    </div>
+    <div class="card">
+      <form method="post" action="/po/${record.id}/receive" class="stack">
+        <div><label>PO Line</label><select name="po_line_id" required><option value="">Select open PO line</option>${lineOptions}</select></div>
+        <div class="grid">
+          <div><label>Qty Received</label><input name="qty_received" required inputmode="decimal" /></div>
+          <div><label>Warehouse</label><select id="po-receive-warehouse-${record.id}" name="warehouse" required onchange='syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
+          <div><label>Location</label><select id="po-receive-location-${record.id}" name="location" data-placeholder="Select location" required><option value="">Select location</option></select></div>
+          <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
+        </div>
+        <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
+        <div class="actions"><button type="submit">Post Receipt</button><a class="btn btn-secondary" href="/po">Back</a></div>
+      </form>
+      <script>syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${JSON.stringify(locationMap)});</script>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>Received</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>OS&D</th><th>Notes</th></tr>${historyRows || `<tr><td colspan="8" class="muted">No receipts posted yet for this PO.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
+  const poId = Number(req.params.id);
+  await withTransaction(async (client) => {
+    const qtyReceived = Number(req.body.qty_received || 0);
+    if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
+    const insert = await client.query(`
+      insert into receipts (po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
+      values ($1, $2, $3, $4, $5, $6)
+      returning id
+    `, [Number(req.body.po_line_id), qtyReceived, req.body.warehouse?.trim(), req.body.location?.trim(), req.body.osd_status || "OK", req.body.osd_notes || ""]);
+    await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `po=${poId};po_line=${req.body.po_line_id}`);
+  });
+  res.redirect(`/po/${poId}/receive`);
+});
+
 app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   const [po, vendors] = await Promise.all([
     query(`
@@ -4587,23 +4682,6 @@ app.post("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), asy
 });
 
 app.get("/receive", requireAuth, requirePermission("receiving", "view"), async (req, res) => {
-  const q = String(req.query.q || "").trim();
-  const hasPo = String(req.query.has_po || "").trim();
-  const params = [];
-  const where = [];
-  if (q) {
-    params.push(`%${q}%`);
-    where.push(`(
-      coalesce(m.mrr_number, '') ilike $${params.length}
-      or coalesce(m.po_number, '') ilike $${params.length}
-      or coalesce(m.vendor_name, '') ilike $${params.length}
-      or coalesce(m.material_description, '') ilike $${params.length}
-      or coalesce(m.received_by, '') ilike $${params.length}
-    )`);
-  }
-  if (hasPo === "yes") where.push(`coalesce(m.po_number, '') <> ''`);
-  if (hasPo === "no") where.push(`coalesce(m.po_number, '') = ''`);
-  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const rows = (await query(`
     select
       m.id,
@@ -4621,20 +4699,8 @@ app.get("/receive", requireAuth, requirePermission("receiving", "view"), async (
         where r.mrr_log_id = m.id
       ), 0) as receipt_count
     from mrr_logs m
-    left join purchase_orders po on po.po_no = m.po_number
-    ${whereSql}
     order by m.id desc
     limit 300
-  `, params)).rows;
-  const history = (await query(`
-    select r.received_at, m.mrr_number, po.po_no, mi.item_code, mi.description, r.qty_received, r.warehouse, r.location, r.osd_status, r.osd_notes
-    from receipts r
-    join po_lines pl on pl.id = r.po_line_id
-    join purchase_orders po on po.id = pl.po_id
-    join material_items mi on mi.id = pl.material_item_id
-    left join mrr_logs m on m.id = r.mrr_log_id
-    order by r.id desc
-    limit 30
   `)).rows;
   const mrrRows = rows.map((row) => `<tr>
     <td>${esc(row.mrr_number)}</td>
@@ -4646,41 +4712,17 @@ app.get("/receive", requireAuth, requirePermission("receiving", "view"), async (
     <td>${esc(row.receipt_count)}</td>
     <td>
       <div class="actions">
-        <a class="btn btn-secondary" href="/receive/${row.id}">${row.po_id ? "Receive Against PO" : "Receive Without PO"}</a>
         <a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit MRR</a>
       </div>
     </td>
   </tr>`).join("");
-  const historyRows = history.map((row) => `<tr>
-    <td>${esc(row.received_at)}</td>
-    <td>${esc(row.mrr_number || "")}</td>
-    <td>${esc(row.po_no)}</td>
-    <td>${esc(row.item_code)}</td>
-    <td>${esc(row.description)}</td>
-    <td>${esc(row.qty_received)}</td>
-    <td>${esc(row.warehouse)}</td>
-    <td>${esc(row.location)}</td>
-    <td>${esc(row.osd_status)}</td>
-    <td>${esc(row.osd_notes || "")}</td>
-  </tr>`).join("");
   res.send(layout("Receiving", `
     <h1>Receiving</h1>
     <div class="card">
-      <p class="muted">Receiving now starts from the MRR log. Most receipts should be posted against the PO tied to the MRR. If an MRR has no PO yet, you can still log the receipt as a no-PO exception.</p>
-      <form method="get" action="/receive" class="stack">
-        <div class="grid" style="grid-template-columns: 1fr 220px;">
-          <div><label>Filter MRRs</label><input name="q" value="${esc(q)}" placeholder="MRR, PO, vendor, description, received by" /></div>
-          <div><label>PO Status</label><select name="has_po"><option value="" ${!hasPo ? "selected" : ""}>All MRRs</option><option value="yes" ${hasPo === "yes" ? "selected" : ""}>Has PO</option><option value="no" ${hasPo === "no" ? "selected" : ""}>No PO</option></select></div>
-        </div>
-        <div class="actions"><button type="submit">Apply Filter</button><a class="btn btn-secondary" href="/receive">Clear</a></div>
-      </form>
+      <div class="actions"><a class="btn btn-primary" href="/material-logs/mrr/new">Create New MRR</a></div>
     </div>
     <div class="card scroll">
       <table><tr><th>MRR #</th><th>PO</th><th>Vendor</th><th>Description</th><th>Received Date</th><th>Received By</th><th>Receipts</th><th>Actions</th></tr>${mrrRows || `<tr><td colspan="8" class="muted">No MRR rows found.</td></tr>`}</table>
-    </div>
-    <div class="card scroll">
-      <h3>Recent Posted Receipts</h3>
-      <table><tr><th>Received</th><th>MRR</th><th>PO</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>OS&D</th><th>Notes</th></tr>${historyRows || `<tr><td colspan="10" class="muted">No receipts posted yet.</td></tr>`}</table>
     </div>
   `, req.user));
 });
