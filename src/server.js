@@ -265,7 +265,7 @@ function layout(title, body, user) {
           <div class="brand">Material Control</div>
           ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
         </div>
-        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/bom">BOMs</a><a href="/requisitions">Requisitions</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a>${user.role === "admin" ? `<a href="/settings">Settings</a>` : ""}<a href="/logout">Logout</a></nav>` : ""}
+        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/bom">BOMs</a><a href="/requisitions">Requisitions</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a><a href="/material-logs">Material Logs</a>${user.role === "admin" ? `<a href="/settings">Settings</a>` : ""}<a href="/logout">Logout</a></nav>` : ""}
       </div>
       ${body}
     </div>
@@ -535,6 +535,66 @@ async function addImportBatchError(client, batchId, rowNumber, errorCode, messag
     insert into import_batch_errors (batch_id, row_number, error_code, message, raw_payload)
     values ($1, $2, $3, $4, $5::jsonb)
   `, [batchId, rowNumber, errorCode, message, JSON.stringify(rawPayload || {})]);
+}
+
+function normalizeWorkbookHeader(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\r?\n/g, " ")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function textValue(value) {
+  if (value === undefined || value === null) return "";
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+  return String(value).trim();
+}
+
+function numberValue(value) {
+  const parsed = Number(String(value ?? "").replace(/,/g, "").trim());
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function workbookRowsFromSheet(workbook, sheetName, headerRowIndex) {
+  const sheet = workbook.Sheets[sheetName];
+  if (!sheet) return [];
+  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
+  const headerRow = matrix[headerRowIndex] || [];
+  const headers = headerRow.map(normalizeWorkbookHeader);
+  const rows = [];
+  for (let index = headerRowIndex + 1; index < matrix.length; index += 1) {
+    const rawRow = matrix[index] || [];
+    const row = {};
+    let hasValue = false;
+    headers.forEach((header, colIndex) => {
+      if (!header) return;
+      const cell = rawRow[colIndex];
+      if (cell !== "" && cell !== null && cell !== undefined) hasValue = true;
+      row[header] = cell;
+    });
+    if (hasValue) rows.push(row);
+  }
+  return rows;
+}
+
+function importRowsFromWorkbook(fileBuffer, logType) {
+  const workbook = XLSX.read(fileBuffer, { type: "buffer", cellDates: true });
+  if (logType === "receiving") {
+    return workbookRowsFromSheet(workbook, workbook.SheetNames.includes("Table_Receiving") ? "Table_Receiving" : "Material Receiving", workbook.SheetNames.includes("Table_Receiving") ? 0 : 1);
+  }
+  if (logType === "mrr") {
+    return workbookRowsFromSheet(workbook, workbook.SheetNames.includes("MRR_Log_Table") ? "MRR_Log_Table" : "MRR Log", workbook.SheetNames.includes("MRR_Log_Table") ? 0 : 1);
+  }
+  if (logType === "fmr") {
+    return workbookRowsFromSheet(workbook, "FMR Log", 4);
+  }
+  throw new Error("Unsupported log type.");
+}
+
+function formatTimestamp(value) {
+  return textValue(value).replace("T", " ").replace("Z", "");
 }
 
 function signSession(payload) {
@@ -3394,6 +3454,693 @@ app.get("/inventory", requireAuth, async (req, res) => {
     <h1>Inventory by Location</h1>
     <div class="card scroll"><table><tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Warehouse</th><th>Location</th><th>Qty On Hand</th><th>Qty OS&D</th></tr>${tableRows}</table></div>
   `, req.user));
+});
+
+app.get("/material-logs", requireAuth, async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  const receivingParams = [];
+  const receivingWhere = [];
+  if (q) {
+    receivingParams.push(`%${q}%`);
+    receivingWhere.push(`(
+      coalesce(discipline, '') ilike $1 or
+      coalesce(vendor_name, '') ilike $1 or
+      coalesce(po_number, '') ilike $1 or
+      coalesce(item_code, '') ilike $1 or
+      coalesce(description, '') ilike $1 or
+      coalesce(container_no, '') ilike $1 or
+      coalesce(mrr_number, '') ilike $1 or
+      coalesce(fmr_number, '') ilike $1
+    )`);
+  }
+  const receivingWhereSql = receivingWhere.length ? `where ${receivingWhere.join(" and ")}` : "";
+  const [receiving, mrrs, fmrs] = await Promise.all([
+    query(`
+      select id, legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date
+      from material_receiving_logs
+      ${receivingWhereSql}
+      order by coalesce(legacy_row_id, id) desc
+      limit 60
+    `, receivingParams),
+    query(`
+      select id, discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by, load_number, opi_number
+      from mrr_logs
+      ${q ? "where (coalesce(mrr_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(po_number, '') ilike $1 or coalesce(material_description, '') ilike $1 or coalesce(opi_number, '') ilike $1)" : ""}
+      order by id desc
+      limit 60
+    `, q ? [`%${q}%`] : []),
+    query(`
+      select id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, mrr_number, request_date, need_date, pickup_location, pickup_date
+      from fmr_logs
+      ${q ? "where (coalesce(fmr_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(container_no, '') ilike $1 or coalesce(fluor_id, '') ilike $1 or coalesce(mrr_number, '') ilike $1)" : ""}
+      order by id desc
+      limit 60
+    `, q ? [`%${q}%`] : [])
+  ]);
+
+  const receivingRows = receiving.rows.map((row) => `<tr>
+    <td>${esc(row.legacy_row_id || row.id)}</td>
+    <td>${esc(row.discipline)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.received_qty)}</td>
+    <td>${esc(row.qty_unit)}</td>
+    <td>${esc(row.mrr_number)}</td>
+    <td>${esc(row.fmr_number)}</td>
+    <td>${esc(row.warehouse)}</td>
+    <td>${esc(row.location)}</td>
+    <td>${esc(row.recv_date)}</td>
+    <td><a class="btn btn-secondary" href="/material-logs/receiving/${row.id}/edit">Edit</a></td>
+  </tr>`).join("");
+  const mrrRows = mrrs.rows.map((row) => `<tr>
+    <td>${esc(row.mrr_number)}</td>
+    <td>${esc(row.discipline)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.pick_ticket)}</td>
+    <td>${esc(row.material_description)}</td>
+    <td>${esc(row.received_date)}</td>
+    <td>${esc(row.received_by)}</td>
+    <td>${esc(row.load_number)}</td>
+    <td>${esc(row.opi_number)}</td>
+    <td><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a></td>
+  </tr>`).join("");
+  const fmrRows = fmrs.rows.map((row) => `<tr>
+    <td>${esc(row.fmr_number)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.container_no)}</td>
+    <td>${esc(row.fluor_id)}</td>
+    <td>${esc(row.fluor_desc)}</td>
+    <td>${esc(row.mrr_number)}</td>
+    <td>${esc(row.request_date)}</td>
+    <td>${esc(row.need_date)}</td>
+    <td>${esc(row.pickup_location)}</td>
+    <td>${esc(row.pickup_date)}</td>
+    <td><a class="btn btn-secondary" href="/material-logs/fmr/${row.id}/edit">Edit</a></td>
+  </tr>`).join("");
+
+  res.send(layout("Material Logs", `
+    <h1>Material Logs</h1>
+    <div class="card">
+      <form method="get" action="/material-logs" class="stack">
+        <div class="grid">
+          <div><label>Search Across Receiving, MRR, and FMR</label><input name="q" value="${esc(q)}" placeholder="PO, MRR, FMR, vendor, item, container..." /></div>
+        </div>
+        <div class="actions"><button type="submit">Search</button><a class="btn btn-secondary" href="/material-logs">Clear</a></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Import Existing Workbook Data</h3>
+      <p class="muted">Upload one of your current workbook files to refresh this log in the app.</p>
+      <form method="post" enctype="multipart/form-data" action="/material-logs/import" class="stack">
+        <div class="grid">
+          <div><label>Log Type</label><select name="log_type"><option value="receiving">Material Receiving</option><option value="mrr">MRR Log</option><option value="fmr">FMR Log</option></select></div>
+          <div><label>Workbook File</label><input type="file" name="sheet" required /></div>
+        </div>
+        <div class="actions"><button type="submit">Import Workbook</button></div>
+      </form>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h3>Add Material Receiving Line</h3>
+        <form method="post" action="/material-logs/receiving/add" class="stack">
+          <div class="grid">
+            <div><label>Legacy ID</label><input name="legacy_row_id" /></div>
+            <div><label>Discipline</label><input name="discipline" /></div>
+            <div><label>Vendor</label><input name="vendor_name" /></div>
+            <div><label>PO</label><input name="po_number" /></div>
+            <div><label>Item Code</label><input name="item_code" /></div>
+            <div><label>Description</label><input name="description" /></div>
+            <div><label>Received Qty</label><input name="received_qty" /></div>
+            <div><label>Qty Unit</label><input name="qty_unit" /></div>
+            <div><label>MRR Number</label><input name="mrr_number" /></div>
+            <div><label>FMR Number</label><input name="fmr_number" /></div>
+            <div><label>Warehouse</label><input name="warehouse" /></div>
+            <div><label>Location</label><input name="location" /></div>
+          </div>
+          <div><label>Received Date</label><input name="recv_date" /></div>
+          <div class="actions"><button type="submit">Add Receiving Line</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Add MRR Header</h3>
+        <form method="post" action="/material-logs/mrr/add" class="stack">
+          <div class="grid">
+            <div><label>MRR Number</label><input name="mrr_number" required /></div>
+            <div><label>Discipline</label><input name="discipline" /></div>
+            <div><label>Vendor</label><input name="vendor_name" /></div>
+            <div><label>PO</label><input name="po_number" /></div>
+            <div><label>Pick Ticket</label><input name="pick_ticket" /></div>
+            <div><label>Received Date</label><input name="received_date" /></div>
+            <div><label>Received By</label><input name="received_by" /></div>
+            <div><label>Load #</label><input name="load_number" /></div>
+            <div><label>OPI #</label><input name="opi_number" /></div>
+            <div><label>OPI Date</label><input name="opi_date" /></div>
+          </div>
+          <div><label>Material Description</label><textarea name="material_description"></textarea></div>
+          <div><label>Notes</label><textarea name="notes"></textarea></div>
+          <div class="actions"><button type="submit">Add MRR</button></div>
+        </form>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Add FMR Entry</h3>
+      <form method="post" action="/material-logs/fmr/add" class="stack">
+        <div class="grid">
+          <div><label>FMR Number</label><input name="fmr_number" required /></div>
+          <div><label>Vendor</label><input name="vendor_name" /></div>
+          <div><label>Container #</label><input name="container_no" /></div>
+          <div><label>Fluor ID</label><input name="fluor_id" /></div>
+          <div><label>MRR #</label><input name="mrr_number" /></div>
+          <div><label>Request Date</label><input name="request_date" /></div>
+          <div><label>Need Date</label><input name="need_date" /></div>
+          <div><label>Pick Ticket #</label><input name="pick_ticket" /></div>
+          <div><label>Pickup Location</label><input name="pickup_location" /></div>
+          <div><label>Pickup Date</label><input name="pickup_date" /></div>
+        </div>
+        <div><label>Fluor Description</label><textarea name="fluor_desc"></textarea></div>
+        <div><label>Request Description</label><textarea name="request_description"></textarea></div>
+        <div class="actions"><button type="submit">Add FMR</button></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <h3>Material Receiving Log</h3>
+      <table><tr><th>ID</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Item</th><th>Description</th><th>Recv Qty</th><th>UOM</th><th>MRR</th><th>FMR</th><th>Warehouse</th><th>Location</th><th>Recv Date</th><th>Action</th></tr>${receivingRows || `<tr><td colspan="14" class="muted">No receiving lines yet.</td></tr>`}</table>
+    </div>
+    <div class="card scroll">
+      <h3>MRR Log</h3>
+      <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Action</th></tr>${mrrRows || `<tr><td colspan="11" class="muted">No MRR rows yet.</td></tr>`}</table>
+    </div>
+    <div class="card scroll">
+      <h3>FMR Log</h3>
+      <table><tr><th>FMR #</th><th>Vendor</th><th>Container</th><th>Fluor ID</th><th>Fluor Description</th><th>MRR #</th><th>Request Date</th><th>Need Date</th><th>Pickup Location</th><th>Pickup Date</th><th>Action</th></tr>${fmrRows || `<tr><td colspan="11" class="muted">No FMR rows yet.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "warehouse"]), upload.single("sheet"), async (req, res) => {
+  if (!req.file?.buffer?.length) throw new Error("Upload a workbook file first.");
+  const logType = String(req.body.log_type || "").trim();
+  const rows = importRowsFromWorkbook(req.file.buffer, logType);
+  if (rows.length === 0) throw new Error("No rows were found in that workbook.");
+
+  await withTransaction(async (client) => {
+    if (logType === "receiving") {
+      for (const row of rows) {
+        const legacyId = numberValue(row.id);
+        await client.query(`
+          insert into material_receiving_logs (
+            legacy_row_id, discipline, vendor_name, po_number, po_position, purchased_by, delivery_to, eta_to_site, company, slid,
+            fluor_item_code, item_code, ident_code, commodity_code, description, size_1, size_2, thk_1, thk_2, bom_qty, ship_qty,
+            received_qty, qty_unit, fmr_number, mrr_number, picking_ticket, opi, osd_number, load_no, container_no, load_date, mir_no,
+            mir_date, cwa, area, drawing, sheet_no, iso, pipe_class, item_type, short_code, received_by, warehouse, location, recv_date,
+            received_status, comments, iwp, package_number, scope, on_off_skid, updated_at
+          ) values (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+            $22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,
+            $33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,
+            $46,$47,$48,$49,$50,$51, now()
+          )
+          on conflict (legacy_row_id) do update set
+            discipline = excluded.discipline,
+            vendor_name = excluded.vendor_name,
+            po_number = excluded.po_number,
+            po_position = excluded.po_position,
+            purchased_by = excluded.purchased_by,
+            delivery_to = excluded.delivery_to,
+            eta_to_site = excluded.eta_to_site,
+            company = excluded.company,
+            slid = excluded.slid,
+            fluor_item_code = excluded.fluor_item_code,
+            item_code = excluded.item_code,
+            ident_code = excluded.ident_code,
+            commodity_code = excluded.commodity_code,
+            description = excluded.description,
+            size_1 = excluded.size_1,
+            size_2 = excluded.size_2,
+            thk_1 = excluded.thk_1,
+            thk_2 = excluded.thk_2,
+            bom_qty = excluded.bom_qty,
+            ship_qty = excluded.ship_qty,
+            received_qty = excluded.received_qty,
+            qty_unit = excluded.qty_unit,
+            fmr_number = excluded.fmr_number,
+            mrr_number = excluded.mrr_number,
+            picking_ticket = excluded.picking_ticket,
+            opi = excluded.opi,
+            osd_number = excluded.osd_number,
+            load_no = excluded.load_no,
+            container_no = excluded.container_no,
+            load_date = excluded.load_date,
+            mir_no = excluded.mir_no,
+            mir_date = excluded.mir_date,
+            cwa = excluded.cwa,
+            area = excluded.area,
+            drawing = excluded.drawing,
+            sheet_no = excluded.sheet_no,
+            iso = excluded.iso,
+            pipe_class = excluded.pipe_class,
+            item_type = excluded.item_type,
+            short_code = excluded.short_code,
+            received_by = excluded.received_by,
+            warehouse = excluded.warehouse,
+            location = excluded.location,
+            recv_date = excluded.recv_date,
+            received_status = excluded.received_status,
+            comments = excluded.comments,
+            iwp = excluded.iwp,
+            package_number = excluded.package_number,
+            scope = excluded.scope,
+            on_off_skid = excluded.on_off_skid,
+            updated_at = now()
+        `, [
+          legacyId || null,
+          textValue(row.discipline),
+          textValue(row.vendor),
+          textValue(row.po),
+          textValue(row.po_position),
+          textValue(row.purchased_by),
+          textValue(row.delivery_to),
+          textValue(row.eta_to_site),
+          textValue(row.company),
+          textValue(row.slid),
+          textValue(row.fluor_item_code),
+          textValue(row.item_code),
+          textValue(row.ident_code),
+          textValue(row.commodity_code),
+          textValue(row.description),
+          textValue(row.size_1),
+          textValue(row.size_2),
+          textValue(row.thk_1),
+          textValue(row.thk_2),
+          numberValue(row.bom_qty),
+          numberValue(row.ship_qty),
+          numberValue(row.received_qty),
+          textValue(row.qty_unit),
+          textValue(row.fmr_number),
+          textValue(row.mrr_number),
+          textValue(row.picking_ticket),
+          textValue(row.opi),
+          textValue(row.osd_number),
+          textValue(row.load_no),
+          textValue(row.container_no),
+          textValue(row.load_date),
+          textValue(row.mir_no),
+          textValue(row.mir_date),
+          textValue(row.cwa),
+          textValue(row.area),
+          textValue(row.drawing),
+          textValue(row.sheet),
+          textValue(row.iso),
+          textValue(row.pipe_class),
+          textValue(row.item_type),
+          textValue(row.short_code),
+          textValue(row.received_by),
+          textValue(row.warehouse),
+          textValue(row.location),
+          textValue(row.recv_date),
+          textValue(row.received_status),
+          textValue(row.comments),
+          textValue(row.iwp),
+          textValue(row.package_number),
+          textValue(row.scope),
+          textValue(row.on_off_skid)
+        ]);
+      }
+    } else if (logType === "mrr") {
+      for (const row of rows) {
+        const mrrNumber = textValue(row.mrr_number);
+        if (!mrrNumber) continue;
+        await client.query(`
+          insert into mrr_logs (
+            discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by,
+            mrr_lookup, client_mrr, mrr_link_label, mtrs_required, osd_required, notes, blank_mrr_link_label, mrr_entered,
+            pictures_loaded, sent_to_matheson, load_number, opi_number, opi_date, updated_at
+          ) values (
+            $1,$2,$3,$4,$5,$6,$7,$8,
+            $9,$10,$11,$12,$13,$14,$15,$16,
+            $17,$18,$19,$20,$21, now()
+          )
+          on conflict (mrr_number) do update set
+            discipline = excluded.discipline,
+            vendor_name = excluded.vendor_name,
+            po_number = excluded.po_number,
+            pick_ticket = excluded.pick_ticket,
+            material_description = excluded.material_description,
+            received_date = excluded.received_date,
+            received_by = excluded.received_by,
+            mrr_lookup = excluded.mrr_lookup,
+            client_mrr = excluded.client_mrr,
+            mrr_link_label = excluded.mrr_link_label,
+            mtrs_required = excluded.mtrs_required,
+            osd_required = excluded.osd_required,
+            notes = excluded.notes,
+            blank_mrr_link_label = excluded.blank_mrr_link_label,
+            mrr_entered = excluded.mrr_entered,
+            pictures_loaded = excluded.pictures_loaded,
+            sent_to_matheson = excluded.sent_to_matheson,
+            load_number = excluded.load_number,
+            opi_number = excluded.opi_number,
+            opi_date = excluded.opi_date,
+            updated_at = now()
+        `, [
+          textValue(row.discipline),
+          mrrNumber,
+          textValue(row.vendor),
+          textValue(row.po),
+          textValue(row.pick_ticket),
+          textValue(row.material_description),
+          textValue(row.received_date),
+          textValue(row.received_by),
+          textValue(row.mrr_lookup),
+          textValue(row.client_mrr),
+          textValue(row.mrr_link),
+          textValue(row.mtrs),
+          textValue(row.os_d),
+          textValue(row.notes),
+          textValue(row.blank_mrr_link),
+          textValue(row.mrr_entered),
+          textValue(row.pictures_loaded),
+          textValue(row.sent_to_matheson),
+          textValue(row.load),
+          textValue(row.opi),
+          textValue(row.opi_date)
+        ]);
+      }
+    } else if (logType === "fmr") {
+      for (const row of rows) {
+        const fmrNumber = textValue(row.fmr);
+        const containerNo = textValue(row.container_no);
+        const fluorId = textValue(row.fluor_id);
+        if (!fmrNumber && !containerNo && !fluorId) continue;
+        await client.query(`
+          insert into fmr_logs (
+            fmr_number, vendor_name, container_no, fmr_lookup, request_description, fluor_id, fluor_desc, mrr_number,
+            mr_fmr, mr_opi, requestor, request_date, need_date, pick_ticket, ready_to_pickup, pickup_location, pickup_date, updated_at
+          ) values (
+            $1,$2,$3,$4,$5,$6,$7,$8,
+            $9,$10,$11,$12,$13,$14,$15,$16,$17, now()
+          )
+          on conflict (fmr_number, container_no, fluor_id) do update set
+            vendor_name = excluded.vendor_name,
+            fmr_lookup = excluded.fmr_lookup,
+            request_description = excluded.request_description,
+            fluor_desc = excluded.fluor_desc,
+            mrr_number = excluded.mrr_number,
+            mr_fmr = excluded.mr_fmr,
+            mr_opi = excluded.mr_opi,
+            requestor = excluded.requestor,
+            request_date = excluded.request_date,
+            need_date = excluded.need_date,
+            pick_ticket = excluded.pick_ticket,
+            ready_to_pickup = excluded.ready_to_pickup,
+            pickup_location = excluded.pickup_location,
+            pickup_date = excluded.pickup_date,
+            updated_at = now()
+        `, [
+          fmrNumber,
+          textValue(row.vendor),
+          containerNo,
+          textValue(row.fmr_lookup),
+          textValue(row.request_description),
+          fluorId,
+          textValue(row.fluor_desc),
+          textValue(row.mrr),
+          textValue(row.mr_fmr),
+          textValue(row.mr_opi),
+          textValue(row.requestor),
+          textValue(row.request_date),
+          textValue(row.need_date),
+          textValue(row.pick_ticket),
+          textValue(row.ready_to_pickup),
+          textValue(row.pickup_location),
+          textValue(row.pickup_date)
+        ]);
+      }
+    } else {
+      throw new Error("Choose a valid log type.");
+    }
+    await auditLog(client, req.user.id, "import", "material_logs", logType, `rows=${rows.length}`);
+  });
+
+  res.redirect("/material-logs");
+});
+
+app.post("/material-logs/receiving/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    const result = await client.query(`
+      insert into material_receiving_logs (
+        legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+      returning id
+    `, [
+      req.body.legacy_row_id ? Number(req.body.legacy_row_id) : null,
+      req.body.discipline?.trim() || "",
+      req.body.vendor_name?.trim() || "",
+      req.body.po_number?.trim() || "",
+      req.body.item_code?.trim() || "",
+      req.body.description?.trim() || "",
+      Number(req.body.received_qty || 0),
+      req.body.qty_unit?.trim() || "",
+      req.body.mrr_number?.trim() || "",
+      req.body.fmr_number?.trim() || "",
+      req.body.warehouse?.trim() || "",
+      req.body.location?.trim() || "",
+      req.body.recv_date?.trim() || ""
+    ]);
+    await auditLog(client, req.user.id, "create", "material_receiving_log", result.rows[0].id, req.body.item_code?.trim() || "");
+  });
+  res.redirect("/material-logs");
+});
+
+app.post("/material-logs/mrr/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    const result = await client.query(`
+      insert into mrr_logs (
+        discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+      returning id
+    `, [
+      req.body.discipline?.trim() || "",
+      req.body.mrr_number?.trim(),
+      req.body.vendor_name?.trim() || "",
+      req.body.po_number?.trim() || "",
+      req.body.pick_ticket?.trim() || "",
+      req.body.material_description?.trim() || "",
+      req.body.received_date?.trim() || "",
+      req.body.received_by?.trim() || "",
+      req.body.notes?.trim() || "",
+      req.body.load_number?.trim() || "",
+      req.body.opi_number?.trim() || "",
+      req.body.opi_date?.trim() || ""
+    ]);
+    await auditLog(client, req.user.id, "create", "mrr_log", result.rows[0].id, req.body.mrr_number?.trim() || "");
+  });
+  res.redirect("/material-logs");
+});
+
+app.post("/material-logs/fmr/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    const result = await client.query(`
+      insert into fmr_logs (
+        fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, mrr_number, request_date, need_date, pick_ticket, pickup_location, pickup_date, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+      returning id
+    `, [
+      req.body.fmr_number?.trim(),
+      req.body.vendor_name?.trim() || "",
+      req.body.container_no?.trim() || "",
+      req.body.fluor_id?.trim() || "",
+      req.body.fluor_desc?.trim() || "",
+      req.body.request_description?.trim() || "",
+      req.body.mrr_number?.trim() || "",
+      req.body.request_date?.trim() || "",
+      req.body.need_date?.trim() || "",
+      req.body.pick_ticket?.trim() || "",
+      req.body.pickup_location?.trim() || "",
+      req.body.pickup_date?.trim() || ""
+    ]);
+    await auditLog(client, req.user.id, "create", "fmr_log", result.rows[0].id, req.body.fmr_number?.trim() || "");
+  });
+  res.redirect("/material-logs");
+});
+
+app.get("/material-logs/receiving/:id/edit", requireAuth, async (req, res) => {
+  const row = (await query("select * from material_receiving_logs where id = $1", [req.params.id])).rows[0];
+  if (!row) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Receiving log row not found.</h3></div>`, req.user));
+    return;
+  }
+  res.send(layout("Edit Receiving Log", `
+    <h1>Edit Material Receiving Line</h1>
+    <div class="card">
+      <form method="post" action="/material-logs/receiving/${row.id}/edit" class="stack">
+        <div class="grid">
+          <div><label>Legacy ID</label><input name="legacy_row_id" value="${esc(row.legacy_row_id || "")}" /></div>
+          <div><label>Discipline</label><input name="discipline" value="${esc(row.discipline)}" /></div>
+          <div><label>Vendor</label><input name="vendor_name" value="${esc(row.vendor_name)}" /></div>
+          <div><label>PO</label><input name="po_number" value="${esc(row.po_number)}" /></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(row.item_code)}" /></div>
+          <div><label>Description</label><input name="description" value="${esc(row.description)}" /></div>
+          <div><label>Received Qty</label><input name="received_qty" value="${esc(row.received_qty)}" /></div>
+          <div><label>Qty Unit</label><input name="qty_unit" value="${esc(row.qty_unit)}" /></div>
+          <div><label>MRR Number</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
+          <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" /></div>
+          <div><label>Warehouse</label><input name="warehouse" value="${esc(row.warehouse)}" /></div>
+          <div><label>Location</label><input name="location" value="${esc(row.location)}" /></div>
+        </div>
+        <div><label>Received Date</label><input name="recv_date" value="${esc(row.recv_date)}" /></div>
+        <div><label>Comments</label><textarea name="comments">${esc(row.comments)}</textarea></div>
+        <div class="actions"><button type="submit">Save Receiving Line</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/material-logs/receiving/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    await client.query(`
+      update material_receiving_logs
+      set legacy_row_id = $2, discipline = $3, vendor_name = $4, po_number = $5, item_code = $6, description = $7, received_qty = $8,
+          qty_unit = $9, mrr_number = $10, fmr_number = $11, warehouse = $12, location = $13, recv_date = $14, comments = $15, updated_at = now()
+      where id = $1
+    `, [
+      req.params.id,
+      req.body.legacy_row_id ? Number(req.body.legacy_row_id) : null,
+      req.body.discipline?.trim() || "",
+      req.body.vendor_name?.trim() || "",
+      req.body.po_number?.trim() || "",
+      req.body.item_code?.trim() || "",
+      req.body.description?.trim() || "",
+      Number(req.body.received_qty || 0),
+      req.body.qty_unit?.trim() || "",
+      req.body.mrr_number?.trim() || "",
+      req.body.fmr_number?.trim() || "",
+      req.body.warehouse?.trim() || "",
+      req.body.location?.trim() || "",
+      req.body.recv_date?.trim() || "",
+      req.body.comments?.trim() || ""
+    ]);
+    await auditLog(client, req.user.id, "update", "material_receiving_log", req.params.id, req.body.item_code?.trim() || "");
+  });
+  res.redirect("/material-logs");
+});
+
+app.get("/material-logs/mrr/:id/edit", requireAuth, async (req, res) => {
+  const row = (await query("select * from mrr_logs where id = $1", [req.params.id])).rows[0];
+  if (!row) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR log row not found.</h3></div>`, req.user));
+    return;
+  }
+  res.send(layout("Edit MRR Log", `
+    <h1>Edit MRR Header</h1>
+    <div class="card">
+      <form method="post" action="/material-logs/mrr/${row.id}/edit" class="stack">
+        <div class="grid">
+          <div><label>MRR Number</label><input name="mrr_number" value="${esc(row.mrr_number)}" required /></div>
+          <div><label>Discipline</label><input name="discipline" value="${esc(row.discipline)}" /></div>
+          <div><label>Vendor</label><input name="vendor_name" value="${esc(row.vendor_name)}" /></div>
+          <div><label>PO</label><input name="po_number" value="${esc(row.po_number)}" /></div>
+          <div><label>Pick Ticket</label><input name="pick_ticket" value="${esc(row.pick_ticket)}" /></div>
+          <div><label>Received Date</label><input name="received_date" value="${esc(row.received_date)}" /></div>
+          <div><label>Received By</label><input name="received_by" value="${esc(row.received_by)}" /></div>
+          <div><label>Load #</label><input name="load_number" value="${esc(row.load_number)}" /></div>
+          <div><label>OPI #</label><input name="opi_number" value="${esc(row.opi_number)}" /></div>
+          <div><label>OPI Date</label><input name="opi_date" value="${esc(row.opi_date)}" /></div>
+        </div>
+        <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
+        <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
+        <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/material-logs/mrr/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    await client.query(`
+      update mrr_logs
+      set mrr_number = $2, discipline = $3, vendor_name = $4, po_number = $5, pick_ticket = $6, material_description = $7,
+          received_date = $8, received_by = $9, notes = $10, load_number = $11, opi_number = $12, opi_date = $13, updated_at = now()
+      where id = $1
+    `, [
+      req.params.id,
+      req.body.mrr_number?.trim(),
+      req.body.discipline?.trim() || "",
+      req.body.vendor_name?.trim() || "",
+      req.body.po_number?.trim() || "",
+      req.body.pick_ticket?.trim() || "",
+      req.body.material_description?.trim() || "",
+      req.body.received_date?.trim() || "",
+      req.body.received_by?.trim() || "",
+      req.body.notes?.trim() || "",
+      req.body.load_number?.trim() || "",
+      req.body.opi_number?.trim() || "",
+      req.body.opi_date?.trim() || ""
+    ]);
+    await auditLog(client, req.user.id, "update", "mrr_log", req.params.id, req.body.mrr_number?.trim() || "");
+  });
+  res.redirect("/material-logs");
+});
+
+app.get("/material-logs/fmr/:id/edit", requireAuth, async (req, res) => {
+  const row = (await query("select * from fmr_logs where id = $1", [req.params.id])).rows[0];
+  if (!row) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>FMR log row not found.</h3></div>`, req.user));
+    return;
+  }
+  res.send(layout("Edit FMR Log", `
+    <h1>Edit FMR Entry</h1>
+    <div class="card">
+      <form method="post" action="/material-logs/fmr/${row.id}/edit" class="stack">
+        <div class="grid">
+          <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" required /></div>
+          <div><label>Vendor</label><input name="vendor_name" value="${esc(row.vendor_name)}" /></div>
+          <div><label>Container #</label><input name="container_no" value="${esc(row.container_no)}" /></div>
+          <div><label>Fluor ID</label><input name="fluor_id" value="${esc(row.fluor_id)}" /></div>
+          <div><label>MRR #</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
+          <div><label>Request Date</label><input name="request_date" value="${esc(row.request_date)}" /></div>
+          <div><label>Need Date</label><input name="need_date" value="${esc(row.need_date)}" /></div>
+          <div><label>Pick Ticket #</label><input name="pick_ticket" value="${esc(row.pick_ticket)}" /></div>
+          <div><label>Pickup Location</label><input name="pickup_location" value="${esc(row.pickup_location)}" /></div>
+          <div><label>Pickup Date</label><input name="pickup_date" value="${esc(row.pickup_date)}" /></div>
+        </div>
+        <div><label>Fluor Description</label><textarea name="fluor_desc">${esc(row.fluor_desc)}</textarea></div>
+        <div><label>Request Description</label><textarea name="request_description">${esc(row.request_description)}</textarea></div>
+        <div class="actions"><button type="submit">Save FMR</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/material-logs/fmr/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  await withTransaction(async (client) => {
+    await client.query(`
+      update fmr_logs
+      set fmr_number = $2, vendor_name = $3, container_no = $4, fluor_id = $5, fluor_desc = $6, request_description = $7,
+          mrr_number = $8, request_date = $9, need_date = $10, pick_ticket = $11, pickup_location = $12, pickup_date = $13, updated_at = now()
+      where id = $1
+    `, [
+      req.params.id,
+      req.body.fmr_number?.trim(),
+      req.body.vendor_name?.trim() || "",
+      req.body.container_no?.trim() || "",
+      req.body.fluor_id?.trim() || "",
+      req.body.fluor_desc?.trim() || "",
+      req.body.request_description?.trim() || "",
+      req.body.mrr_number?.trim() || "",
+      req.body.request_date?.trim() || "",
+      req.body.need_date?.trim() || "",
+      req.body.pick_ticket?.trim() || "",
+      req.body.pickup_location?.trim() || "",
+      req.body.pickup_date?.trim() || ""
+    ]);
+    await auditLog(client, req.user.id, "update", "fmr_log", req.params.id, req.body.fmr_number?.trim() || "");
+  });
+  res.redirect("/material-logs");
 });
 
 app.use((error, req, res, _next) => {

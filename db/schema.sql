@@ -343,6 +343,114 @@ set status = case
 end
 where status in ('OPEN', 'CLOSED');
 
+create table if not exists material_receiving_logs (
+  id bigserial primary key,
+  legacy_row_id bigint unique,
+  discipline text not null default '',
+  vendor_name text not null default '',
+  po_number text not null default '',
+  po_position text not null default '',
+  purchased_by text not null default '',
+  delivery_to text not null default '',
+  eta_to_site text not null default '',
+  company text not null default '',
+  slid text not null default '',
+  fluor_item_code text not null default '',
+  item_code text not null default '',
+  ident_code text not null default '',
+  commodity_code text not null default '',
+  description text not null default '',
+  size_1 text not null default '',
+  size_2 text not null default '',
+  thk_1 text not null default '',
+  thk_2 text not null default '',
+  bom_qty numeric(18,4) not null default 0,
+  ship_qty numeric(18,4) not null default 0,
+  received_qty numeric(18,4) not null default 0,
+  qty_unit text not null default '',
+  fmr_number text not null default '',
+  mrr_number text not null default '',
+  picking_ticket text not null default '',
+  opi text not null default '',
+  osd_number text not null default '',
+  load_no text not null default '',
+  container_no text not null default '',
+  load_date text not null default '',
+  mir_no text not null default '',
+  mir_date text not null default '',
+  cwa text not null default '',
+  area text not null default '',
+  drawing text not null default '',
+  sheet_no text not null default '',
+  iso text not null default '',
+  pipe_class text not null default '',
+  item_type text not null default '',
+  short_code text not null default '',
+  received_by text not null default '',
+  warehouse text not null default '',
+  location text not null default '',
+  recv_date text not null default '',
+  received_status text not null default '',
+  comments text not null default '',
+  iwp text not null default '',
+  package_number text not null default '',
+  scope text not null default '',
+  on_off_skid text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists mrr_logs (
+  id bigserial primary key,
+  discipline text not null default '',
+  mrr_number text not null unique,
+  vendor_name text not null default '',
+  po_number text not null default '',
+  pick_ticket text not null default '',
+  material_description text not null default '',
+  received_date text not null default '',
+  received_by text not null default '',
+  mrr_lookup text not null default '',
+  client_mrr text not null default '',
+  mrr_link_label text not null default '',
+  mtrs_required text not null default '',
+  osd_required text not null default '',
+  notes text not null default '',
+  blank_mrr_link_label text not null default '',
+  mrr_entered text not null default '',
+  pictures_loaded text not null default '',
+  sent_to_matheson text not null default '',
+  load_number text not null default '',
+  opi_number text not null default '',
+  opi_date text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists fmr_logs (
+  id bigserial primary key,
+  fmr_number text not null default '',
+  vendor_name text not null default '',
+  container_no text not null default '',
+  fmr_lookup text not null default '',
+  request_description text not null default '',
+  fluor_id text not null default '',
+  fluor_desc text not null default '',
+  mrr_number text not null default '',
+  mr_fmr text not null default '',
+  mr_opi text not null default '',
+  requestor text not null default '',
+  request_date text not null default '',
+  need_date text not null default '',
+  pick_ticket text not null default '',
+  ready_to_pickup text not null default '',
+  pickup_location text not null default '',
+  pickup_date text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (fmr_number, container_no, fluor_id)
+);
+
 create index if not exists idx_po_po_no on purchase_orders(po_no);
 create index if not exists idx_po_vendor_id on purchase_orders(vendor_id);
 create index if not exists idx_po_rfq_id on purchase_orders(rfq_id);
@@ -359,3 +467,11 @@ create index if not exists idx_bom_headers_status on bom_headers(status);
 create index if not exists idx_bom_lines_bom_id on bom_lines(bom_id);
 create index if not exists idx_bom_lines_item_code on bom_lines(item_code);
 create index if not exists idx_bom_lines_tag_number on bom_lines(tag_number);
+create index if not exists idx_material_receiving_logs_po_number on material_receiving_logs(po_number);
+create index if not exists idx_material_receiving_logs_item_code on material_receiving_logs(item_code);
+create index if not exists idx_material_receiving_logs_mrr_number on material_receiving_logs(mrr_number);
+create index if not exists idx_material_receiving_logs_fmr_number on material_receiving_logs(fmr_number);
+create index if not exists idx_material_receiving_logs_container_no on material_receiving_logs(container_no);
+create index if not exists idx_mrr_logs_mrr_number on mrr_logs(mrr_number);
+create index if not exists idx_fmr_logs_fmr_number on fmr_logs(fmr_number);
+create index if not exists idx_fmr_logs_container_no on fmr_logs(container_no);
