@@ -518,6 +518,7 @@ function normalizePoImportRow(row) {
     freight_terms: ["freight_terms", "freight"],
     ship_to: ["ship_to", "shipto"],
     bill_to: ["bill_to", "billto"],
+    po_description: ["po_description", "purchase_order_description", "project_name", "project"],
     notes: ["notes", "comments", "remarks"],
     buyer_name: ["buyer_name", "buyer", "purchased_by"],
     status: ["status", "po_status"]
@@ -725,9 +726,10 @@ async function upsertPurchaseOrderRow(client, row) {
           freight_terms = $4,
           ship_to = $5,
           bill_to = $6,
-          notes = $7,
-          buyer_name = $8,
-          status = $9,
+          description = $7,
+          notes = $8,
+          buyer_name = $9,
+          status = $10,
           updated_at = now()
       where id = $1
     `, [
@@ -737,14 +739,15 @@ async function upsertPurchaseOrderRow(client, row) {
       String(row.freight_terms || "").trim(),
       String(row.ship_to || "").trim(),
       String(row.bill_to || "").trim(),
+      String(row.po_description || "").trim(),
       String(row.notes || "").trim(),
       String(row.buyer_name || row.buyer || "").trim(),
       String(row.status || "OPEN").trim() || "OPEN"
     ]);
   } else {
     const insertPo = await client.query(`
-      insert into purchase_orders (po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status, updated_at)
-      values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, now())
+      insert into purchase_orders (po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, description, notes, buyer_name, status, updated_at)
+      values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
       returning id
     `, [
       poNo,
@@ -753,6 +756,7 @@ async function upsertPurchaseOrderRow(client, row) {
       String(row.freight_terms || "").trim(),
       String(row.ship_to || "").trim(),
       String(row.bill_to || "").trim(),
+      String(row.po_description || "").trim(),
       String(row.notes || "").trim(),
       String(row.buyer_name || row.buyer || "").trim(),
       String(row.status || "OPEN").trim() || "OPEN"
@@ -3700,9 +3704,10 @@ app.post("/po/create", requireAuth, requirePermission("pos", "edit"), async (req
   const poNo = String(req.body.po_no || "").trim();
   if (!vendorId) throw new Error("Select a vendor with awarded RFQ lines.");
   await withTransaction(async (client) => {
+    const rfq = (await client.query("select project_name from rfqs where id = $1", [rfqId])).rows[0];
     const poInsert = await client.query(
-      "insert into purchase_orders (po_no, vendor_id, rfq_id, status, updated_at) values ($1, $2, $3, 'OPEN', now()) returning id",
-      [poNo, vendorId, rfqId]
+      "insert into purchase_orders (po_no, vendor_id, rfq_id, description, status, updated_at) values ($1, $2, $3, $4, 'OPEN', now()) returning id",
+      [poNo, vendorId, rfqId, rfq?.project_name || ""]
     );
     const poId = poInsert.rows[0].id;
     const lines = await client.query(`
@@ -4066,7 +4071,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const pos = (await query(`
         select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
-               v.name as vendor, coalesce(r.rfq_no, '') as rfq_no, coalesce(po.vendor_contact, '') as vendor_contact,
+               v.name as vendor, coalesce(r.rfq_no, '') as rfq_no, coalesce(po.description, '') as description, coalesce(po.vendor_contact, '') as vendor_contact,
                coalesce(po.freight_terms, '') as freight_terms, coalesce(po.ship_to, '') as ship_to, coalesce(po.buyer_name, '') as buyer_name
     from purchase_orders po
     join vendors v on v.id = po.vendor_id
@@ -4080,6 +4085,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
     <td>${esc(po.po_no)}</td>
     <td>${esc(po.vendor)}</td>
     <td>${esc(po.rfq_no || "")}</td>
+    <td>${esc(po.description || "")}</td>
     <td>${esc(po.vendor_contact || "")}</td>
     <td>${esc(po.freight_terms || "")}</td>
     <td>${esc(po.ship_to || "")}</td>
@@ -4112,7 +4118,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
       <div class="actions"><a class="btn btn-primary" href="/po/import">Import Existing POs</a></div>
     </div>
     <div class="card scroll">
-      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="10" class="muted">No POs match the current filter.</td></tr>`}</table>
+      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="11" class="muted">No POs match the current filter.</td></tr>`}</table>
     </div>
   `, req.user));
 });
@@ -4122,7 +4128,7 @@ app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req,
     <h1>Import Existing POs</h1>
     <div class="card">
       <p class="muted">Upload a CSV/XLSX file to create or update PO headers and lines. Missing vendors are added to the vendors table, missing item codes are added to the items table, and imported PO lines are tied to those item records.</p>
-      <p class="muted">Supported columns: po_no, vendor_name, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status. Alternate headers like PO Number, Vendor, Supplier, Item No, Qty, Ordered Qty, Unit Cost, and Price are also accepted.</p>
+      <p class="muted">Supported columns: po_no, vendor_name, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status. Alternate headers like PO Number, Vendor, Supplier, Item No, Qty, Ordered Qty, Unit Cost, Price, and PO Description are also accepted.</p>
       <div class="actions"><a class="btn btn-secondary" href="/po/import/template">Download Template</a></div>
       <form method="post" enctype="multipart/form-data" action="/po/import/preview" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
@@ -4135,8 +4141,8 @@ app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req,
 
 app.get("/po/import/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
   const csv = [
-    "po_no,vendor_name,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price,vendor_contact,freight_terms,ship_to,bill_to,notes,buyer_name,status",
-    "PO-00001,Example Vendor,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75,John Smith,FOB,SITE A,OFFICE A,Legacy import sample,Buyer One,OPEN"
+    "po_no,vendor_name,po_description,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price,vendor_contact,freight_terms,ship_to,bill_to,notes,buyer_name,status",
+    "PO-00001,Example Vendor,Pipe Supports Release 1,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75,John Smith,FOB,SITE A,OFFICE A,Legacy import sample,Buyer One,OPEN"
   ].join("\\n");
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="po-import-template.csv"');
@@ -4149,6 +4155,7 @@ app.post("/po/import/preview", requireAuth, requirePermission("pos", "edit"), up
   const previewRows = rows.slice(0, 100).map((row) => `<tr>
     <td>${esc(row.po_no)}</td>
     <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_description)}</td>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
     <td>${esc(row.qty_ordered)}</td>
@@ -4164,7 +4171,7 @@ app.post("/po/import/preview", requireAuth, requirePermission("pos", "edit"), up
       </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>PO #</th><th>Vendor</th><th>Item Code</th><th>Description</th><th>Qty Ordered</th><th>Unit Price</th></tr>${previewRows}</table>
+      <table><tr><th>PO #</th><th>Vendor</th><th>PO Description</th><th>Item Code</th><th>Description</th><th>Qty Ordered</th><th>Unit Price</th></tr>${previewRows}</table>
     </div>
   `, req.user));
 });
@@ -4210,6 +4217,9 @@ app.get("/po/new", requireAuth, requirePermission("pos", "edit"), async (req, re
           <div><label>Vendor</label><select name="vendor_id" required><option value="">Select vendor</option>${vendorOptions}</select></div>
           <div><label>Status</label><select name="status"><option value="OPEN">OPEN</option><option value="CLOSED">CLOSED</option></select></div>
         </div>
+        <div class="grid">
+          <div><label>Description</label><input name="description" /></div>
+        </div>
         <div class="actions"><button type="submit">Add PO</button><a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
     </div>
@@ -4219,10 +4229,10 @@ app.get("/po/new", requireAuth, requirePermission("pos", "edit"), async (req, re
 app.post("/po/add", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const result = await client.query(`
-      insert into purchase_orders (po_no, vendor_id, rfq_id, status, updated_at)
-      values ($1, $2, null, $3, now())
+      insert into purchase_orders (po_no, vendor_id, rfq_id, description, status, updated_at)
+      values ($1, $2, null, $3, $4, now())
       returning id
-    `, [String(req.body.po_no || "").trim(), Number(req.body.vendor_id), req.body.status || "OPEN"]);
+    `, [String(req.body.po_no || "").trim(), Number(req.body.vendor_id), String(req.body.description || "").trim(), req.body.status || "OPEN"]);
     await auditLog(client, req.user.id, "create", "purchase_order", result.rows[0].id, String(req.body.po_no || "").trim());
   });
   res.redirect("/po");
@@ -4231,7 +4241,8 @@ app.post("/po/add", requireAuth, requirePermission("pos", "edit"), async (req, r
 app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   const [po, vendors] = await Promise.all([
     query(`
-      select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token, coalesce(r.rfq_no, '') as rfq_no
+      select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
+             coalesce(po.description, '') as description, coalesce(r.rfq_no, '') as rfq_no
       from purchase_orders po
       left join rfqs r on r.id = po.rfq_id
       where po.id = $1
@@ -4251,6 +4262,9 @@ app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (re
           <div><label>Vendor</label><select name="vendor_id">${vendorOptions}</select></div>
           <div><label>Status</label><select name="status"><option value="OPEN" ${record.status === "OPEN" ? "selected" : ""}>OPEN</option><option value="CLOSED" ${record.status === "CLOSED" ? "selected" : ""}>CLOSED</option></select></div>
         </div>
+        <div class="grid">
+          <div><label>Description</label><input name="description" value="${esc(record.description || "")}" /></div>
+        </div>
         <div class="actions"><button type="submit">Save PO</button><a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
     </div>
@@ -4261,9 +4275,9 @@ app.post("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (r
   await withTransaction(async (client) => {
     const update = await client.query(`
       update purchase_orders
-      set po_no = $2, vendor_id = $3, status = $4, updated_at = now()
-      where id = $1 and extract(epoch from updated_at)::text = $5
-    `, [req.params.id, req.body.po_no?.trim(), Number(req.body.vendor_id), req.body.status || "OPEN", req.body.updated_token || ""]);
+      set po_no = $2, vendor_id = $3, status = $4, description = $5, updated_at = now()
+      where id = $1 and extract(epoch from updated_at)::text = $6
+    `, [req.params.id, req.body.po_no?.trim(), Number(req.body.vendor_id), req.body.status || "OPEN", String(req.body.description || "").trim(), req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This PO was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "purchase_order", req.params.id, req.body.po_no?.trim() || "");
   });

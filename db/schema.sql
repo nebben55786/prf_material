@@ -248,6 +248,7 @@ create table if not exists purchase_orders (
   po_no text not null unique,
   vendor_id bigint not null references vendors(id),
   rfq_id bigint references rfqs(id),
+  description text,
   vendor_contact text,
   freight_terms text,
   ship_to text,
@@ -304,6 +305,7 @@ alter table purchase_orders add column if not exists vendor_contact text;
 alter table purchase_orders add column if not exists freight_terms text;
 alter table purchase_orders add column if not exists ship_to text;
 alter table purchase_orders add column if not exists bill_to text;
+alter table purchase_orders add column if not exists description text;
 alter table purchase_orders add column if not exists notes text;
 alter table purchase_orders add column if not exists buyer_name text;
 alter table purchase_orders add column if not exists issued_at timestamptz;
