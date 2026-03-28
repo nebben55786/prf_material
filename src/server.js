@@ -360,6 +360,36 @@ function parseUploadedRows(file, pastedText) {
   });
 }
 
+function normalizePoImportRow(row) {
+  const aliases = {
+    po_no: ["po_no", "po_number", "po", "po_", "purchase_order", "purchase_order_number"],
+    vendor_name: ["vendor_name", "vendor", "supplier", "supplier_name"],
+    item_code: ["item_code", "item", "item_no", "item_number", "material_code", "material_item"],
+    description: ["description", "item_description", "material_description", "desc"],
+    material_type: ["material_type", "type", "item_type"],
+    uom: ["uom", "unit", "unit_of_measure"],
+    size_1: ["size_1", "size1", "primary_size"],
+    size_2: ["size_2", "size2", "secondary_size"],
+    thk_1: ["thk_1", "thk1", "thickness_1", "wall_1"],
+    thk_2: ["thk_2", "thk2", "thickness_2", "wall_2"],
+    qty_ordered: ["qty_ordered", "qty", "quantity", "ordered_qty", "order_qty"],
+    unit_price: ["unit_price", "price", "unitcost", "unit_cost", "cost"],
+    vendor_contact: ["vendor_contact", "contact_name", "contact"],
+    freight_terms: ["freight_terms", "freight"],
+    ship_to: ["ship_to", "shipto"],
+    bill_to: ["bill_to", "billto"],
+    notes: ["notes", "comments", "remarks"],
+    buyer_name: ["buyer_name", "buyer", "purchased_by"],
+    status: ["status", "po_status"]
+  };
+  const normalized = {};
+  for (const [target, keys] of Object.entries(aliases)) {
+    const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] || "").trim() !== "");
+    normalized[target] = sourceKey ? String(row[sourceKey] || "").trim() : "";
+  }
+  return normalized;
+}
+
 function num(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -3553,19 +3583,56 @@ app.get("/po/import", requireAuth, requireRole(["admin", "buyer"]), async (req, 
     <h1>Import Existing POs</h1>
     <div class="card">
       <p class="muted">Upload a CSV/XLSX file to create or update PO headers and lines. Missing vendors are added to the vendors table, missing item codes are added to the items table, and imported PO lines are tied to those item records.</p>
-      <p class="muted">Supported columns: po_no, vendor_name, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status.</p>
-      <form method="post" enctype="multipart/form-data" action="/po/import" class="stack">
+      <p class="muted">Supported columns: po_no, vendor_name, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status. Alternate headers like PO Number, Vendor, Supplier, Item No, Qty, Ordered Qty, Unit Cost, and Price are also accepted.</p>
+      <div class="actions"><a class="btn btn-secondary" href="/po/import/template">Download Template</a></div>
+      <form method="post" enctype="multipart/form-data" action="/po/import/preview" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
         <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
-        <div class="actions"><button type="submit">Import POs</button><a class="btn btn-secondary" href="/po">Back</a></div>
+        <div class="actions"><button type="submit">Preview Import</button><a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
     </div>
   `, req.user));
 });
 
-app.post("/po/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
-  const rows = parseUploadedRows(req.file, req.body.csv_text);
+app.get("/po/import/template", requireAuth, requireRole(["admin", "buyer"]), async (_req, res) => {
+  const csv = [
+    "po_no,vendor_name,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price,vendor_contact,freight_terms,ship_to,bill_to,notes,buyer_name,status",
+    "PO-00001,Example Vendor,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75,John Smith,FOB,SITE A,OFFICE A,Legacy import sample,Buyer One,OPEN"
+  ].join("\\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="po-import-template.csv"');
+  res.send(csv);
+});
+
+app.post("/po/import/preview", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
+  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizePoImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
+  const previewRows = rows.slice(0, 100).map((row) => `<tr>
+    <td>${esc(row.po_no)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.qty_ordered)}</td>
+    <td>${esc(row.unit_price)}</td>
+  </tr>`).join("");
+  res.send(layout("Preview PO Import", `
+    <h1>Preview PO Import</h1>
+    <div class="card">
+      <p class="muted">${rows.length} row(s) parsed. Review the mapped values below, then confirm the import.</p>
+      <form method="post" action="/po/import/commit" class="stack">
+        <input type="hidden" name="rows_json" value="${esc(JSON.stringify(rows))}" />
+        <div class="actions"><button type="submit">Confirm Import</button><a class="btn btn-secondary" href="/po/import">Back</a></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>PO #</th><th>Vendor</th><th>Item Code</th><th>Description</th><th>Qty Ordered</th><th>Unit Price</th></tr>${previewRows}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/po/import/commit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+  const rows = JSON.parse(String(req.body.rows_json || "[]"));
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error("No rows found.");
   const batchId = await withTransaction(async (client) => {
     const batchId = await createImportBatch(client, {
       entityType: "purchase_orders",
