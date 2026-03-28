@@ -2566,10 +2566,6 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
 
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</h1>
-    ${poCount === 0 ? addItemCard : ""}
-    ${poCount === 0 ? uploadItemsCard : ""}
-    ${poCount === 0 ? importQuotesCard : ""}
-    ${awardedVendorCounts.length > 0 ? issuePoCard : issuePoHelpCard}
     <div class="card scroll">
       <h3>RFQ Items</h3>
       <table>
@@ -2577,6 +2573,10 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
         ${itemRows.join("") || `<tr><td colspan="${17 + quoteVendors.length}" class="muted">No RFQ items loaded yet.</td></tr>`}
       </table>
     </div>
+    ${poCount === 0 ? addItemCard : ""}
+    ${poCount === 0 ? uploadItemsCard : ""}
+    ${poCount === 0 ? importQuotesCard : ""}
+    ${awardedVendorCounts.length > 0 ? issuePoCard : issuePoHelpCard}
     <div class="card scroll">
       <h3>Recent Imports</h3>
       <table>
