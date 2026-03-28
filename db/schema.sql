@@ -205,6 +205,16 @@ create table if not exists app_settings (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists material_log_lookup_values (
+  id bigserial primary key,
+  kind text not null,
+  value text not null,
+  created_at timestamptz not null default now(),
+  unique (kind, value)
+);
+
+create index if not exists idx_material_log_lookup_values_kind on material_log_lookup_values(kind);
+
 create table if not exists import_batches (
   id bigserial primary key,
   entity_type text not null,

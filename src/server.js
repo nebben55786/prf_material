@@ -597,6 +597,58 @@ function formatTimestamp(value) {
   return textValue(value).replace("T", " ").replace("Z", "");
 }
 
+async function saveMaterialLogLookup(client, kind, value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return;
+  await client.query(`
+    insert into material_log_lookup_values (kind, value)
+    values ($1, $2)
+    on conflict (kind, value) do nothing
+  `, [kind, normalized]);
+}
+
+async function getMaterialLogLookupOptions(kind) {
+  const result = await query(`
+    select value
+    from (
+      select value from material_log_lookup_values where kind = $1
+      union
+      select name as value from vendors where $1 = 'vendor_name' and coalesce(name, '') <> ''
+      union
+      select po_no as value from purchase_orders where $1 = 'po_number' and coalesce(po_no, '') <> ''
+      union
+      select discipline as value from mrr_logs where $1 = 'discipline' and coalesce(discipline, '') <> ''
+      union
+      select discipline as value from material_receiving_logs where $1 = 'discipline' and coalesce(discipline, '') <> ''
+      union
+      select received_by as value from mrr_logs where $1 = 'received_by' and coalesce(received_by, '') <> ''
+      union
+      select received_by as value from material_receiving_logs where $1 = 'received_by' and coalesce(received_by, '') <> ''
+      union
+      select vendor_name as value from mrr_logs where $1 = 'vendor_name' and coalesce(vendor_name, '') <> ''
+    ) options
+    where coalesce(value, '') <> ''
+    order by value
+  `, [kind]);
+  return result.rows.map((row) => row.value);
+}
+
+async function ensureUniqueFmrContainer(client, containerNo, excludeId = null) {
+  const normalized = String(containerNo || "").trim();
+  if (!normalized) return;
+  const params = [normalized];
+  let sql = "select id from fmr_logs where container_no = $1";
+  if (excludeId) {
+    params.push(excludeId);
+    sql += " and id <> $2";
+  }
+  sql += " limit 1";
+  const existing = (await client.query(sql, params)).rows[0];
+  if (existing) {
+    throw new Error("This container number already exists on the FMR log.");
+  }
+}
+
 function signSession(payload) {
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
@@ -882,6 +934,11 @@ app.get("/settings", requireAuth, requireRole(["admin"]), async (req, res) => {
         <div class="actions"><button type="submit">Save Vendor Categories</button></div>
       </form>
     </div>
+    <div class="card">
+      <h3>Material Log Imports</h3>
+      <div class="muted">Import receiving, MRR, and FMR workbook data from a separate admin page.</div>
+      <div class="actions" style="margin-top:12px;"><a class="btn btn-primary" href="/settings/material-log-imports">Open Material Log Imports</a></div>
+    </div>
     <div class="card scroll">
       <h3>Access Requests</h3>
       <table>
@@ -983,6 +1040,22 @@ app.post("/settings/vendor-categories", requireAuth, requireRole(["admin"]), asy
   });
   setVendorCategories(categories);
   res.redirect("/settings");
+});
+
+app.get("/settings/material-log-imports", requireAuth, requireRole(["admin"]), async (req, res) => {
+  res.send(layout("Material Log Imports", `
+    <h1>Material Log Imports</h1>
+    <div class="card">
+      <p class="muted">Upload one of your current workbook files to refresh the Material Logs module.</p>
+      <form method="post" enctype="multipart/form-data" action="/material-logs/import" class="stack">
+        <div class="grid">
+          <div><label>Log Type</label><select name="log_type"><option value="receiving">Issue Report</option><option value="mrr">MRR Log</option><option value="fmr">FMR Log</option></select></div>
+          <div><label>Workbook File</label><input type="file" name="sheet" required /></div>
+        </div>
+        <div class="actions"><button type="submit">Import Workbook</button><a class="btn btn-secondary" href="/settings">Back To Settings</a></div>
+      </form>
+    </div>
+  `, req.user));
 });
 
 app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
@@ -3457,48 +3530,166 @@ app.get("/inventory", requireAuth, async (req, res) => {
 });
 
 app.get("/material-logs", requireAuth, async (req, res) => {
-  const q = String(req.query.q || "").trim();
-  const receivingParams = [];
-  const receivingWhere = [];
-  if (q) {
-    receivingParams.push(`%${q}%`);
-    receivingWhere.push(`(
-      coalesce(discipline, '') ilike $1 or
-      coalesce(vendor_name, '') ilike $1 or
-      coalesce(po_number, '') ilike $1 or
-      coalesce(item_code, '') ilike $1 or
-      coalesce(description, '') ilike $1 or
-      coalesce(container_no, '') ilike $1 or
-      coalesce(mrr_number, '') ilike $1 or
-      coalesce(fmr_number, '') ilike $1
-    )`);
-  }
-  const receivingWhereSql = receivingWhere.length ? `where ${receivingWhere.join(" and ")}` : "";
-  const [receiving, mrrs, fmrs] = await Promise.all([
-    query(`
-      select id, legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date
-      from material_receiving_logs
-      ${receivingWhereSql}
-      order by coalesce(legacy_row_id, id) desc
-      limit 60
-    `, receivingParams),
-    query(`
-      select id, discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by, load_number, opi_number
-      from mrr_logs
-      ${q ? "where (coalesce(mrr_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(po_number, '') ilike $1 or coalesce(material_description, '') ilike $1 or coalesce(opi_number, '') ilike $1)" : ""}
-      order by id desc
-      limit 60
-    `, q ? [`%${q}%`] : []),
-    query(`
-      select id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, mrr_number, request_date, need_date, pickup_location, pickup_date
-      from fmr_logs
-      ${q ? "where (coalesce(fmr_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(container_no, '') ilike $1 or coalesce(fluor_id, '') ilike $1 or coalesce(mrr_number, '') ilike $1)" : ""}
-      order by id desc
-      limit 60
-    `, q ? [`%${q}%`] : [])
-  ]);
+  res.send(layout("Material Logs", `
+    <h1>Material Logs</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-primary" href="/material-logs/mrr">MRR Log</a>
+        <a class="btn btn-primary" href="/material-logs/fmr">FMR Log</a>
+        <a class="btn btn-primary" href="/material-logs/issue-report">Issue Report</a>
+      </div>
+    </div>
+  `, req.user));
+});
 
-  const receivingRows = receiving.rows.map((row) => `<tr>
+app.get("/material-logs/mrr", requireAuth, async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  const rows = (await query(`
+    select id, discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by, load_number, opi_number
+    from mrr_logs
+    ${q ? "where (coalesce(mrr_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(po_number, '') ilike $1 or coalesce(material_description, '') ilike $1 or coalesce(received_by, '') ilike $1)" : ""}
+    order by id desc
+    limit 200
+  `, q ? [`%${q}%`] : [])).rows;
+  const tableRows = rows.map((row) => `<tr>
+    <td>${esc(row.mrr_number)}</td>
+    <td>${esc(row.discipline)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.pick_ticket)}</td>
+    <td>${esc(row.material_description)}</td>
+    <td>${esc(row.received_date)}</td>
+    <td>${esc(row.received_by)}</td>
+    <td>${esc(row.load_number)}</td>
+    <td>${esc(row.opi_number)}</td>
+    <td><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a></td>
+  </tr>`).join("");
+  res.send(layout("MRR Log", `
+    <h1>MRR Log</h1>
+    <div class="card">
+      <form method="get" action="/material-logs/mrr" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto auto;">
+          <div><label>Filter MRR Log</label><input name="q" value="${esc(q)}" placeholder="MRR, vendor, PO, description, received by" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+          <div style="align-self:end;"><a class="btn btn-primary" href="/material-logs/mrr/new">Add New MRR</a></div>
+        </div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Action</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No MRR rows found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.get("/material-logs/mrr/new", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  const [disciplines, vendors, pos, receivers] = await Promise.all([
+    getMaterialLogLookupOptions("discipline"),
+    getMaterialLogLookupOptions("vendor_name"),
+    getMaterialLogLookupOptions("po_number"),
+    getMaterialLogLookupOptions("received_by")
+  ]);
+  const optionList = (values, placeholder) => [`<option value="">${esc(placeholder)}</option>`]
+    .concat(values.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`))
+    .join("");
+  res.send(layout("Add MRR", `
+    <h1>Add MRR</h1>
+    <div class="card">
+      <form method="post" action="/material-logs/mrr/add" class="stack">
+        <div class="grid">
+          <div><label>MRR Number</label><input name="mrr_number" required /></div>
+          <div><label>Discipline</label><select name="discipline">${optionList(disciplines, "Select discipline")}</select></div>
+          <div><label>Vendor</label><select name="vendor_name">${optionList(vendors, "Select vendor")}</select></div>
+          <div><label>PO</label><select name="po_number">${optionList(pos, "Select PO")}</select></div>
+          <div><label>Pick Ticket</label><input name="pick_ticket" /></div>
+          <div><label>Received Date</label><input name="received_date" /></div>
+          <div><label>Received By</label><select name="received_by">${optionList(receivers, "Select received by")}</select></div>
+          <div><label>Load #</label><input name="load_number" /></div>
+          <div><label>OPI #</label><input name="opi_number" /></div>
+          <div><label>OPI Date</label><input name="opi_date" /></div>
+        </div>
+        <div><label>Material Description</label><textarea name="material_description"></textarea></div>
+        <div><label>Notes</label><textarea name="notes"></textarea></div>
+        <div class="actions"><button type="submit">Add MRR</button><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.get("/material-logs/fmr", requireAuth, async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  const rows = (await query(`
+    select id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, mrr_number, request_date, need_date, pickup_location, pickup_date
+    from fmr_logs
+    ${q ? "where (coalesce(fmr_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(container_no, '') ilike $1 or coalesce(fluor_id, '') ilike $1 or coalesce(mrr_number, '') ilike $1)" : ""}
+    order by id desc
+    limit 200
+  `, q ? [`%${q}%`] : [])).rows;
+  const tableRows = rows.map((row) => `<tr>
+    <td>${esc(row.fmr_number)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.container_no)}</td>
+    <td>${esc(row.fluor_id)}</td>
+    <td>${esc(row.fluor_desc)}</td>
+    <td>${esc(row.mrr_number)}</td>
+    <td>${esc(row.request_date)}</td>
+    <td>${esc(row.need_date)}</td>
+    <td>${esc(row.pickup_location)}</td>
+    <td>${esc(row.pickup_date)}</td>
+    <td><a class="btn btn-secondary" href="/material-logs/fmr/${row.id}/edit">Edit</a></td>
+  </tr>`).join("");
+  res.send(layout("FMR Log", `
+    <h1>FMR Log</h1>
+    <div class="card">
+      <form method="get" action="/material-logs/fmr" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto auto;">
+          <div><label>Filter FMR Log</label><input name="q" value="${esc(q)}" placeholder="FMR, vendor, container, fluor ID, MRR" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+          <div style="align-self:end;"><a class="btn btn-primary" href="/material-logs/fmr/new">Add New FMR</a></div>
+        </div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>FMR #</th><th>Vendor</th><th>Container</th><th>Fluor ID</th><th>Fluor Description</th><th>MRR #</th><th>Request Date</th><th>Need Date</th><th>Pickup Location</th><th>Pickup Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No FMR rows found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.get("/material-logs/fmr/new", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+  res.send(layout("Add FMR", `
+    <h1>Add FMR</h1>
+    <div class="card">
+      <form method="post" action="/material-logs/fmr/add" class="stack">
+        <div class="grid">
+          <div><label>FMR Number</label><input name="fmr_number" required /></div>
+          <div><label>Vendor</label><input name="vendor_name" /></div>
+          <div><label>Container #</label><input name="container_no" required /></div>
+          <div><label>Fluor ID</label><input name="fluor_id" /></div>
+          <div><label>MRR #</label><input name="mrr_number" /></div>
+          <div><label>Request Date</label><input name="request_date" /></div>
+          <div><label>Need Date</label><input name="need_date" /></div>
+          <div><label>Pick Ticket #</label><input name="pick_ticket" /></div>
+          <div><label>Pickup Location</label><input name="pickup_location" /></div>
+          <div><label>Pickup Date</label><input name="pickup_date" /></div>
+        </div>
+        <div><label>Fluor Description</label><textarea name="fluor_desc"></textarea></div>
+        <div><label>Request Description</label><textarea name="request_description"></textarea></div>
+        <div class="actions"><button type="submit">Add FMR</button><a class="btn btn-secondary" href="/material-logs/fmr">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.get("/material-logs/issue-report", requireAuth, async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  const params = q ? [`%${q}%`] : [];
+  const rows = (await query(`
+    select id, legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date
+    from material_receiving_logs
+    ${q ? "where (coalesce(discipline, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(po_number, '') ilike $1 or coalesce(item_code, '') ilike $1 or coalesce(description, '') ilike $1 or coalesce(mrr_number, '') ilike $1 or coalesce(fmr_number, '') ilike $1)" : ""}
+    order by coalesce(legacy_row_id, id) desc
+    limit 200
+  `, params)).rows;
+  const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.legacy_row_id || row.id)}</td>
     <td>${esc(row.discipline)}</td>
     <td>${esc(row.vendor_name)}</td>
@@ -3514,128 +3705,18 @@ app.get("/material-logs", requireAuth, async (req, res) => {
     <td>${esc(row.recv_date)}</td>
     <td><a class="btn btn-secondary" href="/material-logs/receiving/${row.id}/edit">Edit</a></td>
   </tr>`).join("");
-  const mrrRows = mrrs.rows.map((row) => `<tr>
-    <td>${esc(row.mrr_number)}</td>
-    <td>${esc(row.discipline)}</td>
-    <td>${esc(row.vendor_name)}</td>
-    <td>${esc(row.po_number)}</td>
-    <td>${esc(row.pick_ticket)}</td>
-    <td>${esc(row.material_description)}</td>
-    <td>${esc(row.received_date)}</td>
-    <td>${esc(row.received_by)}</td>
-    <td>${esc(row.load_number)}</td>
-    <td>${esc(row.opi_number)}</td>
-    <td><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a></td>
-  </tr>`).join("");
-  const fmrRows = fmrs.rows.map((row) => `<tr>
-    <td>${esc(row.fmr_number)}</td>
-    <td>${esc(row.vendor_name)}</td>
-    <td>${esc(row.container_no)}</td>
-    <td>${esc(row.fluor_id)}</td>
-    <td>${esc(row.fluor_desc)}</td>
-    <td>${esc(row.mrr_number)}</td>
-    <td>${esc(row.request_date)}</td>
-    <td>${esc(row.need_date)}</td>
-    <td>${esc(row.pickup_location)}</td>
-    <td>${esc(row.pickup_date)}</td>
-    <td><a class="btn btn-secondary" href="/material-logs/fmr/${row.id}/edit">Edit</a></td>
-  </tr>`).join("");
-
-  res.send(layout("Material Logs", `
-    <h1>Material Logs</h1>
+  res.send(layout("Issue Report", `
+    <h1>Issue Report</h1>
     <div class="card">
-      <form method="get" action="/material-logs" class="stack">
-        <div class="grid">
-          <div><label>Search Across Receiving, MRR, and FMR</label><input name="q" value="${esc(q)}" placeholder="PO, MRR, FMR, vendor, item, container..." /></div>
+      <form method="get" action="/material-logs/issue-report" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto;">
+          <div><label>Filter Issue Report</label><input name="q" value="${esc(q)}" placeholder="PO, item, vendor, MRR, FMR, description" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
         </div>
-        <div class="actions"><button type="submit">Search</button><a class="btn btn-secondary" href="/material-logs">Clear</a></div>
-      </form>
-    </div>
-    <div class="card">
-      <h3>Import Existing Workbook Data</h3>
-      <p class="muted">Upload one of your current workbook files to refresh this log in the app.</p>
-      <form method="post" enctype="multipart/form-data" action="/material-logs/import" class="stack">
-        <div class="grid">
-          <div><label>Log Type</label><select name="log_type"><option value="receiving">Material Receiving</option><option value="mrr">MRR Log</option><option value="fmr">FMR Log</option></select></div>
-          <div><label>Workbook File</label><input type="file" name="sheet" required /></div>
-        </div>
-        <div class="actions"><button type="submit">Import Workbook</button></div>
-      </form>
-    </div>
-    <div class="grid">
-      <div class="card">
-        <h3>Add Material Receiving Line</h3>
-        <form method="post" action="/material-logs/receiving/add" class="stack">
-          <div class="grid">
-            <div><label>Legacy ID</label><input name="legacy_row_id" /></div>
-            <div><label>Discipline</label><input name="discipline" /></div>
-            <div><label>Vendor</label><input name="vendor_name" /></div>
-            <div><label>PO</label><input name="po_number" /></div>
-            <div><label>Item Code</label><input name="item_code" /></div>
-            <div><label>Description</label><input name="description" /></div>
-            <div><label>Received Qty</label><input name="received_qty" /></div>
-            <div><label>Qty Unit</label><input name="qty_unit" /></div>
-            <div><label>MRR Number</label><input name="mrr_number" /></div>
-            <div><label>FMR Number</label><input name="fmr_number" /></div>
-            <div><label>Warehouse</label><input name="warehouse" /></div>
-            <div><label>Location</label><input name="location" /></div>
-          </div>
-          <div><label>Received Date</label><input name="recv_date" /></div>
-          <div class="actions"><button type="submit">Add Receiving Line</button></div>
-        </form>
-      </div>
-      <div class="card">
-        <h3>Add MRR Header</h3>
-        <form method="post" action="/material-logs/mrr/add" class="stack">
-          <div class="grid">
-            <div><label>MRR Number</label><input name="mrr_number" required /></div>
-            <div><label>Discipline</label><input name="discipline" /></div>
-            <div><label>Vendor</label><input name="vendor_name" /></div>
-            <div><label>PO</label><input name="po_number" /></div>
-            <div><label>Pick Ticket</label><input name="pick_ticket" /></div>
-            <div><label>Received Date</label><input name="received_date" /></div>
-            <div><label>Received By</label><input name="received_by" /></div>
-            <div><label>Load #</label><input name="load_number" /></div>
-            <div><label>OPI #</label><input name="opi_number" /></div>
-            <div><label>OPI Date</label><input name="opi_date" /></div>
-          </div>
-          <div><label>Material Description</label><textarea name="material_description"></textarea></div>
-          <div><label>Notes</label><textarea name="notes"></textarea></div>
-          <div class="actions"><button type="submit">Add MRR</button></div>
-        </form>
-      </div>
-    </div>
-    <div class="card">
-      <h3>Add FMR Entry</h3>
-      <form method="post" action="/material-logs/fmr/add" class="stack">
-        <div class="grid">
-          <div><label>FMR Number</label><input name="fmr_number" required /></div>
-          <div><label>Vendor</label><input name="vendor_name" /></div>
-          <div><label>Container #</label><input name="container_no" /></div>
-          <div><label>Fluor ID</label><input name="fluor_id" /></div>
-          <div><label>MRR #</label><input name="mrr_number" /></div>
-          <div><label>Request Date</label><input name="request_date" /></div>
-          <div><label>Need Date</label><input name="need_date" /></div>
-          <div><label>Pick Ticket #</label><input name="pick_ticket" /></div>
-          <div><label>Pickup Location</label><input name="pickup_location" /></div>
-          <div><label>Pickup Date</label><input name="pickup_date" /></div>
-        </div>
-        <div><label>Fluor Description</label><textarea name="fluor_desc"></textarea></div>
-        <div><label>Request Description</label><textarea name="request_description"></textarea></div>
-        <div class="actions"><button type="submit">Add FMR</button></div>
       </form>
     </div>
     <div class="card scroll">
-      <h3>Material Receiving Log</h3>
-      <table><tr><th>ID</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Item</th><th>Description</th><th>Recv Qty</th><th>UOM</th><th>MRR</th><th>FMR</th><th>Warehouse</th><th>Location</th><th>Recv Date</th><th>Action</th></tr>${receivingRows || `<tr><td colspan="14" class="muted">No receiving lines yet.</td></tr>`}</table>
-    </div>
-    <div class="card scroll">
-      <h3>MRR Log</h3>
-      <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Action</th></tr>${mrrRows || `<tr><td colspan="11" class="muted">No MRR rows yet.</td></tr>`}</table>
-    </div>
-    <div class="card scroll">
-      <h3>FMR Log</h3>
-      <table><tr><th>FMR #</th><th>Vendor</th><th>Container</th><th>Fluor ID</th><th>Fluor Description</th><th>MRR #</th><th>Request Date</th><th>Need Date</th><th>Pickup Location</th><th>Pickup Date</th><th>Action</th></tr>${fmrRows || `<tr><td colspan="11" class="muted">No FMR rows yet.</td></tr>`}</table>
+      <table><tr><th>ID</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Item</th><th>Description</th><th>Recv Qty</th><th>UOM</th><th>MRR</th><th>FMR</th><th>Warehouse</th><th>Location</th><th>Recv Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="14" class="muted">No issue report rows found.</td></tr>`}</table>
     </div>
   `, req.user));
 });
@@ -3883,10 +3964,18 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
     } else {
       throw new Error("Choose a valid log type.");
     }
+    if (logType === "mrr") {
+      for (const row of rows) {
+        await saveMaterialLogLookup(client, "discipline", textValue(row.discipline));
+        await saveMaterialLogLookup(client, "vendor_name", textValue(row.vendor));
+        await saveMaterialLogLookup(client, "po_number", textValue(row.po));
+        await saveMaterialLogLookup(client, "received_by", textValue(row.received_by));
+      }
+    }
     await auditLog(client, req.user.id, "import", "material_logs", logType, `rows=${rows.length}`);
   });
 
-  res.redirect("/material-logs");
+  res.redirect("/settings/material-log-imports");
 });
 
 app.post("/material-logs/receiving/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
@@ -3937,13 +4026,18 @@ app.post("/material-logs/mrr/add", requireAuth, requireRole(["admin", "buyer", "
       req.body.opi_number?.trim() || "",
       req.body.opi_date?.trim() || ""
     ]);
+    await saveMaterialLogLookup(client, "discipline", req.body.discipline);
+    await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name);
+    await saveMaterialLogLookup(client, "po_number", req.body.po_number);
+    await saveMaterialLogLookup(client, "received_by", req.body.received_by);
     await auditLog(client, req.user.id, "create", "mrr_log", result.rows[0].id, req.body.mrr_number?.trim() || "");
   });
-  res.redirect("/material-logs");
+  res.redirect("/material-logs/mrr");
 });
 
 app.post("/material-logs/fmr/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
   await withTransaction(async (client) => {
+    await ensureUniqueFmrContainer(client, req.body.container_no);
     const result = await client.query(`
       insert into fmr_logs (
         fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, mrr_number, request_date, need_date, pick_ticket, pickup_location, pickup_date, updated_at
@@ -3965,7 +4059,7 @@ app.post("/material-logs/fmr/add", requireAuth, requireRole(["admin", "buyer", "
     ]);
     await auditLog(client, req.user.id, "create", "fmr_log", result.rows[0].id, req.body.fmr_number?.trim() || "");
   });
-  res.redirect("/material-logs");
+  res.redirect("/material-logs/fmr");
 });
 
 app.get("/material-logs/receiving/:id/edit", requireAuth, async (req, res) => {
@@ -4081,9 +4175,13 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireRole(["admin", "buye
       req.body.opi_number?.trim() || "",
       req.body.opi_date?.trim() || ""
     ]);
+    await saveMaterialLogLookup(client, "discipline", req.body.discipline);
+    await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name);
+    await saveMaterialLogLookup(client, "po_number", req.body.po_number);
+    await saveMaterialLogLookup(client, "received_by", req.body.received_by);
     await auditLog(client, req.user.id, "update", "mrr_log", req.params.id, req.body.mrr_number?.trim() || "");
   });
-  res.redirect("/material-logs");
+  res.redirect("/material-logs/mrr");
 });
 
 app.get("/material-logs/fmr/:id/edit", requireAuth, async (req, res) => {
@@ -4118,6 +4216,7 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, async (req, res) => {
 
 app.post("/material-logs/fmr/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
   await withTransaction(async (client) => {
+    await ensureUniqueFmrContainer(client, req.body.container_no, req.params.id);
     await client.query(`
       update fmr_logs
       set fmr_number = $2, vendor_name = $3, container_no = $4, fluor_id = $5, fluor_desc = $6, request_description = $7,
@@ -4140,7 +4239,7 @@ app.post("/material-logs/fmr/:id/edit", requireAuth, requireRole(["admin", "buye
     ]);
     await auditLog(client, req.user.id, "update", "fmr_log", req.params.id, req.body.fmr_number?.trim() || "");
   });
-  res.redirect("/material-logs");
+  res.redirect("/material-logs/fmr");
 });
 
 app.use((error, req, res, _next) => {
