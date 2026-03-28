@@ -34,9 +34,14 @@ const defaultVendorCategories = [
 ];
 
 export let vendorCategories = [...defaultVendorCategories];
+export let permissionMatrix = {};
 
 export function setVendorCategories(values) {
   vendorCategories = [...values];
+}
+
+export function setPermissionMatrix(values) {
+  permissionMatrix = values || {};
 }
 
 export async function query(text, params = []) {
@@ -95,12 +100,27 @@ export async function initDb() {
     [defaultVendorCategories.join(",")]
   );
 
+  await pool.query(
+    `
+      insert into app_settings (key, value)
+      values ('permission_matrix', '{}')
+      on conflict (key) do nothing
+    `
+  );
+
   const categorySetting = await pool.query("select value from app_settings where key = 'vendor_categories'");
   const loadedCategories = String(categorySetting.rows[0]?.value || "")
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
   vendorCategories = loadedCategories.length ? loadedCategories : [...defaultVendorCategories];
+
+  const permissionSetting = await pool.query("select value from app_settings where key = 'permission_matrix'");
+  try {
+    permissionMatrix = JSON.parse(String(permissionSetting.rows[0]?.value || "{}"));
+  } catch {
+    permissionMatrix = {};
+  }
 }
 
 export async function auditLog(client, userId, action, entityType, entityId = "", details = "") {

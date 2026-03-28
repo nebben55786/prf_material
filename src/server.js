@@ -5,7 +5,7 @@ import cookieParser from "cookie-parser";
 import multer from "multer";
 import bcrypt from "bcryptjs";
 import XLSX from "xlsx";
-import { initDb, query, withTransaction, auditLog, vendorCategories, setVendorCategories, pool } from "./db.js";
+import { initDb, query, withTransaction, auditLog, vendorCategories, setVendorCategories, permissionMatrix, setPermissionMatrix, pool } from "./db.js";
 
 const app = express();
 const upload = multer();
@@ -15,6 +15,82 @@ const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing",
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
 const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CLOSED"];
+const permissionSections = [
+  { key: "dashboard", label: "Dashboard", href: "/" },
+  { key: "material_logs", label: "Material Logs", href: "/material-logs" },
+  { key: "vendors", label: "Vendors", href: "/vendors" },
+  { key: "rfqs", label: "RFQs", href: "/rfq" },
+  { key: "pos", label: "POs", href: "/po" },
+  { key: "bom", label: "BOM", href: "/bom" },
+  { key: "receiving", label: "Receiving", href: "/receive" },
+  { key: "inventory", label: "Inventory", href: "/inventory" },
+  { key: "requisitions", label: "REQs", href: "/requisitions" },
+  { key: "settings", label: "Settings", href: "/settings" }
+];
+const permissionRoles = ["admin", "buyer", "warehouse", "field", "supervisor"];
+
+const defaultPermissionMatrix = {
+  admin: {
+    dashboard: { view: true },
+    material_logs: { view: true, edit: true },
+    vendors: { view: true, edit: true },
+    rfqs: { view: true, edit: true },
+    pos: { view: true, edit: true },
+    bom: { view: true, edit: true },
+    receiving: { view: true, edit: true },
+    inventory: { view: true },
+    requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: true },
+    settings: { view: true, edit: true }
+  },
+  buyer: {
+    dashboard: { view: true },
+    material_logs: { view: true, edit: true },
+    vendors: { view: true, edit: true },
+    rfqs: { view: true, edit: true },
+    pos: { view: true, edit: true },
+    bom: { view: true, edit: true },
+    receiving: { view: true, edit: false },
+    inventory: { view: true },
+    requisitions: { view: true, create: false, edit: false, verify: false, issue: false, unverify: false, delete: false },
+    settings: { view: true, edit: true }
+  },
+  warehouse: {
+    dashboard: { view: true },
+    material_logs: { view: true, edit: true },
+    vendors: { view: false, edit: false },
+    rfqs: { view: false, edit: false },
+    pos: { view: true, edit: false },
+    bom: { view: false, edit: false },
+    receiving: { view: true, edit: true },
+    inventory: { view: true },
+    requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: false },
+    settings: { view: false, edit: false }
+  },
+  field: {
+    dashboard: { view: true },
+    material_logs: { view: false, edit: false },
+    vendors: { view: false, edit: false },
+    rfqs: { view: false, edit: false },
+    pos: { view: false, edit: false },
+    bom: { view: false, edit: false },
+    receiving: { view: false, edit: false },
+    inventory: { view: true },
+    requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
+    settings: { view: false, edit: false }
+  },
+  supervisor: {
+    dashboard: { view: true },
+    material_logs: { view: true, edit: false },
+    vendors: { view: true, edit: false },
+    rfqs: { view: true, edit: false },
+    pos: { view: true, edit: false },
+    bom: { view: true, edit: false },
+    receiving: { view: true, edit: false },
+    inventory: { view: true },
+    requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
+    settings: { view: false, edit: false }
+  }
+};
 
 function safeCookieDecode(value) {
   try {
@@ -22,6 +98,23 @@ function safeCookieDecode(value) {
   } catch {
     return value;
   }
+}
+
+function getPermissionsForRole(role) {
+  return {
+    ...(defaultPermissionMatrix[role] || {}),
+    ...(permissionMatrix[role] || {})
+  };
+}
+
+function canAccess(user, section, action = "view") {
+  if (!user) return false;
+  const rolePermissions = getPermissionsForRole(user.role);
+  const sectionPermissions = {
+    ...(defaultPermissionMatrix[user.role]?.[section] || {}),
+    ...(rolePermissions[section] || {})
+  };
+  return Boolean(sectionPermissions[action]);
 }
 
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
@@ -38,62 +131,13 @@ function esc(value) {
 }
 
 function layout(title, body, user) {
-  const navByRole = {
-    admin: [
-      ["Dashboard", "/"],
-      ["Material Logs", "/material-logs"],
-      ["Vendors", "/vendors"],
-      ["RFQs", "/rfq"],
-      ["POs", "/po"],
-      ["BOM", "/bom"],
-      ["Receiving", "/receive"],
-      ["Inventory", "/inventory"],
-      ["REQs", "/requisitions"],
-      ["Settings", "/settings"],
-      ["Logout", "/logout"]
-    ],
-    buyer: [
-      ["Dashboard", "/"],
-      ["Material Logs", "/material-logs"],
-      ["Vendors", "/vendors"],
-      ["RFQs", "/rfq"],
-      ["POs", "/po"],
-      ["BOM", "/bom"],
-      ["Receiving", "/receive"],
-      ["Inventory", "/inventory"],
-      ["REQs", "/requisitions"],
-      ["Settings", "/settings"],
-      ["Logout", "/logout"]
-    ],
-    warehouse: [
-      ["Dashboard", "/"],
-      ["Material Logs", "/material-logs"],
-      ["POs", "/po"],
-      ["Receiving", "/receive"],
-      ["Inventory", "/inventory"],
-      ["REQs", "/requisitions"],
-      ["Logout", "/logout"]
-    ],
-    field: [
-      ["Dashboard", "/"],
-      ["Inventory", "/inventory"],
-      ["REQs", "/requisitions"],
-      ["Logout", "/logout"]
-    ],
-    supervisor: [
-      ["Dashboard", "/"],
-      ["Material Logs", "/material-logs"],
-      ["Vendors", "/vendors"],
-      ["RFQs", "/rfq"],
-      ["POs", "/po"],
-      ["BOM", "/bom"],
-      ["Receiving", "/receive"],
-      ["Inventory", "/inventory"],
-      ["REQs", "/requisitions"],
-      ["Logout", "/logout"]
-    ]
-  };
-  const navLinks = user ? (navByRole[user.role] || navByRole.field).map(([label, href]) => `<a href="${href}">${label}</a>`).join("") : "";
+  const navLinks = user
+    ? permissionSections
+        .filter((section) => canAccess(user, section.key, "view"))
+        .map((section) => `<a href="${section.href}">${section.label}</a>`)
+        .concat(`<a href="/logout">Logout</a>`)
+        .join("")
+    : "";
   return `<!doctype html>
   <html>
   <head>
@@ -964,9 +1008,19 @@ function requireRole(roles) {
   };
 }
 
+function requirePermission(section, action = "view") {
+  return (req, res, next) => {
+    if (!canAccess(req.user, section, action)) {
+      res.status(403).send(layout("Forbidden", `<div class="card error"><h3>Forbidden</h3><p>You do not have permission for this action.</p></div>`, req.user));
+      return;
+    }
+    next();
+  };
+}
+
 function canEditRequisition(user, header) {
   if (!user || !header) return false;
-  return header.status === "REQUESTED" && ["admin", "buyer", "warehouse", "field", "supervisor"].includes(user.role);
+  return header.status === "REQUESTED" && canAccess(user, "requisitions", "edit");
 }
 
 async function recalcRfqStatus(client, rfqId) {
@@ -1108,7 +1162,7 @@ app.get("/", async (req, res) => {
   res.send(landingPage());
 });
 
-app.get("/dashboard", requireAuth, async (req, res) => {
+app.get("/dashboard", requireAuth, requirePermission("dashboard", "view"), async (req, res) => {
   const [rfqs, pos, receipts, vendors, osd, jobNumber, pendingAccessRequests] = await Promise.all([
     query("select count(*) from rfqs"),
     query("select count(*) from purchase_orders"),
@@ -1133,13 +1187,42 @@ app.get("/dashboard", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/settings", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.get("/settings", requireAuth, requirePermission("settings", "view"), async (req, res) => {
   const jobNumber = await getJobNumber();
   const vendorCategoryText = vendorCategories.join("\n");
   const accessRequestsRes = await query("select * from access_requests where status = 'PENDING' order by created_at asc");
   const usersRes = req.user.role === "admin"
     ? await query("select id, username, role, is_active, created_at from users order by username")
     : { rows: [] };
+  const permissionRows = permissionSections.map((section) => {
+    const cells = permissionRoles.map((role) => {
+      const perms = {
+        ...(defaultPermissionMatrix[role]?.[section.key] || {}),
+        ...(permissionMatrix[role]?.[section.key] || {})
+      };
+      const viewChecked = perms.view ? "checked" : "";
+      const editChecked = perms.edit ? "checked" : "";
+      const createChecked = perms.create ? "checked" : "";
+      const verifyChecked = perms.verify ? "checked" : "";
+      const issueChecked = perms.issue ? "checked" : "";
+      const unverifyChecked = perms.unverify ? "checked" : "";
+      const deleteChecked = perms.delete ? "checked" : "";
+      return `<td>
+        <div class="stack">
+          <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__view" ${viewChecked} /><span>View</span></label>
+          <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__edit" ${editChecked} /><span>Edit</span></label>
+          ${section.key === "requisitions" ? `
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__create" ${createChecked} /><span>Create</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__verify" ${verifyChecked} /><span>Verify</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__issue" ${issueChecked} /><span>Issue</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__unverify" ${unverifyChecked} /><span>Unverify</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__delete" ${deleteChecked} /><span>Delete</span></label>
+          ` : ""}
+        </div>
+      </td>`;
+    }).join("");
+    return `<tr><td><strong>${esc(section.label)}</strong></td>${cells}</tr>`;
+  }).join("");
   const userRows = usersRes.rows.map((record) => `
     <tr>
       <td>${esc(record.username)}</td>
@@ -1233,6 +1316,18 @@ app.get("/settings", requireAuth, requireRole(["admin", "buyer"]), async (req, r
       <div class="muted">Import receiving, MRR, and FMR workbook data from a separate admin page.</div>
       <div class="actions" style="margin-top:12px;"><a class="btn btn-primary" href="/settings/material-log-imports">Open Material Log Imports</a></div>
     </div>
+    ${req.user.role === "admin" ? `
+    <div class="card scroll">
+      <h3>Sheet Permissions</h3>
+      <form method="post" action="/settings/permissions" class="stack">
+        <table>
+          <tr><th>Sheet</th><th>Admin</th><th>Buyer</th><th>Warehouse</th><th>Field</th><th>Supervisor</th></tr>
+          ${permissionRows}
+        </table>
+        <div class="actions"><button type="submit">Save Permissions</button></div>
+      </form>
+    </div>
+    ` : ""}
     <div class="card scroll">
       <h3>Access Requests</h3>
       <table>
@@ -1307,7 +1402,7 @@ app.post("/request-access", async (req, res) => {
   res.send(requestAccessPage("", "Request submitted. An administrator will review it."));
 });
 
-app.post("/settings/job-number", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/settings/job-number", requireAuth, requirePermission("settings", "edit"), async (req, res) => {
   const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
   if (!jobNumber) throw new Error("Job number is required.");
   await withTransaction(async (client) => {
@@ -1322,7 +1417,7 @@ app.post("/settings/job-number", requireAuth, requireRole(["admin", "buyer"]), a
   res.redirect("/settings");
 });
 
-app.post("/settings/vendor-categories", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/settings/vendor-categories", requireAuth, requirePermission("settings", "edit"), async (req, res) => {
   const categories = normalizeCategoryList(req.body.vendor_categories);
   if (categories.length === 0) throw new Error("At least one vendor category is required.");
   await withTransaction(async (client) => {
@@ -1338,7 +1433,40 @@ app.post("/settings/vendor-categories", requireAuth, requireRole(["admin", "buye
   res.redirect("/settings");
 });
 
-app.get("/settings/material-log-imports", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/settings/permissions", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const nextMatrix = {};
+  for (const role of permissionRoles) {
+    nextMatrix[role] = {};
+    for (const section of permissionSections) {
+      const currentDefaults = defaultPermissionMatrix[role]?.[section.key] || {};
+      nextMatrix[role][section.key] = {
+        ...currentDefaults,
+        view: String(req.body[`perm__${role}__${section.key}__view`] || "") === "on",
+        edit: String(req.body[`perm__${role}__${section.key}__edit`] || "") === "on"
+      };
+      if (section.key === "requisitions") {
+        nextMatrix[role][section.key].create = String(req.body[`perm__${role}__${section.key}__create`] || "") === "on";
+        nextMatrix[role][section.key].verify = String(req.body[`perm__${role}__${section.key}__verify`] || "") === "on";
+        nextMatrix[role][section.key].issue = String(req.body[`perm__${role}__${section.key}__issue`] || "") === "on";
+        nextMatrix[role][section.key].unverify = String(req.body[`perm__${role}__${section.key}__unverify`] || "") === "on";
+        nextMatrix[role][section.key].delete = String(req.body[`perm__${role}__${section.key}__delete`] || "") === "on";
+      }
+    }
+  }
+  await withTransaction(async (client) => {
+    await client.query(`
+      insert into app_settings (key, value, updated_at)
+      values ('permission_matrix', $1, now())
+      on conflict (key) do update
+      set value = excluded.value, updated_at = now()
+    `, [JSON.stringify(nextMatrix)]);
+    await auditLog(client, req.user.id, "update", "app_setting", "permission_matrix", "updated");
+  });
+  setPermissionMatrix(nextMatrix);
+  res.redirect("/settings");
+}));
+
+app.get("/settings/material-log-imports", requireAuth, requirePermission("settings", "view"), async (req, res) => {
   res.send(layout("Material Log Imports", `
     <h1>Material Log Imports</h1>
     <div class="card">
@@ -1491,7 +1619,7 @@ app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyn
   res.redirect("/settings");
 }));
 
-app.get("/bom", requireAuth, async (req, res) => {
+app.get("/bom", requireAuth, requirePermission("bom", "view"), async (req, res) => {
   const bomNo = String(req.query.bom_no || "").trim();
   const bomName = String(req.query.bom_name || "").trim();
   const bomType = String(req.query.bom_type || "").trim();
@@ -1575,7 +1703,7 @@ app.get("/bom", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/bom", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/bom", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   const bomId = await withTransaction(async (client) => {
     const jobNumber = String((req.body.job_number || await getJobNumber(client))).trim().toUpperCase();
     const bomNo = String(req.body.bom_no || "").trim() || await getNextBomNumber(client);
@@ -1603,7 +1731,7 @@ app.post("/bom", requireAuth, requireRole(["admin", "buyer"]), async (req, res) 
   res.redirect(`/bom/${bomId}`);
 });
 
-app.get("/bom/:id/edit", requireAuth, async (req, res) => {
+app.get("/bom/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   const bom = (await query("select * from bom_headers where id = $1", [req.params.id])).rows[0];
   if (!bom) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
@@ -1635,7 +1763,7 @@ app.get("/bom/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/bom/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/bom/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await client.query(`
       update bom_headers
@@ -1735,7 +1863,7 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/bom/:id/to-rfq", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/bom/:id/to-rfq", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   const bomId = Number(req.params.id);
   const rfqId = await withTransaction(async (client) => {
     const bom = (await client.query("select * from bom_headers where id = $1", [bomId])).rows[0];
@@ -1792,7 +1920,7 @@ app.post("/bom/:id/to-rfq", requireAuth, requireRole(["admin", "buyer"]), async 
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/bom/:id/requisitions", requireAuth, asyncHandler(async (req, res) => {
+app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
   const selectedLineIds = []
     .concat(req.body.selected_line_ids || [])
@@ -1896,7 +2024,7 @@ app.post("/bom/:id/requisitions", requireAuth, asyncHandler(async (req, res) => 
   res.redirect(`/requisitions/${requisitionId}`);
 }));
 
-app.post("/bom/:id/lines/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
+app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"), upload.single("sheet"), async (req, res) => {
   const bomId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (rows.length === 0) throw new Error("No rows found.");
@@ -1948,7 +2076,7 @@ app.post("/bom/:id/lines/import", requireAuth, requireRole(["admin", "buyer"]), 
   res.redirect(`/imports/${batchId}`);
 });
 
-app.get("/bom-line/:id/edit", requireAuth, async (req, res) => {
+app.get("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   const line = (await query("select bl.*, bh.bom_no from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1", [req.params.id])).rows[0];
   if (!line) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM line not found.</h3></div>`, req.user));
@@ -1985,7 +2113,7 @@ app.get("/bom-line/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/bom-line/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   const lineId = Number(req.params.id);
   const bomId = await withTransaction(async (client) => {
     const current = (await client.query("select bom_id from bom_lines where id = $1", [lineId])).rows[0];
@@ -2003,7 +2131,7 @@ app.post("/bom-line/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asy
   res.redirect(`/bom/${bomId}`);
 });
 
-app.post("/bom-line/:id/delete", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/bom-line/:id/delete", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   const lineId = Number(req.params.id);
   const bomId = await withTransaction(async (client) => {
     const current = (await client.query("select bom_id from bom_lines where id = $1", [lineId])).rows[0];
@@ -2015,7 +2143,7 @@ app.post("/bom-line/:id/delete", requireAuth, requireRole(["admin", "buyer"]), a
   res.redirect(`/bom/${bomId}`);
 });
 
-app.get("/requisitions/new", requireAuth, async (req, res) => {
+app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "create"), async (req, res) => {
   const availableBoms = (await query(`
     select id, bom_no, bom_name, description, status
     from bom_headers
@@ -2227,7 +2355,7 @@ app.get("/requisitions/new", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/requisitions", requireAuth, async (req, res) => {
+app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"), async (req, res) => {
   const iwp = String(req.query.iwp || "").trim();
   const iso = String(req.query.iso || "").trim();
   const status = String(req.query.status || "").trim();
@@ -2261,9 +2389,9 @@ app.get("/requisitions", requireAuth, async (req, res) => {
   </tr>`).join("");
   res.send(layout("Requisitions", `
     <h1>Material Requisitions</h1>
-    <div class="card">
+    ${canAccess(req.user, "requisitions", "create") ? `<div class="card">
       <div class="actions"><a class="btn btn-primary" href="/requisitions/new">New Request</a></div>
-    </div>
+    </div>` : ""}
     <div class="card">
       <form method="get" action="/requisitions" class="stack">
         <div class="grid">
@@ -2278,7 +2406,7 @@ app.get("/requisitions", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/requisitions/:id", requireAuth, async (req, res) => {
+app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "view"), async (req, res) => {
   const header = (await query(`
     select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
     from material_requisitions mr
@@ -2315,16 +2443,18 @@ app.get("/requisitions/:id", requireAuth, async (req, res) => {
   if (canEditRequisition(req.user, header)) {
     headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Edit Request</a>`);
   }
-  if (header.status === "REQUESTED") {
+  if (header.status === "REQUESTED" && canAccess(req.user, "requisitions", "verify")) {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Verify Request</button></form>`);
   }
   if (header.status === "VERIFIED") {
-    if (["admin", "warehouse"].includes(req.user.role)) {
+    if (canAccess(req.user, "requisitions", "unverify")) {
       headerActions.push(`<form method="post" action="/requisitions/${header.id}/unverify"><button class="btn btn-secondary" type="submit">Set To Un-Verified</button></form>`);
     }
-    headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
+    if (canAccess(req.user, "requisitions", "issue")) {
+      headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
+    }
   }
-  if (req.user.role === "admin") {
+  if (canAccess(req.user, "requisitions", "delete")) {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/delete" onsubmit="return confirm('Delete this requisition? If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Delete Requisition</button></form>`);
   }
   res.send(layout(`Requisition ${header.requisition_no}`, `
@@ -2339,7 +2469,7 @@ app.get("/requisitions/:id", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/requisitions/:id/verify", requireAuth, requireRole(["admin", "warehouse", "buyer"]), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/verify", requireAuth, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
     if (!header) throw new Error("Requisition not found.");
@@ -2356,7 +2486,7 @@ app.post("/requisitions/:id/verify", requireAuth, requireRole(["admin", "warehou
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.get("/requisitions/:id/edit", requireAuth, asyncHandler(async (req, res) => {
+app.get("/requisitions/:id/edit", requireAuth, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
   const header = (await query(`
     select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
     from material_requisitions mr
@@ -2473,7 +2603,7 @@ app.get("/requisitions/:id/edit", requireAuth, asyncHandler(async (req, res) => 
   `, req.user));
 }));
 
-app.post("/requisitions/:id/edit", requireAuth, asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/edit", requireAuth, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
     if (!header) throw new Error("Requisition not found.");
@@ -2569,7 +2699,7 @@ app.post("/requisitions/:id/edit", requireAuth, asyncHandler(async (req, res) =>
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.post("/requisitions/:id/unverify", requireAuth, requireRole(["admin", "warehouse"]), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/unverify", requireAuth, requirePermission("requisitions", "unverify"), asyncHandler(async (req, res) => {
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
     if (!header) throw new Error("Requisition not found.");
@@ -2586,7 +2716,7 @@ app.post("/requisitions/:id/unverify", requireAuth, requireRole(["admin", "wareh
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehouse"]), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
     if (!header) throw new Error("Requisition not found.");
@@ -2694,7 +2824,7 @@ app.post("/requisitions/:id/issue", requireAuth, requireRole(["admin", "warehous
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.post("/requisitions/:id/delete", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/delete", requireAuth, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
     if (!header) throw new Error("Requisition not found.");
@@ -2726,7 +2856,7 @@ app.post("/requisitions/:id/delete", requireAuth, requireRole(["admin"]), asyncH
   res.redirect("/requisitions");
 }));
 
-app.get("/vendors", requireAuth, async (req, res) => {
+app.get("/vendors", requireAuth, requirePermission("vendors", "view"), async (req, res) => {
   const search = String(req.query.search || "").trim();
   const category = String(req.query.category || "").trim();
   const showInactive = String(req.query.show_inactive || "").trim() === "1";
@@ -2800,7 +2930,7 @@ app.get("/vendors", requireAuth, async (req, res) => {
       `, req.user));
 });
 
-app.get("/vendors/new", requireAuth, async (req, res) => {
+app.get("/vendors/new", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
   const checks = vendorCategories.map((category) => `<label class="check-option"><input type="checkbox" name="categories" value="${esc(category)}" /><span>${esc(category)}</span></label>`).join("");
   res.send(layout("Add Vendor", `
     <h1>Add Vendor</h1>
@@ -2820,7 +2950,7 @@ app.get("/vendors/new", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/vendors/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/vendors/add", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
       const result = await client.query(
         "insert into vendors (name, contact_name, website, email, phone, categories) values ($1, $2, $3, $4, $5, $6) returning id",
@@ -2832,7 +2962,7 @@ app.post("/vendors/add", requireAuth, requireRole(["admin", "buyer"]), async (re
   res.redirect("/vendors");
 });
 
-app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
+app.get("/vendors/:id/edit", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
   const [vendorRes, contactsRes] = await Promise.all([
     query("select * from vendors where id = $1", [req.params.id]),
     query("select * from vendor_contacts where vendor_id = $1 order by is_primary desc, contact_name asc, id asc", [req.params.id])
@@ -2887,7 +3017,7 @@ app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
     `, req.user));
 });
 
-app.post("/vendors/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/vendors/:id/edit", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
       await client.query(
         "update vendors set name = $2, contact_name = $3, website = $4, email = $5, phone = $6, categories = $7 where id = $1",
@@ -2899,7 +3029,7 @@ app.post("/vendors/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asyn
   res.redirect("/vendors");
 });
 
-app.post("/vendors/:id/contacts/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/vendors/:id/contacts/add", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const vendorId = Number(req.params.id);
     const vendor = (await client.query("select id from vendors where id = $1", [vendorId])).rows[0];
@@ -2915,7 +3045,7 @@ app.post("/vendors/:id/contacts/add", requireAuth, requireRole(["admin", "buyer"
   res.redirect(`/vendors/${req.params.id}/edit`);
 });
 
-app.post("/vendors/:id/deactivate", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/vendors/:id/deactivate", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await client.query("update vendors set is_active = false where id = $1", [req.params.id]);
     await auditLog(client, req.user.id, "deactivate", "vendor", req.params.id, "");
@@ -2923,7 +3053,7 @@ app.post("/vendors/:id/deactivate", requireAuth, requireRole(["admin", "buyer"])
   res.redirect("/vendors");
 });
 
-app.post("/vendors/:id/activate", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/vendors/:id/activate", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await client.query("update vendors set is_active = true where id = $1", [req.params.id]);
     await auditLog(client, req.user.id, "activate", "vendor", req.params.id, "");
@@ -2931,7 +3061,7 @@ app.post("/vendors/:id/activate", requireAuth, requireRole(["admin", "buyer"]), 
   res.redirect("/vendors");
 });
 
-app.post("/vendors/:id/contacts/:contactId/primary", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/vendors/:id/contacts/:contactId/primary", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const vendorId = Number(req.params.id);
     const contactId = Number(req.params.contactId);
@@ -2949,7 +3079,7 @@ app.post("/vendors/:id/contacts/:contactId/primary", requireAuth, requireRole(["
   res.redirect(`/vendors/${req.params.id}/edit`);
 });
 
-app.post("/vendors/:id/contacts/:contactId/delete", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/vendors/:id/contacts/:contactId/delete", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const vendorId = Number(req.params.id);
     const contactId = Number(req.params.contactId);
@@ -2962,7 +3092,7 @@ app.post("/vendors/:id/contacts/:contactId/delete", requireAuth, requireRole(["a
   res.redirect(`/vendors/${req.params.id}/edit`);
 });
 
-app.get("/rfq", requireAuth, async (req, res) => {
+app.get("/rfq", requireAuth, requirePermission("rfqs", "view"), async (req, res) => {
   const rfqNo = String(req.query.rfq_no || "").trim();
   const project = String(req.query.project || "").trim();
   const status = String(req.query.status || "").trim();
@@ -3048,7 +3178,7 @@ app.get("/rfq", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/rfq/new", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const [nextRfqNo, jobNumber] = await Promise.all([
     getNextRfqNumber(),
     getJobNumber()
@@ -3074,7 +3204,7 @@ app.get("/rfq/new", requireAuth, requireRole(["admin", "buyer"]), async (req, re
   `, req.user));
 });
 
-app.post("/rfq", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const id = await withTransaction(async (client) => {
     const rfqNo = await getNextRfqNumber(client);
     const insert = await client.query(
@@ -3087,7 +3217,7 @@ app.post("/rfq", requireAuth, requireRole(["admin", "buyer"]), async (req, res) 
   res.redirect(`/rfq/${id}`);
 });
 
-app.get("/rfq/:id", requireAuth, async (req, res) => {
+app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const selectedVendorId = String(req.query.quote_vendor_id || "").trim();
   const rfq = (await query("select * from rfqs where id = $1", [rfqId])).rows[0];
@@ -3322,7 +3452,7 @@ app.get("/rfq/:id", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/rfq/:id/items/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
+app.post("/rfq/:id/items/import", requireAuth, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (rows.length === 0) throw new Error("No rows found.");
@@ -3354,7 +3484,7 @@ app.post("/rfq/:id/items/import", requireAuth, requireRole(["admin", "buyer"]), 
   res.redirect(`/imports/${batchId}`);
 });
 
-app.post("/rfq/:id/items/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq/:id/items/add", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
   await withTransaction(async (client) => {
     const result = await upsertRfqItemRow(client, rfqId, req.body);
@@ -3364,7 +3494,7 @@ app.post("/rfq/:id/items/add", requireAuth, requireRole(["admin", "buyer"]), asy
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/rfq/:id/items/grid", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq/:id/items/grid", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const usedItemCodes = new Set();
   const rows = Array.from({ length: 8 }, (_, index) => ({
@@ -3420,7 +3550,7 @@ app.post("/rfq/:id/items/grid", requireAuth, requireRole(["admin", "buyer"]), as
   res.redirect(`/imports/${batchId}`);
 });
 
-app.post("/rfq/:id/items/paste", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq/:id/items/paste", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const rows = parseDelimitedRows(req.body.table_text);
   if (rows.length === 0) throw new Error("No pasted rows found.");
@@ -3452,7 +3582,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireRole(["admin", "buyer"]), a
   res.redirect(`/imports/${batchId}`);
 });
 
-app.post("/rfq/:id/quotes/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
+app.post("/rfq/:id/quotes/import", requireAuth, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (rows.length === 0) throw new Error("No rows found.");
@@ -3576,7 +3706,7 @@ app.get("/imports/:id", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/po/create", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/po/create", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   const rfqId = Number(req.body.rfq_id);
   const vendorId = Number(req.body.vendor_id);
   const poNo = String(req.body.po_no || "").trim();
@@ -3654,7 +3784,7 @@ app.get("/rfq-item/:id/award", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/rfq-item/:id/award", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq-item/:id/award", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
   const rfqId = await withTransaction(async (client) => {
     const quote = (await client.query(`
@@ -3682,7 +3812,7 @@ app.post("/rfq-item/:id/award", requireAuth, requireRole(["admin", "buyer"]), as
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/rfq-item/:id/award/clear", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq-item/:id/award/clear", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
   const rfqId = await withTransaction(async (client) => {
     const current = (await client.query("select rfq_id from rfq_items where id = $1", [itemId])).rows[0];
@@ -3713,7 +3843,7 @@ app.post("/rfq-item/:id/award/clear", requireAuth, requireRole(["admin", "buyer"
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.get("/rfq-item/:id/edit", requireAuth, async (req, res) => {
+app.get("/rfq-item/:id/edit", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const item = (await query(`
     select ri.id, ri.rfq_id, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
            mi.item_code, mi.description, mi.material_type, mi.uom
@@ -3751,7 +3881,7 @@ app.get("/rfq-item/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/rfq-item/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq-item/:id/edit", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
   const rfqId = await withTransaction(async (client) => {
     const current = (await client.query("select rfq_id, material_item_id from rfq_items where id = $1", [itemId])).rows[0];
@@ -3772,7 +3902,7 @@ app.post("/rfq-item/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asy
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/rfq-item/:id/delete", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq-item/:id/delete", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
   const rfqId = await withTransaction(async (client) => {
     const current = (await client.query("select rfq_id from rfq_items where id = $1", [itemId])).rows[0];
@@ -3839,7 +3969,7 @@ app.get("/rfq-item/:id/quotes", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/quotes", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/quotes", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const rfqItemId = Number(req.body.rfq_item_id);
     const vendorId = Number(req.body.vendor_id);
@@ -3870,7 +4000,7 @@ app.post("/quotes", requireAuth, requireRole(["admin", "buyer"]), async (req, re
   res.redirect(`/rfq/${req.body.rfq_id}`);
 });
 
-app.post("/rfq/:id/quotes/grid", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq/:id/quotes/grid", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const vendorId = Number(req.body.vendor_id);
   if (!vendorId) throw new Error("Select a quote vendor first.");
@@ -3934,7 +4064,7 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireRole(["admin", "buyer"]), a
   res.redirect(`/rfq/${rfqId}?quote_vendor_id=${encodeURIComponent(String(vendorId))}`);
 });
 
-app.get("/po", requireAuth, async (req, res) => {
+app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) => {
   const poNo = String(req.query.po_no || "").trim();
   const rfqNo = String(req.query.rfq_no || "").trim();
   const vendorId = String(req.query.vendor_id || "").trim();
@@ -3999,7 +4129,7 @@ app.get("/po", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/po/import", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   res.send(layout("Import Existing POs", `
     <h1>Import Existing POs</h1>
     <div class="card">
@@ -4015,7 +4145,7 @@ app.get("/po/import", requireAuth, requireRole(["admin", "buyer"]), async (req, 
   `, req.user));
 });
 
-app.get("/po/import/template", requireAuth, requireRole(["admin", "buyer"]), async (_req, res) => {
+app.get("/po/import/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
   const csv = [
     "po_no,vendor_name,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price,vendor_contact,freight_terms,ship_to,bill_to,notes,buyer_name,status",
     "PO-00001,Example Vendor,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75,John Smith,FOB,SITE A,OFFICE A,Legacy import sample,Buyer One,OPEN"
@@ -4025,7 +4155,7 @@ app.get("/po/import/template", requireAuth, requireRole(["admin", "buyer"]), asy
   res.send(csv);
 });
 
-app.post("/po/import/preview", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
+app.post("/po/import/preview", requireAuth, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
   const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizePoImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
   const previewRows = rows.slice(0, 100).map((row) => `<tr>
@@ -4051,7 +4181,7 @@ app.post("/po/import/preview", requireAuth, requireRole(["admin", "buyer"]), upl
   `, req.user));
 });
 
-app.post("/po/import/commit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/po/import/commit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   const rows = JSON.parse(String(req.body.rows_json || "[]"));
   if (!Array.isArray(rows) || rows.length === 0) throw new Error("No rows found.");
   const batchId = await withTransaction(async (client) => {
@@ -4080,7 +4210,7 @@ app.post("/po/import/commit", requireAuth, requireRole(["admin", "buyer"]), asyn
   res.redirect(`/imports/${batchId}`);
 });
 
-app.get("/po/new", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.get("/po/new", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   const vendors = (await query("select id, name from vendors where is_active = true order by name")).rows;
   const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
   res.send(layout("Add PO", `
@@ -4098,7 +4228,7 @@ app.get("/po/new", requireAuth, requireRole(["admin", "buyer"]), async (req, res
   `, req.user));
 });
 
-app.post("/po/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/po/add", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const result = await client.query(`
       insert into purchase_orders (po_no, vendor_id, rfq_id, status, updated_at)
@@ -4110,7 +4240,7 @@ app.post("/po/add", requireAuth, requireRole(["admin", "buyer"]), async (req, re
   res.redirect("/po");
 });
 
-app.get("/po/:id/edit", requireAuth, async (req, res) => {
+app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   const [po, vendors] = await Promise.all([
     query(`
       select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token, coalesce(r.rfq_no, '') as rfq_no
@@ -4139,7 +4269,7 @@ app.get("/po/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/po/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const update = await client.query(`
       update purchase_orders
@@ -4152,7 +4282,7 @@ app.post("/po/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (re
   res.redirect("/po");
 });
 
-app.post("/po/:id/delete", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/po/:id/delete", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const po = (await client.query("select rfq_id from purchase_orders where id = $1", [req.params.id])).rows[0];
     await client.query("delete from purchase_orders where id = $1", [req.params.id]);
@@ -4162,7 +4292,7 @@ app.post("/po/:id/delete", requireAuth, requireRole(["admin", "buyer"]), async (
   res.redirect("/po");
 });
 
-app.get("/po-line/:id/edit", requireAuth, async (req, res) => {
+app.get("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   const line = (await query(`
     select pl.id, pl.qty_ordered, pl.unit_price, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, extract(epoch from pl.updated_at)::text as updated_token,
            mi.item_code, mi.description, po.po_no
@@ -4191,7 +4321,7 @@ app.get("/po-line/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/po-line/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const update = await client.query(`
       update po_lines
@@ -4204,7 +4334,7 @@ app.post("/po-line/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asyn
   res.redirect("/po");
 });
 
-app.get("/receive", requireAuth, async (req, res) => {
+app.get("/receive", requireAuth, requirePermission("receiving", "view"), async (req, res) => {
   const poId = String(req.query.po_id || "").trim();
   const poOptionsRows = (await query("select id, po_no from purchase_orders order by id desc")).rows;
   const poOptions = [`<option value="">All POs</option>`]
@@ -4267,7 +4397,7 @@ app.get("/receive", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/receive", requireAuth, requireRole(["admin", "warehouse"]), async (req, res) => {
+app.post("/receive", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const insert = await client.query(`
       insert into receipts (po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
@@ -4279,7 +4409,7 @@ app.post("/receive", requireAuth, requireRole(["admin", "warehouse"]), async (re
   res.redirect(req.body.po_id ? `/receive?po_id=${encodeURIComponent(req.body.po_id)}` : "/receive");
 });
 
-app.get("/inventory", requireAuth, async (req, res) => {
+app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async (req, res) => {
   const rows = (await query(`
     select mi.item_code, mi.description, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2,
            r.warehouse, r.location,
@@ -4302,7 +4432,7 @@ app.get("/inventory", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/material-logs", requireAuth, async (req, res) => {
+app.get("/material-logs", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
   res.send(layout("Material Logs", `
     <h1>Material Logs</h1>
     <div class="card">
@@ -4316,7 +4446,7 @@ app.get("/material-logs", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/material-logs/mrr", requireAuth, async (req, res) => {
+app.get("/material-logs/mrr", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
   const q = String(req.query.q || "").trim();
   const rows = (await query(`
     select id, discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by, load_number, opi_number
@@ -4355,7 +4485,7 @@ app.get("/material-logs/mrr", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/material-logs/mrr/new", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.get("/material-logs/mrr/new", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await syncMrrVendorsIntoVendorTable(client);
   });
@@ -4393,7 +4523,7 @@ app.get("/material-logs/mrr/new", requireAuth, requireRole(["admin", "buyer", "w
   `, req.user));
 });
 
-app.get("/material-logs/fmr", requireAuth, async (req, res) => {
+app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
   const q = String(req.query.q || "").trim();
   const rows = (await query(`
     select id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, mrr_number, request_date, need_date, pickup_location, pickup_date
@@ -4432,7 +4562,7 @@ app.get("/material-logs/fmr", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/material-logs/opi", requireAuth, async (req, res) => {
+app.get("/material-logs/opi", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
   await withTransaction(async (client) => {
     await syncOpiLogsFromMrr(client);
   });
@@ -4467,7 +4597,7 @@ app.get("/material-logs/opi", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.get("/material-logs/fmr/new", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.get("/material-logs/fmr/new", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   res.send(layout("Add FMR", `
     <h1>Add FMR</h1>
     <div class="card">
@@ -4492,7 +4622,7 @@ app.get("/material-logs/fmr/new", requireAuth, requireRole(["admin", "buyer", "w
   `, req.user));
 });
 
-app.get("/material-logs/received-by/new", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.get("/material-logs/received-by/new", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   const values = await getMaterialLogLookupOptions("received_by");
   const rows = values.map((value) => `<tr><td>${esc(value)}</td></tr>`).join("");
   res.send(layout("Add Received By", `
@@ -4509,7 +4639,7 @@ app.get("/material-logs/received-by/new", requireAuth, requireRole(["admin", "bu
   `, req.user));
 });
 
-app.post("/material-logs/received-by/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/received-by/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await saveMaterialLogLookup(client, "received_by", req.body.value);
     await auditLog(client, req.user.id, "create", "material_log_lookup", "received_by", String(req.body.value || "").trim());
@@ -4517,7 +4647,7 @@ app.post("/material-logs/received-by/add", requireAuth, requireRole(["admin", "b
   res.redirect("/material-logs/mrr/new");
 });
 
-app.get("/material-logs/issue-report", requireAuth, async (req, res) => {
+app.get("/material-logs/issue-report", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
   const q = String(req.query.q || "").trim();
   const params = q ? [`%${q}%`] : [];
   const rows = (await query(`
@@ -4559,7 +4689,7 @@ app.get("/material-logs/issue-report", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "warehouse"]), upload.single("sheet"), async (req, res) => {
+app.post("/material-logs/import", requireAuth, requirePermission("material_logs", "edit"), upload.single("sheet"), async (req, res) => {
   if (!req.file?.buffer?.length) throw new Error("Upload a workbook file first.");
   const logType = String(req.body.log_type || "").trim();
   const rows = importRowsFromWorkbook(req.file.buffer, logType);
@@ -4818,7 +4948,7 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
   res.redirect("/settings/material-log-imports");
 });
 
-app.post("/material-logs/receiving/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/receiving/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const result = await client.query(`
       insert into material_receiving_logs (
@@ -4845,7 +4975,7 @@ app.post("/material-logs/receiving/add", requireAuth, requireRole(["admin", "buy
   res.redirect("/material-logs");
 });
 
-app.post("/material-logs/mrr/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/mrr/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     const mrrNumber = await getNextMrrNumber();
     const result = await client.query(`
@@ -4878,7 +5008,7 @@ app.post("/material-logs/mrr/add", requireAuth, requireRole(["admin", "buyer", "
   res.redirect("/material-logs/mrr");
 });
 
-app.post("/material-logs/fmr/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/fmr/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await ensureUniqueFmrContainer(client, req.body.container_no);
     const result = await client.query(`
@@ -4905,7 +5035,7 @@ app.post("/material-logs/fmr/add", requireAuth, requireRole(["admin", "buyer", "
   res.redirect("/material-logs/fmr");
 });
 
-app.get("/material-logs/receiving/:id/edit", requireAuth, async (req, res) => {
+app.get("/material-logs/receiving/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   const row = (await query("select * from material_receiving_logs where id = $1", [req.params.id])).rows[0];
   if (!row) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Receiving log row not found.</h3></div>`, req.user));
@@ -4937,7 +5067,7 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/material-logs/receiving/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/receiving/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await client.query(`
       update material_receiving_logs
@@ -4966,7 +5096,7 @@ app.post("/material-logs/receiving/:id/edit", requireAuth, requireRole(["admin",
   res.redirect("/material-logs");
 });
 
-app.get("/material-logs/mrr/:id/edit", requireAuth, async (req, res) => {
+app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await syncMrrVendorsIntoVendorTable(client);
   });
@@ -5008,7 +5138,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/material-logs/mrr/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await client.query(`
       update mrr_logs
@@ -5041,7 +5171,7 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireRole(["admin", "buye
   res.redirect("/material-logs/mrr");
 });
 
-app.get("/material-logs/fmr/:id/edit", requireAuth, async (req, res) => {
+app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   const row = (await query("select * from fmr_logs where id = $1", [req.params.id])).rows[0];
   if (!row) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>FMR log row not found.</h3></div>`, req.user));
@@ -5071,7 +5201,7 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/material-logs/fmr/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
     await ensureUniqueFmrContainer(client, req.body.container_no, req.params.id);
     await client.query(`
