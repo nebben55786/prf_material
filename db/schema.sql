@@ -507,6 +507,27 @@ create table if not exists opi_logs (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists osd_logs (
+  id bigserial primary key,
+  mrr_log_id bigint references mrr_logs(id) on delete set null,
+  receipt_id bigint references receipts(id) on delete set null,
+  po_id bigint references purchase_orders(id) on delete set null,
+  po_line_id bigint references po_lines(id) on delete set null,
+  mrr_number text not null default '',
+  po_number text not null default '',
+  item_code text not null default '',
+  description text not null default '',
+  warehouse text not null default '',
+  location text not null default '',
+  expected_qty numeric(18,4) not null default 0,
+  received_qty numeric(18,4) not null default 0,
+  osd_qty numeric(18,4) not null default 0,
+  osd_status text not null default '',
+  notes text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 alter table mrr_logs add column if not exists app_po_id bigint references purchase_orders(id) on delete set null;
 
 alter table receipts add column if not exists mrr_log_id bigint references mrr_logs(id) on delete set null;
@@ -537,3 +558,6 @@ create index if not exists idx_fmr_logs_fmr_number on fmr_logs(fmr_number);
 create index if not exists idx_fmr_logs_container_no on fmr_logs(container_no);
 create index if not exists idx_opi_logs_opi_number on opi_logs(opi_number);
 create index if not exists idx_opi_logs_mrr_number on opi_logs(mrr_number);
+create index if not exists idx_osd_logs_mrr_number on osd_logs(mrr_number);
+create index if not exists idx_osd_logs_po_id on osd_logs(po_id);
+create index if not exists idx_osd_logs_po_line_id on osd_logs(po_line_id);

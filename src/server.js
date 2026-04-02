@@ -1046,6 +1046,43 @@ async function getNextMrrNumber() {
   return `${prefix}${nextValue}`;
 }
 
+async function getLatestMrrForPo(client, poId) {
+  if (!poId) return null;
+  return (await client.query(`
+    select id, mrr_number
+    from mrr_logs
+    where app_po_id = $1
+    order by id desc
+    limit 1
+  `, [poId])).rows[0] || null;
+}
+
+async function createOsdLog(client, payload) {
+  await client.query(`
+    insert into osd_logs (
+      mrr_log_id, receipt_id, po_id, po_line_id, mrr_number, po_number, item_code, description,
+      warehouse, location, expected_qty, received_qty, osd_qty, osd_status, notes, updated_at
+    )
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+  `, [
+    payload.mrr_log_id || null,
+    payload.receipt_id || null,
+    payload.po_id || null,
+    payload.po_line_id || null,
+    String(payload.mrr_number || ""),
+    String(payload.po_number || ""),
+    String(payload.item_code || ""),
+    String(payload.description || ""),
+    String(payload.warehouse || ""),
+    String(payload.location || ""),
+    Number(payload.expected_qty || 0),
+    Number(payload.received_qty || 0),
+    Number(payload.osd_qty || 0),
+    String(payload.osd_status || ""),
+    String(payload.notes || "")
+  ]);
+}
+
 async function syncMrrVendorsIntoVendorTable(client) {
   await client.query(`
     insert into vendors (name, contact_name, website, email, phone, categories)
@@ -4747,7 +4784,8 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
 app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
   const poId = Number(req.params.id);
   await withTransaction(async (client) => {
-    const po = (await client.query("select rfq_id from purchase_orders where id = $1", [poId])).rows[0];
+    const po = (await client.query("select id, po_no, rfq_id from purchase_orders where id = $1", [poId])).rows[0];
+    const linkedMrr = await getLatestMrrForPo(client, poId);
     const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
     let postedCount = 0;
     for (const rawLineId of lineIds) {
@@ -4755,24 +4793,75 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
       const qtyReceived = Number(req.body[`qty_received_${lineId}`] || 0);
       if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
       const line = (await client.query(`
-        select pl.id, pl.qty_ordered, coalesce(sum(r.qty_received), 0) as qty_received
+        select pl.id, pl.qty_ordered, mi.item_code, mi.description, coalesce(sum(r.qty_received), 0) as qty_received
         from po_lines pl
+        join material_items mi on mi.id = pl.material_item_id
         left join receipts r on r.po_line_id = pl.id
         where pl.id = $1 and pl.po_id = $2
-        group by pl.id, pl.qty_ordered
+        group by pl.id, pl.qty_ordered, mi.item_code, mi.description
       `, [lineId, poId])).rows[0];
       if (!line) throw new Error("PO line not found.");
       const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
       if (remainingQty <= 0) throw new Error("Fully received PO lines cannot be edited.");
-      if (qtyReceived > remainingQty) throw new Error("Qty received cannot exceed remaining qty.");
       const warehouse = String(req.body[`warehouse_${lineId}`] || "").trim();
       const location = String(req.body[`location_${lineId}`] || "").trim();
       await assertValidWarehouseLocation(client, warehouse, location);
-      await client.query(`
-        insert into receipts (po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
-        values ($1, $2, $3, $4, $5, $6)
-      `, [lineId, qtyReceived, warehouse, location, req.body.osd_status || "OK", req.body.osd_notes || ""]);
-      postedCount += 1;
+      const enteredStatus = String(req.body.osd_status || "OK").trim() || "OK";
+      const enteredNotes = String(req.body.osd_notes || "").trim();
+      const baseQty = Math.min(qtyReceived, remainingQty);
+      const overageQty = Math.max(qtyReceived - remainingQty, 0);
+      if (baseQty > 0) {
+        const receipt = (await client.query(`
+          insert into receipts (po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
+          values ($1, $2, $3, $4, $5, $6, $7)
+          returning id
+        `, [lineId, linkedMrr?.id || null, baseQty, warehouse, location, enteredStatus, enteredNotes])).rows[0];
+        postedCount += 1;
+        if (enteredStatus !== "OK") {
+          await createOsdLog(client, {
+            mrr_log_id: linkedMrr?.id || null,
+            receipt_id: receipt.id,
+            po_id: po.id,
+            po_line_id: lineId,
+            mrr_number: linkedMrr?.mrr_number || "",
+            po_number: po.po_no || "",
+            item_code: line.item_code || "",
+            description: line.description || "",
+            warehouse,
+            location,
+            expected_qty: remainingQty,
+            received_qty: baseQty,
+            osd_qty: baseQty,
+            osd_status: enteredStatus,
+            notes: enteredNotes
+          });
+        }
+      }
+      if (overageQty > 0) {
+        const overReceipt = (await client.query(`
+          insert into receipts (po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
+          values ($1, $2, $3, $4, $5, 'OVERAGE', $6)
+          returning id
+        `, [lineId, linkedMrr?.id || null, overageQty, warehouse, location, enteredNotes ? `Auto-created overage from PO receipt. ${enteredNotes}` : "Auto-created overage from PO receipt."])).rows[0];
+        postedCount += 1;
+        await createOsdLog(client, {
+          mrr_log_id: linkedMrr?.id || null,
+          receipt_id: overReceipt.id,
+          po_id: po.id,
+          po_line_id: lineId,
+          mrr_number: linkedMrr?.mrr_number || "",
+          po_number: po.po_no || "",
+          item_code: line.item_code || "",
+          description: line.description || "",
+          warehouse,
+          location,
+          expected_qty: remainingQty,
+          received_qty: qtyReceived,
+          osd_qty: overageQty,
+          osd_status: "OVERAGE",
+          notes: enteredNotes ? `Auto-created from over receipt. ${enteredNotes}` : "Auto-created from over receipt."
+        });
+      }
     }
     if (postedCount === 0) throw new Error("Enter a received quantity on at least one editable PO line.");
     await recalcPoStatus(client, poId);
@@ -5033,9 +5122,10 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
     await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
     if (String(req.body.mode || "") === "po") {
       const poLine = (await client.query(`
-        select po.id as po_id, po.rfq_id
+        select po.id as po_id, po.po_no, po.rfq_id, mi.item_code, mi.description
         from po_lines pl
         join purchase_orders po on po.id = pl.po_id
+        join material_items mi on mi.id = pl.material_item_id
         where pl.id = $1
       `, [Number(req.body.po_line_id)])).rows[0];
       const insert = await client.query(`
@@ -5043,6 +5133,25 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
         values ($1, $2, $3, $4, $5, $6, $7)
         returning id
       `, [mrrId, Number(req.body.po_line_id), qtyReceived, req.body.warehouse?.trim(), req.body.location?.trim(), req.body.osd_status || "OK", req.body.osd_notes || ""]);
+      if ((req.body.osd_status || "OK") !== "OK") {
+        await createOsdLog(client, {
+          mrr_log_id: mrrId,
+          receipt_id: insert.rows[0].id,
+          po_id: poLine?.po_id || null,
+          po_line_id: Number(req.body.po_line_id),
+          mrr_number: mrr.mrr_number || "",
+          po_number: poLine?.po_no || mrr.po_number || "",
+          item_code: poLine?.item_code || "",
+          description: poLine?.description || "",
+          warehouse: req.body.warehouse?.trim() || "",
+          location: req.body.location?.trim() || "",
+          expected_qty: qtyReceived,
+          received_qty: qtyReceived,
+          osd_qty: qtyReceived,
+          osd_status: req.body.osd_status || "OK",
+          notes: req.body.osd_notes || ""
+        });
+      }
       if (poLine?.po_id) await recalcPoStatus(client, poLine.po_id);
       if (poLine?.rfq_id) await recalcRfqStatus(client, poLine.rfq_id);
       await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `mrr=${mrr.mrr_number};po_line=${req.body.po_line_id}`);
