@@ -4482,7 +4482,6 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
       <div class="actions">
         <a class="btn btn-secondary" href="/po/${po.id}/receive">Receive</a>
         <a class="btn btn-secondary" href="/po/${po.id}/edit">Edit</a>
-        <form method="post" action="/po/${po.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>
       </div>
     </td>
   </tr>`).join("");
@@ -4974,7 +4973,13 @@ app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (re
         <div class="grid">
           <div><label>Description</label><input name="description" value="${esc(record.description || "")}" /></div>
         </div>
-        <div class="actions"><button type="submit">Save PO</button><a class="btn btn-secondary" href="/po">Back</a></div>
+        <div class="actions">
+          <button type="submit">Save PO</button>
+          <a class="btn btn-secondary" href="/po">Back</a>
+          <form method="post" action="/po/${record.id}/delete" onsubmit="return confirm('Delete PO ${escAttr(record.po_no)}? This will also remove its PO lines and receipts.');">
+            <button class="btn btn-danger" type="submit">Delete PO</button>
+          </form>
+        </div>
       </form>
     </div>
   `, req.user));
