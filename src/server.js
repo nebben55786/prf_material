@@ -4762,6 +4762,12 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
         }
         syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${JSON.stringify(locationMap)});
         ${poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0) > 0).map((line) => `syncLocationOptions("po-line-warehouse-${line.id}", "po-line-location-${line.id}", ${JSON.stringify(locationMap)});`).join("\n")}
+        document.getElementById("po-receive-form-${record.id}").addEventListener("keydown", function(event) {
+          if (event.key !== "Enter") return;
+          const tag = (event.target.tagName || "").toUpperCase();
+          if (tag === "TEXTAREA" || tag === "BUTTON") return;
+          event.preventDefault();
+        });
         document.getElementById("po-receive-form-${record.id}").addEventListener("submit", function(event) {
           let hasQty = false;
           let hasError = false;
