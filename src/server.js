@@ -539,6 +539,7 @@ function parseUploadedRows(file, pastedText) {
 function normalizePoImportRow(row) {
   const aliases = {
     po_no: ["po_no", "po_number", "po", "po_", "purchase_order", "purchase_order_number"],
+    po_line: ["po_line", "po_line_no", "po_line_number", "line_no", "line_number", "line"],
     vendor_name: ["vendor_name", "vendor", "supplier", "supplier_name"],
     item_code: ["item_code", "item", "item_no", "item_number", "material_code", "material_item"],
     description: ["description", "item_description", "material_description", "desc"],
@@ -642,7 +643,7 @@ function requestAccessPage(error = "", success = "") {
   `, null);
 }
 
-const rfqItemColumns = ["item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
+const rfqItemColumns = ["po_line", "item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
 
 function parseDelimitedRows(text, columns = rfqItemColumns) {
   if (!text?.trim()) return [];
@@ -704,6 +705,7 @@ async function findOrCreateVendorByName(client, vendorName) {
 
 async function upsertRfqItemRow(client, rfqId, row) {
   const itemCode = String(row.item_code || "").trim();
+  const poLine = String(row.po_line || row.line_no || row.line || "").trim();
   const qty = num(row.qty);
   if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
   if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
@@ -718,15 +720,15 @@ async function upsertRfqItemRow(client, rfqId, row) {
   if (existingItem.rows[0]) {
     await client.query(`
       update rfq_items
-      set spec = $2, commodity_code = $3, tag_number = $4, qty = $5, notes = $6, updated_at = now()
+      set po_line = $2, spec = $3, commodity_code = $4, tag_number = $5, qty = $6, notes = $7, updated_at = now()
       where id = $1
-    `, [existingItem.rows[0].id, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
+    `, [existingItem.rows[0].id, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
     return { status: "updated" };
   }
   await client.query(`
-    insert into rfq_items (rfq_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
-    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
-  `, [rfqId, materialItemId, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
+    insert into rfq_items (rfq_id, material_item_id, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+  `, [rfqId, materialItemId, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
   return { status: "inserted" };
 }
 
@@ -736,6 +738,7 @@ async function upsertPurchaseOrderRow(client, row) {
   const itemCode = String(row.item_code || "").trim();
   const qtyOrdered = num(row.qty_ordered || row.qty || row.quantity);
   const unitPrice = num(row.unit_price || row.price || row.unitcost || row.unit_cost);
+  const poLine = String(row.po_line || row.line_no || row.line || "").trim();
   if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
   if (!vendorName) return { status: "skipped", errorCode: "missing_vendor", message: "Vendor name is required." };
   if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
@@ -816,16 +819,16 @@ async function upsertPurchaseOrderRow(client, row) {
   if (existingLine) {
     await client.query(`
       update po_lines
-      set qty_ordered = $2, unit_price = $3, size_1 = $4, size_2 = $5, thk_1 = $6, thk_2 = $7, updated_at = now()
+      set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
       where id = $1
-    `, [existingLine.id, qtyOrdered, unitPrice, size1, size2, thk1, thk2]);
+    `, [existingLine.id, poLine, qtyOrdered, unitPrice, size1, size2, thk1, thk2]);
     return { status: headerStatus === "inserted" ? "inserted" : "updated" };
   }
 
   await client.query(`
-    insert into po_lines (po_id, rfq_item_id, material_item_id, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
-    values ($1, null, $2, $3, $4, $5, $6, $7, $8, now())
-  `, [poId, materialItemId, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
+    insert into po_lines (po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
+    values ($1, null, $2, $3, $4, $5, $6, $7, $8, $9, now())
+  `, [poId, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
   return { status: "inserted" };
 }
 
@@ -3608,13 +3611,13 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
   }
   const [itemsRes, vendorsRes, poCountRes, recentImportsRes, materialItemsRes] = await Promise.all([
     query(`
-      select ri.id, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
+      select ri.id, ri.po_line, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
              ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
              mi.item_code, mi.description, mi.material_type, mi.uom
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       where ri.rfq_id = $1
-      order by ri.id desc
+      order by nullif(ri.po_line, '') nulls last, ri.id desc
     `, [rfqId]),
     query("select id, name from vendors order by name"),
     query("select count(*) from purchase_orders where rfq_id = $1", [rfqId]),
@@ -3661,6 +3664,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
       <td><input name="description_${index}" /></td>
       <td><input name="material_type_${index}" /></td>
       <td><input name="uom_${index}" /></td>
+      <td><input name="po_line_${index}" /></td>
       <td><input name="spec_${index}" /></td>
       <td><input name="commodity_code_${index}" /></td>
       <td><input name="tag_number_${index}" /></td>
@@ -3692,6 +3696,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
       ? `${awardedVendor} | $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d`
       : "Open";
     itemRows.push(`<tr>
+      <td>${esc(item.po_line || "")}</td>
       <td><input type="hidden" name="rfq_item_id_${item.id}" value="${item.id}" />${esc(item.item_code)}</td>
       <td>${esc(item.description)}</td>
       <td>${esc(item.qty)}</td>
@@ -3744,7 +3749,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
       <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
         <div class="scroll">
           <table class="data-grid">
-            <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
+            <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>PO Line</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
             <tbody>${newItemRows}</tbody>
           </table>
         </div>
@@ -3754,7 +3759,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
   const uploadItemsCard = `
     <div class="card">
       <h3>Import RFQ Items From File</h3>
-      <p class="muted">CSV/XLSX columns: item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes</p>
+      <p class="muted">CSV/XLSX columns: po_line, item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes</p>
       <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/items/import" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
         <div class="actions"><button type="submit">Import File</button></div>
@@ -3793,8 +3798,8 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
           <button type="button" onclick="return promptPoNumber(this, 'rfq-quote-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}')">Create PO From Awarded Lines</button>
         </div>
         <table>
-          <tr><th>Item</th><th>Description</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Thk</th><th>Notes</th><th>Unit Price</th><th>Lead Days</th><th>Award Status</th><th>Award Summary</th><th>Issued PO</th><th>Actions</th></tr>
-          ${itemRows.join("") || `<tr><td colspan="14" class="muted">No RFQ items loaded yet.</td></tr>`}
+          <tr><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Thk</th><th>Notes</th><th>Unit Price</th><th>Lead Days</th><th>Award Status</th><th>Award Summary</th><th>Issued PO</th><th>Actions</th></tr>
+          ${itemRows.join("") || `<tr><td colspan="15" class="muted">No RFQ items loaded yet.</td></tr>`}
         </table>
       </form>
       <form id="rfq-po-create-form-${rfqId}" method="post" action="/po/create" style="display:none;">
@@ -3862,6 +3867,7 @@ app.post("/rfq/:id/items/grid", requireAuth, requirePermission("rfqs", "edit"), 
   const rfqId = Number(req.params.id);
   const usedItemCodes = new Set();
   const rows = Array.from({ length: 8 }, (_, index) => ({
+    po_line: req.body[`po_line_${index}`],
     item_code: req.body[`item_code_${index}`],
     description: req.body[`description_${index}`],
     material_type: req.body[`material_type_${index}`],
@@ -4083,7 +4089,7 @@ app.post("/po/create", requireAuth, requirePermission("pos", "edit"), async (req
     );
     const poId = poInsert.rows[0].id;
     const lines = await client.query(`
-      select ri.id as rfq_item_id, ri.material_item_id, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.qty,
+      select ri.id as rfq_item_id, ri.material_item_id, ri.po_line, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.qty,
              ri.awarded_unit_price as unit_price
       from rfq_items ri
       where ri.rfq_id = $1 and ri.award_status = 'AWARDED' and ri.awarded_vendor_id = $2
@@ -4097,9 +4103,9 @@ app.post("/po/create", requireAuth, requirePermission("pos", "edit"), async (req
     if (lines.rows.length === 0) throw new Error("Selected vendor has no unissued awarded lines on this RFQ.");
     for (const line of lines.rows) {
       await client.query(`
-        insert into po_lines (po_id, rfq_item_id, material_item_id, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
-      `, [poId, line.rfq_item_id, line.material_item_id, line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price]);
+        insert into po_lines (po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+      `, [poId, line.rfq_item_id, line.material_item_id, line.po_line || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price]);
     }
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
@@ -4445,7 +4451,8 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
         select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
                v.name as vendor, coalesce(r.rfq_no, '') as rfq_no, coalesce(po.description, '') as description, coalesce(po.vendor_contact, '') as vendor_contact,
                coalesce(po.freight_terms, '') as freight_terms, coalesce(po.ship_to, '') as ship_to, coalesce(po.buyer_name, '') as buyer_name,
-               coalesce(open_counts.open_items, 0) as open_items
+               coalesce(open_counts.open_items, 0) as open_items,
+               coalesce(line_refs.po_lines, '') as po_line_refs
     from purchase_orders po
     join vendors v on v.id = po.vendor_id
     left join rfqs r on r.id = po.rfq_id
@@ -4461,6 +4468,14 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
       ) rcv on rcv.po_line_id = pl.id
       group by pl.po_id
     ) open_counts on open_counts.po_id = po.id
+    left join (
+      select
+        pl.po_id,
+        string_agg(nullif(pl.po_line, ''), ', ' order by nullif(pl.po_line, ''), pl.id) as po_lines
+      from po_lines pl
+      where coalesce(pl.po_line, '') <> ''
+      group by pl.po_id
+    ) line_refs on line_refs.po_id = po.id
     ${whereSql}
     order by po.id desc
     limit 300
@@ -4476,6 +4491,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
     <td>${esc(po.ship_to || "")}</td>
     <td>${esc(po.buyer_name || "")}</td>
     <td>${esc(po.status)}</td>
+    <td>${esc(po.po_line_refs || "")}</td>
     <td>${esc(po.open_items)}</td>
     <td>${esc(po.created_at)}</td>
     <td>
@@ -4504,7 +4520,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
       <div class="actions"><a class="btn btn-primary" href="/po/import">Import Existing POs</a></div>
     </div>
     <div class="card scroll">
-      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>Open Items</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="12" class="muted">No POs match the current filter.</td></tr>`}</table>
+      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>PO Line</th><th>Open Items</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="13" class="muted">No POs match the current filter.</td></tr>`}</table>
     </div>
   `, req.user));
 });
@@ -4514,7 +4530,7 @@ app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req,
     <h1>Import Existing POs</h1>
     <div class="card">
       <p class="muted">Upload a CSV/XLSX file to create or update PO headers and lines. Missing vendors are added to the vendors table, missing item codes are added to the items table, and imported PO lines are tied to those item records.</p>
-      <p class="muted">Supported columns: po_no, vendor_name, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status. Alternate headers like PO Number, Vendor, Supplier, Item No, Qty, Ordered Qty, Unit Cost, Price, and PO Description are also accepted.</p>
+      <p class="muted">Supported columns: po_no, po_line, vendor_name, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status. Alternate headers like PO Number, Vendor, Supplier, Item No, Qty, Ordered Qty, Unit Cost, Price, and PO Description are also accepted.</p>
       <div class="actions"><a class="btn btn-secondary" href="/po/import/template">Download Template</a></div>
       <form method="post" enctype="multipart/form-data" action="/po/import/preview" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
@@ -4527,8 +4543,8 @@ app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req,
 
 app.get("/po/import/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
   const csv = [
-    "po_no,vendor_name,po_description,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price,vendor_contact,freight_terms,ship_to,bill_to,notes,buyer_name,status",
-    "PO-00001,Example Vendor,Pipe Supports Release 1,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75,John Smith,FOB,SITE A,OFFICE A,Legacy import sample,Buyer One,OPEN"
+    "po_no,po_line,vendor_name,po_description,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price,vendor_contact,freight_terms,ship_to,bill_to,notes,buyer_name,status",
+    "PO-00001,0010,Example Vendor,Pipe Supports Release 1,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75,John Smith,FOB,SITE A,OFFICE A,Legacy import sample,Buyer One,OPEN"
   ].join("\\n");
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="po-import-template.csv"');
@@ -4540,6 +4556,7 @@ app.post("/po/import/preview", requireAuth, requirePermission("pos", "edit"), up
   if (rows.length === 0) throw new Error("No rows found.");
   const previewRows = rows.slice(0, 100).map((row) => `<tr>
     <td>${esc(row.po_no)}</td>
+    <td>${esc(row.po_line)}</td>
     <td>${esc(row.vendor_name)}</td>
     <td>${esc(row.po_description)}</td>
     <td>${esc(row.item_code)}</td>
@@ -4557,7 +4574,7 @@ app.post("/po/import/preview", requireAuth, requirePermission("pos", "edit"), up
       </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>PO #</th><th>Vendor</th><th>PO Description</th><th>Item Code</th><th>Description</th><th>Qty Ordered</th><th>Unit Price</th></tr>${previewRows}</table>
+      <table><tr><th>PO #</th><th>PO Line</th><th>Vendor</th><th>PO Description</th><th>Item Code</th><th>Description</th><th>Qty Ordered</th><th>Unit Price</th></tr>${previewRows}</table>
     </div>
   `, req.user));
 });

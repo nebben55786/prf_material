@@ -170,6 +170,7 @@ create table if not exists rfq_items (
   rfq_id bigint not null references rfqs(id) on delete cascade,
   bom_line_id bigint references bom_lines(id) on delete set null,
   material_item_id bigint not null references material_items(id),
+  po_line text,
   spec text,
   commodity_code text,
   tag_number text,
@@ -294,6 +295,7 @@ create table if not exists po_lines (
   po_id bigint not null references purchase_orders(id) on delete cascade,
   rfq_item_id bigint references rfq_items(id) on delete set null,
   material_item_id bigint not null references material_items(id),
+  po_line text,
   size_1 text,
   size_2 text,
   thk_1 text,
@@ -317,6 +319,7 @@ create table if not exists receipts (
 alter table rfq_items add column if not exists award_status text not null default 'OPEN';
 alter table users add column if not exists is_active boolean not null default true;
 alter table rfq_items add column if not exists bom_line_id bigint references bom_lines(id) on delete set null;
+alter table rfq_items add column if not exists po_line text;
 alter table rfq_items add column if not exists spec text;
 alter table rfq_items add column if not exists commodity_code text;
 alter table rfq_items add column if not exists tag_number text;
@@ -327,6 +330,7 @@ alter table rfq_items add column if not exists awarded_at timestamptz;
 alter table rfq_items add column if not exists awarded_by bigint references users(id);
 alter table rfq_items add column if not exists award_notes text;
 alter table po_lines add column if not exists rfq_item_id bigint references rfq_items(id) on delete set null;
+alter table po_lines add column if not exists po_line text;
 alter table purchase_orders add column if not exists vendor_contact text;
 alter table purchase_orders add column if not exists freight_terms text;
 alter table purchase_orders add column if not exists ship_to text;
