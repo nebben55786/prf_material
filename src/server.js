@@ -4930,7 +4930,7 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
     if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
     await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};mrr=${mrrNumber};lines=${postedCount}`);
   });
-  res.redirect(`/po/${poId}/receive`);
+  res.redirect("/dashboard");
 });
 
 app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
