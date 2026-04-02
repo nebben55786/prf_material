@@ -4613,7 +4613,7 @@ app.post("/po/add", requireAuth, requirePermission("pos", "edit"), async (req, r
 
 app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
   const poId = Number(req.params.id);
-  const [po, warehouseOptions, locationMap] = await Promise.all([
+  const [po, warehouseOptions, locationMap, nextMrrNumber, receivedByOptions] = await Promise.all([
     query(`
       select po.id, po.po_no, coalesce(po.description, '') as description, v.name as vendor_name
       from purchase_orders po
@@ -4621,7 +4621,9 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       where po.id = $1
     `, [poId]),
     getWarehouseOptions(),
-    getWarehouseLocationMap()
+    getWarehouseLocationMap(),
+    getNextMrrNumber(),
+    getMaterialLogLookupOptions("received_by")
   ]);
   const record = po.rows[0];
   if (!record) {
@@ -4670,6 +4672,10 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
     .join("");
+  const receivedByOptionsHtml = [`<option value="">Select received by</option>`]
+    .concat(receivedByOptions.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`))
+    .join("");
+  const today = new Date().toISOString().slice(0, 10);
   const lineRows = poLines.map((line) => {
     const lineId = Number(line.id);
     const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
@@ -4720,6 +4726,12 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
     <div class="card">
       <form method="post" action="/po/${record.id}/receive" class="stack" id="po-receive-form-${record.id}">
         <div class="grid">
+          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly /></div>
+          <div><label>Received Date</label><input name="received_date" type="date" value="${esc(today)}" required /></div>
+          <div><label>Received By</label><div class="inline-field"><select name="received_by" required>${receivedByOptionsHtml}</select><input name="received_by_manual" placeholder="Or enter received by" /></div></div>
+          <div><label>Load Number</label><input name="load_number" /></div>
+        </div>
+        <div class="grid">
           <div><label>Default Warehouse</label><select id="po-receive-warehouse-${record.id}" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
           <div><label>Default Location</label><select id="po-receive-location-${record.id}" data-placeholder="Select location" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'><option value="">Select location</option></select></div>
           <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
@@ -4730,6 +4742,7 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
             ${lineRows || `<tr><td colspan="12" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
+        <div><label>MRR Notes</label><textarea name="mrr_notes"></textarea></div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions"><button type="submit">Post Receipt</button><a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
@@ -4752,6 +4765,13 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
         document.getElementById("po-receive-form-${record.id}").addEventListener("submit", function(event) {
           let hasQty = false;
           let hasError = false;
+          const receivedBySelect = document.querySelector('select[name="received_by"]');
+          const receivedByManual = document.querySelector('input[name="received_by_manual"]');
+          if ((!receivedBySelect || !receivedBySelect.value) && (!receivedByManual || !receivedByManual.value.trim())) {
+            event.preventDefault();
+            alert("Received By is required for every new MRR.");
+            return;
+          }
           document.querySelectorAll('input[name^="qty_received_"]').forEach(function(input) {
             const lineId = input.name.replace("qty_received_", "");
             const qty = Number(input.value || 0);
@@ -4784,9 +4804,45 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
 app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
   const poId = Number(req.params.id);
   await withTransaction(async (client) => {
-    const po = (await client.query("select id, po_no, rfq_id from purchase_orders where id = $1", [poId])).rows[0];
-    const linkedMrr = await getLatestMrrForPo(client, poId);
+    const po = (await client.query(`
+      select po.id, po.po_no, po.rfq_id, coalesce(po.description, '') as description, coalesce(v.name, '') as vendor_name
+      from purchase_orders po
+      left join vendors v on v.id = po.vendor_id
+      where po.id = $1
+    `, [poId])).rows[0];
+    if (!po) throw new Error("PO not found.");
+    const mrrNumber = String(req.body.mrr_number || "").trim();
+    const receivedBy = String(req.body.received_by_manual || req.body.received_by || "").trim();
+    const receivedDate = String(req.body.received_date || "").trim();
+    const loadNumber = String(req.body.load_number || "").trim();
+    const mrrNotes = String(req.body.mrr_notes || "").trim();
+    if (!mrrNumber) throw new Error("MRR number is required.");
+    if (!receivedBy) throw new Error("Received By is required.");
+    if (!receivedDate) throw new Error("Received Date is required.");
     const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
+    const mrrInsert = (await client.query(`
+      insert into mrr_logs (
+        discipline, mrr_number, vendor_name, app_po_id, po_number, material_description,
+        received_date, received_by, notes, load_number, updated_at
+      )
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+      returning id
+    `, [
+      "",
+      mrrNumber,
+      po.vendor_name || "",
+      po.id,
+      po.po_no || "",
+      po.description || "",
+      receivedDate,
+      receivedBy,
+      mrrNotes,
+      loadNumber
+    ])).rows[0];
+    await saveMaterialLogLookup(client, "received_by", receivedBy);
+    await saveMaterialLogLookup(client, "vendor_name", po.vendor_name || "");
+    await saveMaterialLogLookup(client, "po_number", po.po_no || "");
+    await auditLog(client, req.user.id, "create", "mrr_log", mrrInsert.id, mrrNumber);
     let postedCount = 0;
     for (const rawLineId of lineIds) {
       const lineId = Number(rawLineId);
@@ -4815,15 +4871,15 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
           insert into receipts (po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
           values ($1, $2, $3, $4, $5, $6, $7)
           returning id
-        `, [lineId, linkedMrr?.id || null, baseQty, warehouse, location, enteredStatus, enteredNotes])).rows[0];
+        `, [lineId, mrrInsert.id, baseQty, warehouse, location, enteredStatus, enteredNotes])).rows[0];
         postedCount += 1;
         if (enteredStatus !== "OK") {
           await createOsdLog(client, {
-            mrr_log_id: linkedMrr?.id || null,
+            mrr_log_id: mrrInsert.id,
             receipt_id: receipt.id,
             po_id: po.id,
             po_line_id: lineId,
-            mrr_number: linkedMrr?.mrr_number || "",
+            mrr_number: mrrNumber,
             po_number: po.po_no || "",
             item_code: line.item_code || "",
             description: line.description || "",
@@ -4842,14 +4898,14 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
           insert into receipts (po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
           values ($1, $2, $3, $4, $5, 'OVERAGE', $6)
           returning id
-        `, [lineId, linkedMrr?.id || null, overageQty, warehouse, location, enteredNotes ? `Auto-created overage from PO receipt. ${enteredNotes}` : "Auto-created overage from PO receipt."])).rows[0];
+        `, [lineId, mrrInsert.id, overageQty, warehouse, location, enteredNotes ? `Auto-created overage from PO receipt. ${enteredNotes}` : "Auto-created overage from PO receipt."])).rows[0];
         postedCount += 1;
         await createOsdLog(client, {
-          mrr_log_id: linkedMrr?.id || null,
+          mrr_log_id: mrrInsert.id,
           receipt_id: overReceipt.id,
           po_id: po.id,
           po_line_id: lineId,
-          mrr_number: linkedMrr?.mrr_number || "",
+          mrr_number: mrrNumber,
           po_number: po.po_no || "",
           item_code: line.item_code || "",
           description: line.description || "",
@@ -4866,7 +4922,7 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
     if (postedCount === 0) throw new Error("Enter a received quantity on at least one editable PO line.");
     await recalcPoStatus(client, poId);
     if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
-    await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};lines=${postedCount}`);
+    await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};mrr=${mrrNumber};lines=${postedCount}`);
   });
   res.redirect(`/po/${poId}/receive`);
 });
