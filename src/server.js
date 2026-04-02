@@ -138,6 +138,10 @@ function esc(value) {
     .replaceAll("'", "&#39;");
 }
 
+function escAttr(value) {
+  return esc(value).replaceAll("`", "&#96;");
+}
+
 function layout(title, body, user) {
   const navLinks = user
     ? permissionSections
