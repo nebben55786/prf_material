@@ -4591,7 +4591,7 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>PO not found.</h3></div>`, req.user));
     return;
   }
-  const openLines = (await query(`
+  const poLines = (await query(`
     select
       pl.id,
       mi.item_code,
@@ -4610,7 +4610,6 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       group by po_line_id
     ) rcv on rcv.po_line_id = pl.id
     where pl.po_id = $1
-      and coalesce(rcv.qty_received, 0) < pl.qty_ordered
     order by pl.id
   `, [poId])).rows;
   const history = (await query(`
@@ -4622,10 +4621,27 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
     order by r.id desc
     limit 30
   `, [poId])).rows;
-  const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(line.qty_ordered)} | Rec ${esc(line.qty_received)} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`).join("");
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
     .join("");
+  const lineRows = poLines.map((line) => {
+    const lineId = Number(line.id);
+    const locked = Number(line.qty_received || 0) > 0;
+    const disabled = locked ? "disabled" : "";
+    return `<tr>
+      <td>${esc(line.item_code)}</td>
+      <td>${esc(line.description)}</td>
+      <td>${esc(line.qty_ordered)}</td>
+      <td>${esc(line.qty_received)}</td>
+      <td>${esc(Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0))}</td>
+      <td>${esc([line.size_1, line.size_2].filter(Boolean).join(" x "))}</td>
+      <td>${esc([line.thk_1, line.thk_2].filter(Boolean).join(" x "))}</td>
+      <td><input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" ${disabled} /></td>
+      <td><select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" ${disabled} onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></td>
+      <td><select id="po-line-location-${lineId}" name="location_${lineId}" data-placeholder="Select location" ${disabled}><option value="">Select location</option></select></td>
+      <td>${locked ? `<span class="chip">Received</span>` : `<span class="muted">Editable</span>`}</td>
+    </tr>`;
+  }).join("");
   const historyRows = history.map((row) => `<tr>
     <td>${esc(row.received_at)}</td>
     <td>${esc(row.item_code)}</td>
@@ -4642,22 +4658,43 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       <div class="stats">
         <div class="stat"><div>Vendor</div><strong>${esc(record.vendor_name)}</strong></div>
         <div class="stat"><div>Description</div><strong>${esc(record.description || "")}</strong></div>
-        <div class="stat"><div>Open Lines</div><strong>${openLines.length}</strong></div>
+        <div class="stat"><div>PO Lines</div><strong>${poLines.length}</strong></div>
       </div>
     </div>
     <div class="card">
       <form method="post" action="/po/${record.id}/receive" class="stack">
-        <div><label>PO Line</label><select name="po_line_id" required><option value="">Select open PO line</option>${lineOptions}</select></div>
         <div class="grid">
-          <div><label>Qty Received</label><input name="qty_received" required inputmode="decimal" /></div>
-          <div><label>Warehouse</label><select id="po-receive-warehouse-${record.id}" name="warehouse" required onchange='syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
-          <div><label>Location</label><select id="po-receive-location-${record.id}" name="location" data-placeholder="Select location" required><option value="">Select location</option></select></div>
+          <div><label>Default Warehouse</label><select id="po-receive-warehouse-${record.id}" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
+          <div><label>Default Location</label><select id="po-receive-location-${record.id}" data-placeholder="Select location" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'><option value="">Select location</option></select></div>
           <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
+        </div>
+        <div class="scroll">
+          <table>
+            <tr><th>Item</th><th>Description</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>Size</th><th>Thk</th><th>Qty This Receipt</th><th>Warehouse</th><th>Location</th><th>Status</th></tr>
+            ${lineRows || `<tr><td colspan="11" class="muted">No PO lines found.</td></tr>`}
+          </table>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions"><button type="submit">Post Receipt</button><a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
-      <script>syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${JSON.stringify(locationMap)});</script>
+      <script>
+        function applyPoHeaderDefaults(poId, optionsByWarehouse) {
+          const headerWarehouse = document.getElementById("po-receive-warehouse-" + poId);
+          const headerLocation = document.getElementById("po-receive-location-" + poId);
+          if (!headerWarehouse || !headerLocation) return;
+          syncLocationOptions(headerWarehouse.id, headerLocation.id, optionsByWarehouse, headerLocation.value || "");
+          document.querySelectorAll('select[id^="po-line-warehouse-"]').forEach(function(select) {
+            if (select.disabled) return;
+            select.value = headerWarehouse.value;
+            const locationId = select.id.replace("warehouse", "location");
+            syncLocationOptions(select.id, locationId, optionsByWarehouse, "");
+            const lineLocation = document.getElementById(locationId);
+            if (lineLocation) lineLocation.value = headerLocation.value;
+          });
+        }
+        syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${JSON.stringify(locationMap)});
+        ${poLines.map((line) => `syncLocationOptions("po-line-warehouse-${line.id}", "po-line-location-${line.id}", ${JSON.stringify(locationMap)});`).join("\n")}
+      </script>
     </div>
     <div class="card scroll">
       <table><tr><th>Received</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>OS&D</th><th>Notes</th></tr>${historyRows || `<tr><td colspan="8" class="muted">No receipts posted yet for this PO.</td></tr>`}</table>
@@ -4668,18 +4705,36 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
 app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
   const poId = Number(req.params.id);
   await withTransaction(async (client) => {
-    const qtyReceived = Number(req.body.qty_received || 0);
-    if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
-    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
     const po = (await client.query("select rfq_id from purchase_orders where id = $1", [poId])).rows[0];
-    const insert = await client.query(`
-      insert into receipts (po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
-      values ($1, $2, $3, $4, $5, $6)
-      returning id
-    `, [Number(req.body.po_line_id), qtyReceived, req.body.warehouse?.trim(), req.body.location?.trim(), req.body.osd_status || "OK", req.body.osd_notes || ""]);
+    const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
+    let postedCount = 0;
+    for (const rawLineId of lineIds) {
+      const lineId = Number(rawLineId);
+      const qtyReceived = Number(req.body[`qty_received_${lineId}`] || 0);
+      if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
+      const line = (await client.query(`
+        select pl.id, pl.qty_ordered, coalesce(sum(r.qty_received), 0) as qty_received
+        from po_lines pl
+        left join receipts r on r.po_line_id = pl.id
+        where pl.id = $1 and pl.po_id = $2
+        group by pl.id, pl.qty_ordered
+      `, [lineId, poId])).rows[0];
+      if (!line) throw new Error("PO line not found.");
+      if (Number(line.qty_received || 0) > 0) throw new Error("Previously received PO lines cannot be edited.");
+      if (qtyReceived > Number(line.qty_ordered || 0)) throw new Error("Qty received cannot exceed qty ordered.");
+      const warehouse = String(req.body[`warehouse_${lineId}`] || "").trim();
+      const location = String(req.body[`location_${lineId}`] || "").trim();
+      await assertValidWarehouseLocation(client, warehouse, location);
+      await client.query(`
+        insert into receipts (po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
+        values ($1, $2, $3, $4, $5, $6)
+      `, [lineId, qtyReceived, warehouse, location, req.body.osd_status || "OK", req.body.osd_notes || ""]);
+      postedCount += 1;
+    }
+    if (postedCount === 0) throw new Error("Enter a received quantity on at least one editable PO line.");
     await recalcPoStatus(client, poId);
     if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
-    await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `po=${poId};po_line=${req.body.po_line_id}`);
+    await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};lines=${postedCount}`);
   });
   res.redirect(`/po/${poId}/receive`);
 });
