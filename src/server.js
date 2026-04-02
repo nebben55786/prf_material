@@ -4766,48 +4766,67 @@ app.post("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), asy
 });
 
 app.get("/receive", requireAuth, requirePermission("receiving", "view"), async (req, res) => {
-  const rows = (await query(`
-    select
-      m.id,
-      m.mrr_number,
-      m.vendor_name,
-      coalesce(po.po_no, m.po_number) as po_number,
-      m.material_description,
-      m.received_date,
-      m.received_by,
-      m.load_number,
-      coalesce(po.id, 0) as po_id,
-      coalesce((
-        select count(*)
-        from receipts r
-        where r.mrr_log_id = m.id
-      ), 0) as receipt_count
-    from mrr_logs m
-    left join purchase_orders po on po.id = m.app_po_id
-    order by m.id desc
-    limit 300
-  `)).rows;
-  const mrrRows = rows.map((row) => `<tr>
-    <td>${esc(row.mrr_number)}</td>
-    <td>${esc(row.po_number || "")}</td>
-    <td>${esc(row.vendor_name || "")}</td>
-    <td>${esc(row.material_description || "")}</td>
-    <td>${esc(row.received_date || "")}</td>
-    <td>${esc(row.received_by || "")}</td>
-    <td>${esc(row.receipt_count)}</td>
-    <td>
-      <div class="actions">
-        <a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit MRR</a>
-      </div>
-    </td>
-  </tr>`).join("");
   res.send(layout("Receiving", `
     <h1>Receiving</h1>
     <div class="card">
-      <div class="actions"><a class="btn btn-primary" href="/material-logs/mrr/new">Create New MRR</a></div>
+      <div class="actions">
+        <a class="btn btn-primary" href="/receive/by-po">By PO</a>
+        <a class="btn btn-primary" href="/material-logs/mrr/new">Manual Entry</a>
+      </div>
+    </div>
+  `, req.user));
+});
+
+app.get("/receive/by-po", requireAuth, requirePermission("receiving", "view"), async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  const params = [];
+  const where = [];
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(po.po_no ilike $1 or coalesce(po.description, '') ilike $1)`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const rows = (await query(`
+    select
+      po.id,
+      po.po_no,
+      coalesce(po.description, '') as description,
+      coalesce(v.name, '') as vendor_name,
+      po.status,
+      count(pl.id) as line_count,
+      count(pl.id) filter (
+        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) < pl.qty_ordered
+      ) as open_line_count
+    from purchase_orders po
+    left join vendors v on v.id = po.vendor_id
+    left join po_lines pl on pl.po_id = po.id
+    ${whereSql}
+    group by po.id, po.po_no, po.description, v.name, po.status
+    order by po.id desc
+    limit 300
+  `, params)).rows;
+  const poRows = rows.map((row) => `<tr>
+    <td>${esc(row.po_no)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.status)}</td>
+    <td>${esc(row.line_count)}</td>
+    <td>${esc(row.open_line_count)}</td>
+    <td><a class="btn btn-secondary" href="/po/${row.id}/receive">Receive</a></td>
+  </tr>`).join("");
+  res.send(layout("Receive By PO", `
+    <h1>Receive By PO</h1>
+    <div class="card">
+      <form method="get" action="/receive/by-po" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto auto;">
+          <div><label>Filter POs</label><input name="q" value="${esc(q)}" placeholder="PO number or description" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+          <div style="align-self:end;"><a class="btn btn-secondary" href="/receive/by-po">Clear</a></div>
+        </div>
+      </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>MRR #</th><th>PO</th><th>Vendor</th><th>Description</th><th>Received Date</th><th>Received By</th><th>Receipts</th><th>Actions</th></tr>${mrrRows || `<tr><td colspan="8" class="muted">No MRR rows found.</td></tr>`}</table>
+      <table><tr><th>PO #</th><th>Description</th><th>Vendor</th><th>Status</th><th>Lines</th><th>Open Lines</th><th>Action</th></tr>${poRows || `<tr><td colspan="7" class="muted">No purchase orders found.</td></tr>`}</table>
     </div>
   `, req.user));
 });
