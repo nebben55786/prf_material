@@ -4588,12 +4588,25 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
     return;
   }
   const openLines = (await query(`
-    select pl.id, mi.item_code, mi.description, pl.qty_ordered, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2,
-           coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as qty_received
+    select
+      pl.id,
+      mi.item_code,
+      mi.description,
+      pl.qty_ordered,
+      pl.size_1,
+      pl.size_2,
+      pl.thk_1,
+      pl.thk_2,
+      coalesce(rcv.qty_received, 0) as qty_received
     from po_lines pl
     join material_items mi on mi.id = pl.material_item_id
+    left join (
+      select po_line_id, sum(qty_received) as qty_received
+      from receipts
+      group by po_line_id
+    ) rcv on rcv.po_line_id = pl.id
     where pl.po_id = $1
-      and coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) < pl.qty_ordered
+      and coalesce(rcv.qty_received, 0) < pl.qty_ordered
     order by pl.id
   `, [poId])).rows;
   const history = (await query(`
@@ -4847,12 +4860,25 @@ app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), 
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
     .join("");
   const openLines = po ? (await query(`
-    select pl.id, mi.item_code, mi.description, pl.qty_ordered, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2,
-           coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as qty_received
+    select
+      pl.id,
+      mi.item_code,
+      mi.description,
+      pl.qty_ordered,
+      pl.size_1,
+      pl.size_2,
+      pl.thk_1,
+      pl.thk_2,
+      coalesce(rcv.qty_received, 0) as qty_received
     from po_lines pl
     join material_items mi on mi.id = pl.material_item_id
+    left join (
+      select po_line_id, sum(qty_received) as qty_received
+      from receipts
+      group by po_line_id
+    ) rcv on rcv.po_line_id = pl.id
     where pl.po_id = $1
-      and coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) < pl.qty_ordered
+      and coalesce(rcv.qty_received, 0) < pl.qty_ordered
     order by pl.id
   `, [po.id])).rows : [];
   const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(line.qty_ordered)} | Rec ${esc(line.qty_received)} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`).join("");
