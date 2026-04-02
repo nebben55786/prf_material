@@ -4601,7 +4601,9 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       pl.size_2,
       pl.thk_1,
       pl.thk_2,
-      coalesce(rcv.qty_received, 0) as qty_received
+      coalesce(rcv.qty_received, 0) as qty_received,
+      coalesce(last_receipt.warehouse, '') as last_warehouse,
+      coalesce(last_receipt.location, '') as last_location
     from po_lines pl
     join material_items mi on mi.id = pl.material_item_id
     left join (
@@ -4609,6 +4611,13 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       from receipts
       group by po_line_id
     ) rcv on rcv.po_line_id = pl.id
+    left join lateral (
+      select r.warehouse, r.location
+      from receipts r
+      where r.po_line_id = pl.id
+      order by r.id desc
+      limit 1
+    ) last_receipt on true
     where pl.po_id = $1
     order by pl.id
   `, [poId])).rows;
@@ -4628,10 +4637,15 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
     const lineId = Number(line.id);
     const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
     const locked = remainingQty <= 0;
-    const disabled = locked ? "disabled" : "";
-    const statusLabel = locked
-      ? "Received"
-      : (Number(line.qty_received || 0) > 0 ? "Partial" : "Editable");
+    const qtyCell = locked
+      ? `<span class="chip">Received</span><input type="hidden" name="po_line_ids" value="${lineId}" />`
+      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" />`;
+    const warehouseCell = locked
+      ? `<span>${esc(line.last_warehouse || "")}</span>`
+      : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select>`;
+    const locationCell = locked
+      ? `<span>${esc(line.last_location || "")}</span>`
+      : `<select id="po-line-location-${lineId}" name="location_${lineId}" data-placeholder="Select location"><option value="">Select location</option></select>`;
     return `<tr>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
@@ -4640,10 +4654,9 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       <td>${esc(remainingQty)}</td>
       <td>${esc([line.size_1, line.size_2].filter(Boolean).join(" x "))}</td>
       <td>${esc([line.thk_1, line.thk_2].filter(Boolean).join(" x "))}</td>
-      <td><input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" ${disabled} /></td>
-      <td><select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" ${disabled} onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></td>
-      <td><select id="po-line-location-${lineId}" name="location_${lineId}" data-placeholder="Select location" ${disabled}><option value="">Select location</option></select></td>
-      <td>${locked ? `<span class="chip">Received</span>` : `<span class="chip">${esc(statusLabel)}</span>`}</td>
+      <td>${qtyCell}</td>
+      <td>${warehouseCell}</td>
+      <td>${locationCell}</td>
     </tr>`;
   }).join("");
   const historyRows = history.map((row) => `<tr>
@@ -4666,7 +4679,7 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       </div>
     </div>
     <div class="card">
-      <form method="post" action="/po/${record.id}/receive" class="stack">
+      <form method="post" action="/po/${record.id}/receive" class="stack" id="po-receive-form-${record.id}">
         <div class="grid">
           <div><label>Default Warehouse</label><select id="po-receive-warehouse-${record.id}" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
           <div><label>Default Location</label><select id="po-receive-location-${record.id}" data-placeholder="Select location" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'><option value="">Select location</option></select></div>
@@ -4674,8 +4687,8 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
         </div>
         <div class="scroll">
           <table>
-            <tr><th>Item</th><th>Description</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>Size</th><th>Thk</th><th>Qty This Receipt</th><th>Warehouse</th><th>Location</th><th>Status</th></tr>
-            ${lineRows || `<tr><td colspan="11" class="muted">No PO lines found.</td></tr>`}
+            <tr><th>Item</th><th>Description</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>Size</th><th>Thk</th><th>Qty This Receipt</th><th>Warehouse</th><th>Location</th></tr>
+            ${lineRows || `<tr><td colspan="10" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
@@ -4688,7 +4701,6 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
           if (!headerWarehouse || !headerLocation) return;
           syncLocationOptions(headerWarehouse.id, headerLocation.id, optionsByWarehouse, headerLocation.value || "");
           document.querySelectorAll('select[id^="po-line-warehouse-"]').forEach(function(select) {
-            if (select.disabled) return;
             select.value = headerWarehouse.value;
             const locationId = select.id.replace("warehouse", "location");
             syncLocationOptions(select.id, locationId, optionsByWarehouse, "");
@@ -4697,7 +4709,31 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
           });
         }
         syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${JSON.stringify(locationMap)});
-        ${poLines.map((line) => `syncLocationOptions("po-line-warehouse-${line.id}", "po-line-location-${line.id}", ${JSON.stringify(locationMap)});`).join("\n")}
+        ${poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0) > 0).map((line) => `syncLocationOptions("po-line-warehouse-${line.id}", "po-line-location-${line.id}", ${JSON.stringify(locationMap)});`).join("\n")}
+        document.getElementById("po-receive-form-${record.id}").addEventListener("submit", function(event) {
+          let hasQty = false;
+          let hasError = false;
+          document.querySelectorAll('input[name^="qty_received_"]').forEach(function(input) {
+            const lineId = input.name.replace("qty_received_", "");
+            const qty = Number(input.value || 0);
+            if (!Number.isFinite(qty) || qty <= 0) return;
+            hasQty = true;
+            const warehouse = document.getElementById("po-line-warehouse-" + lineId);
+            const location = document.getElementById("po-line-location-" + lineId);
+            if (!warehouse || !warehouse.value || !location || !location.value) {
+              hasError = true;
+            }
+          });
+          if (!hasQty) {
+            event.preventDefault();
+            alert("Enter a received quantity on at least one editable PO line.");
+            return;
+          }
+          if (hasError) {
+            event.preventDefault();
+            alert("Warehouse and location are required on every PO line with a received quantity.");
+          }
+        });
       </script>
     </div>
     <div class="card scroll">
