@@ -4444,10 +4444,23 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
   const pos = (await query(`
         select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
                v.name as vendor, coalesce(r.rfq_no, '') as rfq_no, coalesce(po.description, '') as description, coalesce(po.vendor_contact, '') as vendor_contact,
-               coalesce(po.freight_terms, '') as freight_terms, coalesce(po.ship_to, '') as ship_to, coalesce(po.buyer_name, '') as buyer_name
+               coalesce(po.freight_terms, '') as freight_terms, coalesce(po.ship_to, '') as ship_to, coalesce(po.buyer_name, '') as buyer_name,
+               coalesce(open_counts.open_items, 0) as open_items
     from purchase_orders po
     join vendors v on v.id = po.vendor_id
     left join rfqs r on r.id = po.rfq_id
+    left join (
+      select
+        pl.po_id,
+        count(*) filter (where coalesce(rcv.qty_received, 0) < pl.qty_ordered) as open_items
+      from po_lines pl
+      left join (
+        select po_line_id, sum(qty_received) as qty_received
+        from receipts
+        group by po_line_id
+      ) rcv on rcv.po_line_id = pl.id
+      group by pl.po_id
+    ) open_counts on open_counts.po_id = po.id
     ${whereSql}
     order by po.id desc
     limit 300
@@ -4463,6 +4476,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
     <td>${esc(po.ship_to || "")}</td>
     <td>${esc(po.buyer_name || "")}</td>
     <td>${esc(po.status)}</td>
+    <td>${esc(po.open_items)}</td>
     <td>${esc(po.created_at)}</td>
     <td>
       <div class="actions">
@@ -4491,7 +4505,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
       <div class="actions"><a class="btn btn-primary" href="/po/import">Import Existing POs</a></div>
     </div>
     <div class="card scroll">
-      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="11" class="muted">No POs match the current filter.</td></tr>`}</table>
+      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>Open Items</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="12" class="muted">No POs match the current filter.</td></tr>`}</table>
     </div>
   `, req.user));
 });
