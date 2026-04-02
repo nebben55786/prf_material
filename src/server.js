@@ -4649,11 +4649,13 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
     return `<tr>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
+      <td>${esc(line.size_1 || "")}</td>
+      <td>${esc(line.size_2 || "")}</td>
+      <td>${esc(line.thk_1 || "")}</td>
+      <td>${esc(line.thk_2 || "")}</td>
       <td>${esc(line.qty_ordered)}</td>
       <td>${esc(line.qty_received)}</td>
       <td>${esc(remainingQty)}</td>
-      <td>${esc([line.size_1, line.size_2].filter(Boolean).join(" x "))}</td>
-      <td>${esc([line.thk_1, line.thk_2].filter(Boolean).join(" x "))}</td>
       <td>${qtyCell}</td>
       <td>${warehouseCell}</td>
       <td>${locationCell}</td>
@@ -4687,8 +4689,8 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
         </div>
         <div class="scroll">
           <table>
-            <tr><th>Item</th><th>Description</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>Size</th><th>Thk</th><th>Qty This Receipt</th><th>Warehouse</th><th>Location</th></tr>
-            ${lineRows || `<tr><td colspan="10" class="muted">No PO lines found.</td></tr>`}
+            <tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>Qty This Receipt</th><th>Warehouse</th><th>Location</th></tr>
+            ${lineRows || `<tr><td colspan="12" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
