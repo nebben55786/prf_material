@@ -4626,20 +4626,24 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
     .join("");
   const lineRows = poLines.map((line) => {
     const lineId = Number(line.id);
-    const locked = Number(line.qty_received || 0) > 0;
+    const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
+    const locked = remainingQty <= 0;
     const disabled = locked ? "disabled" : "";
+    const statusLabel = locked
+      ? "Received"
+      : (Number(line.qty_received || 0) > 0 ? "Partial" : "Editable");
     return `<tr>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(line.qty_ordered)}</td>
       <td>${esc(line.qty_received)}</td>
-      <td>${esc(Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0))}</td>
+      <td>${esc(remainingQty)}</td>
       <td>${esc([line.size_1, line.size_2].filter(Boolean).join(" x "))}</td>
       <td>${esc([line.thk_1, line.thk_2].filter(Boolean).join(" x "))}</td>
       <td><input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" ${disabled} /></td>
       <td><select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" ${disabled} onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></td>
       <td><select id="po-line-location-${lineId}" name="location_${lineId}" data-placeholder="Select location" ${disabled}><option value="">Select location</option></select></td>
-      <td>${locked ? `<span class="chip">Received</span>` : `<span class="muted">Editable</span>`}</td>
+      <td>${locked ? `<span class="chip">Received</span>` : `<span class="chip">${esc(statusLabel)}</span>`}</td>
     </tr>`;
   }).join("");
   const historyRows = history.map((row) => `<tr>
@@ -4720,8 +4724,9 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
         group by pl.id, pl.qty_ordered
       `, [lineId, poId])).rows[0];
       if (!line) throw new Error("PO line not found.");
-      if (Number(line.qty_received || 0) > 0) throw new Error("Previously received PO lines cannot be edited.");
-      if (qtyReceived > Number(line.qty_ordered || 0)) throw new Error("Qty received cannot exceed qty ordered.");
+      const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
+      if (remainingQty <= 0) throw new Error("Fully received PO lines cannot be edited.");
+      if (qtyReceived > remainingQty) throw new Error("Qty received cannot exceed remaining qty.");
       const warehouse = String(req.body[`warehouse_${lineId}`] || "").trim();
       const location = String(req.body[`location_${lineId}`] || "").trim();
       await assertValidWarehouseLocation(client, warehouse, location);
