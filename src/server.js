@@ -3617,7 +3617,10 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       where ri.rfq_id = $1
-      order by nullif(ri.po_line, '') nulls last, ri.id desc
+      order by
+        case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
+        case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
+        ri.id
     `, [rfqId]),
     query("select id, name from vendors order by name"),
     query("select count(*) from purchase_orders where rfq_id = $1", [rfqId]),
@@ -4663,6 +4666,7 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
   const poLines = (await query(`
     select
       pl.id,
+      coalesce(pl.po_line, '') as po_line,
       mi.item_code,
       mi.description,
       pl.qty_ordered,
@@ -4688,7 +4692,10 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       limit 1
     ) last_receipt on true
     where pl.po_id = $1
-    order by pl.id
+    order by
+      case when coalesce(pl.po_line, '') = '' then 1 else 0 end,
+      case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
+      pl.id
   `, [poId])).rows;
   const history = (await query(`
     select r.received_at, mi.item_code, mi.description, r.qty_received, r.warehouse, r.location, r.osd_status, r.osd_notes
@@ -4720,6 +4727,7 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       ? `<span>${esc(line.last_location || "")}</span>`
       : `<select id="po-line-location-${lineId}" name="location_${lineId}" data-placeholder="Select location"><option value="">Select location</option></select>`;
     return `<tr>
+      <td>${esc(line.po_line || "")}</td>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(line.size_1 || "")}</td>
@@ -4768,8 +4776,8 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
         </div>
         <div class="scroll">
           <table>
-            <tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>Qty This Receipt</th><th>Warehouse</th><th>Location</th></tr>
-            ${lineRows || `<tr><td colspan="12" class="muted">No PO lines found.</td></tr>`}
+            <tr><th>PO Line</th><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>Qty This Receipt</th><th>Warehouse</th><th>Location</th></tr>
+            ${lineRows || `<tr><td colspan="13" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
         <div><label>MRR Notes</label><textarea name="mrr_notes"></textarea></div>
@@ -4964,7 +4972,7 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
 });
 
 app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
-  const [po, vendors] = await Promise.all([
+  const [po, vendors, poLines] = await Promise.all([
     query(`
       select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
              coalesce(po.description, '') as description, coalesce(r.rfq_no, '') as rfq_no
@@ -4972,10 +4980,33 @@ app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (re
       left join rfqs r on r.id = po.rfq_id
       where po.id = $1
     `, [req.params.id]),
-    query("select id, name from vendors order by name")
+    query("select id, name from vendors order by name"),
+    query(`
+      select pl.id, coalesce(pl.po_line, '') as po_line, mi.item_code, mi.description, pl.qty_ordered, pl.unit_price,
+             coalesce(pl.size_1, '') as size_1, coalesce(pl.size_2, '') as size_2, coalesce(pl.thk_1, '') as thk_1, coalesce(pl.thk_2, '') as thk_2
+      from po_lines pl
+      join material_items mi on mi.id = pl.material_item_id
+      where pl.po_id = $1
+      order by
+        case when coalesce(pl.po_line, '') = '' then 1 else 0 end,
+        case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
+        pl.id
+    `, [req.params.id])
   ]);
   const record = po.rows[0];
   const vendorOptions = vendors.rows.map((vendor) => `<option value="${vendor.id}" ${vendor.id === record.vendor_id ? "selected" : ""}>${esc(vendor.name)}</option>`).join("");
+  const poLineRows = poLines.rows.map((line) => `<tr>
+    <td>${esc(line.po_line || "")}</td>
+    <td>${esc(line.item_code)}</td>
+    <td>${esc(line.description)}</td>
+    <td>${esc(line.size_1)}</td>
+    <td>${esc(line.size_2)}</td>
+    <td>${esc(line.thk_1)}</td>
+    <td>${esc(line.thk_2)}</td>
+    <td>${esc(line.qty_ordered)}</td>
+    <td>${esc(line.unit_price)}</td>
+    <td><a class="btn btn-secondary" href="/po-line/${line.id}/edit">Edit Line</a></td>
+  </tr>`).join("");
   res.send(layout("Edit PO", `
     <h1>Edit PO</h1>
     <div class="card">
@@ -4998,6 +5029,10 @@ app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (re
           </form>
         </div>
       </form>
+    </div>
+    <div class="card scroll">
+      <h3>PO Lines</h3>
+      <table><tr><th>PO Line</th><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Unit Price</th><th>Action</th></tr>${poLineRows || `<tr><td colspan="10" class="muted">No PO lines found.</td></tr>`}</table>
     </div>
   `, req.user));
 });
@@ -5027,7 +5062,7 @@ app.post("/po/:id/delete", requireAuth, requirePermission("pos", "edit"), async 
 
 app.get("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   const line = (await query(`
-    select pl.id, pl.qty_ordered, pl.unit_price, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, extract(epoch from pl.updated_at)::text as updated_token,
+    select pl.id, coalesce(pl.po_line, '') as po_line, pl.qty_ordered, pl.unit_price, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, extract(epoch from pl.updated_at)::text as updated_token,
            mi.item_code, mi.description, po.po_no
     from po_lines pl
     join material_items mi on mi.id = pl.material_item_id
@@ -5041,6 +5076,7 @@ app.get("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), asyn
       <form method="post" action="/po-line/${line.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(line.updated_token)}" />
         <div class="grid">
+          <div><label>PO Line</label><input name="po_line" value="${esc(line.po_line || "")}" /></div>
           <div><label>Qty Ordered</label><input name="qty_ordered" value="${esc(line.qty_ordered)}" required /></div>
           <div><label>Unit Price</label><input name="unit_price" value="${esc(line.unit_price)}" required /></div>
           <div><label>Size 1</label><input name="size_1" value="${esc(line.size_1 || "")}" /></div>
@@ -5058,9 +5094,9 @@ app.post("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), asy
   await withTransaction(async (client) => {
     const update = await client.query(`
       update po_lines
-      set qty_ordered = $2, unit_price = $3, size_1 = $4, size_2 = $5, thk_1 = $6, thk_2 = $7, updated_at = now()
-      where id = $1 and extract(epoch from updated_at)::text = $8
-    `, [req.params.id, Number(req.body.qty_ordered), Number(req.body.unit_price), req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.updated_token || ""]);
+      set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
+      where id = $1 and extract(epoch from updated_at)::text = $9
+    `, [req.params.id, req.body.po_line || "", Number(req.body.qty_ordered), Number(req.body.unit_price), req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This PO line was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "po_line", req.params.id, "");
   });
@@ -5151,6 +5187,7 @@ app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), 
   const openLines = po ? (await query(`
     select
       pl.id,
+      coalesce(pl.po_line, '') as po_line,
       mi.item_code,
       mi.description,
       pl.qty_ordered,
@@ -5168,9 +5205,12 @@ app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), 
     ) rcv on rcv.po_line_id = pl.id
     where pl.po_id = $1
       and coalesce(rcv.qty_received, 0) < pl.qty_ordered
-    order by pl.id
+    order by
+      case when coalesce(pl.po_line, '') = '' then 1 else 0 end,
+      case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
+      pl.id
   `, [po.id])).rows : [];
-  const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(line.qty_ordered)} | Rec ${esc(line.qty_received)} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`).join("");
+  const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(line.qty_ordered)} | Rec ${esc(line.qty_received)} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`).join("");
   res.send(layout("Receive MRR", `
     <h1>Receive ${esc(mrr.mrr_number)}</h1>
     <div class="card">
