@@ -6258,10 +6258,18 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
       ].filter(Boolean).join(" | ");
       const insert = await client.query(`
         insert into fmr_logs (
-          fmr_number, vendor_name, container_no, request_description, request_date, updated_at
-        ) values ($1,$2,$3,$4,$5, now())
+          fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, request_date, updated_at
+        ) values ($1,$2,$3,$4,$5,$6,$7, now())
         returning id
-      `, [fmrNumber, row.vendor_name || "", crateNumber, requestDescription, new Date().toISOString().slice(0, 10)]);
+      `, [
+        fmrNumber,
+        row.vendor_name || "",
+        crateNumber,
+        row.item_code || "",
+        row.abbrev_description || "",
+        requestDescription,
+        new Date().toISOString().slice(0, 10)
+      ]);
       await auditLog(client, req.user.id, "create", "fmr_log", insert.rows[0].id, fmrNumber);
       createdCount += 1;
     }
