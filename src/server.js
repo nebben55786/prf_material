@@ -7011,15 +7011,21 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
         </div>
         <div><label>Fluor Description</label><textarea name="fluor_desc">${esc(row.fluor_desc)}</textarea></div>
         <div><label>Request Description</label><textarea name="request_description">${esc(row.request_description)}</textarea></div>
-        <div class="actions"><button type="submit">Save Vendor FMR</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
-      </form>
-    </div>
-  `, req.user));
-});
+        <div class="actions">
+          <button type="submit">Save Vendor FMR</button>
+          <a class="btn btn-secondary" href="/material-logs">Back</a>
+          <form method="post" action="/material-logs/fmr/${row.id}/delete" onsubmit="return confirm('Delete Vendor FMR ${escAttr(row.fmr_number)}?');">
+            <button class="btn btn-danger" type="submit">Delete Vendor FMR</button>
+          </form>
+        </div>
+        </form>
+      </div>
+    `, req.user));
+  });
 
-app.post("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
-  await withTransaction(async (client) => {
-    await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no, req.params.id);
+  app.post("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+    await withTransaction(async (client) => {
+      await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no, req.params.id);
     await client.query(`
       update fmr_logs
       set fmr_number = $2, vendor_name = $3, container_no = $4, fluor_id = $5, fluor_desc = $6, request_description = $7,
@@ -7041,9 +7047,19 @@ app.post("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material
       req.body.pickup_date?.trim() || ""
     ]);
     await auditLog(client, req.user.id, "update", "fmr_log", req.params.id, req.body.fmr_number?.trim() || "");
+    });
+    res.redirect("/material-logs/fmr");
   });
-  res.redirect("/material-logs/fmr");
-});
+
+  app.post("/material-logs/fmr/:id/delete", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+    await withTransaction(async (client) => {
+      const current = (await client.query("select fmr_number from fmr_logs where id = $1", [req.params.id])).rows[0];
+      if (!current) throw new Error("Vendor FMR log row not found.");
+      await client.query("delete from fmr_logs where id = $1", [req.params.id]);
+      await auditLog(client, req.user.id, "delete", "fmr_log", req.params.id, current.fmr_number || "");
+    });
+    res.redirect("/material-logs/fmr");
+  });
 
 app.use((error, req, res, _next) => {
   const user = currentUser(req);
