@@ -14,7 +14,7 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
-const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CLOSED"];
+const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CANCELLED", "CLOSED"];
 const rfqStatuses = [
   { value: "SEND_FOR_QUOTES", label: "Send for Quotes" },
   { value: "WAITING_ON_QUOTES", label: "Waiting on Quotes" },
@@ -3121,8 +3121,8 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
       headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
     }
   }
-  if (canAccess(req.user, "requisitions", "delete")) {
-    headerActions.push(`<form method="post" action="/requisitions/${header.id}/delete" onsubmit="return confirm('Delete this requisition? If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Delete Requisition</button></form>`);
+  if (req.user?.role === "admin" && header.status !== "CANCELLED") {
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/cancel" onsubmit="return confirm('Cancel this requisition? The record will be kept. If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Cancel Requisition</button></form>`);
   }
   res.send(layout(`Requisition ${header.requisition_no}`, `
     <h1>Requisition ${esc(header.requisition_no)}</h1>
@@ -3584,10 +3584,12 @@ app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.post("/requisitions/:id/delete", requireAuth, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/cancel", requireAuth, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
+  if (req.user?.role !== "admin") throw new Error("Only admins can cancel requisitions.");
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    if (header.status === "CANCELLED") return;
     const lines = (await client.query(`
       select mrl.bom_line_id, mrl.qty_issued, bl.planning_status, bl.qty_required, bl.qty_issued as bom_qty_issued
       from material_requisition_lines mrl
@@ -3610,10 +3612,15 @@ app.post("/requisitions/:id/delete", requireAuth, requirePermission("requisition
         where id = $1
       `, [line.bom_line_id, nextIssued, nextStatus]);
     }
-    await client.query("delete from material_requisitions where id = $1", [req.params.id]);
-    await auditLog(client, req.user.id, "delete", "material_requisition", req.params.id, header.requisition_no);
+    await client.query(`
+      update material_requisitions
+      set status = 'CANCELLED',
+          updated_at = now()
+      where id = $1
+    `, [req.params.id]);
+    await auditLog(client, req.user.id, "cancel", "material_requisition", req.params.id, header.requisition_no);
   });
-  res.redirect("/requisitions");
+  res.redirect(`/requisitions/${req.params.id}`);
 }));
 
 app.get("/vendors", requireAuth, requirePermission("vendors", "view"), async (req, res) => {
