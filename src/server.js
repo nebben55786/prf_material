@@ -1329,6 +1329,24 @@ async function getNextMrrNumber() {
   return `${prefix}${nextValue}`;
 }
 
+async function getNextFmrNumber(client = null) {
+  const runner = client || { query };
+  const latest = (await runner.query(`
+    select fmr_number
+    from fmr_logs
+    where coalesce(fmr_number, '') <> '' and fmr_number ~ '\\d+$'
+    order by ((regexp_match(fmr_number, '(\\d+)$'))[1])::bigint desc, id desc
+    limit 1
+  `)).rows[0];
+  const current = String(latest?.fmr_number || "").trim();
+  if (!current) return "FMR-000001";
+  const match = current.match(/^(.*?)(\d+)$/);
+  if (!match) return "FMR-000001";
+  const prefix = match[1];
+  const nextValue = String(Number(match[2]) + 1).padStart(match[2].length, "0");
+  return `${prefix}${nextValue}`;
+}
+
 async function getLatestMrrForPo(client, poId) {
   if (!poId) return null;
   return (await client.query(`
@@ -1401,19 +1419,25 @@ async function syncOpiLogsFromMrr(client) {
   `);
 }
 
-async function ensureUniqueFmrContainer(client, containerNo, excludeId = null) {
+async function ensureUniqueFmrContainer(client, vendorName, containerNo, excludeId = null) {
+  const vendor = String(vendorName || "").trim().toLowerCase();
   const normalized = String(containerNo || "").trim();
-  if (!normalized) return;
-  const params = [normalized];
-  let sql = "select id from fmr_logs where container_no = $1";
+  if (!vendor || !normalized) return;
+  const params = [vendor, normalized.toLowerCase()];
+  let sql = `
+    select id
+    from fmr_logs
+    where lower(trim(coalesce(vendor_name, ''))) = $1
+      and lower(trim(coalesce(container_no, ''))) = $2
+  `;
   if (excludeId) {
     params.push(excludeId);
-    sql += " and id <> $2";
+    sql += " and id <> $3";
   }
   sql += " limit 1";
   const existing = (await client.query(sql, params)).rows[0];
   if (existing) {
-    throw new Error("This container number already exists on the FMR log.");
+    throw new Error("This vendor already has that container number on the FMR log.");
   }
 }
 
@@ -5991,16 +6015,23 @@ app.get("/material-logs/opi", requireAuth, requirePermission("material_logs", "v
 });
 
 app.get("/material-logs/fmr/new", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+  const [nextFmrNumber, vendors] = await Promise.all([
+    getNextFmrNumber(),
+    query("select name from vendors where is_active = true order by name")
+  ]);
+  const vendorOptions = [`<option value="">Select vendor</option>`]
+    .concat(vendors.rows.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
+    .join("");
   res.send(layout("Add FMR", `
     <h1>Add FMR</h1>
-    <div class="card">
-      <form method="post" action="/material-logs/fmr/add" class="stack">
-        <div class="grid">
-          <div><label>FMR Number</label><input name="fmr_number" required /></div>
-          <div><label>Vendor</label><input name="vendor_name" /></div>
-          <div><label>Container #</label><input name="container_no" required /></div>
-          <div><label>Fluor ID</label><input name="fluor_id" /></div>
-          <div><label>MRR #</label><input name="mrr_number" /></div>
+      <div class="card">
+        <form method="post" action="/material-logs/fmr/add" class="stack">
+          <div class="grid">
+            <div><label>FMR Number</label><input name="fmr_number" value="${esc(nextFmrNumber)}" readonly /></div>
+            <div><label>Vendor</label><div class="inline-field"><select name="vendor_name" required>${vendorOptions}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
+            <div><label>Container #</label><input name="container_no" required /></div>
+            <div><label>Fluor ID</label><input name="fluor_id" /></div>
+            <div><label>MRR #</label><input name="mrr_number" /></div>
           <div><label>Request Date</label><input name="request_date" /></div>
           <div><label>Need Date</label><input name="need_date" /></div>
           <div><label>Pick Ticket #</label><input name="pick_ticket" /></div>
@@ -6410,14 +6441,15 @@ app.post("/material-logs/mrr/add", requireAuth, requirePermission("material_logs
 
 app.post("/material-logs/fmr/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
-    await ensureUniqueFmrContainer(client, req.body.container_no);
+    const fmrNumber = await getNextFmrNumber(client);
+    await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no);
     const result = await client.query(`
       insert into fmr_logs (
         fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, mrr_number, request_date, need_date, pick_ticket, pickup_location, pickup_date, updated_at
       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
       returning id
     `, [
-      req.body.fmr_number?.trim(),
+      fmrNumber,
       req.body.vendor_name?.trim() || "",
       req.body.container_no?.trim() || "",
       req.body.fluor_id?.trim() || "",
@@ -6590,21 +6622,28 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material
 });
 
 app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
-  const row = (await query("select * from fmr_logs where id = $1", [req.params.id])).rows[0];
+  const [rowRes, vendors] = await Promise.all([
+    query("select * from fmr_logs where id = $1", [req.params.id]),
+    query("select name from vendors where is_active = true order by name")
+  ]);
+  const row = rowRes.rows[0];
   if (!row) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>FMR log row not found.</h3></div>`, req.user));
     return;
   }
+  const vendorOptions = [`<option value="">Select vendor</option>`]
+    .concat(vendors.rows.map((vendor) => `<option value="${esc(vendor.name)}" ${row.vendor_name === vendor.name ? "selected" : ""}>${esc(vendor.name)}</option>`))
+    .join("");
   res.send(layout("Edit FMR Log", `
-    <h1>Edit FMR Entry</h1>
-    <div class="card">
-      <form method="post" action="/material-logs/fmr/${row.id}/edit" class="stack">
-        <div class="grid">
-          <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" required /></div>
-          <div><label>Vendor</label><input name="vendor_name" value="${esc(row.vendor_name)}" /></div>
-          <div><label>Container #</label><input name="container_no" value="${esc(row.container_no)}" /></div>
-          <div><label>Fluor ID</label><input name="fluor_id" value="${esc(row.fluor_id)}" /></div>
-          <div><label>MRR #</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
+      <h1>Edit FMR Entry</h1>
+      <div class="card">
+        <form method="post" action="/material-logs/fmr/${row.id}/edit" class="stack">
+          <div class="grid">
+            <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" required /></div>
+            <div><label>Vendor</label><div class="inline-field"><select name="vendor_name" required>${vendorOptions}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
+            <div><label>Container #</label><input name="container_no" value="${esc(row.container_no)}" /></div>
+            <div><label>Fluor ID</label><input name="fluor_id" value="${esc(row.fluor_id)}" /></div>
+            <div><label>MRR #</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
           <div><label>Request Date</label><input name="request_date" value="${esc(row.request_date)}" /></div>
           <div><label>Need Date</label><input name="need_date" value="${esc(row.need_date)}" /></div>
           <div><label>Pick Ticket #</label><input name="pick_ticket" value="${esc(row.pick_ticket)}" /></div>
@@ -6621,7 +6660,7 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
 
 app.post("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
-    await ensureUniqueFmrContainer(client, req.body.container_no, req.params.id);
+    await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no, req.params.id);
     await client.query(`
       update fmr_logs
       set fmr_number = $2, vendor_name = $3, container_no = $4, fluor_id = $5, fluor_desc = $6, request_description = $7,
