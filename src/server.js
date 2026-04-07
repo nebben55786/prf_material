@@ -2499,7 +2499,7 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
       <p class="muted">BOM #: ${esc(bom.bom_no)} | Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system_name || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}</p>
       <p>${esc(bom.description || "")}</p>
       ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
-      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a></div>
+      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a></div>
     </div>
     <div class="stats">
       <div class="stat"><div>Lines</div><strong>${coverage.line_count}</strong></div>
@@ -3063,6 +3063,69 @@ app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"),
     <div class="card scroll"><table><tr><th>Req #</th><th>BOM Name</th><th>BOM #</th><th>Requested By</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="10" class="muted">No requisitions yet.</td></tr>`}</table></div>
   `, req.user));
 });
+
+app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHandler(async (req, res) => {
+  const bom = (await query("select * from bom_headers where id = $1", [req.params.id])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  const search = String(req.query.search || "").trim();
+  const iwp = String(req.query.iwp || "").trim();
+  const lineNo = String(req.query.line_no || "").trim();
+  const where = ["bl.bom_id = $1"];
+  const params = [req.params.id];
+  if (search) {
+    params.push(`%${search}%`);
+    where.push(`(bl.item_code ilike $${params.length} or coalesce(bl.description, '') ilike $${params.length})`);
+  }
+  if (iwp) {
+    params.push(`%${iwp}%`);
+    where.push(`coalesce(bl.iwp_no, '') ilike $${params.length}`);
+  }
+  if (lineNo) {
+    params.push(`%${lineNo}%`);
+    where.push(`coalesce(bl.line_no, '') ilike $${params.length}`);
+  }
+  const lines = (await query(`
+    select bl.*
+    from bom_lines bl
+    where ${where.join(" and ")}
+    order by coalesce(bl.iwp_no, ''), coalesce(bl.line_no, ''), bl.id
+  `, params)).rows;
+  const lineRows = lines.map((line) => `<tr>
+    <td>${esc(line.line_no)}</td>
+    <td>${esc(line.iwp_no || "")}</td>
+    <td>${esc(line.item_code)}</td>
+    <td>${esc(line.description)}</td>
+    <td>${esc(line.material_type || "")}</td>
+    <td>${esc(line.qty_required)}</td>
+    <td>${esc(line.qty_issued)}</td>
+    <td>${esc(line.uom || "")}</td>
+    <td>${esc(line.spec || "")}</td>
+    <td>${esc(line.size_1 || "")}</td>
+    <td>${esc(line.size_2 || "")}</td>
+    <td>${esc(line.thk_1 || "")}</td>
+    <td>${esc(line.thk_2 || "")}</td>
+    <td><span class="chip">${esc(line.planning_status || "")}</span></td>
+    <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a></div></td>
+  </tr>`).join("");
+  res.send(layout(`BOM Lines ${bom.bom_name || bom.description || bom.bom_no}`, `
+    <h1>BOM Lines</h1>
+    <div class="card">
+      <p class="muted">BOM: <a href="/bom/${bom.id}">${esc(bom.bom_name || bom.description || bom.bom_no)}</a> | BOM #: ${esc(bom.bom_no)} | Type: ${esc(bom.bom_type)} | Status: ${esc(bom.status)}</p>
+      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}">Back to BOM</a></div>
+    </div>
+    <div class="card">
+      <form method="get" action="/bom/${bom.id}/lines" class="stack">
+        <div class="grid">
+          <div><label>Search</label><input name="search" value="${esc(search)}" /></div>
+          <div><label>IWP</label><input name="iwp" value="${esc(iwp)}" /></div>
+          <div><label>Line No</label><input name="line_no" value="${esc(lineNo)}" /></div>
+        </div>
+        <div class="actions"><button type="submit">Filter Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Clear</a><span class="muted">${lines.length} line(s)</span></div>
+      </form>
+    </div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Status</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="15" class="muted">No BOM lines found.</td></tr>`}</table></div>
+  `, req.user));
+}));
 
 app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "view"), async (req, res) => {
   const header = (await query(`
