@@ -6141,6 +6141,7 @@ app.get("/material-logs/mrr/new", requireAuth, requirePermission("material_logs"
 app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
   const q = String(req.query.q || "").trim();
   const createdCount = Number(req.query.created || 0);
+  const createdLineCount = Number(req.query.lines || 0);
   const skippedCount = Number(req.query.skipped || 0);
   const rows = (await query(`
     select id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, mrr_number, request_date, need_date, pickup_location, pickup_date
@@ -6164,7 +6165,7 @@ app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "v
     </tr>`).join("");
     res.send(layout("Vendor FMR Log", `
       <h1>Vendor FMR Log</h1>
-      ${createdCount > 0 || skippedCount > 0 ? `<div class="card"><strong>Vendor FMR Generation:</strong> Created ${createdCount} | Skipped ${skippedCount}</div>` : ""}
+    ${createdCount > 0 || createdLineCount > 0 || skippedCount > 0 ? `<div class="card"><strong>Vendor FMR Generation:</strong> Created ${createdCount} FMR${createdCount === 1 ? "" : "s"} | ${createdLineCount} Line${createdLineCount === 1 ? "" : "s"} | Skipped ${skippedCount}</div>` : ""}
       <div class="card">
         <form method="get" action="/material-logs/fmr" class="stack">
           <div class="grid" style="grid-template-columns: 1fr auto auto auto;">
@@ -6379,62 +6380,76 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
       where id = any($1::bigint[])
       order by id
     `, [selectedIds])).rows;
-    const grouped = new Map();
+    const requestGroups = new Map();
     let skippedRequestedCount = 0;
     for (const row of rows) {
       const crateNumber = String(req.body[`crate_number_${row.id}`] || row.crate_number || "").trim();
       const srnNumber = String(req.body[`srn_number_${row.id}`] || row.srn_number || "").trim();
       if (!crateNumber) throw new Error("Every selected line must have a crate number before generating Vendor FMRs.");
-      const requestKey = `${String(row.vendor_name || "").trim().toLowerCase()}|${crateNumber.toLowerCase()}`;
-      if (requestedSet.has(requestKey)) {
+      const vendorKey = String(row.vendor_name || "").trim().toLowerCase();
+      const crateKey = `${vendorKey}|${crateNumber.toLowerCase()}`;
+      if (requestedSet.has(crateKey)) {
         skippedRequestedCount += 1;
         continue;
       }
-      if (!grouped.has(requestKey)) {
-        grouped.set(requestKey, { row, crateNumber, srnNumber });
+      const requestGroupKey = `${vendorKey}|${srnNumber ? srnNumber.toLowerCase() : "__blank__"}`;
+      if (!requestGroups.has(requestGroupKey)) {
+        requestGroups.set(requestGroupKey, {
+          srnNumber,
+          rowsByCrate: new Map()
+        });
+      }
+      const group = requestGroups.get(requestGroupKey);
+      if (!group.rowsByCrate.has(crateKey)) {
+        group.rowsByCrate.set(crateKey, { row, crateNumber, srnNumber });
       }
     }
-    if (grouped.size === 0) throw new Error("All selected crates have already been requested.");
+    if (requestGroups.size === 0) throw new Error("All selected crates have already been requested.");
     let createdCount = 0;
-    for (const { row, crateNumber, srnNumber } of grouped.values()) {
-      await ensureUniqueFmrContainer(client, row.vendor_name, crateNumber);
+    let createdLineCount = 0;
+    for (const group of requestGroups.values()) {
       const fmrNumber = await getNextFmrNumber(client);
-      const requestDescription = [
-        row.po_number ? `PO ${row.po_number}` : "",
-        row.item_code || "",
-        row.abbrev_description || "",
-        srnNumber ? `SRN ${srnNumber}` : ""
-      ].filter(Boolean).join(" | ");
-      const insert = await client.query(`
-        insert into fmr_logs (
-          fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, request_date, updated_at
-        ) values ($1,$2,$3,$4,$5,$6,$7, now())
-        returning id
-      `, [
-        fmrNumber,
-        row.vendor_name || "",
-        crateNumber,
-        row.item_code || "",
-        row.abbrev_description || "",
-        requestDescription,
-        new Date().toISOString().slice(0, 10)
-      ]);
-      await ensureMrrForVendorCrate(client, {
-        userId: req.user.id,
-        fmrId: insert.rows[0].id,
-        vendorName: row.vendor_name || "",
-        containerNo: crateNumber,
-        poNumber: row.po_number || ""
-      });
-      await auditLog(client, req.user.id, "create", "fmr_log", insert.rows[0].id, fmrNumber);
       createdCount += 1;
+      for (const { row, crateNumber, srnNumber } of group.rowsByCrate.values()) {
+        await ensureUniqueFmrContainer(client, row.vendor_name, crateNumber);
+        const requestDescription = [
+          row.po_number ? `PO ${row.po_number}` : "",
+          row.item_code || "",
+          row.abbrev_description || "",
+          srnNumber ? `SRN ${srnNumber}` : ""
+        ].filter(Boolean).join(" | ");
+        const insert = await client.query(`
+          insert into fmr_logs (
+            fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, request_date, updated_at
+          ) values ($1,$2,$3,$4,$5,$6,$7, now())
+          returning id
+        `, [
+          fmrNumber,
+          row.vendor_name || "",
+          crateNumber,
+          row.item_code || "",
+          row.abbrev_description || "",
+          requestDescription,
+          new Date().toISOString().slice(0, 10)
+        ]);
+        await ensureMrrForVendorCrate(client, {
+          userId: req.user.id,
+          fmrId: insert.rows[0].id,
+          vendorName: row.vendor_name || "",
+          containerNo: crateNumber,
+          poNumber: row.po_number || ""
+        });
+        await auditLog(client, req.user.id, "create", "fmr_log", insert.rows[0].id, fmrNumber);
+        createdLineCount += 1;
+      }
     }
-    req._vendorFmrGenerateResult = { createdCount, skippedRequestedCount };
+    req._vendorFmrGenerateResult = { createdCount, createdLineCount, skippedRequestedCount };
   });
   if (action === "generate") {
     const createdCount = Number(req._vendorFmrGenerateResult?.createdCount || 0);
+    const createdLineCount = Number(req._vendorFmrGenerateResult?.createdLineCount || 0);
     const skippedRequestedCount = Number(req._vendorFmrGenerateResult?.skippedRequestedCount || 0);
-    res.redirect(`/material-logs/fmr?created=${createdCount}&skipped=${skippedRequestedCount}`);
+    res.redirect(`/material-logs/fmr?created=${createdCount}&lines=${createdLineCount}&skipped=${skippedRequestedCount}`);
     return;
   }
   res.redirect(`/material-logs/fmr/request-lines?${redirectQuery}`);
