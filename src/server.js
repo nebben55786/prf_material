@@ -556,31 +556,39 @@ function buildMrrFormPdf(header, lines, options = {}) {
   }
 
   const osdTop = rowY - 10;
-  field(x0, osdTop, totalWidth, 18, "18.REPORT OF UNSATISFACTORY OVER SHORT AND DAMAGED MATERIAL (ONLY NECESSARY IF DISCREPANCIES EXIST)", "");
+  content.push(rect(x0, osdTop - 18, totalWidth, 18));
+  content.push(makeText(x0 + 2, osdTop - 8, "18.REPORT OF UNSATISFACTORY OVER SHORT AND DAMAGED MATERIAL (ONLY NECESSARY IF DISCREPANCIES EXIST)", "F2", 5.5));
   const osdHeaderTop = osdTop - 18;
-  const osdCols = [68, 92, 74, 74, totalWidth - 68 - 92 - 74 - 74];
-  content.push(rect(x0, osdHeaderTop - 18 - (Math.max(discrepancyItems.length, 8) * 16), totalWidth, 18 + (Math.max(discrepancyItems.length, 8) * 16)));
-  let osdX = x0;
-  ["ITEM", "QUANTITY", "QUANTITY", "QUANTITY", "COMPLETE DESCRIPTION OF DESCREPENCEY"].forEach((label, idx) => {
-    if (idx > 0) content.push(line(osdX, osdHeaderTop, osdX, osdHeaderTop - 18 - (Math.max(discrepancyItems.length, 8) * 16)));
-    content.push(centerText(osdX, osdHeaderTop - 12, osdCols[idx], label, "F2", 6));
-    osdX += osdCols[idx];
-  });
+  const osdRowsHeight = Math.max(discrepancyItems.length, 8) * 16;
+  const itemWidth = 68;
+  const qtyTotalWidth = 240;
+  const qtyColWidth = qtyTotalWidth / 3;
+  const descWidth = totalWidth - itemWidth - qtyTotalWidth;
+  content.push(rect(x0, osdHeaderTop - 34 - osdRowsHeight, totalWidth, 34 + osdRowsHeight));
+  content.push(line(x0 + itemWidth, osdHeaderTop, x0 + itemWidth, osdHeaderTop - 34 - osdRowsHeight));
+  content.push(line(x0 + itemWidth + qtyTotalWidth, osdHeaderTop, x0 + itemWidth + qtyTotalWidth, osdHeaderTop - 34 - osdRowsHeight));
   content.push(line(x0, osdHeaderTop - 18, right, osdHeaderTop - 18));
-  content.push(makeText(x0 + 4, osdHeaderTop - 28, "TAG NO.", "F2", 5));
-  content.push(centerText(x0 + osdCols[0], osdHeaderTop - 28, osdCols[1], "ORDERED", "F2", 5));
-  content.push(centerText(x0 + osdCols[0] + osdCols[1], osdHeaderTop - 28, osdCols[2], "SHIPPED", "F2", 5));
-  content.push(centerText(x0 + osdCols[0] + osdCols[1] + osdCols[2], osdHeaderTop - 28, osdCols[3], "RECEIVED", "F2", 5));
-  let osdY = osdHeaderTop - 18;
+  content.push(line(x0, osdHeaderTop - 34, right, osdHeaderTop - 34));
+  content.push(line(x0 + itemWidth + qtyColWidth, osdHeaderTop - 18, x0 + itemWidth + qtyColWidth, osdHeaderTop - 34 - osdRowsHeight));
+  content.push(line(x0 + itemWidth + qtyColWidth * 2, osdHeaderTop - 18, x0 + itemWidth + qtyColWidth * 2, osdHeaderTop - 34 - osdRowsHeight));
+  content.push(centerText(x0, osdHeaderTop - 12, itemWidth, "ITEM", "F2", 6));
+  content.push(centerText(x0 + itemWidth, osdHeaderTop - 12, qtyTotalWidth, "QUANTITY", "F2", 6));
+  content.push(makeText(x0 + itemWidth + qtyTotalWidth + 2, osdHeaderTop - 12, "COMPLETE DESCRIPTION OF DESCREPENCEY", "F2", 6));
+  content.push(centerText(x0, osdHeaderTop - 28, itemWidth, "TAG NO.", "F2", 5.5));
+  content.push(centerText(x0 + itemWidth, osdHeaderTop - 28, qtyColWidth, "ORDERED", "F2", 5.5));
+  content.push(centerText(x0 + itemWidth + qtyColWidth, osdHeaderTop - 28, qtyColWidth, "SHIPPED", "F2", 5.5));
+  content.push(centerText(x0 + itemWidth + qtyColWidth * 2, osdHeaderTop - 28, qtyColWidth, "RECEIVED", "F2", 5.5));
+  let osdY = osdHeaderTop - 34;
   for (let i = 0; i < 8; i += 1) {
     const item = discrepancyItems[i] || {};
-    const issueText = item.discrepancy || "";
+    const issueText = wrapPdfText(item.discrepancy || "", 40);
     content.push(line(x0, osdY - 16, right, osdY - 16));
     content.push(makeText(x0 + 2, osdY - 11, item.item_code || "", "F1", 6));
-    content.push(centerText(x0 + osdCols[0], osdY - 11, osdCols[1], item.ordered || "", "F1", 6));
-    content.push(centerText(x0 + osdCols[0] + osdCols[1], osdY - 11, osdCols[2], item.shipped || "", "F1", 6));
-    content.push(centerText(x0 + osdCols[0] + osdCols[1] + osdCols[2], osdY - 11, osdCols[3], item.received || "", "F1", 6));
-    content.push(makeText(x0 + osdCols[0] + osdCols[1] + osdCols[2] + osdCols[3] + 2, osdY - 11, issueText, "F1", 6));
+    content.push(centerText(x0 + itemWidth, osdY - 11, qtyColWidth, item.ordered || "", "F1", 6));
+    content.push(centerText(x0 + itemWidth + qtyColWidth, osdY - 11, qtyColWidth, item.shipped || "", "F1", 6));
+    content.push(centerText(x0 + itemWidth + qtyColWidth * 2, osdY - 11, qtyColWidth, item.received || "", "F1", 6));
+    content.push(makeText(x0 + itemWidth + qtyTotalWidth + 2, osdY - 11, issueText[0] || "", "F1", 5.5));
+    if (issueText[1]) content.push(makeText(x0 + itemWidth + qtyTotalWidth + 2, osdY - 15, issueText[1], "F1", 5.5));
     osdY -= 16;
   }
 
