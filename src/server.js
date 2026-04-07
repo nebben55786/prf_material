@@ -2521,12 +2521,27 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     <div class="card">
       <h3>Upload BOM Lines</h3>
       <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes</p>
-      <form method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
-        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
-        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
-        <div class="actions"><button type="submit">Import BOM Lines</button></div>
-      </form>
-    </div>
+        <form id="bom-lines-import-form" method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
+          <div><label>CSV/XLSX File</label><input id="bom-lines-import-file" type="file" name="sheet" /></div>
+          <div><label>Or Paste CSV</label><textarea id="bom-lines-import-text" name="csv_text"></textarea></div>
+          <div class="actions"><button type="submit">Import BOM Lines</button></div>
+        </form>
+        <script>
+          (() => {
+            const form = document.getElementById("bom-lines-import-form");
+            const fileInput = document.getElementById("bom-lines-import-file");
+            const textInput = document.getElementById("bom-lines-import-text");
+            if (!form || !fileInput || !textInput) return;
+            form.addEventListener("submit", (event) => {
+              const hasFile = fileInput.files && fileInput.files.length > 0;
+              const hasText = textInput.value.trim().length > 0;
+              if (hasFile || hasText) return;
+              event.preventDefault();
+              window.alert("Upload BOM lines or paste CSV before importing.");
+            });
+          })();
+        </script>
+      </div>
     <div class="card scroll"><table><tr><th>Batch</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>${importRows}</table></div>
   `, req.user));
 });
