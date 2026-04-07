@@ -32,7 +32,6 @@ const permissionSections = [
   { key: "bom", label: "BOM", href: "/bom" },
   { key: "receiving", label: "Receiving", href: "/receive" },
   { key: "yard", label: "Yard", href: "/yard" },
-  { key: "inventory", label: "Inventory", href: "/inventory" },
   { key: "requisitions", label: "REQs", href: "/requisitions" },
   { key: "settings", label: "Settings", href: "/settings" }
 ];
