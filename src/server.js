@@ -610,23 +610,25 @@ function buildMrrFormPdf(header, lines, options = {}) {
   field(x0 + 360, info3Top, totalWidth - 360, 18, "CARRIER INSPECTION REPORT NO.:", "");
 
   const optsTop = info3Top - 18;
-  field(x0, optsTop, totalWidth, 18, "THIS REPORT IS FOR:", "");
-  checkbox(x0 + 64, optsTop - 1, false, "OVERAGE");
-  checkbox(x0 + 144, optsTop - 1, false, "SHORTAGE");
-  checkbox(x0 + 232, optsTop - 1, false, "DAMAGED");
-  checkbox(x0 + 322, optsTop - 1, false, "UNSATISFACTORY");
-  checkbox(x0 + 444, optsTop - 1, false, "OTHER");
+  content.push(rect(x0, optsTop - 24, totalWidth, 24));
+  content.push(makeText(x0 + 2, optsTop - 8, "THIS REPORT IS FOR:", "F2", 6));
+  checkbox(x0 + 76, optsTop - 6, false, "OVERAGE");
+  checkbox(x0 + 156, optsTop - 6, false, "SHORTAGE");
+  checkbox(x0 + 278, optsTop - 6, false, "DAMAGED");
+  checkbox(x0 + 400, optsTop - 6, false, "UNSATISFACTORY");
+  checkbox(x0 + 520, optsTop - 6, false, "OTHER");
 
-  const attachTop = optsTop - 18;
-  field(x0, attachTop, totalWidth, 18, "ATACHMENTS:", "");
-  checkbox(x0 + 2, attachTop - 1, false, "CARRIER INSPECTION REPORT");
-  checkbox(x0 + 112, attachTop - 1, false, "PHOTOS");
-  checkbox(x0 + 176, attachTop - 1, false, "PICK/SHIPPING TICKET");
-  checkbox(x0 + 306, attachTop - 1, false, "NCR(IF APPLICABLE)");
-  checkbox(x0 + 436, attachTop - 1, false, "MTRS");
-  checkbox(x0 + 486, attachTop - 1, false, "OTHER");
+  const attachTop = optsTop - 24;
+  content.push(rect(x0, attachTop - 30, totalWidth, 30));
+  content.push(makeText(x0 + 2, attachTop - 8, "ATACHMENTS:", "F2", 6));
+  content.push(makeText(x0 + 2, attachTop - 18, "CARRIER INSPECTION REPORT", "F2", 6));
+  checkbox(x0 + 188, attachTop - 18, false, "PHOTOS");
+  checkbox(x0 + 268, attachTop - 18, false, "PICK/SHIPPING TICKET");
+  checkbox(x0 + 404, attachTop - 18, false, "NCR(IF APPLICABLE)");
+  checkbox(x0 + 522, attachTop - 18, false, "MTRS");
+  checkbox(x0 + 560, attachTop - 18, false, "OTHER");
 
-  const dispoTop = attachTop - 18;
+  const dispoTop = attachTop - 30;
   field(x0, dispoTop, 310, 18, "INSPECTING FIELD SUPT./ENG.:", "");
   field(x0 + 310, dispoTop, totalWidth - 310, 18, "DISPOSITION RECOMMENDED:", "");
 
