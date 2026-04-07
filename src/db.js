@@ -64,6 +64,18 @@ export async function withTransaction(fn) {
 }
 
 export async function initDb() {
+  await pool.query(`
+    create table if not exists schema_migrations (
+      id bigserial primary key,
+      filename text not null unique,
+      applied_at timestamptz not null default now()
+    )
+  `);
+
+  const migrationDir = path.join(process.cwd(), "db", "migrations");
+  const migrationFiles = fs.existsSync(migrationDir)
+    ? fs.readdirSync(migrationDir).filter((name) => name.endsWith(".sql")).sort()
+    : [];
   const tableCheck = await pool.query(`
     select exists (
       select 1
@@ -80,11 +92,22 @@ export async function initDb() {
   `);
   const hasAppSettings = Boolean(tableCheck.rows[0]?.has_app_settings);
   const hasUsers = Boolean(tableCheck.rows[0]?.has_users);
+  const hasLegacySchema = hasAppSettings || hasUsers;
+  const appliedRows = await pool.query("select filename from schema_migrations");
+  const applied = new Set(appliedRows.rows.map((row) => String(row.filename)));
 
-  if (!hasAppSettings || !hasUsers) {
-    const schemaPath = path.join(process.cwd(), "db", "schema.sql");
-    const schemaSql = fs.readFileSync(schemaPath, "utf8");
-    await pool.query(schemaSql);
+  for (const filename of migrationFiles) {
+    if (applied.has(filename)) continue;
+    if (filename === "001_initial_schema.sql" && hasLegacySchema) {
+      await pool.query("insert into schema_migrations (filename) values ($1) on conflict (filename) do nothing", [filename]);
+      applied.add(filename);
+      continue;
+    }
+    const migrationSql = fs.readFileSync(path.join(migrationDir, filename), "utf8");
+    await withTransaction(async (client) => {
+      await client.query(migrationSql);
+      await client.query("insert into schema_migrations (filename) values ($1)", [filename]);
+    });
   }
 
   const username = process.env.DEFAULT_ADMIN_USERNAME || "admin";
