@@ -31,6 +31,7 @@ const permissionSections = [
   { key: "pos", label: "POs", href: "/po" },
   { key: "bom", label: "BOM", href: "/bom" },
   { key: "receiving", label: "Receiving", href: "/receive" },
+  { key: "yard", label: "Yard", href: "/yard" },
   { key: "inventory", label: "Inventory", href: "/inventory" },
   { key: "requisitions", label: "REQs", href: "/requisitions" },
   { key: "settings", label: "Settings", href: "/settings" }
@@ -46,6 +47,7 @@ const defaultPermissionMatrix = {
     pos: { view: true, edit: true },
     bom: { view: true, edit: true },
     receiving: { view: true, edit: true },
+    yard: { view: true },
     inventory: { view: true },
     requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: true },
     settings: { view: true, edit: true }
@@ -58,6 +60,7 @@ const defaultPermissionMatrix = {
     pos: { view: true, edit: true },
     bom: { view: true, edit: true },
     receiving: { view: true, edit: false },
+    yard: { view: true },
     inventory: { view: true },
     requisitions: { view: true, create: false, edit: false, verify: false, issue: false, unverify: false, delete: false },
     settings: { view: true, edit: true }
@@ -70,6 +73,7 @@ const defaultPermissionMatrix = {
     pos: { view: true, edit: false },
     bom: { view: false, edit: false },
     receiving: { view: true, edit: true },
+    yard: { view: true },
     inventory: { view: true },
     requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: false },
     settings: { view: false, edit: false }
@@ -82,6 +86,7 @@ const defaultPermissionMatrix = {
     pos: { view: false, edit: false },
     bom: { view: false, edit: false },
     receiving: { view: false, edit: false },
+    yard: { view: true },
     inventory: { view: true },
     requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
     settings: { view: false, edit: false }
@@ -94,6 +99,7 @@ const defaultPermissionMatrix = {
     pos: { view: true, edit: false },
     bom: { view: true, edit: false },
     receiving: { view: true, edit: false },
+    yard: { view: true },
     inventory: { view: true },
     requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
     settings: { view: false, edit: false }
@@ -1381,6 +1387,33 @@ app.get("/dashboard", requireAuth, requirePermission("dashboard", "view"), async
       <div class="stat"><div>OS&D Cases</div><strong>${osd.rows[0].count}</strong></div>
     </div>
     ${rfqStatusCards}
+  `, req.user));
+});
+
+app.get("/yard", requireAuth, requirePermission("yard", "view"), async (req, res) => {
+  const [unverifiedRes, verifiedRes] = await Promise.all([
+    query("select count(*) from material_requisitions where status = 'REQUESTED'"),
+    query("select count(*) from material_requisitions where status = 'VERIFIED'")
+  ]);
+  const unverifiedCount = Number(unverifiedRes.rows[0]?.count || 0);
+  const verifiedCount = Number(verifiedRes.rows[0]?.count || 0);
+  res.send(layout("Yard", `
+    <h1>Yard</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-primary" href="/inventory">Inventory</a>
+      </div>
+    </div>
+    <div class="stats">
+      <a class="stat" href="/requisitions?status=REQUESTED" style="text-decoration:none;color:inherit;">
+        <div>Unverified Requests</div>
+        <strong>${unverifiedCount}</strong>
+      </a>
+      <a class="stat" href="/requisitions?status=VERIFIED" style="text-decoration:none;color:inherit;">
+        <div>Verified Requests</div>
+        <strong>${verifiedCount}</strong>
+      </a>
+    </div>
   `, req.user));
 });
 
