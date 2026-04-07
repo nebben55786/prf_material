@@ -848,6 +848,43 @@ function normalizePoImportRow(row) {
   return normalized;
 }
 
+function normalizeVendorFmrRequestLine(row) {
+  const aliases = {
+    po_number: ["po", "po_number"],
+    vendor_name: ["supplier", "vendor", "vendor_name"],
+    item_code: ["item_code", "item"],
+    abbrev_description: ["abbrev_description", "description", "abbrev_desc"],
+    po_line: ["line", "po_line"],
+    sub_line: ["sub", "sub_line"],
+    qty_ordered: ["ord", "ordered_qty", "qty_ordered"],
+    qty_received: ["rcvd", "received_qty", "qty_received"],
+    mrr_number: ["mrr_number"],
+    issued_date: ["issued", "issued_date"],
+    received_date: ["date_rcvd", "received_date"],
+    srn_number: ["srn", "srn_number", "shipment_number", "shipment_no"]
+  };
+  const normalized = {};
+  for (const [target, keys] of Object.entries(aliases)) {
+    const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] ?? "").trim() !== "");
+    const raw = sourceKey ? row[sourceKey] : "";
+    if (target === "qty_ordered" || target === "qty_received") normalized[target] = numberValue(raw);
+    else normalized[target] = textValue(raw);
+  }
+  normalized.crate_number = textValue(row.crate_number || row.container_no || row.package_number || "");
+  return normalized;
+}
+
+function parseVendorFmrRequestWorkbook(fileBuffer) {
+  const workbook = XLSX.read(fileBuffer, { type: "buffer", cellDates: true });
+  const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+  if (!firstSheet) return [];
+  const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "", raw: false });
+  return rows
+    .map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeWorkbookHeader(key), value])))
+    .map(normalizeVendorFmrRequestLine)
+    .filter((row) => row.po_number && row.item_code && row.abbrev_description);
+}
+
 function num(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -1439,6 +1476,18 @@ async function ensureUniqueFmrContainer(client, vendorName, containerNo, exclude
   if (existing) {
     throw new Error("This vendor already has that container number on the Vendor FMR Log.");
   }
+}
+
+async function getRequestedVendorCrateSet(client = null) {
+  const runner = client || { query };
+  const rows = (await runner.query(`
+    select lower(trim(coalesce(vendor_name, ''))) as vendor_key,
+           lower(trim(coalesce(container_no, ''))) as crate_key
+    from fmr_logs
+    where trim(coalesce(vendor_name, '')) <> ''
+      and trim(coalesce(container_no, '')) <> ''
+  `)).rows;
+  return new Set(rows.map((row) => `${row.vendor_key}|${row.crate_key}`));
 }
 
 function signSession(payload) {
@@ -5962,22 +6011,254 @@ app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "v
     <td>${esc(row.pickup_date)}</td>
     <td><a class="btn btn-secondary" href="/material-logs/fmr/${row.id}/edit">Edit</a></td>
   </tr>`).join("");
-  res.send(layout("Vendor FMR Log", `
-    <h1>Vendor FMR Log</h1>
+    res.send(layout("Vendor FMR Log", `
+      <h1>Vendor FMR Log</h1>
+      <div class="card">
+        <form method="get" action="/material-logs/fmr" class="stack">
+          <div class="grid" style="grid-template-columns: 1fr auto auto auto;">
+            <div><label>Filter Vendor FMR Log</label><input name="q" value="${esc(q)}" placeholder="FMR, vendor, container, fluor ID, MRR" /></div>
+            <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+            <div style="align-self:end;"><a class="btn btn-secondary" href="/material-logs/fmr/request-lines">Build Vendor FMRs</a></div>
+            <div style="align-self:end;"><a class="btn btn-primary" href="/material-logs/fmr/new">Add Vendor FMR</a></div>
+          </div>
+        </form>
+      </div>
+      <div class="card scroll">
+          <table><tr><th>FMR #</th><th>Vendor</th><th>Container</th><th>Fluor ID</th><th>Fluor Description</th><th>MRR #</th><th>Request Date</th><th>Need Date</th><th>Pickup Location</th><th>Pickup Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No vendor FMR rows found.</td></tr>`}</table>
+      </div>
+    `, req.user));
+  });
+
+app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const poNumber = String(req.query.po_number || "").trim();
+  const itemCode = String(req.query.item_code || "").trim();
+  const abbrevDescription = String(req.query.abbrev_description || "").trim();
+  const showRequested = String(req.query.show_requested || "").trim() === "1";
+  const params = [];
+  const where = [];
+  if (poNumber) {
+    params.push(`%${poNumber}%`);
+    where.push(`coalesce(vl.po_number, '') ilike $${params.length}`);
+  }
+  if (itemCode) {
+    params.push(`%${itemCode}%`);
+    where.push(`coalesce(vl.item_code, '') ilike $${params.length}`);
+  }
+  if (abbrevDescription) {
+    params.push(`%${abbrevDescription}%`);
+    where.push(`coalesce(vl.abbrev_description, '') ilike $${params.length}`);
+  }
+  if (!showRequested) {
+    where.push(`not (
+      trim(coalesce(vl.crate_number, '')) <> ''
+      and exists (
+        select 1
+        from fmr_logs f
+        where lower(trim(coalesce(f.vendor_name, ''))) = lower(trim(coalesce(vl.vendor_name, '')))
+          and lower(trim(coalesce(f.container_no, ''))) = lower(trim(coalesce(vl.crate_number, '')))
+      )
+    )`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const rows = (await query(`
+    select
+      vl.*,
+      exists (
+        select 1
+        from fmr_logs f
+        where trim(coalesce(vl.crate_number, '')) <> ''
+          and lower(trim(coalesce(f.vendor_name, ''))) = lower(trim(coalesce(vl.vendor_name, '')))
+          and lower(trim(coalesce(f.container_no, ''))) = lower(trim(coalesce(vl.crate_number, '')))
+      ) as already_requested
+    from vendor_fmr_request_lines vl
+    ${whereSql}
+    order by coalesce(vl.po_number, ''), coalesce(vl.item_code, ''), coalesce(vl.abbrev_description, ''), vl.id
+    limit 300
+  `, params)).rows;
+  const rowMarkup = rows.map((row) => `<tr>
+    <td>${row.already_requested ? `<span class="chip">Requested</span>` : `<input type="checkbox" name="selected_ids" value="${row.id}" />`}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.abbrev_description)}</td>
+    <td><input name="crate_number_${row.id}" value="${esc(row.crate_number || "")}" placeholder="Enter crate #" /></td>
+    <td><input name="srn_number_${row.id}" value="${esc(row.srn_number || "")}" placeholder="Optional SRN" /></td>
+    <td>${esc(row.po_line || "")}</td>
+    <td>${esc(row.sub_line || "")}</td>
+    <td>${esc(row.qty_received)}</td>
+    <td>${esc(row.mrr_number || "")}</td>
+    <td>${esc(row.received_date || "")}</td>
+  </tr>`).join("");
+  res.send(layout("Build Vendor FMRs", `
+    <h1>Build Vendor FMRs</h1>
     <div class="card">
-      <form method="get" action="/material-logs/fmr" class="stack">
+      <form method="post" enctype="multipart/form-data" action="/material-logs/fmr/request-lines/import" class="stack">
         <div class="grid" style="grid-template-columns: 1fr auto auto;">
-          <div><label>Filter Vendor FMR Log</label><input name="q" value="${esc(q)}" placeholder="FMR, vendor, container, fluor ID, MRR" /></div>
+          <div><label>PO Receiving Status Report</label><input type="file" name="sheet" accept=".xlsx,.xls,.xlsb" required /></div>
+          <div style="align-self:end;"><button type="submit">Import PO Status Report</button></div>
+          <div style="align-self:end;"><a class="btn btn-secondary" href="/material-logs/fmr">Back To Vendor FMR Log</a></div>
+        </div>
+        <div class="muted">Imports columns from the vendor PO receiving status report and only adds new line items based on PO + Item Code + Abbrev Description.</div>
+      </form>
+    </div>
+    <div class="card">
+      <form method="get" action="/material-logs/fmr/request-lines" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr 1fr 1fr auto auto;">
+          <div><label>PO</label><input name="po_number" value="${esc(poNumber)}" /></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(itemCode)}" /></div>
+          <div><label>Abbrev Description</label><input name="abbrev_description" value="${esc(abbrevDescription)}" /></div>
+          <div><label>Show Requested</label><select name="show_requested"><option value="0" ${showRequested ? "" : "selected"}>No</option><option value="1" ${showRequested ? "selected" : ""}>Yes</option></select></div>
           <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
-          <div style="align-self:end;"><a class="btn btn-primary" href="/material-logs/fmr/new">Add Vendor FMR</a></div>
         </div>
       </form>
     </div>
-    <div class="card scroll">
-        <table><tr><th>FMR #</th><th>Vendor</th><th>Container</th><th>Fluor ID</th><th>Fluor Description</th><th>MRR #</th><th>Request Date</th><th>Need Date</th><th>Pickup Location</th><th>Pickup Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No vendor FMR rows found.</td></tr>`}</table>
+    <div class="card">
+      <div class="muted">Enter the crate/package number manually on the matching lines. When you generate Vendor FMRs, the app uses the first checked line for each vendor + crate combination. If SRN is blank, it is ignored.</div>
     </div>
+    <form method="post" action="/material-logs/fmr/request-lines/bulk" class="stack">
+      <input type="hidden" name="po_number" value="${esc(poNumber)}" />
+      <input type="hidden" name="item_code" value="${esc(itemCode)}" />
+      <input type="hidden" name="abbrev_description" value="${esc(abbrevDescription)}" />
+      <input type="hidden" name="show_requested" value="${showRequested ? "1" : "0"}" />
+      <div class="card scroll">
+        <table><tr><th>Pick</th><th>Vendor</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Crate #</th><th>SRN</th><th>Line</th><th>Sub</th><th>Rcvd</th><th>MRR #</th><th>Date Rcvd</th></tr>${rowMarkup || `<tr><td colspan="12" class="muted">No request lines found.</td></tr>`}</table>
+      </div>
+      <div class="actions">
+        <button type="submit" name="action" value="save">Save Crate / SRN</button>
+        <button type="submit" name="action" value="generate">Generate Vendor FMRs</button>
+      </div>
+    </form>
   `, req.user));
-});
+}));
+
+app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermission("material_logs", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+  if (!req.file?.buffer?.length) throw new Error("Choose a PO receiving status report file to import.");
+  const rows = parseVendorFmrRequestWorkbook(req.file.buffer);
+  if (rows.length === 0) throw new Error("No matching line items were found in that report.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "vendor_fmr_request_lines",
+      rfqId: null,
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || ""
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 2;
+      const existing = (await client.query(`
+        select id
+        from vendor_fmr_request_lines
+        where po_number = $1 and item_code = $2 and abbrev_description = $3
+      `, [row.po_number, row.item_code, row.abbrev_description])).rows[0];
+      if (existing) {
+        await client.query(`
+          update vendor_fmr_request_lines
+          set vendor_name = $2,
+              po_line = $3,
+              sub_line = $4,
+              qty_ordered = $5,
+              qty_received = $6,
+              mrr_number = $7,
+              issued_date = $8,
+              received_date = $9,
+              source_filename = $10,
+              updated_at = now()
+          where id = $1
+        `, [existing.id, row.vendor_name, row.po_line, row.sub_line, row.qty_ordered, row.qty_received, row.mrr_number, row.issued_date, row.received_date, req.file?.originalname || ""]);
+        updatedCount += 1;
+      } else {
+        await client.query(`
+          insert into vendor_fmr_request_lines (
+            vendor_name, po_number, item_code, abbrev_description, po_line, sub_line,
+            qty_ordered, qty_received, mrr_number, issued_date, received_date, srn_number, crate_number, source_filename, updated_at
+          ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+        `, [row.vendor_name, row.po_number, row.item_code, row.abbrev_description, row.po_line, row.sub_line, row.qty_ordered, row.qty_received, row.mrr_number, row.issued_date, row.received_date, row.srn_number || "", row.crate_number || "", req.file?.originalname || ""]);
+        insertedCount += 1;
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "vendor_fmr_request_lines", batchId, `rows=${rows.length}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+}));
+
+app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const action = String(req.body.action || "save").trim();
+  const fieldIds = Object.keys(req.body)
+    .map((key) => {
+      const match = key.match(/^(crate_number|srn_number)_(\d+)$/);
+      return match ? Number(match[2]) : null;
+    })
+    .filter((value, index, array) => Number.isFinite(value) && array.indexOf(value) === index);
+  const selectedIds = Array.isArray(req.body.selected_ids)
+    ? req.body.selected_ids.map((value) => Number(value)).filter(Number.isFinite)
+    : req.body.selected_ids
+      ? [Number(req.body.selected_ids)].filter(Number.isFinite)
+      : [];
+  const redirectQuery = new URLSearchParams({
+    po_number: String(req.body.po_number || ""),
+    item_code: String(req.body.item_code || ""),
+    abbrev_description: String(req.body.abbrev_description || ""),
+    show_requested: String(req.body.show_requested || "0")
+  }).toString();
+  await withTransaction(async (client) => {
+    for (const id of fieldIds) {
+      await client.query(`
+        update vendor_fmr_request_lines
+        set crate_number = $2,
+            srn_number = $3,
+            updated_at = now()
+        where id = $1
+      `, [id, String(req.body[`crate_number_${id}`] || "").trim(), String(req.body[`srn_number_${id}`] || "").trim()]);
+    }
+    if (action !== "generate") {
+      await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", fieldIds.join(","), `count=${fieldIds.length}`);
+      return;
+    }
+    if (selectedIds.length === 0) throw new Error("Select at least one line to generate Vendor FMRs.");
+    const requestedSet = await getRequestedVendorCrateSet(client);
+    const rows = (await client.query(`
+      select *
+      from vendor_fmr_request_lines
+      where id = any($1::bigint[])
+      order by id
+    `, [selectedIds])).rows;
+    const grouped = new Map();
+    for (const row of rows) {
+      const crateNumber = String(req.body[`crate_number_${row.id}`] || row.crate_number || "").trim();
+      const srnNumber = String(req.body[`srn_number_${row.id}`] || row.srn_number || "").trim();
+      if (!crateNumber) throw new Error("Every selected line must have a crate number before generating Vendor FMRs.");
+      const requestKey = `${String(row.vendor_name || "").trim().toLowerCase()}|${crateNumber.toLowerCase()}`;
+      if (requestedSet.has(requestKey)) continue;
+      if (!grouped.has(requestKey)) {
+        grouped.set(requestKey, { row, crateNumber, srnNumber });
+      }
+    }
+    if (grouped.size === 0) throw new Error("All selected crates have already been requested.");
+    for (const { row, crateNumber, srnNumber } of grouped.values()) {
+      await ensureUniqueFmrContainer(client, row.vendor_name, crateNumber);
+      const fmrNumber = await getNextFmrNumber(client);
+      const requestDescription = [
+        row.po_number ? `PO ${row.po_number}` : "",
+        row.item_code || "",
+        row.abbrev_description || "",
+        srnNumber ? `SRN ${srnNumber}` : ""
+      ].filter(Boolean).join(" | ");
+      const insert = await client.query(`
+        insert into fmr_logs (
+          fmr_number, vendor_name, container_no, request_description, request_date, updated_at
+        ) values ($1,$2,$3,$4,$5, now())
+        returning id
+      `, [fmrNumber, row.vendor_name || "", crateNumber, requestDescription, new Date().toISOString().slice(0, 10)]);
+      await auditLog(client, req.user.id, "create", "fmr_log", insert.rows[0].id, fmrNumber);
+    }
+  });
+  res.redirect(action === "generate" ? "/material-logs/fmr" : `/material-logs/fmr/request-lines?${redirectQuery}`);
+}));
 
 app.get("/material-logs/opi", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
   await withTransaction(async (client) => {
