@@ -253,6 +253,14 @@ function buildSimplePdf(title, detailLines, tableLines) {
   return Buffer.from(pdf, "utf8");
 }
 
+function formatPickTicketTimestamp(value = new Date()) {
+  try {
+    return value.toLocaleString("en-US");
+  } catch (_error) {
+    return value.toISOString().replace("T", " ").slice(0, 19);
+  }
+}
+
 function layout(title, body, user) {
   const navLinks = user
     ? permissionSections
@@ -2995,7 +3003,7 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("req
     `Created: ${header.created_at || ""}`,
     `IWP: ${header.iwp_no || ""}    ISO: ${header.iso_no || ""}`,
     `Status: ${header.status}`,
-    `Print Date: ${new Date().toLocaleString("en-US", { timeZone: process.env.TZ || "America/Chicago" })}`,
+    `Print Date: ${formatPickTicketTimestamp()}`,
     header.notes ? `Notes: ${header.notes}` : ""
   ].filter(Boolean);
 
