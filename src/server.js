@@ -3798,7 +3798,7 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("mater
   const deliveryMatch = String(linkedFmr.fmr_number || "").match(/^FMR-([A-Z0-9]+)-/i);
   const printableLines = [...poReceiptLines.rows, ...manualLines.rows].map((row) => ({
     item_code: row.item_code || "",
-    description: row.description || "",
+    description: header.material_description || row.description || "",
     qty: Number(row.received_qty || 0).toFixed(2),
     location: [row.warehouse, row.location].filter(Boolean).join(" / "),
     grid: "",
