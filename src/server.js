@@ -1572,19 +1572,19 @@ async function getNextBomNumber(client = null) {
 
 function loginPage(error = "") {
   return layout("Login", `
-    ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
-    <div class="card">
-      <h2>Sign In</h2>
-      <p class="muted">Default admin login: <strong>admin</strong> / <strong>admin123</strong></p>
-      <form method="post" action="/login" class="stack">
-        <div class="grid">
-          <div><label>Username</label><input name="username" required /></div>
-          <div><label>Password</label><input type="password" name="password" required /></div>
-        </div>
-        <div class="actions"><button type="submit">Sign In</button></div>
-      </form>
-    </div>
-  `, null);
+      ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
+      <div class="card">
+        <h2>Sign In</h2>
+        <p class="muted">Default admin login: <strong>admin</strong> / <strong>admin123</strong></p>
+        <form method="post" action="/login" class="stack">
+          <div class="grid">
+            <div><label>Username</label><input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></div>
+            <div><label>Password</label><input type="password" name="password" autocomplete="current-password" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Sign In</button></div>
+        </form>
+      </div>
+    `, null);
 }
 
 app.get("/login", (req, res) => {
@@ -1592,7 +1592,12 @@ app.get("/login", (req, res) => {
     res.redirect("/dashboard");
     return;
   }
-  res.send(loginPage());
+  const errorMap = {
+    invalid: "Invalid username or password.",
+    inactive: "This user is inactive. Contact an administrator."
+  };
+  const error = errorMap[String(req.query.error || "").trim()] || "";
+  res.send(loginPage(error));
 });
 
 app.post("/login", asyncHandler(async (req, res) => {
@@ -1600,11 +1605,11 @@ app.post("/login", asyncHandler(async (req, res) => {
   const result = await query("select id, username, role, password_hash, is_active from users where username = $1", [username.trim()]);
   const user = result.rows[0];
   if (user && !user.is_active) {
-    res.status(401).send(loginPage("This user is inactive. Contact an administrator."));
+    res.redirect("/login?error=inactive");
     return;
   }
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-    res.status(401).send(loginPage("Invalid username or password."));
+    res.redirect("/login?error=invalid");
     return;
   }
   const token = signSession({ id: user.id, username: user.username, role: user.role });
