@@ -1437,7 +1437,7 @@ async function ensureUniqueFmrContainer(client, vendorName, containerNo, exclude
   sql += " limit 1";
   const existing = (await client.query(sql, params)).rows[0];
   if (existing) {
-    throw new Error("This vendor already has that container number on the FMR log.");
+    throw new Error("This vendor already has that container number on the Vendor FMR Log.");
   }
 }
 
@@ -2170,7 +2170,7 @@ app.get("/settings/material-log-imports", requireAuth, requirePermission("settin
       <p class="muted">Upload one of your current workbook files to refresh the Material Logs module.</p>
       <form method="post" enctype="multipart/form-data" action="/material-logs/import" class="stack">
         <div class="grid">
-          <div><label>Log Type</label><select name="log_type"><option value="receiving">Issue Report</option><option value="mrr">MRR Log</option><option value="fmr">FMR Log</option></select></div>
+          <div><label>Log Type</label><select name="log_type"><option value="receiving">Issue Report</option><option value="mrr">MRR Log</option><option value="fmr">Vendor FMR Log</option></select></div>
           <div><label>Workbook File</label><input type="file" name="sheet" required /></div>
         </div>
         <div class="actions"><button type="submit">Import Workbook</button><a class="btn btn-secondary" href="/settings">Back To Settings</a></div>
@@ -5848,7 +5848,7 @@ app.get("/material-logs", requireAuth, requirePermission("material_logs", "view"
     <div class="card">
       <div class="actions">
         <a class="btn btn-primary" href="/material-logs/mrr">MRR Log</a>
-        <a class="btn btn-primary" href="/material-logs/fmr">FMR Log</a>
+        <a class="btn btn-primary" href="/material-logs/fmr">Vendor FMR Log</a>
         <a class="btn btn-primary" href="/material-logs/opi">OPI Log</a>
         <a class="btn btn-primary" href="/material-logs/issue-report">Issue Report</a>
       </div>
@@ -5962,19 +5962,19 @@ app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "v
     <td>${esc(row.pickup_date)}</td>
     <td><a class="btn btn-secondary" href="/material-logs/fmr/${row.id}/edit">Edit</a></td>
   </tr>`).join("");
-  res.send(layout("FMR Log", `
-    <h1>FMR Log</h1>
+  res.send(layout("Vendor FMR Log", `
+    <h1>Vendor FMR Log</h1>
     <div class="card">
       <form method="get" action="/material-logs/fmr" class="stack">
         <div class="grid" style="grid-template-columns: 1fr auto auto;">
-          <div><label>Filter FMR Log</label><input name="q" value="${esc(q)}" placeholder="FMR, vendor, container, fluor ID, MRR" /></div>
+          <div><label>Filter Vendor FMR Log</label><input name="q" value="${esc(q)}" placeholder="FMR, vendor, container, fluor ID, MRR" /></div>
           <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
-          <div style="align-self:end;"><a class="btn btn-primary" href="/material-logs/fmr/new">Add New FMR</a></div>
+          <div style="align-self:end;"><a class="btn btn-primary" href="/material-logs/fmr/new">Add Vendor FMR</a></div>
         </div>
       </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>FMR #</th><th>Vendor</th><th>Container</th><th>Fluor ID</th><th>Fluor Description</th><th>MRR #</th><th>Request Date</th><th>Need Date</th><th>Pickup Location</th><th>Pickup Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No FMR rows found.</td></tr>`}</table>
+        <table><tr><th>FMR #</th><th>Vendor</th><th>Container</th><th>Fluor ID</th><th>Fluor Description</th><th>MRR #</th><th>Request Date</th><th>Need Date</th><th>Pickup Location</th><th>Pickup Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No vendor FMR rows found.</td></tr>`}</table>
     </div>
   `, req.user));
 });
@@ -6022,8 +6022,8 @@ app.get("/material-logs/fmr/new", requireAuth, requirePermission("material_logs"
   const vendorOptions = [`<option value="">Select vendor</option>`]
     .concat(vendors.rows.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
     .join("");
-  res.send(layout("Add FMR", `
-    <h1>Add FMR</h1>
+  res.send(layout("Add Vendor FMR", `
+    <h1>Add Vendor FMR</h1>
       <div class="card">
         <form method="post" action="/material-logs/fmr/add" class="stack">
           <div class="grid">
@@ -6040,7 +6040,7 @@ app.get("/material-logs/fmr/new", requireAuth, requirePermission("material_logs"
         </div>
         <div><label>Fluor Description</label><textarea name="fluor_desc"></textarea></div>
         <div><label>Request Description</label><textarea name="request_description"></textarea></div>
-        <div class="actions"><button type="submit">Add FMR</button><a class="btn btn-secondary" href="/material-logs/fmr">Back</a></div>
+        <div class="actions"><button type="submit">Add Vendor FMR</button><a class="btn btn-secondary" href="/material-logs/fmr">Back</a></div>
       </form>
     </div>
   `, req.user));
@@ -6682,14 +6682,14 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
   ]);
   const row = rowRes.rows[0];
   if (!row) {
-    res.status(404).send(layout("Not Found", `<div class="card error"><h3>FMR log row not found.</h3></div>`, req.user));
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Vendor FMR log row not found.</h3></div>`, req.user));
     return;
   }
   const vendorOptions = [`<option value="">Select vendor</option>`]
     .concat(vendors.rows.map((vendor) => `<option value="${esc(vendor.name)}" ${row.vendor_name === vendor.name ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
-  res.send(layout("Edit FMR Log", `
-      <h1>Edit FMR Entry</h1>
+  res.send(layout("Edit Vendor FMR Log", `
+      <h1>Edit Vendor FMR Entry</h1>
       <div class="card">
         <form method="post" action="/material-logs/fmr/${row.id}/edit" class="stack">
           <div class="grid">
@@ -6706,7 +6706,7 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
         </div>
         <div><label>Fluor Description</label><textarea name="fluor_desc">${esc(row.fluor_desc)}</textarea></div>
         <div><label>Request Description</label><textarea name="request_description">${esc(row.request_description)}</textarea></div>
-        <div class="actions"><button type="submit">Save FMR</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
+        <div class="actions"><button type="submit">Save Vendor FMR</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
       </form>
     </div>
   `, req.user));
