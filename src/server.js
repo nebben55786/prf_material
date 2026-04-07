@@ -6544,22 +6544,72 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR log row not found.</h3></div>`, req.user));
     return;
   }
-  const [disciplines, vendors, pos, receivers, appPos] = await Promise.all([
-    getMaterialLogLookupOptions("discipline"),
-    getMaterialLogLookupOptions("vendor_name"),
-    getMaterialLogLookupOptions("po_number"),
-    getMaterialLogLookupOptions("received_by"),
-    getAppPurchaseOrderOptions()
-  ]);
+  const [disciplines, vendors, pos, receivers, appPos, poReceiptLines, manualLines] = await Promise.all([
+      getMaterialLogLookupOptions("discipline"),
+      getMaterialLogLookupOptions("vendor_name"),
+      getMaterialLogLookupOptions("po_number"),
+      getMaterialLogLookupOptions("received_by"),
+      getAppPurchaseOrderOptions(),
+      query(`
+        select
+          r.id,
+          'PO Receipt' as source_type,
+          coalesce(pl.po_line, '') as po_line,
+          mi.item_code,
+          mi.description,
+          r.qty_received,
+          r.warehouse,
+          r.location,
+          r.osd_status,
+          coalesce(r.osd_notes, '') as notes,
+          r.received_at::text as line_date
+        from receipts r
+        join po_lines pl on pl.id = r.po_line_id
+        join material_items mi on mi.id = pl.material_item_id
+        where r.mrr_log_id = $1
+        order by r.id desc
+      `, [req.params.id]),
+      query(`
+        select
+          mrl.id,
+          'Manual Entry' as source_type,
+          coalesce(mrl.po_position, '') as po_line,
+          coalesce(mrl.item_code, '') as item_code,
+          coalesce(mrl.description, '') as description,
+          coalesce(mrl.received_qty, 0) as qty_received,
+          coalesce(mrl.warehouse, '') as warehouse,
+          coalesce(mrl.location, '') as location,
+          coalesce(mrl.received_status, '') as osd_status,
+          coalesce(mrl.comments, '') as notes,
+          coalesce(mrl.recv_date, '') as line_date
+        from material_receiving_logs mrl
+        where coalesce(mrl.mrr_number, '') = $1
+        order by coalesce(mrl.legacy_row_id, mrl.id) desc
+      `, [row.mrr_number])
+    ]);
   const optionList = (values, selectedValue, placeholder) => [`<option value="">${esc(placeholder)}</option>`]
     .concat(values.map((value) => `<option value="${esc(value)}" ${value === selectedValue ? "selected" : ""}>${esc(value)}</option>`))
     .join("");
-  const appPoOptions = [`<option value="">Select app PO</option>`]
-    .concat(appPos.map((po) => `<option value="${po.id}" ${Number(po.id) === Number(row.app_po_id || 0) ? "selected" : ""}>${esc(po.po_no)}${po.vendor_name ? ` | ${esc(po.vendor_name)}` : ""}${po.description ? ` | ${esc(po.description)}` : ""}</option>`))
-    .join("");
-  res.send(layout("Edit MRR Log", `
-    <h1>Edit MRR Header</h1>
-    <div class="card">
+    const appPoOptions = [`<option value="">Select app PO</option>`]
+      .concat(appPos.map((po) => `<option value="${po.id}" ${Number(po.id) === Number(row.app_po_id || 0) ? "selected" : ""}>${esc(po.po_no)}${po.vendor_name ? ` | ${esc(po.vendor_name)}` : ""}${po.description ? ` | ${esc(po.description)}` : ""}</option>`))
+      .join("");
+    const mrrLineRows = [...poReceiptLines.rows, ...manualLines.rows]
+      .sort((a, b) => String(b.line_date || "").localeCompare(String(a.line_date || "")) || Number(b.id || 0) - Number(a.id || 0))
+      .map((line) => `<tr>
+        <td>${esc(line.source_type)}</td>
+        <td>${esc(line.po_line || "")}</td>
+        <td>${esc(line.item_code || "")}</td>
+        <td>${esc(line.description || "")}</td>
+        <td>${esc(line.qty_received)}</td>
+        <td>${esc(line.warehouse || "")}</td>
+        <td>${esc(line.location || "")}</td>
+        <td>${esc(line.osd_status || "")}</td>
+        <td>${esc(line.line_date || "")}</td>
+        <td>${esc(line.notes || "")}</td>
+      </tr>`).join("");
+    res.send(layout("Edit MRR Log", `
+      <h1>Edit MRR Header</h1>
+      <div class="card">
       <form method="post" action="/material-logs/mrr/${row.id}/edit" class="stack">
         <div class="grid">
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(row.mrr_number)}" required /></div>
@@ -6576,11 +6626,15 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
         <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
-        <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
-      </form>
-    </div>
-  `, req.user));
-});
+          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+        </form>
+      </div>
+      <div class="card scroll">
+        <h3>MRR Lines</h3>
+        <table><tr><th>Source</th><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>Status</th><th>Date</th><th>Notes</th></tr>${mrrLineRows || `<tr><td colspan="10" class="muted">No MRR lines found for this header yet.</td></tr>`}</table>
+      </div>
+    `, req.user));
+  });
 
 app.post("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
