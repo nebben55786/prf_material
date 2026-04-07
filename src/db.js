@@ -64,9 +64,28 @@ export async function withTransaction(fn) {
 }
 
 export async function initDb() {
-  const schemaPath = path.join(process.cwd(), "db", "schema.sql");
-  const schemaSql = fs.readFileSync(schemaPath, "utf8");
-  await pool.query(schemaSql);
+  const tableCheck = await pool.query(`
+    select exists (
+      select 1
+      from information_schema.tables
+      where table_schema = 'public'
+        and table_name = 'app_settings'
+    ) as has_app_settings,
+    exists (
+      select 1
+      from information_schema.tables
+      where table_schema = 'public'
+        and table_name = 'users'
+    ) as has_users
+  `);
+  const hasAppSettings = Boolean(tableCheck.rows[0]?.has_app_settings);
+  const hasUsers = Boolean(tableCheck.rows[0]?.has_users);
+
+  if (!hasAppSettings || !hasUsers) {
+    const schemaPath = path.join(process.cwd(), "db", "schema.sql");
+    const schemaSql = fs.readFileSync(schemaPath, "utf8");
+    await pool.query(schemaSql);
+  }
 
   const username = process.env.DEFAULT_ADMIN_USERNAME || "admin";
   const password = process.env.DEFAULT_ADMIN_PASSWORD || "admin123";
