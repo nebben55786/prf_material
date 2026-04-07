@@ -1349,8 +1349,9 @@ async function assertValidWarehouseLocation(client, warehouseName, locationName)
   if (!match) throw new Error("Select a valid location for the chosen warehouse.");
 }
 
-async function getNextMrrNumber() {
-  const latest = (await query(`
+async function getNextMrrNumber(client = null) {
+  const runner = client || { query };
+  const latest = (await runner.query(`
     select mrr_number
     from mrr_logs
     where coalesce(mrr_number, '') <> '' and mrr_number ~ '\\d+$'
@@ -1384,6 +1385,24 @@ async function getNextFmrNumber(client = null) {
   return `${prefix}${nextValue}`;
 }
 
+async function getNextOpiNumber(client = null) {
+  const runner = client || { query };
+  const latest = (await runner.query(`
+    select opi_number
+    from mrr_logs
+    where coalesce(opi_number, '') <> '' and opi_number ~ '\\d+$'
+    order by ((regexp_match(opi_number, '(\\d+)$'))[1])::bigint desc, id desc
+    limit 1
+  `)).rows[0];
+  const current = String(latest?.opi_number || "").trim();
+  if (!current) return "OPI-000001";
+  const match = current.match(/^(.*?)(\d+)$/);
+  if (!match) return "OPI-000001";
+  const prefix = match[1];
+  const nextValue = String(Number(match[2]) + 1).padStart(match[2].length, "0");
+  return `${prefix}${nextValue}`;
+}
+
 async function getLatestMrrForPo(client, poId) {
   if (!poId) return null;
   return (await client.query(`
@@ -1393,6 +1412,129 @@ async function getLatestMrrForPo(client, poId) {
     order by id desc
     limit 1
   `, [poId])).rows[0] || null;
+}
+
+async function getPoNumberForVendorCrate(client, vendorName, containerNo) {
+  const vendor = String(vendorName || "").trim();
+  const crate = String(containerNo || "").trim();
+  if (!vendor || !crate) return "";
+  const row = (await client.query(`
+    select trim(coalesce(po_number, '')) as po_number
+    from vendor_fmr_request_lines
+    where lower(trim(coalesce(vendor_name, ''))) = lower($1)
+      and lower(trim(coalesce(crate_number, ''))) = lower($2)
+      and trim(coalesce(po_number, '')) <> ''
+    order by id
+    limit 1
+  `, [vendor, crate])).rows[0];
+  return String(row?.po_number || "").trim();
+}
+
+async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, vendorName = "", containerNo = "", mrrNumber = "", poNumber = "" } = {}) {
+  const vendor = String(vendorName || "").trim();
+  const crate = String(containerNo || "").trim();
+  if (!vendor || !crate) {
+    return { mrrNumber: String(mrrNumber || "").trim(), opiNumber: "", poNumber: String(poNumber || "").trim(), created: false };
+  }
+  const description = `${vendor} pkg: ${crate}`;
+  const effectivePoNumber = String(poNumber || "").trim() || await getPoNumberForVendorCrate(client, vendor, crate);
+  const linkedPo = effectivePoNumber
+    ? (await client.query("select id, po_no from purchase_orders where po_no = $1 order by id desc limit 1", [effectivePoNumber])).rows[0]
+    : null;
+  const saveLinkedFmr = async (resolvedMrrNumber) => {
+    if (!fmrId) return;
+    await client.query(`
+      update fmr_logs
+      set mrr_number = $2,
+          updated_at = now()
+      where id = $1
+    `, [fmrId, resolvedMrrNumber]);
+  };
+  const syncExistingMrr = async (row) => {
+    let resolvedOpiNumber = String(row.opi_number || "").trim();
+    const updates = [];
+    const params = [row.id];
+    if (!String(row.po_number || "").trim() && effectivePoNumber) {
+      params.push(effectivePoNumber);
+      updates.push(`po_number = $${params.length}`);
+    }
+    if (!row.app_po_id && linkedPo?.id) {
+      params.push(linkedPo.id);
+      updates.push(`app_po_id = $${params.length}`);
+    }
+    if (!resolvedOpiNumber) {
+      resolvedOpiNumber = await getNextOpiNumber(client);
+      params.push(resolvedOpiNumber);
+      updates.push(`opi_number = $${params.length}`);
+    }
+    if (updates.length > 0) {
+      await client.query(`
+        update mrr_logs
+        set ${updates.join(", ")}, updated_at = now()
+        where id = $1
+      `, params);
+      await syncOpiLogsFromMrr(client);
+    }
+    await saveLinkedFmr(row.mrr_number);
+    return { mrrNumber: row.mrr_number, opiNumber: resolvedOpiNumber, poNumber: effectivePoNumber, created: false };
+  };
+  const requestedMrrNumber = String(mrrNumber || "").trim();
+  if (requestedMrrNumber) {
+    const exactMatch = (await client.query(`
+      select id, mrr_number, opi_number, po_number, app_po_id
+      from mrr_logs
+      where mrr_number = $1
+        and lower(trim(coalesce(vendor_name, ''))) = lower($2)
+        and lower(trim(coalesce(material_description, ''))) = lower($3)
+      limit 1
+    `, [requestedMrrNumber, vendor, description])).rows[0];
+    if (exactMatch) {
+      return syncExistingMrr(exactMatch);
+    }
+  }
+  const existing = (await client.query(`
+    select id, mrr_number, opi_number, po_number, app_po_id
+    from mrr_logs
+    where lower(trim(coalesce(vendor_name, ''))) = lower($1)
+      and lower(trim(coalesce(material_description, ''))) = lower($2)
+    order by id desc
+    limit 1
+  `, [vendor, description])).rows[0];
+  if (existing) {
+    return syncExistingMrr(existing);
+  }
+  const nextMrrNumber = await getNextMrrNumber(client);
+  const nextOpiNumber = await getNextOpiNumber(client);
+  const insert = (await client.query(`
+    insert into mrr_logs (
+      discipline, mrr_number, vendor_name, app_po_id, po_number, pick_ticket, material_description,
+      received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+    returning id
+  `, [
+    "",
+    nextMrrNumber,
+    vendor,
+    linkedPo?.id || null,
+    effectivePoNumber,
+    "",
+    description,
+    "",
+    "",
+    "",
+    "",
+    nextOpiNumber,
+    ""
+  ])).rows[0];
+  await saveMaterialLogLookup(client, "vendor_name", vendor);
+  await saveMaterialLogLookup(client, "po_number", effectivePoNumber);
+  await syncMrrVendorsIntoVendorTable(client);
+  await syncOpiLogsFromMrr(client);
+  await saveLinkedFmr(nextMrrNumber);
+  if (userId) {
+    await auditLog(client, userId, "create", "mrr_log", insert.id, nextMrrNumber);
+  }
+  return { mrrNumber: nextMrrNumber, opiNumber: nextOpiNumber, poNumber: effectivePoNumber, created: true };
 }
 
 async function createOsdLog(client, payload) {
@@ -6270,6 +6412,13 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
         requestDescription,
         new Date().toISOString().slice(0, 10)
       ]);
+      await ensureMrrForVendorCrate(client, {
+        userId: req.user.id,
+        fmrId: insert.rows[0].id,
+        vendorName: row.vendor_name || "",
+        containerNo: crateNumber,
+        poNumber: row.po_number || ""
+      });
       await auditLog(client, req.user.id, "create", "fmr_log", insert.rows[0].id, fmrNumber);
       createdCount += 1;
     }
@@ -6767,7 +6916,14 @@ app.post("/material-logs/fmr/add", requireAuth, requirePermission("material_logs
       req.body.pickup_location?.trim() || "",
       req.body.pickup_date?.trim() || ""
     ]);
-    await auditLog(client, req.user.id, "create", "fmr_log", result.rows[0].id, req.body.fmr_number?.trim() || "");
+    await ensureMrrForVendorCrate(client, {
+      userId: req.user.id,
+      fmrId: result.rows[0].id,
+      vendorName: req.body.vendor_name?.trim() || "",
+      containerNo: req.body.container_no?.trim() || "",
+      mrrNumber: req.body.mrr_number?.trim() || ""
+    });
+    await auditLog(client, req.user.id, "create", "fmr_log", result.rows[0].id, fmrNumber);
   });
   res.redirect("/material-logs/fmr");
 });
@@ -7046,6 +7202,13 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
       req.body.pickup_location?.trim() || "",
       req.body.pickup_date?.trim() || ""
     ]);
+    await ensureMrrForVendorCrate(client, {
+      userId: req.user.id,
+      fmrId: req.params.id,
+      vendorName: req.body.vendor_name?.trim() || "",
+      containerNo: req.body.container_no?.trim() || "",
+      mrrNumber: req.body.mrr_number?.trim() || ""
+    });
     await auditLog(client, req.user.id, "update", "fmr_log", req.params.id, req.body.fmr_number?.trim() || "");
     });
     res.redirect("/material-logs/fmr");
