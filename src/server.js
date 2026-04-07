@@ -404,15 +404,19 @@ function buildPickTicketPdf(header, lines) {
       y -= rowHeight;
     }
 
-    const footerY = 72;
-    content.push(rect(left, footerY, 170, 32));
-    content.push(rect(left + 188, footerY, 170, 32));
-    content.push(rect(left + 376, footerY, 170, 32));
-    content.push(rect(left + 564, footerY, 172, 32));
-    content.push(makeText(left + 8, footerY + 20, "Picked / Staged By", "F2", 8));
-    content.push(makeText(left + 196, footerY + 20, "Date / Time", "F2", 8));
-    content.push(makeText(left + 384, footerY + 20, "Received By (Print)", "F2", 8));
-    content.push(makeText(left + 572, footerY + 20, "Received By (Sign)", "F2", 8));
+    const footerTop = 86;
+    content.push(rect(left + 8, footerTop, 510, 30));
+    content.push(rect(left + 518, footerTop, 160, 30));
+    content.push(makeText(left + 12, footerTop + 18, "Pulled by:", "F1", 8));
+    content.push(makeText(left + 522, footerTop + 18, "Date:", "F1", 8));
+
+    content.push(rect(left + 8, footerTop - 46, 510, 30));
+    content.push(makeText(left + 12, footerTop - 28, "Received by (PRINT):", "F1", 8));
+
+    content.push(rect(left + 8, footerTop - 92, 510, 30));
+    content.push(rect(left + 518, footerTop - 92, 160, 30));
+    content.push(makeText(left + 12, footerTop - 74, "Received by (SIGN):", "F1", 8));
+    content.push(makeText(left + 522, footerTop - 74, "Date:", "F1", 8));
 
     return content.join("\n");
   }), { pageWidth, pageHeight });
