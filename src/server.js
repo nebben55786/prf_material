@@ -3683,12 +3683,11 @@ app.post("/requisitions/:id/cancel", requireAuth, requirePermission("requisition
         where id = $1
       `, [line.bom_line_id, nextIssued, nextStatus]);
     }
-    await client.query(`
-      update material_requisitions
-      set status = 'CANCELLED',
-          updated_at = now()
-      where id = $1
-    `, [req.params.id]);
+      await client.query(`
+        update material_requisitions
+        set status = 'CANCELLED'
+        where id = $1
+      `, [req.params.id]);
     await auditLog(client, req.user.id, "cancel", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
