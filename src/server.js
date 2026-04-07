@@ -1586,9 +1586,16 @@ async function syncOpiLogsFromMrr(client) {
   `);
   await client.query(`
     insert into opi_logs (opi_number, vendor_name, material_description, load_number, mrr_number, updated_at)
-    select distinct trim(m.opi_number), coalesce(m.vendor_name, ''), coalesce(m.material_description, ''), coalesce(m.load_number, ''), coalesce(m.mrr_number, ''), now()
+    select distinct on (trim(m.opi_number))
+           trim(m.opi_number),
+           coalesce(m.vendor_name, ''),
+           coalesce(m.material_description, ''),
+           coalesce(m.load_number, ''),
+           coalesce(m.mrr_number, ''),
+           now()
     from mrr_logs m
     where trim(coalesce(m.opi_number, '')) <> ''
+    order by trim(m.opi_number), m.id desc
     on conflict (opi_number) do update set
       vendor_name = excluded.vendor_name,
       material_description = excluded.material_description,
