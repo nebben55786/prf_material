@@ -261,6 +261,156 @@ function formatPickTicketTimestamp(value = new Date()) {
   }
 }
 
+function buildDrawnPdf(pages) {
+  const objects = [];
+  const addObject = (body) => {
+    objects.push(body);
+    return objects.length;
+  };
+  const fontRegularId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const fontBoldId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
+  const pageIds = [];
+  for (const contentStream of pages) {
+    const contentId = addObject(`<< /Length ${Buffer.byteLength(contentStream, "utf8")} >>\nstream\n${contentStream}\nendstream`);
+    pageIds.push(addObject(`<< /Type /Page /Parent PAGES_REF /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${fontRegularId} 0 R /F2 ${fontBoldId} 0 R >> >> /Contents ${contentId} 0 R >>`));
+  }
+  const pagesId = addObject(`<< /Type /Pages /Count ${pageIds.length} /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] >>`);
+  for (const pageId of pageIds) {
+    objects[pageId - 1] = objects[pageId - 1].replace("PAGES_REF", `${pagesId} 0 R`);
+  }
+  const catalogId = addObject(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (let i = 0; i < objects.length; i += 1) {
+    offsets.push(Buffer.byteLength(pdf, "utf8"));
+    pdf += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(pdf, "utf8");
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i < offsets.length; i += 1) {
+    pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return Buffer.from(pdf, "utf8");
+}
+
+function buildPickTicketPdf(header, lines) {
+  const left = 36;
+  const right = 576;
+  const top = 756;
+  const rowHeight = 22;
+  const maxRowsFirstPage = 18;
+  const maxRowsOtherPages = 24;
+  const chunks = [];
+  let cursor = 0;
+  while (cursor < lines.length || !chunks.length) {
+    const maxRows = chunks.length ? maxRowsOtherPages : maxRowsFirstPage;
+    chunks.push(lines.slice(cursor, cursor + maxRows));
+    cursor += maxRows;
+  }
+
+  const makeText = (x, y, text, font = "F1", size = 9) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
+  const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
+  const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
+
+  return buildDrawnPdf(chunks.map((pageLines, pageIndex) => {
+    const content = [];
+    content.push("0.2 w");
+    content.push("0 0 0 RG");
+    content.push(rect(left, top - 56, right - left, 56));
+    content.push(makeText(left + 14, top - 22, "PICK TICKET", "F2", 18));
+    content.push(makeText(left + 14, top - 40, "Laydown Yard Material Pick / Verification Copy", "F1", 9));
+    content.push(makeText(right - 110, top - 22, `REQ # ${header.requisition_no || ""}`, "F2", 12));
+    content.push(makeText(right - 110, top - 40, `Page ${pageIndex + 1} of ${chunks.length}`, "F1", 9));
+
+    const metaTop = top - 70;
+    const col1 = left;
+    const col2 = 300;
+    const col3 = 446;
+    content.push(rect(col1, metaTop - 44, 264, 44));
+    content.push(rect(col2, metaTop - 44, 146, 44));
+    content.push(rect(col3, metaTop - 44, 130, 44));
+    content.push(makeText(col1 + 8, metaTop - 14, "BOM NAME", "F2", 8));
+    content.push(makeText(col1 + 8, metaTop - 30, String(header.bom_name || header.bom_description || header.bom_no || "").slice(0, 42), "F1", 10));
+    content.push(makeText(col2 + 8, metaTop - 14, "BOM #", "F2", 8));
+    content.push(makeText(col2 + 8, metaTop - 30, header.bom_no || "", "F1", 10));
+    content.push(makeText(col3 + 8, metaTop - 14, "STATUS", "F2", 8));
+    content.push(makeText(col3 + 8, metaTop - 30, header.status || "", "F1", 10));
+
+    const meta2Top = metaTop - 54;
+    content.push(rect(col1, meta2Top - 44, 180, 44));
+    content.push(rect(col1 + 180, meta2Top - 44, 120, 44));
+    content.push(rect(col2 + 36, meta2Top - 44, 120, 44));
+    content.push(rect(col3, meta2Top - 44, 130, 44));
+    content.push(makeText(col1 + 8, meta2Top - 14, "REQUESTED BY", "F2", 8));
+    content.push(makeText(col1 + 8, meta2Top - 30, String(header.requested_by_name || "").slice(0, 28), "F1", 10));
+    content.push(makeText(col1 + 188, meta2Top - 14, "CREATED", "F2", 8));
+    content.push(makeText(col1 + 188, meta2Top - 30, String(header.created_at || "").slice(0, 16), "F1", 10));
+    content.push(makeText(col2 + 44, meta2Top - 14, "PRINTED", "F2", 8));
+    content.push(makeText(col2 + 44, meta2Top - 30, formatPickTicketTimestamp().slice(0, 19), "F1", 10));
+    content.push(makeText(col3 + 8, meta2Top - 14, "YARD USE", "F2", 8));
+    content.push(makeText(col3 + 8, meta2Top - 30, "PRINT / PICK / STAGE", "F1", 9));
+
+    const meta3Top = meta2Top - 54;
+    content.push(rect(col1, meta3Top - 32, 264, 32));
+    content.push(rect(col2, meta3Top - 32, 146, 32));
+    content.push(rect(col3, meta3Top - 32, 130, 32));
+    content.push(makeText(col1 + 8, meta3Top - 13, `IWP: ${header.iwp_no || ""}`, "F1", 9));
+    content.push(makeText(col1 + 132, meta3Top - 13, `ISO: ${header.iso_no || ""}`, "F1", 9));
+    content.push(makeText(col2 + 8, meta3Top - 13, "REQ VERIFIED", "F2", 8));
+    content.push(makeText(col2 + 8, meta3Top - 25, "Ready for yard picking", "F1", 8));
+    content.push(makeText(col3 + 8, meta3Top - 13, "NOTES", "F2", 8));
+    content.push(makeText(col3 + 8, meta3Top - 25, String(header.notes || "").slice(0, 20), "F1", 8));
+
+    const tableTop = meta3Top - 48;
+    const widths = [38, 82, 238, 44, 38, 50, 50];
+    const headers = ["LINE", "ITEM", "DESCRIPTION", "QTY", "UOM", "IWP", "ISO"];
+    let x = left;
+    content.push(rect(left, tableTop - rowHeight, right - left, rowHeight));
+    for (let i = 0; i < widths.length; i += 1) {
+      if (i > 0) content.push(line(x, tableTop, x, tableTop - rowHeight - (pageLines.length * rowHeight)));
+      content.push(makeText(x + 4, tableTop - 15, headers[i], "F2", 8));
+      x += widths[i];
+    }
+    content.push(line(right, tableTop, right, tableTop - rowHeight - (pageLines.length * rowHeight)));
+
+    let y = tableTop - rowHeight;
+    for (const item of pageLines) {
+      content.push(rect(left, y - rowHeight, right - left, rowHeight));
+      let cellX = left;
+      const wrapped = wrapPdfText(item.description, 34);
+      const rowValues = [
+        item.line_no || "",
+        item.item_code || "",
+        wrapped[0] || "",
+        Number(item.qty_requested || 0).toFixed(2),
+        item.uom || "",
+        item.iwp_no || "",
+        item.iso_no || ""
+      ];
+      for (let i = 0; i < widths.length; i += 1) {
+        const value = rowValues[i];
+        const textX = i === 3 ? cellX + widths[i] - 24 : cellX + 4;
+        content.push(makeText(textX, y - 15, value, "F1", 8));
+        cellX += widths[i];
+      }
+      if (wrapped[1]) {
+        content.push(makeText(left + widths[0] + widths[1] + 4, y - 21, wrapped[1], "F1", 7));
+      }
+      y -= rowHeight;
+    }
+
+    const footerY = 72;
+    content.push(rect(left, footerY, 250, 32));
+    content.push(rect(left + 270, footerY, 270, 32));
+    content.push(makeText(left + 8, footerY + 20, "Picked / Staged By", "F2", 8));
+    content.push(makeText(left + 278, footerY + 20, "Date / Time", "F2", 8));
+    content.push(makeText(left, 50, "Print this ticket for the laydown yard crew. Mark partial picks on the hard copy if needed.", "F1", 8));
+
+    return content.join("\n");
+  }));
+}
+
 function layout(title, body, user) {
   const navLinks = user
     ? permissionSections
@@ -2995,35 +3145,7 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("req
     order by bl.line_no, bl.id
   `, [req.params.id])).rows;
 
-  const detailLines = [
-    `REQ #: ${header.requisition_no}`,
-    `BOM: ${header.bom_name || header.bom_description || header.bom_no}`,
-    `BOM #: ${header.bom_no}`,
-    `Requested By: ${header.requested_by_name || ""}`,
-    `Created: ${header.created_at || ""}`,
-    `IWP: ${header.iwp_no || ""}    ISO: ${header.iso_no || ""}`,
-    `Status: ${header.status}`,
-    `Print Date: ${formatPickTicketTimestamp()}`,
-    header.notes ? `Notes: ${header.notes}` : ""
-  ].filter(Boolean);
-
-  const prefixTemplate = `${padPdfColumn("LINE", 6)} ${padPdfColumn("ITEM", 14)} ${padPdfColumn("QTY", 7, "right")} ${padPdfColumn("UOM", 4)} ${padPdfColumn("IWP", 10)} ${padPdfColumn("ISO", 10)} `;
-  const tableLines = [
-    prefixTemplate + "DESCRIPTION",
-    "-".repeat(prefixTemplate.length + 52)
-  ];
-  for (const line of lines) {
-    const wrappedDescription = wrapPdfText(line.description, 52);
-    const prefix = `${padPdfColumn(line.line_no, 6)} ${padPdfColumn(line.item_code, 14)} ${padPdfColumn(Number(line.qty_requested || 0).toFixed(2), 7, "right")} ${padPdfColumn(line.uom, 4)} ${padPdfColumn(line.iwp_no || "", 10)} ${padPdfColumn(line.iso_no || "", 10)} `;
-    tableLines.push(`${prefix}${wrappedDescription[0] || ""}`);
-    for (const extraLine of wrappedDescription.slice(1)) {
-      tableLines.push(`${" ".repeat(prefix.length)}${extraLine}`);
-    }
-  }
-  tableLines.push("");
-  tableLines.push("Yard Copy - Print for picking and laydown handling.");
-
-  const pdfBuffer = buildSimplePdf("Pick Ticket", detailLines, tableLines);
+  const pdfBuffer = buildPickTicketPdf(header, lines);
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename=\"${String(header.requisition_no || "pick-ticket").replace(/[^A-Za-z0-9._-]/g, "_")}-pick-ticket.pdf\"`);
   res.send(pdfBuffer);
