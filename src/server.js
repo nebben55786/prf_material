@@ -148,6 +148,111 @@ function escAttr(value) {
   return esc(value).replaceAll("`", "&#96;");
 }
 
+function pdfEscape(value) {
+  return String(value ?? "")
+    .replaceAll("\\", "\\\\")
+    .replaceAll("(", "\\(")
+    .replaceAll(")", "\\)")
+    .replaceAll("\r", " ")
+    .replaceAll("\n", " ");
+}
+
+function padPdfColumn(value, width, align = "left") {
+  const text = String(value ?? "");
+  if (text.length >= width) return text.slice(0, width);
+  const padding = " ".repeat(width - text.length);
+  return align === "right" ? `${padding}${text}` : `${text}${padding}`;
+}
+
+function wrapPdfText(value, width) {
+  const words = String(value ?? "").trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return [""];
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    if (!current) {
+      current = word;
+      continue;
+    }
+    if (`${current} ${word}`.length <= width) {
+      current = `${current} ${word}`;
+      continue;
+    }
+    lines.push(current);
+    current = word;
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function buildSimplePdf(title, detailLines, tableLines) {
+  const pageWidth = 612;
+  const pageHeight = 792;
+  const marginLeft = 36;
+  const marginTop = 42;
+  const lineHeight = 13;
+  const pageLineLimit = 50;
+  const allLines = [
+    title,
+    "",
+    ...detailLines,
+    "",
+    ...tableLines
+  ];
+  const pages = [];
+  for (let i = 0; i < allLines.length; i += pageLineLimit) {
+    pages.push(allLines.slice(i, i + pageLineLimit));
+  }
+  const objects = [];
+  const addObject = (body) => {
+    objects.push(body);
+    return objects.length;
+  };
+  const fontObjectId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
+  const pageObjectIds = [];
+  const contentObjectIds = [];
+  for (const pageLines of pages) {
+    let y = pageHeight - marginTop;
+    const contentParts = ["BT", `/F1 10 Tf`, "0 g"];
+    for (let i = 0; i < pageLines.length; i += 1) {
+      const line = pageLines[i];
+      if (i === 0) {
+        contentParts.push(`/F1 14 Tf`);
+      } else if (i === 1) {
+        contentParts.push(`/F1 10 Tf`);
+      }
+      contentParts.push(`1 0 0 1 ${marginLeft} ${y} Tm (${pdfEscape(line)}) Tj`);
+      y -= lineHeight;
+    }
+    contentParts.push("ET");
+    const contentStream = contentParts.join("\n");
+    const contentObjectId = addObject(`<< /Length ${Buffer.byteLength(contentStream, "utf8")} >>\nstream\n${contentStream}\nendstream`);
+    contentObjectIds.push(contentObjectId);
+    pageObjectIds.push(addObject(`<< /Type /Page /Parent PAGES_REF /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`));
+  }
+  const pagesObjectId = addObject(`<< /Type /Pages /Count ${pageObjectIds.length} /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(" ")}] >>`);
+  objects[pagesObjectId - 1] = objects[pagesObjectId - 1];
+  for (const pageObjectId of pageObjectIds) {
+    objects[pageObjectId - 1] = objects[pageObjectId - 1].replace("PAGES_REF", `${pagesObjectId} 0 R`);
+  }
+  const catalogObjectId = addObject(`<< /Type /Catalog /Pages ${pagesObjectId} 0 R >>`);
+
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (let i = 0; i < objects.length; i += 1) {
+    offsets.push(Buffer.byteLength(pdf, "utf8"));
+    pdf += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(pdf, "utf8");
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (let i = 1; i < offsets.length; i += 1) {
+    pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogObjectId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return Buffer.from(pdf, "utf8");
+}
+
 function layout(title, body, user) {
   const navLinks = user
     ? permissionSections
@@ -2780,6 +2885,7 @@ app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"),
     <td>${esc(row.qty_requested)}</td>
     <td><span class="chip">${esc(row.status)}</span></td>
     <td>${esc(row.created_at)}</td>
+    <td>${row.status === "VERIFIED" ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>` : ""}</td>
   </tr>`).join("");
   res.send(layout("Requisitions", `
     <h1>Material Requisitions</h1>
@@ -2796,7 +2902,7 @@ app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"),
         <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Req #</th><th>BOM Name</th><th>BOM #</th><th>Requested By</th><th>IWP</th><th>ISO</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th></tr>${tableRows || `<tr><td colspan="10" class="muted">No requisitions yet.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Req #</th><th>BOM Name</th><th>BOM #</th><th>Requested By</th><th>IWP</th><th>ISO</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No requisitions yet.</td></tr>`}</table></div>
   `, req.user));
 });
 
@@ -2841,6 +2947,7 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Verify Request</button></form>`);
   }
   if (header.status === "VERIFIED") {
+    headerActions.push(`<a class="btn btn-secondary" target="_blank" href="/requisitions/${header.id}/pick-ticket.pdf">Open Pick Ticket PDF</a>`);
     if (canAccess(req.user, "requisitions", "unverify")) {
       headerActions.push(`<form method="post" action="/requisitions/${header.id}/unverify"><button class="btn btn-secondary" type="submit">Set To Un-Verified</button></form>`);
     }
@@ -2862,6 +2969,57 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
     <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>ISO</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th></tr>${lineRows || `<tr><td colspan="13" class="muted">No lines on this requisition.</td></tr>`}</table></div>
   `, req.user));
 });
+
+app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+  const header = (await query(`
+    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
+    from material_requisitions mr
+    join bom_headers bh on bh.id = mr.bom_id
+    where mr.id = $1
+  `, [req.params.id])).rows[0];
+  if (!header) throw new Error("Requisition not found.");
+  if (header.status !== "VERIFIED") throw new Error("Pick tickets are only available for verified requisitions.");
+  const lines = (await query(`
+    select mrl.qty_requested, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mrl.requisition_id = $1
+    order by bl.line_no, bl.id
+  `, [req.params.id])).rows;
+
+  const detailLines = [
+    `REQ #: ${header.requisition_no}`,
+    `BOM: ${header.bom_name || header.bom_description || header.bom_no}`,
+    `BOM #: ${header.bom_no}`,
+    `Requested By: ${header.requested_by_name || ""}`,
+    `Created: ${header.created_at || ""}`,
+    `IWP: ${header.iwp_no || ""}    ISO: ${header.iso_no || ""}`,
+    `Status: ${header.status}`,
+    `Print Date: ${new Date().toLocaleString("en-US", { timeZone: process.env.TZ || "America/Chicago" })}`,
+    header.notes ? `Notes: ${header.notes}` : ""
+  ].filter(Boolean);
+
+  const prefixTemplate = `${padPdfColumn("LINE", 6)} ${padPdfColumn("ITEM", 14)} ${padPdfColumn("QTY", 7, "right")} ${padPdfColumn("UOM", 4)} ${padPdfColumn("IWP", 10)} ${padPdfColumn("ISO", 10)} `;
+  const tableLines = [
+    prefixTemplate + "DESCRIPTION",
+    "-".repeat(prefixTemplate.length + 52)
+  ];
+  for (const line of lines) {
+    const wrappedDescription = wrapPdfText(line.description, 52);
+    const prefix = `${padPdfColumn(line.line_no, 6)} ${padPdfColumn(line.item_code, 14)} ${padPdfColumn(Number(line.qty_requested || 0).toFixed(2), 7, "right")} ${padPdfColumn(line.uom, 4)} ${padPdfColumn(line.iwp_no || "", 10)} ${padPdfColumn(line.iso_no || "", 10)} `;
+    tableLines.push(`${prefix}${wrappedDescription[0] || ""}`);
+    for (const extraLine of wrappedDescription.slice(1)) {
+      tableLines.push(`${" ".repeat(prefix.length)}${extraLine}`);
+    }
+  }
+  tableLines.push("");
+  tableLines.push("Yard Copy - Print for picking and laydown handling.");
+
+  const pdfBuffer = buildSimplePdf("Pick Ticket", detailLines, tableLines);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename=\"${String(header.requisition_no || "pick-ticket").replace(/[^A-Za-z0-9._-]/g, "_")}-pick-ticket.pdf\"`);
+  res.send(pdfBuffer);
+}));
 
 app.post("/requisitions/:id/verify", requireAuth, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
   await withTransaction(async (client) => {
