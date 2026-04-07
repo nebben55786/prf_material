@@ -2819,7 +2819,6 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
   const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
   const lineFilter = {
     iwp: String(req.query.iwp || "").trim(),
-    iso: String(req.query.iso || "").trim(),
     itemCode: String(req.query.item_code || "").trim(),
     lineNo: String(req.query.line_no || "").trim(),
     limit: Math.min(Math.max(num(req.query.limit, 250), 50), 1000)
@@ -2830,7 +2829,6 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
     const lineWhere = ["bom_id = $1"];
     const lineParams = [selectedBom.id];
     if (lineFilter.iwp) { lineParams.push(`%${lineFilter.iwp}%`); lineWhere.push(`coalesce(iwp_no, '') ilike $${lineParams.length}`); }
-    if (lineFilter.iso) { lineParams.push(`%${lineFilter.iso}%`); lineWhere.push(`coalesce(iso_no, '') ilike $${lineParams.length}`); }
     if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
     if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
     const lineWhereSql = lineWhere.join(" and ");
@@ -2897,7 +2895,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
          and alloc.thk_1 = coalesce(bl.thk_1, '')
          and alloc.thk_2 = coalesce(bl.thk_2, '')
         where ${lineWhereSql.replace(/\bbom_id\b/g, "bl.bom_id").replace(/\bitem_code\b/g, "bl.item_code").replace(/\bline_no\b/g, "bl.line_no")}
-        order by coalesce(bl.iwp_no, ''), coalesce(bl.iso_no, ''), bl.line_no, bl.id
+        order by coalesce(bl.iwp_no, ''), bl.line_no, bl.id
         limit ${lineFilter.limit}
       `, lineParams),
       query(`select count(*) as filtered_count from bom_lines where ${lineWhereSql}`, lineParams)
@@ -2907,7 +2905,6 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
       <td><input type="checkbox" name="selected_line_ids" value="${line.id}" /></td>
       <td>${esc(line.line_no)}</td>
       <td>${esc(line.iwp_no || "")}</td>
-      <td>${esc(line.iso_no || "")}</td>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(line.material_type)}</td>
@@ -2938,7 +2935,6 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
           <div><label>Piping BOM</label><select name="bom_id">${bomOptions || `<option value="">No piping BOMs found</option>`}</select></div>
           <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
           <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
-          <div><label>ISO</label><input name="iso" value="${esc(lineFilter.iso)}" /></div>
           <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
           <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" /></div>
         </div>
@@ -2954,7 +2950,6 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
             <div><label>Requested By</label><input name="requested_by_name" value="${esc(req.user.username)}" required /></div>
             <div><label>Status</label><select name="status">${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${value === "REQUESTED" ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
             <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
-            <div><label>ISO</label><input name="iso_no" value="${esc(lineFilter.iso)}" /></div>
           </div>
           <div><label>Notes</label><textarea name="notes"></textarea></div>
           <div class="scroll">
@@ -2963,7 +2958,6 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
                 <col style="width:80px" />
                 <col style="width:170px" />
                 <col style="width:120px" />
-                <col style="width:180px" />
                 <col style="width:120px" />
                 <col style="width:380px" />
                 <col style="width:90px" />
@@ -2988,7 +2982,6 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
                 <th class="nowrap" data-resizable="true">Pick</th>
                 <th class="wrap" data-resizable="true">Line</th>
                 <th class="nowrap" data-resizable="true">IWP</th>
-                <th class="nowrap" data-resizable="true">ISO</th>
                 <th class="nowrap" data-resizable="true">Item</th>
                 <th class="wrap" data-resizable="true">Description</th>
                 <th class="nowrap" data-resizable="true">Type</th>
@@ -3009,7 +3002,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
                 <th class="nowrap" data-resizable="true">Status</th>
                 <th class="nowrap" data-resizable="true">Actions</th>
               </tr>
-              ${lineRows || `<tr><td colspan="23" class="muted">No BOM lines match the current filter.</td></tr>`}
+              ${lineRows || `<tr><td colspan="22" class="muted">No BOM lines match the current filter.</td></tr>`}
             </table>
           </div>
           <div class="actions"><button type="submit">Create Material Requisition</button></div>
@@ -3022,12 +3015,10 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
 
 app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"), async (req, res) => {
   const iwp = String(req.query.iwp || "").trim();
-  const iso = String(req.query.iso || "").trim();
   const status = String(req.query.status || "").trim();
   const where = [];
   const params = [];
   if (iwp) { params.push(`%${iwp}%`); where.push(`coalesce(mr.iwp_no, '') ilike $${params.length}`); }
-  if (iso) { params.push(`%${iso}%`); where.push(`coalesce(mr.iso_no, '') ilike $${params.length}`); }
   if (status) { params.push(status); where.push(`mr.status = $${params.length}`); }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const rows = (await query(`
@@ -3046,7 +3037,6 @@ app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"),
     <td>${esc(row.bom_no)}</td>
     <td>${esc(row.requested_by_name)}</td>
     <td>${esc(row.iwp_no || "")}</td>
-    <td>${esc(row.iso_no || "")}</td>
     <td>${row.line_count}</td>
     <td>${esc(row.qty_requested)}</td>
     <td><span class="chip">${esc(row.status)}</span></td>
@@ -3062,13 +3052,12 @@ app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"),
       <form method="get" action="/requisitions" class="stack">
         <div class="grid">
           <div><label>IWP</label><input name="iwp" value="${esc(iwp)}" /></div>
-          <div><label>ISO</label><input name="iso" value="${esc(iso)}" /></div>
           <div><label>Status</label><select name="status"><option value="">All Statuses</option>${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${status === value ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
         </div>
         <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Req #</th><th>BOM Name</th><th>BOM #</th><th>Requested By</th><th>IWP</th><th>ISO</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No requisitions yet.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Req #</th><th>BOM Name</th><th>BOM #</th><th>Requested By</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="10" class="muted">No requisitions yet.</td></tr>`}</table></div>
   `, req.user));
 });
 
@@ -3084,7 +3073,7 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
     return;
   }
   const lines = (await query(`
-    select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
+    select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
     from material_requisition_lines mrl
     join bom_lines bl on bl.id = mrl.bom_line_id
     where mrl.requisition_id = $1
@@ -3093,7 +3082,6 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
   const lineRows = lines.map((line) => `<tr>
     <td>${esc(line.line_no)}</td>
     <td>${esc(line.iwp_no || "")}</td>
-    <td>${esc(line.iso_no || "")}</td>
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
     <td>${esc(line.qty_requested)}</td>
@@ -3128,11 +3116,11 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
     <h1>Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
       <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(header.created_at)}</p>
-      <p class="muted">IWP: ${esc(header.iwp_no || "")} | ISO: ${esc(header.iso_no || "")}</p>
+      <p class="muted">IWP: ${esc(header.iwp_no || "")}</p>
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
       ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>ISO</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th></tr>${lineRows || `<tr><td colspan="13" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th></tr>${lineRows || `<tr><td colspan="12" class="muted">No lines on this requisition.</td></tr>`}</table></div>
   `, req.user));
 });
 
@@ -3262,7 +3250,6 @@ app.get("/requisitions/:id/edit", requireAuth, requirePermission("requisitions",
       bl.id as bom_line_id,
       bl.line_no,
       bl.iwp_no,
-      bl.iso_no,
       bl.item_code,
       bl.description,
       bl.uom,
@@ -3333,7 +3320,6 @@ app.get("/requisitions/:id/edit", requireAuth, requirePermission("requisitions",
     return `<tr>
       <td>${esc(line.line_no)}</td>
       <td>${esc(line.iwp_no || "")}</td>
-      <td>${esc(line.iso_no || "")}</td>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(line.qty_required)}</td>
@@ -3353,10 +3339,9 @@ app.get("/requisitions/:id/edit", requireAuth, requirePermission("requisitions",
         <div class="grid">
           <div><label>Requested By</label><input name="requested_by_name" value="${esc(header.requested_by_name)}" required /></div>
           <div><label>IWP</label><input name="iwp_no" value="${esc(header.iwp_no || "")}" /></div>
-          <div><label>ISO</label><input name="iso_no" value="${esc(header.iso_no || "")}" /></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(header.notes || "")}</textarea></div>
-        <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>ISO</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Available</th><th>UOM</th><th>New Qty</th><th>Remove</th><th>Limit</th></tr>${lineRows || `<tr><td colspan="12" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+        <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Available</th><th>UOM</th><th>New Qty</th><th>Remove</th><th>Limit</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table></div>
         <div class="actions"><button type="submit">Save Requisition</button><a class="btn btn-secondary" href="/requisitions/${header.id}">Back</a></div>
       </form>
     </div>
@@ -3370,9 +3355,9 @@ app.post("/requisitions/:id/edit", requireAuth, requirePermission("requisitions"
     if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
     await client.query(`
       update material_requisitions
-      set requested_by_name = $2, iwp_no = $3, iso_no = $4, notes = $5
+      set requested_by_name = $2, iwp_no = $3, notes = $4
       where id = $1
-    `, [req.params.id, String(req.body.requested_by_name || "").trim(), req.body.iwp_no || "", req.body.iso_no || "", req.body.notes || ""]);
+    `, [req.params.id, String(req.body.requested_by_name || "").trim(), req.body.iwp_no || "", req.body.notes || ""]);
     const lines = (await client.query(`
       select
         mrl.id as requisition_line_id,
