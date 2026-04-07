@@ -3835,7 +3835,7 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("mater
     fmrNumber: linkedFmr.fmr_number || ""
   });
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename="${String(header.mrr_number || "mrr").replace(/[^A-Za-z0-9._-]/g, "_")}-mrr.pdf"`);
+  res.setHeader("Content-Disposition", `inline; filename="${String(header.mrr_number || "MRR").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
   res.send(pdfBuffer);
 }));
 
