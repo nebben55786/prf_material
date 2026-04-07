@@ -319,8 +319,8 @@ function buildPickTicketPdf(header, lines) {
   const right = pageWidth - 28;
   const top = pageHeight - 24;
   const rowHeight = 24;
-  const maxRowsFirstPage = 15;
-  const maxRowsOtherPages = 18;
+  const maxRowsFirstPage = 14;
+  const maxRowsOtherPages = 17;
   const chunks = [];
   let cursor = 0;
   while (cursor < lines.length || !chunks.length) {
@@ -358,21 +358,15 @@ function buildPickTicketPdf(header, lines) {
     content.push(makeText(left + 520, metaTop - 26, String(header.bom_name || header.bom_description || header.bom_no || "").slice(0, 32), "F1", 9));
 
     const meta2Top = metaTop - 42;
-    content.push(rect(left, meta2Top - 26, 180, 26));
-    content.push(rect(left + 180, meta2Top - 26, 180, 26));
     if (header.notes) {
-      content.push(rect(left + 360, meta2Top - 26, 376, 26));
-    }
-    content.push(makeText(left + 8, meta2Top - 16, `IWP: ${String(header.iwp_no || "").slice(0, 18)}`, "F1", 9));
-    content.push(makeText(left + 188, meta2Top - 16, `ISO: ${String(header.iso_no || "").slice(0, 18)}`, "F1", 9));
-    if (header.notes) {
-      content.push(makeText(left + 368, meta2Top - 10, "NOTES", "F2", 7));
-      content.push(makeText(left + 368, meta2Top - 20, String(header.notes).slice(0, 58), "F1", 8));
+      content.push(rect(left, meta2Top - 26, right - left, 26));
+      content.push(makeText(left + 8, meta2Top - 10, "NOTES", "F2", 7));
+      content.push(makeText(left + 8, meta2Top - 20, String(header.notes).slice(0, 108), "F1", 8));
     }
 
-    const tableTop = meta2Top - 40;
-    const widths = [56, 96, 264, 50, 40, 230];
-    const headers = ["LINE", "ITEM", "DESCRIPTION", "QTY", "UOM", "PICK LOCATION"];
+    const tableTop = meta2Top - (header.notes ? 40 : 14);
+    const widths = [126, 96, 254, 50, 40, 170];
+    const headers = ["LINE", "ITEM", "DESCRIPTION", "QTY", "UOM", "LOCATION"];
     let x = left;
     content.push(rect(left, tableTop - rowHeight, right - left, rowHeight));
     for (let i = 0; i < widths.length; i += 1) {
@@ -387,7 +381,7 @@ function buildPickTicketPdf(header, lines) {
       content.push(rect(left, y - rowHeight, right - left, rowHeight));
       let cellX = left;
       const wrappedDescription = wrapPdfText(item.description, 36);
-      const wrappedLocation = wrapPdfText(item.pick_location || "", 30);
+      const wrappedLocation = wrapPdfText(item.pick_location || "", 22);
       const rowValues = [
         item.line_no || "",
         item.item_code || "",
@@ -412,10 +406,14 @@ function buildPickTicketPdf(header, lines) {
     }
 
     const footerY = 72;
-    content.push(rect(left, footerY, 250, 32));
-    content.push(rect(left + 270, footerY, 270, 32));
+    content.push(rect(left, footerY, 170, 32));
+    content.push(rect(left + 188, footerY, 170, 32));
+    content.push(rect(left + 376, footerY, 170, 32));
+    content.push(rect(left + 564, footerY, 172, 32));
     content.push(makeText(left + 8, footerY + 20, "Picked / Staged By", "F2", 8));
-    content.push(makeText(left + 278, footerY + 20, "Date / Time", "F2", 8));
+    content.push(makeText(left + 196, footerY + 20, "Date / Time", "F2", 8));
+    content.push(makeText(left + 384, footerY + 20, "Received By (Print)", "F2", 8));
+    content.push(makeText(left + 572, footerY + 20, "Received By (Sign)", "F2", 8));
 
     return content.join("\n");
   }), { pageWidth, pageHeight });
