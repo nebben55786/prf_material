@@ -422,6 +422,216 @@ function buildPickTicketPdf(header, lines) {
   }), { pageWidth, pageHeight });
 }
 
+function buildMrrFormPdf(header, lines, options = {}) {
+  const pageWidth = 612;
+  const pageHeight = 792;
+  const left = 18;
+  const right = pageWidth - 18;
+  const top = pageHeight - 18;
+  const content = [];
+  const makeText = (x, y, text, font = "F1", size = 8) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
+  const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
+  const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
+  const centerText = (x, y, w, text, font = "F1", size = 8) => {
+    const safe = String(text ?? "");
+    const estimatedWidth = safe.length * size * 0.42;
+    const textX = x + Math.max(2, (w - estimatedWidth) / 2);
+    return makeText(textX, y, safe, font, size);
+  };
+  const field = (x, yTop, w, h, label, value = "", opts = {}) => {
+    const labelSize = opts.labelSize || 6;
+    const valueSize = opts.valueSize || 8;
+    const align = opts.align || "left";
+    content.push(rect(x, yTop - h, w, h));
+    content.push(makeText(x + 2, yTop - 8, label, "F2", labelSize));
+    const text = String(value || "");
+    if (align === "center") {
+      content.push(centerText(x, yTop - 18, w, text, "F1", valueSize));
+    } else {
+      content.push(makeText(x + 2, yTop - 19, text, "F1", valueSize));
+    }
+  };
+  const checkbox = (x, y, checked = false, label = "") => {
+    content.push(rect(x, y - 8, 8, 8));
+    if (checked) {
+      content.push(line(x + 1.5, y - 6.5, x + 6.5, y - 1.5));
+      content.push(line(x + 6.5, y - 6.5, x + 1.5, y - 1.5));
+    }
+    if (label) content.push(makeText(x + 12, y - 6, label, "F1", 7));
+  };
+  const formatDate = (value) => {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+      const [yyyy, mm, dd] = text.split("-");
+      return `${mm}/${dd}/${yyyy}`;
+    }
+    return text;
+  };
+  const lineItems = lines.slice(0, 12);
+  const discrepancyItems = lines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK").slice(0, 8);
+  const jobNumber = String(options.jobNumber || "").trim();
+  const deliveryLocation = String(options.deliveryLocation || "KEQ3").trim();
+  const fmrNumber = String(options.fmrNumber || "").trim();
+  const pageNo = "1";
+  const pageCount = "1";
+  const topSectionBottom = top - 290;
+
+  content.push("0.4 w");
+  content.push("0 0 0 RG");
+  content.push(rect(left, topSectionBottom, right - left, top - topSectionBottom));
+
+  const x0 = left;
+  const totalWidth = right - left;
+  const col1 = 92;
+  const col2 = 108;
+  const col3 = 96;
+  const col4 = totalWidth - col1 - col2 - col3;
+  const y1 = top;
+  field(x0, y1, totalWidth - 94, 28, " ", "", { align: "center" });
+  content.push(centerText(x0, y1 - 10, totalWidth - 94, "PERFORMANCE CONTRACTORS, INC.", "F2", 9));
+  content.push(centerText(x0, y1 - 21, totalWidth - 94, "MATERIAL RECEIVING REPORT (MRR)", "F2", 9));
+  field(right - 94, y1, 94, 28, "MRR NO.", header.mrr_number || "", { align: "center", valueSize: 9 });
+
+  const y2 = y1 - 28;
+  field(x0, y2, col1, 24, "1.JOB(CONTRACT)NO.", jobNumber);
+  field(x0 + col1, y2, col2, 24, "2.DATE RECEIVED", formatDate(header.received_date));
+  field(x0 + col1 + col2, y2, col3, 24, "3.P.O.NO", header.po_number || "");
+  field(x0 + col1 + col2 + col3, y2, 46, 24, "4.PAGE", pageNo);
+  field(x0 + col1 + col2 + col3 + 46, y2, totalWidth - col1 - col2 - col3 - 46, 24, "OF", pageCount);
+
+  const y3 = y2 - 24;
+  field(x0, y3, 130, 24, "5. SHIP TICKET NO", header.pick_ticket || "");
+  field(x0 + 130, y3, 140, 24, "6. SUPPLIER ORDER NO.", "");
+  field(x0 + 270, y3, 198, 24, "7. MATERIAL REQ/LOAD NO.", header.load_number || fmrNumber);
+  field(x0 + 468, y3, totalWidth - 468, 24, "8. DELIVERY LOCATION (LAYDOWNYARD, UNIT, ETC.)", deliveryLocation);
+
+  const y4 = y3 - 24;
+  field(x0, y4, 392, 24, "9. SUPPLIER", header.vendor_name || "");
+  field(x0 + 392, y4, totalWidth - 392, 24, "10.CARRIER", "");
+
+  const y5 = y4 - 24;
+  field(x0, y5, totalWidth / 2, 46, "11. DELIVERED BY", "");
+  field(x0 + totalWidth / 2, y5, totalWidth / 2, 46, "12. RECEIVED BY", header.received_by || "");
+  content.push(makeText(x0 + 128, y5 - 19, "(PRINT)", "F1", 6));
+  content.push(makeText(x0 + 128, y5 - 35, "(SIGNATURE)", "F1", 6));
+  content.push(makeText(x0 + 150, y5 - 35, "(DATE)", "F1", 6));
+  content.push(makeText(x0 + totalWidth / 2 + 125, y5 - 19, "(PRINT)", "F1", 6));
+  content.push(makeText(x0 + totalWidth / 2 + 125, y5 - 35, "(SIGNATURE)", "F1", 6));
+  content.push(makeText(x0 + totalWidth / 2 + 150, y5 - 35, "(DATE)", "F1", 6));
+
+  const tableTop = y5 - 46;
+  const tableHeaderHeight = 24;
+  const itemCols = [160, 252, 48, 52, 64];
+  const itemHeaders = [
+    "13. STOCK/ITEM NO (TAG NO)",
+    "14. DESCRIPTION",
+    "15\nQTY",
+    "16\nLOCATION",
+    "17\nGRID"
+  ];
+  content.push(rect(x0, tableTop - tableHeaderHeight - (lineItems.length * 18 || 216), totalWidth, tableHeaderHeight + (Math.max(lineItems.length, 12) * 18)));
+  let itemX = x0;
+  for (let i = 0; i < itemCols.length; i += 1) {
+    if (i > 0) content.push(line(itemX, tableTop, itemX, tableTop - tableHeaderHeight - (Math.max(lineItems.length, 12) * 18)));
+    const headerLines = itemHeaders[i].split("\n");
+    content.push(makeText(itemX + 2, tableTop - 8, headerLines[0], "F2", 6));
+    if (headerLines[1]) content.push(centerText(itemX, tableTop - 17, itemCols[i], headerLines[1], "F2", 6));
+    itemX += itemCols[i];
+  }
+  content.push(line(x0, tableTop - tableHeaderHeight, right, tableTop - tableHeaderHeight));
+  content.push(makeText(x0 + 164, tableTop - 14, "(INDICATE NUMBER OF SHIPPING CONTAINERS - TYPE OF CONTAINER - CONTAINER NUMBER, ETC.)", "F1", 5));
+  let rowY = tableTop - tableHeaderHeight;
+  for (let i = 0; i < 12; i += 1) {
+    const item = lineItems[i] || {};
+    const descLines = wrapPdfText(item.description || "", 48);
+    content.push(line(x0, rowY - 18, right, rowY - 18));
+    content.push(makeText(x0 + 2, rowY - 12, item.item_code || "", "F1", 7));
+    content.push(makeText(x0 + itemCols[0] + 2, rowY - 10, descLines[0] || "", "F1", 6));
+    if (descLines[1]) content.push(makeText(x0 + itemCols[0] + 2, rowY - 16, descLines[1], "F1", 6));
+    content.push(centerText(x0 + itemCols[0] + itemCols[1], rowY - 12, itemCols[2], item.qty || "", "F1", 7));
+    content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2], rowY - 12, itemCols[3], item.location || "", "F1", 7));
+    content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2] + itemCols[3], rowY - 12, itemCols[4], item.grid || "", "F1", 7));
+    rowY -= 18;
+  }
+
+  const osdTop = rowY - 10;
+  field(x0, osdTop, totalWidth, 18, "18.REPORT OF UNSATISFACTORY OVER SHORT AND DAMAGED MATERIAL (ONLY NECESSARY IF DISCREPANCIES EXIST)", "");
+  const osdHeaderTop = osdTop - 18;
+  const osdCols = [68, 92, 74, 74, totalWidth - 68 - 92 - 74 - 74];
+  content.push(rect(x0, osdHeaderTop - 18 - (Math.max(discrepancyItems.length, 8) * 16), totalWidth, 18 + (Math.max(discrepancyItems.length, 8) * 16)));
+  let osdX = x0;
+  ["ITEM", "QUANTITY", "QUANTITY", "QUANTITY", "COMPLETE DESCRIPTION OF DESCREPENCEY"].forEach((label, idx) => {
+    if (idx > 0) content.push(line(osdX, osdHeaderTop, osdX, osdHeaderTop - 18 - (Math.max(discrepancyItems.length, 8) * 16)));
+    content.push(centerText(osdX, osdHeaderTop - 12, osdCols[idx], label, "F2", 6));
+    osdX += osdCols[idx];
+  });
+  content.push(line(x0, osdHeaderTop - 18, right, osdHeaderTop - 18));
+  content.push(makeText(x0 + 4, osdHeaderTop - 28, "TAG NO.", "F2", 5));
+  content.push(centerText(x0 + osdCols[0], osdHeaderTop - 28, osdCols[1], "ORDERED", "F2", 5));
+  content.push(centerText(x0 + osdCols[0] + osdCols[1], osdHeaderTop - 28, osdCols[2], "SHIPPED", "F2", 5));
+  content.push(centerText(x0 + osdCols[0] + osdCols[1] + osdCols[2], osdHeaderTop - 28, osdCols[3], "RECEIVED", "F2", 5));
+  let osdY = osdHeaderTop - 18;
+  for (let i = 0; i < 8; i += 1) {
+    const item = discrepancyItems[i] || {};
+    const issueText = item.discrepancy || "";
+    content.push(line(x0, osdY - 16, right, osdY - 16));
+    content.push(makeText(x0 + 2, osdY - 11, item.item_code || "", "F1", 6));
+    content.push(centerText(x0 + osdCols[0], osdY - 11, osdCols[1], item.ordered || "", "F1", 6));
+    content.push(centerText(x0 + osdCols[0] + osdCols[1], osdY - 11, osdCols[2], item.shipped || "", "F1", 6));
+    content.push(centerText(x0 + osdCols[0] + osdCols[1] + osdCols[2], osdY - 11, osdCols[3], item.received || "", "F1", 6));
+    content.push(makeText(x0 + osdCols[0] + osdCols[1] + osdCols[2] + osdCols[3] + 2, osdY - 11, issueText, "F1", 6));
+    osdY -= 16;
+  }
+
+  const remarksTop = osdY;
+  field(x0, remarksTop, totalWidth, 18, "NATURE AND EXTENT OF OVERAGE-LOSS-DAMAGED OR UNSATISFACTORY CONDITION OF MATERIAL AND REMARKS:", "");
+  const infoTop = remarksTop - 18;
+  field(x0, infoTop, 192, 18, "TYPE OF CONTAINER:", header.container_type || "");
+  field(x0 + 192, infoTop, 166, 18, "CONTAINER FILED TO CAPACITY?:", "");
+  field(x0 + 358, infoTop, totalWidth - 358, 18, "TYPE OF PACKING USED:", "");
+
+  const info2Top = infoTop - 18;
+  field(x0, info2Top, 192, 18, "EXCEPTION NOTED ON SHIPPING/FREIGHT TICKET?", "");
+  field(x0 + 192, info2Top, 166, 18, "CARRIER NOTIFIED?", "");
+  field(x0 + 358, info2Top, totalWidth - 358, 18, "WAS DAMAGE CONCEALED?", "");
+
+  const info3Top = info2Top - 18;
+  field(x0, info3Top, 240, 18, "INSPECTED FOR CARRIER BY:", "");
+  field(x0 + 240, info3Top, 120, 18, "DATE:", "");
+  field(x0 + 360, info3Top, totalWidth - 360, 18, "CARRIER INSPECTION REPORT NO.:", "");
+
+  const optsTop = info3Top - 18;
+  field(x0, optsTop, totalWidth, 18, "THIS REPORT IS FOR:", "");
+  checkbox(x0 + 64, optsTop - 1, false, "OVERAGE");
+  checkbox(x0 + 144, optsTop - 1, false, "SHORTAGE");
+  checkbox(x0 + 232, optsTop - 1, false, "DAMAGED");
+  checkbox(x0 + 322, optsTop - 1, false, "UNSATISFACTORY");
+  checkbox(x0 + 444, optsTop - 1, false, "OTHER");
+
+  const attachTop = optsTop - 18;
+  field(x0, attachTop, totalWidth, 18, "ATACHMENTS:", "");
+  checkbox(x0 + 2, attachTop - 1, false, "CARRIER INSPECTION REPORT");
+  checkbox(x0 + 112, attachTop - 1, false, "PHOTOS");
+  checkbox(x0 + 176, attachTop - 1, false, "PICK/SHIPPING TICKET");
+  checkbox(x0 + 306, attachTop - 1, false, "NCR(IF APPLICABLE)");
+  checkbox(x0 + 436, attachTop - 1, false, "MTRS");
+  checkbox(x0 + 486, attachTop - 1, false, "OTHER");
+
+  const dispoTop = attachTop - 18;
+  field(x0, dispoTop, 310, 18, "INSPECTING FIELD SUPT./ENG.:", "");
+  field(x0 + 310, dispoTop, totalWidth - 310, 18, "DISPOSITION RECOMMENDED:", "");
+
+  const certTop = dispoTop - 22;
+  field(x0, certTop, totalWidth, 18, "I CERTIFY THE ABOVE REPORT TO BE TRUE AND IN ACCORDANCE WITH THE CONDITION OF THE GOODS UPON RECEIPT", "");
+  const signTop = certTop - 18;
+  field(x0, signTop, 194, 18, "DATE:", "");
+  field(x0 + 194, signTop, 164, 18, "BY:", "");
+  field(x0 + 358, signTop, totalWidth - 358, 18, "TITLE:", "");
+
+  return buildDrawnPdf([content.join("\n")], { pageWidth, pageHeight });
+}
+
 function layout(title, body, user) {
   const navLinks = user
     ? permissionSections
@@ -3525,6 +3735,100 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("req
   res.send(pdfBuffer);
 }));
 
+app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
+  const [headerRes, poReceiptLines, manualLines, linkedFmrRes, jobNumber] = await Promise.all([
+    query(`
+      select
+        m.*,
+        coalesce(po.po_no, m.po_number) as effective_po_number
+      from mrr_logs m
+      left join purchase_orders po on po.id = m.app_po_id
+      where m.id = $1
+    `, [req.params.id]),
+    query(`
+      select
+        r.id,
+        coalesce(pl.po_line, '') as po_line,
+        coalesce(mi.item_code, '') as item_code,
+        coalesce(mi.description, '') as description,
+        coalesce(pl.qty_ordered, 0) as ordered_qty,
+        coalesce(r.qty_received, 0) as received_qty,
+        coalesce(r.warehouse, '') as warehouse,
+        coalesce(r.location, '') as location,
+        coalesce(r.osd_status, '') as osd_status,
+        coalesce(r.osd_notes, '') as notes
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join material_items mi on mi.id = pl.material_item_id
+      where r.mrr_log_id = $1
+      order by r.id
+    `, [req.params.id]),
+    query(`
+      select
+        mrl.id,
+        coalesce(mrl.po_position, '') as po_line,
+        coalesce(mrl.item_code, '') as item_code,
+        coalesce(mrl.description, '') as description,
+        0 as ordered_qty,
+        coalesce(mrl.received_qty, 0) as received_qty,
+        coalesce(mrl.warehouse, '') as warehouse,
+        coalesce(mrl.location, '') as location,
+        coalesce(mrl.received_status, '') as osd_status,
+        coalesce(mrl.comments, '') as notes
+      from material_receiving_logs mrl
+      where coalesce(mrl.mrr_number, '') = (
+        select coalesce(mrr_number, '') from mrr_logs where id = $1
+      )
+      order by coalesce(mrl.legacy_row_id, mrl.id)
+    `, [req.params.id]),
+    query(`
+      select fmr_number, container_no
+      from fmr_logs
+      where coalesce(mrr_number, '') = (
+        select coalesce(mrr_number, '') from mrr_logs where id = $1
+      )
+      order by id
+      limit 1
+    `, [req.params.id]),
+    getJobNumber()
+  ]);
+  const header = headerRes.rows[0];
+  if (!header) throw new Error("MRR log row not found.");
+  const linkedFmr = linkedFmrRes.rows[0] || {};
+  const deliveryMatch = String(linkedFmr.fmr_number || "").match(/^FMR-([A-Z0-9]+)-/i);
+  const printableLines = [...poReceiptLines.rows, ...manualLines.rows].map((row) => ({
+    item_code: row.item_code || "",
+    description: row.description || "",
+    qty: Number(row.received_qty || 0).toFixed(2),
+    location: [row.warehouse, row.location].filter(Boolean).join(" / "),
+    grid: "",
+    status: row.osd_status || "",
+    ordered: row.ordered_qty ? Number(row.ordered_qty).toFixed(2) : "",
+    shipped: row.ordered_qty ? Number(row.ordered_qty).toFixed(2) : "",
+    received: Number(row.received_qty || 0).toFixed(2),
+    discrepancy: [row.osd_status && row.osd_status !== "OK" ? row.osd_status : "", row.notes || ""].filter(Boolean).join(" | ")
+  }));
+  const pdfBuffer = buildMrrFormPdf({
+    mrr_number: header.mrr_number || "",
+    vendor_name: header.vendor_name || "",
+    po_number: header.effective_po_number || "",
+    pick_ticket: header.pick_ticket || "",
+    received_date: header.received_date || "",
+    received_by: header.received_by || "",
+    load_number: header.load_number || "",
+    notes: header.notes || "",
+    container_type: "",
+    material_description: header.material_description || ""
+  }, printableLines, {
+    jobNumber,
+    deliveryLocation: deliveryMatch?.[1] || "KEQ3",
+    fmrNumber: linkedFmr.fmr_number || ""
+  });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${String(header.mrr_number || "mrr").replace(/[^A-Za-z0-9._-]/g, "_")}-mrr.pdf"`);
+  res.send(pdfBuffer);
+}));
+
 app.post("/requisitions/:id/verify", requireAuth, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
@@ -6076,7 +6380,7 @@ app.get("/material-logs/mrr", requireAuth, requirePermission("material_logs", "v
     <td>${esc(row.received_by)}</td>
     <td>${esc(row.load_number)}</td>
     <td>${esc(row.opi_number)}</td>
-    <td><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a></td>
+    <td><div class="actions"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
   </tr>`).join("");
   res.send(layout("MRR Log", `
     <h1>MRR Log</h1>
@@ -7109,7 +7413,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
         <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
-          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
         </form>
       </div>
       <div class="card scroll">
