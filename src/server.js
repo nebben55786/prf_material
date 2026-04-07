@@ -5991,6 +5991,8 @@ app.get("/material-logs/mrr/new", requireAuth, requirePermission("material_logs"
 
 app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
   const q = String(req.query.q || "").trim();
+  const createdCount = Number(req.query.created || 0);
+  const skippedCount = Number(req.query.skipped || 0);
   const rows = (await query(`
     select id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, mrr_number, request_date, need_date, pickup_location, pickup_date
     from fmr_logs
@@ -6010,9 +6012,10 @@ app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "v
     <td>${esc(row.pickup_location)}</td>
     <td>${esc(row.pickup_date)}</td>
     <td><a class="btn btn-secondary" href="/material-logs/fmr/${row.id}/edit">Edit</a></td>
-  </tr>`).join("");
+    </tr>`).join("");
     res.send(layout("Vendor FMR Log", `
       <h1>Vendor FMR Log</h1>
+      ${createdCount > 0 || skippedCount > 0 ? `<div class="card"><strong>Vendor FMR Generation:</strong> Created ${createdCount} | Skipped ${skippedCount}</div>` : ""}
       <div class="card">
         <form method="get" action="/material-logs/fmr" class="stack">
           <div class="grid" style="grid-template-columns: 1fr auto auto auto;">
@@ -6228,17 +6231,22 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
       order by id
     `, [selectedIds])).rows;
     const grouped = new Map();
+    let skippedRequestedCount = 0;
     for (const row of rows) {
       const crateNumber = String(req.body[`crate_number_${row.id}`] || row.crate_number || "").trim();
       const srnNumber = String(req.body[`srn_number_${row.id}`] || row.srn_number || "").trim();
       if (!crateNumber) throw new Error("Every selected line must have a crate number before generating Vendor FMRs.");
       const requestKey = `${String(row.vendor_name || "").trim().toLowerCase()}|${crateNumber.toLowerCase()}`;
-      if (requestedSet.has(requestKey)) continue;
+      if (requestedSet.has(requestKey)) {
+        skippedRequestedCount += 1;
+        continue;
+      }
       if (!grouped.has(requestKey)) {
         grouped.set(requestKey, { row, crateNumber, srnNumber });
       }
     }
     if (grouped.size === 0) throw new Error("All selected crates have already been requested.");
+    let createdCount = 0;
     for (const { row, crateNumber, srnNumber } of grouped.values()) {
       await ensureUniqueFmrContainer(client, row.vendor_name, crateNumber);
       const fmrNumber = await getNextFmrNumber(client);
@@ -6255,9 +6263,17 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
         returning id
       `, [fmrNumber, row.vendor_name || "", crateNumber, requestDescription, new Date().toISOString().slice(0, 10)]);
       await auditLog(client, req.user.id, "create", "fmr_log", insert.rows[0].id, fmrNumber);
+      createdCount += 1;
     }
+    req._vendorFmrGenerateResult = { createdCount, skippedRequestedCount };
   });
-  res.redirect(action === "generate" ? "/material-logs/fmr" : `/material-logs/fmr/request-lines?${redirectQuery}`);
+  if (action === "generate") {
+    const createdCount = Number(req._vendorFmrGenerateResult?.createdCount || 0);
+    const skippedRequestedCount = Number(req._vendorFmrGenerateResult?.skippedRequestedCount || 0);
+    res.redirect(`/material-logs/fmr?created=${createdCount}&skipped=${skippedRequestedCount}`);
+    return;
+  }
+  res.redirect(`/material-logs/fmr/request-lines?${redirectQuery}`);
 }));
 
 app.get("/material-logs/opi", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
