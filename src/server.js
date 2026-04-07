@@ -6587,12 +6587,12 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
       <input type="hidden" name="item_code" value="${esc(itemCode)}" />
       <input type="hidden" name="abbrev_description" value="${esc(abbrevDescription)}" />
       <input type="hidden" name="show_requested" value="${showRequested ? "1" : "0"}" />
-      <div class="card scroll">
-        <table><tr><th>Pick</th><th>Vendor</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Crate #</th><th>SRN</th><th>Line</th><th>Sub</th><th>Rcvd</th><th>MRR #</th><th>Date Rcvd</th></tr>${rowMarkup || `<tr><td colspan="12" class="muted">No request lines found.</td></tr>`}</table>
-      </div>
       <div class="actions">
         <button type="submit" name="action" value="save">Save Crate / SRN</button>
         <button type="submit" name="action" value="generate">Generate Vendor FMRs</button>
+      </div>
+      <div class="card scroll">
+        <table><tr><th>Pick</th><th>Vendor</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Crate #</th><th>SRN</th><th>Line</th><th>Sub</th><th>Rcvd</th><th>MRR #</th><th>Date Rcvd</th></tr>${rowMarkup || `<tr><td colspan="12" class="muted">No request lines found.</td></tr>`}</table>
       </div>
     </form>
   `, req.user));
