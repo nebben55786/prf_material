@@ -7146,8 +7146,12 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Vendor FMR log row not found.</h3></div>`, req.user));
     return;
   }
+  const vendorNames = vendors.rows.map((vendor) => String(vendor.name || "").trim()).filter(Boolean);
+  if (String(row.vendor_name || "").trim() && !vendorNames.some((name) => name.toLowerCase() === String(row.vendor_name || "").trim().toLowerCase())) {
+    vendorNames.unshift(String(row.vendor_name || "").trim());
+  }
   const vendorOptions = [`<option value="">Select vendor</option>`]
-    .concat(vendors.rows.map((vendor) => `<option value="${esc(vendor.name)}" ${row.vendor_name === vendor.name ? "selected" : ""}>${esc(vendor.name)}</option>`))
+    .concat(vendorNames.map((vendorName) => `<option value="${esc(vendorName)}" ${String(row.vendor_name || "").trim().toLowerCase() === vendorName.toLowerCase() ? "selected" : ""}>${esc(vendorName)}</option>`))
     .join("");
   res.send(layout("Edit Vendor FMR Log", `
       <h1>Edit Vendor FMR Entry</h1>
