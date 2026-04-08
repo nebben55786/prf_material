@@ -7559,7 +7559,7 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requirePermission("mat
           <div><label>Warehouse</label><select id="receiving-log-warehouse-${row.id}" name="warehouse" onchange='syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(row.location || "")}")'>${warehouseOptionsHtml}</select></div>
           <div><label>Location</label><select id="receiving-log-location-${row.id}" name="location" data-placeholder="Select location"><option value="">Select location</option></select></div>
         </div>
-        <div><label>Received Date</label><input name="recv_date" value="${esc(row.recv_date)}" /></div>
+        <div><label>Received Date</label><input name="recv_date" value="${esc(formatShortDateTime(row.recv_date))}" /></div>
         <div><label>Comments</label><textarea name="comments">${esc(row.comments)}</textarea></div>
         <div class="actions"><button type="submit">Save Receiving Line</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
       </form>
@@ -7765,11 +7765,11 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
             <div><label>Container #</label><input name="container_no" value="${esc(row.container_no)}" /></div>
             <div><label>Fluor ID</label><input name="fluor_id" value="${esc(row.fluor_id)}" /></div>
             <div><label>MRR #</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
-          <div><label>Request Date</label><input name="request_date" value="${esc(row.request_date)}" /></div>
-          <div><label>Need Date</label><input name="need_date" value="${esc(row.need_date)}" /></div>
+          <div><label>Request Date</label><input name="request_date" value="${esc(formatShortDateTime(row.request_date))}" /></div>
+          <div><label>Need Date</label><input name="need_date" value="${esc(formatShortDateTime(row.need_date))}" /></div>
           <div><label>Pick Ticket #</label><input name="pick_ticket" value="${esc(row.pick_ticket)}" /></div>
           <div><label>Pickup Location</label><input name="pickup_location" value="${esc(row.pickup_location)}" /></div>
-          <div><label>Pickup Date</label><input name="pickup_date" value="${esc(row.pickup_date)}" /></div>
+          <div><label>Pickup Date</label><input name="pickup_date" value="${esc(formatShortDateTime(row.pickup_date))}" /></div>
         </div>
         <div><label>Fluor Description</label><textarea name="fluor_desc">${esc(row.fluor_desc)}</textarea></div>
         <div><label>Request Description</label><textarea name="request_description">${esc(row.request_description)}</textarea></div>
