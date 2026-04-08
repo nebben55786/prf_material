@@ -6815,6 +6815,9 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
 });
 
 app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async (req, res) => {
+  const warehouseFilter = String(req.query.warehouse_filter || "").trim();
+  const locationFilter = String(req.query.location_filter || "").trim();
+  const identFilter = String(req.query.ident_filter || "").trim();
   const allowedSorts = {
     item_code: "coalesce(item_code, '')",
     description: "coalesce(description, '')",
@@ -6830,12 +6833,42 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
   const sort = String(req.query.sort || "item_code").trim();
   const dir = String(req.query.dir || "asc").trim().toLowerCase() === "desc" ? "desc" : "asc";
   const sortSql = allowedSorts[sort] || allowedSorts.item_code;
+  const [warehouseOptions, locationMap] = await Promise.all([
+    getWarehouseOptions(),
+    getWarehouseLocationMap()
+  ]);
+  const params = [];
+  const where = [];
+  if (warehouseFilter) {
+    params.push(`%${warehouseFilter}%`);
+    where.push(`coalesce(warehouse, '') ilike $${params.length}`);
+  }
+  if (locationFilter) {
+    params.push(`%${locationFilter}%`);
+    where.push(`coalesce(location, '') ilike $${params.length}`);
+  }
+  if (identFilter) {
+    params.push(`%${identFilter}%`);
+    where.push(`(coalesce(item_code, '') ilike $${params.length} or coalesce(description, '') ilike $${params.length})`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const inventoryQueryString = (source = {}) => new URLSearchParams({
+    warehouse_filter: String(source.warehouse_filter || ""),
+    location_filter: String(source.location_filter || ""),
+    ident_filter: String(source.ident_filter || ""),
+    sort: String(source.sort || sort),
+    dir: String(source.dir || dir)
+  }).toString();
   const rows = (await query(`
     select *
     from (${getInventoryByLocationSubquery()}) inventory_by_location
+    ${whereSql}
     order by ${sortSql} ${dir}, item_code asc, warehouse asc, location asc
-  `)).rows;
-  const sortLink = (column) => `/inventory?sort=${encodeURIComponent(column)}&dir=${encodeURIComponent(nextSortDir(sort, dir, column))}`;
+  `, params)).rows;
+  const sortLink = (column) => `/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter, ident_filter: identFilter, sort: column, dir: nextSortDir(sort, dir, column) })}`;
+  const warehouseOptionsHtml = [`<option value="">All warehouses</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
+    .join("");
   const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.item_code)}</td><td>${esc(row.description)}</td><td>${esc(row.size_1 || "")}</td><td>${esc(row.size_2 || "")}</td>
     <td>${esc(row.thk_1 || "")}</td><td>${esc(row.thk_2 || "")}</td><td>${esc(row.warehouse)}</td><td>${esc(row.location)}</td>
@@ -6843,7 +6876,48 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
   </tr>`).join("");
   res.send(layout("Inventory", `
     <h1>Inventory by Location</h1>
+    <div class="card">
+      <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">
+        <form method="get" action="/inventory" class="stack">
+          <label>Warehouse</label>
+          <select id="inventory-warehouse" name="warehouse_filter" onchange='syncLocationOptions("inventory-warehouse", "inventory-location", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(locationFilter)}")'>${warehouseOptionsHtml}</select>
+          <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="sort" value="${esc(sort)}" />
+          <input type="hidden" name="dir" value="${esc(dir)}" />
+          <div class="actions">
+            <button type="submit">Apply Warehouse</button>
+            <a class="btn btn-secondary" href="/inventory?${inventoryQueryString({ location_filter: locationFilter, ident_filter: identFilter })}">Clear Warehouse</a>
+          </div>
+        </form>
+        <form method="get" action="/inventory" class="stack">
+          <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <label>Location</label>
+          <select id="inventory-location" name="location_filter" data-placeholder="All locations"><option value="">All locations</option></select>
+          <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="sort" value="${esc(sort)}" />
+          <input type="hidden" name="dir" value="${esc(dir)}" />
+          <div class="actions">
+            <button type="submit">Apply Location</button>
+            <a class="btn btn-secondary" href="/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, ident_filter: identFilter })}">Clear Location</a>
+          </div>
+        </form>
+        <form method="get" action="/inventory" class="stack">
+          <label>Ident</label>
+          <input name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <input type="hidden" name="sort" value="${esc(sort)}" />
+          <input type="hidden" name="dir" value="${esc(dir)}" />
+          <div class="actions">
+            <button type="submit">Apply Ident</button>
+            <a class="btn btn-secondary" href="/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter })}">Clear Ident</a>
+          </div>
+        </form>
+      </div>
+    </div>
     <div class="card scroll"><table><tr><th><a href="${sortLink("item_code")}">${esc(sortLabel("Item", sort, dir, "item_code"))}</a></th><th><a href="${sortLink("description")}">${esc(sortLabel("Description", sort, dir, "description"))}</a></th><th><a href="${sortLink("size_1")}">${esc(sortLabel("Size 1", sort, dir, "size_1"))}</a></th><th><a href="${sortLink("size_2")}">${esc(sortLabel("Size 2", sort, dir, "size_2"))}</a></th><th><a href="${sortLink("thk_1")}">${esc(sortLabel("Thk 1", sort, dir, "thk_1"))}</a></th><th><a href="${sortLink("thk_2")}">${esc(sortLabel("Thk 2", sort, dir, "thk_2"))}</a></th><th><a href="${sortLink("warehouse")}">${esc(sortLabel("Warehouse", sort, dir, "warehouse"))}</a></th><th><a href="${sortLink("location")}">${esc(sortLabel("Location", sort, dir, "location"))}</a></th><th><a href="${sortLink("qty_on_hand")}">${esc(sortLabel("Qty On Hand", sort, dir, "qty_on_hand"))}</a></th><th><a href="${sortLink("qty_osd")}">${esc(sortLabel("Qty OS&D", sort, dir, "qty_osd"))}</a></th></tr>${tableRows}</table></div>
+    <script>syncLocationOptions("inventory-warehouse", "inventory-location", ${JSON.stringify(locationMap)}, ${JSON.stringify(locationFilter)});</script>
   `, req.user));
 });
 
