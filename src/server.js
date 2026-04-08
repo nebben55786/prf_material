@@ -2030,6 +2030,93 @@ async function getRequestedVendorCrateSet(client = null) {
   return new Set(rows.map((row) => `${row.vendor_key}|${row.crate_key}`));
 }
 
+function getVendorFmrRequestBuilderQuery(source = {}) {
+  return new URLSearchParams({
+    po_number: String(source.po_number || ""),
+    item_code: String(source.item_code || ""),
+    abbrev_description: String(source.abbrev_description || ""),
+    show_requested: String(source.show_requested || "0"),
+    current_crate_number: String(source.current_crate_number || "")
+  }).toString();
+}
+
+async function buildVendorFmrPreviewData(client) {
+  const requestedSet = await getRequestedVendorCrateSet(client);
+  const stagedRows = (await client.query(`
+    select *
+    from vendor_fmr_request_lines
+    where selected_for_request = true
+    order by id
+  `)).rows;
+  const requestGroups = new Map();
+  const invalidRows = [];
+  const skippedRows = [];
+  for (const row of stagedRows) {
+    const crateNumber = String(row.crate_number || "").trim();
+    const srnNumber = String(row.srn_number || "").trim();
+    const vendorName = String(row.vendor_name || "").trim();
+    const vendorKey = vendorName.toLowerCase();
+    if (!crateNumber) {
+      invalidRows.push({
+        id: row.id,
+        vendorName,
+        poNumber: row.po_number || "",
+        itemCode: row.item_code || "",
+        abbrevDescription: row.abbrev_description || "",
+        srnNumber
+      });
+      continue;
+    }
+    const crateKey = `${vendorKey}|${crateNumber.toLowerCase()}`;
+    if (requestedSet.has(crateKey)) {
+      skippedRows.push({
+        id: row.id,
+        vendorName,
+        crateNumber,
+        poNumber: row.po_number || "",
+        itemCode: row.item_code || "",
+        abbrevDescription: row.abbrev_description || "",
+        srnNumber
+      });
+      continue;
+    }
+    const requestGroupKey = `${vendorKey}|${srnNumber ? srnNumber.toLowerCase() : "__blank__"}`;
+    if (!requestGroups.has(requestGroupKey)) {
+      requestGroups.set(requestGroupKey, {
+        vendorName,
+        srnNumber,
+        rowsByCrate: new Map()
+      });
+    }
+    const group = requestGroups.get(requestGroupKey);
+    if (!group.rowsByCrate.has(crateKey)) {
+      group.rowsByCrate.set(crateKey, {
+        row,
+        vendorName,
+        crateNumber,
+        srnNumber,
+        stagedLineCount: 1
+      });
+    } else {
+      group.rowsByCrate.get(crateKey).stagedLineCount += 1;
+    }
+  }
+  const previewGroups = Array.from(requestGroups.values()).map((group) => ({
+    ...group,
+    crates: Array.from(group.rowsByCrate.values())
+  }));
+  const previewRows = previewGroups.flatMap((group) => group.crates.map((crate) => ({
+    vendorName: crate.vendorName,
+    crateNumber: crate.crateNumber,
+    srnNumber: crate.srnNumber,
+    poNumber: crate.row.po_number || "",
+    itemCode: crate.row.item_code || "",
+    abbrevDescription: crate.row.abbrev_description || "",
+    stagedLineCount: crate.stagedLineCount
+  })));
+  return { stagedRows, previewGroups, previewRows, invalidRows, skippedRows };
+}
+
 function signSession(payload) {
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
@@ -6767,7 +6854,7 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
   const poNumber = String(req.query.po_number || "").trim();
   const itemCode = String(req.query.item_code || "").trim();
   const abbrevDescription = String(req.query.abbrev_description || "").trim();
-  const currentCrateNumber = String(req.query.current_crate_number || "").trim();
+  const currentCrateNumber = String(req.query.current_crate_number || "").trim() || itemCode || abbrevDescription;
   const showRequested = String(req.query.show_requested || "").trim() === "1";
   const params = [];
   const where = [];
@@ -6795,11 +6882,14 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
     )`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  const stagedCount = Number((await query(`
-    select count(*)::int as count
+  const stagedRows = (await query(`
+    select *
     from vendor_fmr_request_lines
     where selected_for_request = true
-  `)).rows[0]?.count || 0);
+    order by updated_at desc, id desc
+    limit 100
+  `)).rows;
+  const stagedCount = stagedRows.length;
   const rows = (await query(`
     select
       vl.*,
@@ -6815,6 +6905,24 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
     order by coalesce(vl.po_number, ''), coalesce(vl.item_code, ''), coalesce(vl.abbrev_description, ''), vl.id
     limit 300
   `, params)).rows;
+  const stagedMarkup = stagedRows.map((row) => `<tr>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.abbrev_description)}</td>
+    <td>${esc(row.crate_number || "")}</td>
+    <td>${esc(row.srn_number || "")}</td>
+    <td>
+      <form method="post" action="/material-logs/fmr/request-lines/staged/${row.id}/delete">
+        <input type="hidden" name="po_number" value="${esc(poNumber)}" />
+        <input type="hidden" name="item_code" value="${esc(itemCode)}" />
+        <input type="hidden" name="abbrev_description" value="${esc(abbrevDescription)}" />
+        <input type="hidden" name="show_requested" value="${showRequested ? "1" : "0"}" />
+        <input type="hidden" name="current_crate_number" value="${esc(currentCrateNumber)}" />
+        <button type="submit" class="btn btn-secondary">Remove</button>
+      </form>
+    </td>
+  </tr>`).join("");
   const rowMarkup = rows.map((row) => `<tr>
     <td>${row.already_requested ? `<span class="chip">Requested</span>` : `<input type="checkbox" class="vendor-fmr-pick" data-row-id="${row.id}" name="selected_ids" value="${row.id}" ${row.selected_for_request ? "checked" : ""} />`}</td>
     <td>${esc(row.vendor_name)}</td>
@@ -6847,7 +6955,7 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
           <div><label>PO</label><input name="po_number" value="${esc(poNumber)}" /></div>
           <div><label>Item Code</label><input name="item_code" value="${esc(itemCode)}" /></div>
           <div><label>Abbrev Description</label><input name="abbrev_description" value="${esc(abbrevDescription)}" /></div>
-          <div><label>Current Crate #</label><input name="current_crate_number" value="${esc(currentCrateNumber)}" placeholder="Use this crate # for checked rows" /></div>
+          <div><label>Current Crate #</label><input id="current_crate_number_display" name="current_crate_number" value="${esc(currentCrateNumber)}" placeholder="Use this crate # for checked rows" /></div>
           <div><label>Show Requested</label><select name="show_requested"><option value="0" ${showRequested ? "" : "selected"}>No</option><option value="1" ${showRequested ? "selected" : ""}>Yes</option></select></div>
           <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
         </div>
@@ -6857,17 +6965,16 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
       <div class="muted">Work one crate at a time here. Type the current crate number once, check the matching lines, and the app will fill that crate number into each checked row. Save as many staged crates as you need, then click Generate Vendor FMRs once to create all staged requests.</div>
       <div class="muted" style="margin-top:8px;">Staged lines ready to generate: <strong>${stagedCount}</strong></div>
     </div>
+    <div class="card scroll">
+      <h2 style="margin-top:0;">Currently Staged</h2>
+      <table><tr><th>Vendor</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Crate #</th><th>SRN</th><th>Action</th></tr>${stagedMarkup || `<tr><td colspan="7" class="muted">No lines are staged yet.</td></tr>`}</table>
+    </div>
     <form method="post" action="/material-logs/fmr/request-lines/bulk" class="stack">
       <input type="hidden" name="po_number" value="${esc(poNumber)}" />
       <input type="hidden" name="item_code" value="${esc(itemCode)}" />
       <input type="hidden" name="abbrev_description" value="${esc(abbrevDescription)}" />
       <input type="hidden" name="show_requested" value="${showRequested ? "1" : "0"}" />
-      <div class="card">
-        <div class="grid" style="grid-template-columns: 1fr auto;">
-          <div><label>Current Crate #</label><input id="current_crate_number" name="current_crate_number" value="${esc(currentCrateNumber)}" placeholder="Type crate # once, then check the matching lines" /></div>
-          <div style="align-self:end;"><button type="button" class="btn btn-secondary" id="apply_current_crate">Fill Checked Rows</button></div>
-        </div>
-      </div>
+      <input id="current_crate_number" type="hidden" name="current_crate_number" value="${esc(currentCrateNumber)}" />
       <div class="actions">
         <button type="submit" name="action" value="save">Save Crate / SRN</button>
         <button type="submit" name="action" value="generate">Generate Vendor FMRs</button>
@@ -6878,11 +6985,12 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
     </form>
     <script>
       (() => {
-        const crateSource = document.getElementById("current_crate_number");
-        const fillButton = document.getElementById("apply_current_crate");
-        if (!crateSource) return;
+        const crateSource = document.getElementById("current_crate_number_display");
+        const crateHidden = document.getElementById("current_crate_number");
+        if (!crateSource || !crateHidden) return;
         const applyCrateToCheckedRows = () => {
           const crateValue = crateSource.value.trim();
+          crateHidden.value = crateValue;
           if (!crateValue) return;
           document.querySelectorAll(".vendor-fmr-pick:checked").forEach((checkbox) => {
             const crateInput = document.querySelector('.vendor-fmr-crate-input[data-row-id="' + checkbox.dataset.rowId + '"]');
@@ -6895,9 +7003,7 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
           });
         });
         crateSource.addEventListener("input", applyCrateToCheckedRows);
-        if (fillButton) {
-          fillButton.addEventListener("click", applyCrateToCheckedRows);
-        }
+        applyCrateToCheckedRows();
       })();
     </script>
   `, req.user));
@@ -6958,6 +7064,21 @@ app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermissi
   res.redirect(`/imports/${batchId}`);
 }));
 
+app.post("/material-logs/fmr/request-lines/staged/:id/delete", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) throw new Error("Invalid staged request line.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      update vendor_fmr_request_lines
+      set selected_for_request = false,
+          updated_at = now()
+      where id = $1
+    `, [id]);
+    await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", id, "unstaged");
+  });
+  res.redirect(`/material-logs/fmr/request-lines?${getVendorFmrRequestBuilderQuery(req.body)}`);
+}));
+
 app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
   const action = String(req.body.action || "save").trim();
   const currentCrateNumber = String(req.body.current_crate_number || "").trim();
@@ -6972,13 +7093,13 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
     : req.body.selected_ids
       ? [Number(req.body.selected_ids)].filter(Number.isFinite)
       : [];
-  const redirectQuery = new URLSearchParams({
+  const redirectQuery = getVendorFmrRequestBuilderQuery({
     po_number: String(req.body.po_number || ""),
     item_code: String(req.body.item_code || ""),
     abbrev_description: String(req.body.abbrev_description || ""),
     show_requested: String(req.body.show_requested || "0"),
     current_crate_number: currentCrateNumber
-  }).toString();
+  });
   await withTransaction(async (client) => {
     const selectedIdSet = new Set(selectedIds);
     for (const id of fieldIds) {
@@ -6996,45 +7117,119 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
       await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", fieldIds.join(","), `count=${fieldIds.length}`);
       return;
     }
-    const requestedSet = await getRequestedVendorCrateSet(client);
-    const rows = (await client.query(`
-      select *
-      from vendor_fmr_request_lines
+    const preview = await buildVendorFmrPreviewData(client);
+    if (preview.stagedRows.length === 0) throw new Error("Save at least one staged line before generating Vendor FMRs.");
+  });
+  if (action === "generate") {
+    res.redirect(`/material-logs/fmr/request-lines/preview?${redirectQuery}`);
+    return;
+  }
+  res.redirect(`/material-logs/fmr/request-lines?${redirectQuery}`);
+}));
+
+app.get("/material-logs/fmr/request-lines/preview", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const queryString = getVendorFmrRequestBuilderQuery(req.query);
+  const preview = await withTransaction(async (client) => buildVendorFmrPreviewData(client));
+  if (preview.stagedRows.length === 0) {
+    res.redirect(`/material-logs/fmr/request-lines?${queryString}`);
+    return;
+  }
+  const previewMarkup = preview.previewRows.map((row) => `<tr>
+    <td>${esc(row.vendorName)}</td>
+    <td>${esc(row.crateNumber)}</td>
+    <td>${esc(row.srnNumber || "")}</td>
+    <td>${esc(row.poNumber)}</td>
+    <td>${esc(row.itemCode)}</td>
+    <td>${esc(row.abbrevDescription)}</td>
+    <td>${esc(row.stagedLineCount)}</td>
+    <td>
+      <form method="post" action="/material-logs/fmr/request-lines/preview/remove">
+        <input type="hidden" name="vendor_name" value="${esc(row.vendorName)}" />
+        <input type="hidden" name="crate_number" value="${esc(row.crateNumber)}" />
+        <input type="hidden" name="srn_number" value="${esc(row.srnNumber || "")}" />
+        <input type="hidden" name="po_number" value="${esc(String(req.query.po_number || ""))}" />
+        <input type="hidden" name="item_code" value="${esc(String(req.query.item_code || ""))}" />
+        <input type="hidden" name="abbrev_description" value="${esc(String(req.query.abbrev_description || ""))}" />
+        <input type="hidden" name="show_requested" value="${esc(String(req.query.show_requested || "0"))}" />
+        <input type="hidden" name="current_crate_number" value="${esc(String(req.query.current_crate_number || ""))}" />
+        <button type="submit" class="btn btn-secondary">Remove</button>
+      </form>
+    </td>
+  </tr>`).join("");
+  const skippedMarkup = preview.skippedRows.map((row) => `<tr>
+    <td>${esc(row.vendorName)}</td>
+    <td>${esc(row.crateNumber)}</td>
+    <td>${esc(row.srnNumber || "")}</td>
+    <td>${esc(row.poNumber)}</td>
+    <td>${esc(row.itemCode)}</td>
+    <td>${esc(row.abbrevDescription)}</td>
+    <td>Already on Vendor FMR Log</td>
+  </tr>`).join("");
+  const invalidMarkup = preview.invalidRows.map((row) => `<tr>
+    <td>${esc(row.vendorName)}</td>
+    <td>${esc(row.poNumber)}</td>
+    <td>${esc(row.itemCode)}</td>
+    <td>${esc(row.abbrevDescription)}</td>
+    <td>${esc(row.srnNumber || "")}</td>
+    <td>Missing crate #</td>
+  </tr>`).join("");
+  res.send(layout("Review Vendor FMRs", `
+    <h1>Review Vendor FMRs</h1>
+    <div class="card">
+      <div class="muted">This is the final review before new Vendor FMRs are created. Each row below represents one crate that will become one Vendor FMR line.</div>
+    </div>
+    ${preview.invalidRows.length ? `<div class="card scroll"><h2 style="margin-top:0;">Needs Attention</h2><table><tr><th>Vendor</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>SRN</th><th>Issue</th></tr>${invalidMarkup}</table></div>` : ""}
+    ${preview.skippedRows.length ? `<div class="card scroll"><h2 style="margin-top:0;">Already Requested</h2><table><tr><th>Vendor</th><th>Crate #</th><th>SRN</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Status</th></tr>${skippedMarkup}</table></div>` : ""}
+    <div class="card scroll">
+      <h2 style="margin-top:0;">Will Be Added</h2>
+      <table><tr><th>Vendor</th><th>Crate #</th><th>SRN</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Staged Lines</th><th>Action</th></tr>${previewMarkup || `<tr><td colspan="8" class="muted">No new Vendor FMRs are queued right now.</td></tr>`}</table>
+    </div>
+    <div class="actions">
+      <a class="btn btn-secondary" href="/material-logs/fmr/request-lines?${queryString}">Back And Add More</a>
+      ${preview.invalidRows.length || preview.previewRows.length === 0 ? "" : `<form method="post" action="/material-logs/fmr/request-lines/preview/create" style="display:inline-block;">
+        <input type="hidden" name="po_number" value="${esc(String(req.query.po_number || ""))}" />
+        <input type="hidden" name="item_code" value="${esc(String(req.query.item_code || ""))}" />
+        <input type="hidden" name="abbrev_description" value="${esc(String(req.query.abbrev_description || ""))}" />
+        <input type="hidden" name="show_requested" value="${esc(String(req.query.show_requested || "0"))}" />
+        <input type="hidden" name="current_crate_number" value="${esc(String(req.query.current_crate_number || ""))}" />
+        <button type="submit">Confirm And Create Vendor FMRs</button>
+      </form>`}
+    </div>
+  `, req.user));
+}));
+
+app.post("/material-logs/fmr/request-lines/preview/remove", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const vendorName = String(req.body.vendor_name || "").trim();
+  const crateNumber = String(req.body.crate_number || "").trim();
+  const srnNumber = String(req.body.srn_number || "").trim();
+  if (!vendorName || !crateNumber) throw new Error("Invalid staged crate.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      update vendor_fmr_request_lines
+      set selected_for_request = false,
+          updated_at = now()
       where selected_for_request = true
-      order by id
-    `)).rows;
-    if (rows.length === 0) throw new Error("Save at least one staged line before generating Vendor FMRs.");
-    const requestGroups = new Map();
-    let skippedRequestedCount = 0;
-    for (const row of rows) {
-      const crateNumber = String(row.crate_number || "").trim();
-      const srnNumber = String(row.srn_number || "").trim();
-      if (!crateNumber) throw new Error("Every selected line must have a crate number before generating Vendor FMRs.");
-      const vendorKey = String(row.vendor_name || "").trim().toLowerCase();
-      const crateKey = `${vendorKey}|${crateNumber.toLowerCase()}`;
-      if (requestedSet.has(crateKey)) {
-        skippedRequestedCount += 1;
-        continue;
-      }
-      const requestGroupKey = `${vendorKey}|${srnNumber ? srnNumber.toLowerCase() : "__blank__"}`;
-      if (!requestGroups.has(requestGroupKey)) {
-        requestGroups.set(requestGroupKey, {
-          srnNumber,
-          rowsByCrate: new Map()
-        });
-      }
-      const group = requestGroups.get(requestGroupKey);
-      if (!group.rowsByCrate.has(crateKey)) {
-        group.rowsByCrate.set(crateKey, { row, crateNumber, srnNumber });
-      }
-    }
-    if (requestGroups.size === 0) throw new Error("All selected crates have already been requested.");
+        and lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))
+        and lower(trim(coalesce(crate_number, ''))) = lower(trim($2))
+        and lower(trim(coalesce(srn_number, ''))) = lower(trim($3))
+    `, [vendorName, crateNumber, srnNumber]);
+    await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", crateNumber, `preview-remove ${vendorName}`);
+  });
+  res.redirect(`/material-logs/fmr/request-lines/preview?${getVendorFmrRequestBuilderQuery(req.body)}`);
+}));
+
+app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  await withTransaction(async (client) => {
+    const preview = await buildVendorFmrPreviewData(client);
+    if (preview.stagedRows.length === 0) throw new Error("There are no staged lines ready to create.");
+    if (preview.invalidRows.length > 0) throw new Error("Fix the staged lines that are missing crate numbers before creating Vendor FMRs.");
+    if (preview.previewGroups.length === 0) throw new Error("All staged crates have already been requested.");
     let createdCount = 0;
     let createdLineCount = 0;
-    for (const group of requestGroups.values()) {
+    for (const group of preview.previewGroups) {
       const fmrNumber = await getNextFmrNumber(client);
       createdCount += 1;
-      for (const { row, crateNumber, srnNumber } of group.rowsByCrate.values()) {
+      for (const { row, crateNumber, srnNumber } of group.crates) {
         await ensureUniqueFmrContainer(client, row.vendor_name, crateNumber);
         const requestDescription = [
           row.po_number ? `PO ${row.po_number}` : "",
@@ -7073,16 +7268,16 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
           updated_at = now()
       where selected_for_request = true
     `);
-    req._vendorFmrGenerateResult = { createdCount, createdLineCount, skippedRequestedCount };
+    req._vendorFmrGenerateResult = {
+      createdCount,
+      createdLineCount,
+      skippedRequestedCount: preview.skippedRows.length
+    };
   });
-  if (action === "generate") {
-    const createdCount = Number(req._vendorFmrGenerateResult?.createdCount || 0);
-    const createdLineCount = Number(req._vendorFmrGenerateResult?.createdLineCount || 0);
-    const skippedRequestedCount = Number(req._vendorFmrGenerateResult?.skippedRequestedCount || 0);
-    res.redirect(`/material-logs/fmr?created=${createdCount}&lines=${createdLineCount}&skipped=${skippedRequestedCount}`);
-    return;
-  }
-  res.redirect(`/material-logs/fmr/request-lines?${redirectQuery}`);
+  const createdCount = Number(req._vendorFmrGenerateResult?.createdCount || 0);
+  const createdLineCount = Number(req._vendorFmrGenerateResult?.createdLineCount || 0);
+  const skippedRequestedCount = Number(req._vendorFmrGenerateResult?.skippedRequestedCount || 0);
+  res.redirect(`/material-logs/fmr?created=${createdCount}&lines=${createdLineCount}&skipped=${skippedRequestedCount}`);
 }));
 
 app.get("/material-logs/opi", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
