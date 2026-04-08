@@ -260,6 +260,56 @@ function formatPickTicketTimestamp(value = new Date()) {
   }
 }
 
+function buildRfqSheetPdf(rfq, items, options = {}) {
+  const vendorName = String(options.vendorName || "").trim();
+  const vendorContact = String(options.vendorContact || "").trim();
+  const detailLines = [
+    `RFQ #: ${rfq.rfq_no || ""}`,
+    `Project: ${rfq.project_name || ""}`,
+    `Vendor: ${vendorName || "Not Selected"}`,
+    `Contact: ${vendorContact || ""}`,
+    `Due Date: ${rfq.due_date || ""}`,
+    `Status: ${rfq.status || ""}`,
+    `Created: ${rfq.created_at || ""}`
+  ];
+  const tableLines = [
+    [
+      padPdfColumn("LINE", 8),
+      padPdfColumn("ITEM", 22),
+      padPdfColumn("QTY", 8, "right"),
+      padPdfColumn("UOM", 8),
+      padPdfColumn("DESCRIPTION", 60)
+    ].join(" ")
+  ];
+  tableLines.push("-".repeat(115));
+  for (const item of items) {
+    const descriptionLines = wrapPdfText(item.description || "", 60);
+    descriptionLines.forEach((descriptionLine, index) => {
+      tableLines.push([
+        padPdfColumn(index === 0 ? item.po_line || "" : "", 8),
+        padPdfColumn(index === 0 ? item.item_code || "" : "", 22),
+        padPdfColumn(index === 0 ? String(item.qty || "") : "", 8, "right"),
+        padPdfColumn(index === 0 ? item.uom || "" : "", 8),
+        padPdfColumn(descriptionLine, 60)
+      ].join(" "));
+    });
+    if (item.spec || item.notes) {
+      const meta = [item.spec ? `Spec: ${item.spec}` : "", item.notes ? `Notes: ${item.notes}` : ""].filter(Boolean).join(" | ");
+      wrapPdfText(meta, 102).forEach((metaLine) => {
+        tableLines.push([
+          padPdfColumn("", 8),
+          padPdfColumn("", 22),
+          padPdfColumn("", 8),
+          padPdfColumn("", 8),
+          padPdfColumn(metaLine, 60)
+        ].join(" "));
+      });
+    }
+    tableLines.push("");
+  }
+  return buildSimplePdf(`REQUEST FOR QUOTE ${rfq.rfq_no || ""}`, detailLines, tableLines);
+}
+
 function buildDrawnPdf(pages, options = {}) {
   const pageWidth = options.pageWidth || 612;
   const pageHeight = options.pageHeight || 792;
@@ -824,6 +874,78 @@ function layout(title, body, user) {
         poInput.value = String(poNumber).trim();
         vendorInput.value = vendorSelect.value;
         targetForm.submit();
+        return false;
+      }
+      function blobToBase64(blob) {
+        return new Promise(function(resolve, reject) {
+          const reader = new FileReader();
+          reader.onloadend = function() {
+            const result = String(reader.result || "");
+            const parts = result.split(",");
+            resolve(parts[1] || "");
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+      async function createOutlookRfqDraft(button, rfqId, vendorSelectId, rfqNumber, description) {
+        const vendorSelect = document.getElementById(vendorSelectId);
+        if (!vendorSelect) return false;
+        if (!vendorSelect.value) {
+          window.alert("Select a quote vendor first.");
+          return false;
+        }
+        const selectedOption = vendorSelect.options[vendorSelect.selectedIndex];
+        const vendorEmail = String(selectedOption?.getAttribute("data-email") || "").trim();
+        const vendorName = String(selectedOption?.textContent || "").trim();
+        const vendorContact = String(selectedOption?.getAttribute("data-contact-name") || "").trim();
+        if (!vendorEmail) {
+          window.alert("The selected vendor does not have a primary contact email.");
+          return false;
+        }
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = "Creating Outlook Draft...";
+        try {
+          const pdfResponse = await fetch("/rfq/" + encodeURIComponent(rfqId) + "/sheet.pdf?vendor_id=" + encodeURIComponent(vendorSelect.value), {
+            credentials: "same-origin"
+          });
+          if (!pdfResponse.ok) {
+            throw new Error("Unable to generate the RFQ PDF.");
+          }
+          const pdfBlob = await pdfResponse.blob();
+          const pdfBase64 = await blobToBase64(pdfBlob);
+          const helperResponse = await fetch("http://127.0.0.1:47321/outlook/rfq-draft", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              to: vendorEmail,
+              subject: [rfqNumber, description].filter(Boolean).join(" | "),
+              body: [
+                "Please see the attached RFQ sheet.",
+                "",
+                "RFQ #: " + String(rfqNumber || ""),
+                "Vendor: " + vendorName,
+                vendorContact ? "Contact: " + vendorContact : ""
+              ].filter(Boolean).join("\\r\\n"),
+              attachmentName: String(rfqNumber || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_") + ".pdf",
+              attachmentBase64: pdfBase64
+            })
+          });
+          if (!helperResponse.ok) {
+            const errorText = await helperResponse.text();
+            throw new Error(errorText || "The Outlook helper did not accept the RFQ draft request.");
+          }
+          window.alert("Outlook draft created.");
+        } catch (error) {
+          const details = error && error.message ? error.message : "Start the local Outlook helper and try again.";
+          window.alert("Unable to create the Outlook draft. " + details);
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
         return false;
       }
       function filterTableRows(inputId, tableId) {
@@ -4634,7 +4756,22 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
     `, [rfqId]),
-    query("select id, name from vendors order by name"),
+    query(`
+      select
+        v.id,
+        v.name,
+        coalesce(primary_contact.contact_name, v.contact_name, '') as primary_contact_name,
+        coalesce(primary_contact.email, v.email, '') as primary_email
+      from vendors v
+      left join lateral (
+        select contact_name, email
+        from vendor_contacts
+        where vendor_id = v.id and is_primary = true
+        order by id asc
+        limit 1
+      ) primary_contact on true
+      order by v.name
+    `),
     query("select count(*) from purchase_orders where rfq_id = $1", [rfqId]),
     query(`
       select ib.id, ib.entity_type, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
@@ -4654,7 +4791,6 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
   const materialItems = materialItemsRes.rows;
   const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
   const activeQuoteVendorId = selectedVendorId || String(vendors[0]?.id || "");
-  const activeQuoteVendorName = vendors.find((vendor) => String(vendor.id) === activeQuoteVendorId)?.name || "";
   const materialItemRows = materialItems
     .map((item) => `<tr>
       <td>${esc(item.item_code)}</td>
@@ -4734,7 +4870,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
   }
 
   const quoteVendorOptions = [`<option value="">Select vendor</option>`]
-    .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === activeQuoteVendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
+    .concat(vendors.map((vendor) => `<option value="${vendor.id}" data-email="${escAttr(vendor.primary_email || "")}" data-contact-name="${escAttr(vendor.primary_contact_name || "")}" ${String(vendor.id) === activeQuoteVendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
   const rfqStatusOptions = rfqStatuses
     .map((status) => `<option value="${status.value}" ${rfq.status === status.value ? "selected" : ""}>${esc(status.label)}</option>`)
@@ -4811,7 +4947,9 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
         <div class="actions">
           <button type="submit" name="award_all" value="1" onclick="return validateBulkAward(this.form)">Award Populated Rows</button>
           <button type="button" onclick="return promptPoNumber(this, 'rfq-quote-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}')">Create PO From Awarded Lines</button>
+          <button type="button" onclick="return createOutlookRfqDraft(this, ${rfqId}, 'rfq-quote-vendor-${rfqId}', ${escAttr(JSON.stringify(String(rfq.rfq_no || "")))}, ${escAttr(JSON.stringify(String(rfq.project_name || "")))})">Create RFQ PDF + Outlook Draft</button>
         </div>
+        <div class="muted">Uses the selected quote vendor's primary contact email and requires the local Outlook helper running on this PC.</div>
         <table>
           <tr><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Thk</th><th>Notes</th><th>Unit Price</th><th>Lead Days</th><th>Award Status</th><th>Award Summary</th><th>Issued PO</th><th>Actions</th></tr>
           ${itemRows.join("") || `<tr><td colspan="15" class="muted">No RFQ items loaded yet.</td></tr>`}
@@ -4835,6 +4973,56 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
     </div>
   `, req.user));
 });
+
+app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const vendorId = Number(req.query.vendor_id || 0);
+  const [rfqRes, itemsRes, vendorRes] = await Promise.all([
+    query("select * from rfqs where id = $1", [rfqId]),
+    query(`
+      select
+        ri.po_line,
+        ri.qty,
+        ri.notes,
+        ri.spec,
+        mi.item_code,
+        mi.description,
+        mi.uom
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.rfq_id = $1
+      order by
+        case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
+        case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
+        ri.id
+    `, [rfqId]),
+    vendorId ? query(`
+      select
+        v.name,
+        coalesce(primary_contact.contact_name, v.contact_name, '') as primary_contact_name,
+        coalesce(primary_contact.email, v.email, '') as primary_email
+      from vendors v
+      left join lateral (
+        select contact_name, email
+        from vendor_contacts
+        where vendor_id = v.id and is_primary = true
+        order by id asc
+        limit 1
+      ) primary_contact on true
+      where v.id = $1
+    `, [vendorId]) : Promise.resolve({ rows: [] })
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const vendor = vendorRes.rows[0] || {};
+  const pdfBuffer = buildRfqSheetPdf(rfq, itemsRes.rows, {
+    vendorName: vendor.name || "",
+    vendorContact: vendor.primary_contact_name || ""
+  });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
+  res.send(pdfBuffer);
+}));
 
 app.post("/rfq/:id/items/import", requireAuth, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
   const rfqId = Number(req.params.id);
