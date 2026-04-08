@@ -47,7 +47,7 @@ const defaultPermissionMatrix = {
     bom: { view: true, edit: true },
     receiving: { view: true, edit: true },
     yard: { view: true },
-    inventory: { view: true },
+    inventory: { view: true, edit: true },
     requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: true },
     settings: { view: true, edit: true }
   },
@@ -60,7 +60,7 @@ const defaultPermissionMatrix = {
     bom: { view: true, edit: true },
     receiving: { view: true, edit: false },
     yard: { view: true },
-    inventory: { view: true },
+    inventory: { view: true, edit: true },
     requisitions: { view: true, create: false, edit: false, verify: false, issue: false, unverify: false, delete: false },
     settings: { view: true, edit: true }
   },
@@ -73,7 +73,7 @@ const defaultPermissionMatrix = {
     bom: { view: false, edit: false },
     receiving: { view: true, edit: true },
     yard: { view: true },
-    inventory: { view: true },
+    inventory: { view: true, edit: false },
     requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: false },
     settings: { view: false, edit: false }
   },
@@ -86,7 +86,7 @@ const defaultPermissionMatrix = {
     bom: { view: false, edit: false },
     receiving: { view: false, edit: false },
     yard: { view: true },
-    inventory: { view: true },
+    inventory: { view: true, edit: false },
     requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
     settings: { view: false, edit: false }
   },
@@ -99,7 +99,7 @@ const defaultPermissionMatrix = {
     bom: { view: true, edit: false },
     receiving: { view: true, edit: false },
     yard: { view: true },
-    inventory: { view: true },
+    inventory: { view: true, edit: false },
     requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
     settings: { view: false, edit: false }
   }
@@ -6750,19 +6750,46 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
 });
 
 app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const recentReports = await query(`
+    select
+      r.id,
+      r.report_no,
+      r.created_at,
+      u.username as created_by_name
+    from inventory_audit_reports r
+    left join users u on u.id = r.created_by
+    order by r.id desc
+    limit 50
+  `);
+  const recentReportRows = recentReports.rows.map((row) => `<tr>
+    <td>${esc(row.report_no)}</td>
+    <td>${esc(formatShortDateTime(row.created_at))}</td>
+    <td>${esc(row.created_by_name || "")}</td>
+    <td><a class="btn btn-secondary" href="/inventory-audit/reports/${row.id}">View</a></td>
+  </tr>`).join("");
+  res.send(layout("Inventory Audit", `
+    <h1>Inventory Audit</h1>
+    <div class="card">
+      <div class="actions">
+        ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-primary" href="/inventory-audit/new">New Audit</a>` : ""}
+        <a class="btn btn-secondary" href="/yard">Back To Yard</a>
+      </div>
+    </div>
+    <div class="card scroll">
+      <h3 style="margin-top:0;">Past Inventory Audit Reports</h3>
+      <table><tr><th>Report #</th><th>Created</th><th>Created By</th><th>Action</th></tr>${recentReportRows || `<tr><td colspan="4" class="muted">No audit reports created yet.</td></tr>`}</table>
+    </div>
+  `, req.user));
+}));
+
+app.get("/inventory-audit/new", requireAuth, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
   const warehouseFilter = String(req.query.warehouse_filter || "").trim();
   const locationWarehouseFilter = String(req.query.location_warehouse_filter || "").trim() || warehouseFilter;
   const locationFilter = String(req.query.location_filter || "").trim();
   const identFilter = String(req.query.ident_filter || "").trim();
-  const [warehouseOptions, locationMap, recentReports] = await Promise.all([
+  const [warehouseOptions, locationMap] = await Promise.all([
     getWarehouseOptions(),
-    getWarehouseLocationMap(),
-    query(`
-      select id, report_no, created_at
-      from inventory_audit_reports
-      order by id desc
-      limit 20
-    `)
+    getWarehouseLocationMap()
   ]);
   const params = [];
   const where = [];
@@ -6839,16 +6866,16 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
       </td>
     </tr>`;
   }).join("");
-  const recentReportRows = recentReports.rows.map((row) => `<tr>
-    <td>${esc(row.report_no)}</td>
-    <td>${esc(formatShortDateTime(row.created_at))}</td>
-    <td><a class="btn btn-secondary" href="/inventory-audit/reports/${row.id}">View</a></td>
-  </tr>`).join("");
   res.send(layout("Inventory Audit", `
-    <h1>Inventory Audit</h1>
+    <h1>New Inventory Audit</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/inventory-audit">Back To Audit Reports</a>
+      </div>
+    </div>
     <div class="card">
       <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">
-        <form method="get" action="/inventory-audit" class="stack">
+        <form method="get" action="/inventory-audit/new" class="stack">
           <label>Warehouse</label>
           <select name="warehouse_filter">${warehouseOptionsHtml}</select>
           <input type="hidden" name="location_warehouse_filter" value="${esc(locationWarehouseFilter)}" />
@@ -6856,10 +6883,10 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
           <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
           <div class="actions">
             <button type="submit">Apply Warehouse</button>
-            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ location_warehouse_filter: locationWarehouseFilter, location_filter: locationFilter, ident_filter: identFilter })}">Clear Warehouse</a>
+            <a class="btn btn-secondary" href="/inventory-audit/new?${getInventoryAuditQueryString({ location_warehouse_filter: locationWarehouseFilter, location_filter: locationFilter, ident_filter: identFilter })}">Clear Warehouse</a>
           </div>
         </form>
-        <form method="get" action="/inventory-audit" class="stack">
+        <form method="get" action="/inventory-audit/new" class="stack">
           <label>Location Warehouse</label>
           <select id="inventory-audit-location-warehouse" name="location_warehouse_filter" onchange='syncLocationOptions("inventory-audit-location-warehouse", "inventory-audit-location", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(locationFilter)}")'>${locationWarehouseOptionsHtml}</select>
           <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
@@ -6867,10 +6894,10 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
           <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
           <div class="actions">
             <button type="submit">Apply Location</button>
-            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_warehouse_filter: locationWarehouseFilter, ident_filter: identFilter })}">Clear Location</a>
+            <a class="btn btn-secondary" href="/inventory-audit/new?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_warehouse_filter: locationWarehouseFilter, ident_filter: identFilter })}">Clear Location</a>
           </div>
         </form>
-        <form method="get" action="/inventory-audit" class="stack">
+        <form method="get" action="/inventory-audit/new" class="stack">
           <label>Ident</label>
           <input name="ident_filter" value="${esc(identFilter)}" />
           <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
@@ -6878,14 +6905,10 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
           <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
           <div class="actions">
             <button type="submit">Apply Ident</button>
-            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_warehouse_filter: locationWarehouseFilter, location_filter: locationFilter })}">Clear Ident</a>
+            <a class="btn btn-secondary" href="/inventory-audit/new?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_warehouse_filter: locationWarehouseFilter, location_filter: locationFilter })}">Clear Ident</a>
           </div>
         </form>
       </div>
-    </div>
-    <div class="card scroll">
-      <h3 style="margin-top:0;">Recent Inventory Audit Reports</h3>
-      <table><tr><th>Report #</th><th>Created</th><th>Action</th></tr>${recentReportRows || `<tr><td colspan="3" class="muted">No audit reports created yet.</td></tr>`}</table>
     </div>
     <div class="card scroll">
       <table>
@@ -6897,7 +6920,7 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
   `, req.user));
 }));
 
-app.post("/inventory-audit/save", requireAuth, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+app.post("/inventory-audit/save", requireAuth, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
   const key = String(req.body.key || "").trim();
   if (!key) throw new Error("Invalid inventory audit row.");
   let decoded;
