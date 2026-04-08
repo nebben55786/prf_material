@@ -2381,6 +2381,7 @@ app.get("/yard", requireAuth, requirePermission("yard", "view"), async (req, res
     <div class="card">
       <div class="actions">
         <a class="btn btn-primary" href="/inventory">Inventory</a>
+        <a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>
       </div>
     </div>
     <div class="stats">
@@ -2395,6 +2396,14 @@ app.get("/yard", requireAuth, requirePermission("yard", "view"), async (req, res
     </div>
   `, req.user));
 });
+
+function getInventoryAuditQueryString(source = {}) {
+  return new URLSearchParams({
+    warehouse_filter: String(source.warehouse_filter || ""),
+    location_filter: String(source.location_filter || ""),
+    ident_filter: String(source.ident_filter || "")
+  }).toString();
+}
 
 app.get("/settings", requireAuth, requirePermission("settings", "view"), async (req, res) => {
   const jobNumber = await getJobNumber();
@@ -6707,6 +6716,184 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
     <div class="card scroll"><table><tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Warehouse</th><th>Location</th><th>Qty On Hand</th><th>Qty OS&D</th></tr>${tableRows}</table></div>
   `, req.user));
 });
+
+app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const warehouseFilter = String(req.query.warehouse_filter || "").trim();
+  const locationFilter = String(req.query.location_filter || "").trim();
+  const identFilter = String(req.query.ident_filter || "").trim();
+  const params = [];
+  const where = [];
+  if (warehouseFilter) {
+    params.push(`%${warehouseFilter}%`);
+    where.push(`coalesce(r.warehouse, '') ilike $${params.length}`);
+  }
+  if (locationFilter) {
+    params.push(`%${locationFilter}%`);
+    where.push(`coalesce(r.location, '') ilike $${params.length}`);
+  }
+  if (identFilter) {
+    params.push(`%${identFilter}%`);
+    where.push(`(
+      coalesce(mi.item_code, '') ilike $${params.length}
+      or coalesce(mi.description, '') ilike $${params.length}
+    )`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const rows = (await query(`
+    select
+      mi.item_code,
+      mi.description,
+      coalesce(pl.size_1, '') as size_1,
+      coalesce(pl.size_2, '') as size_2,
+      coalesce(pl.thk_1, '') as thk_1,
+      coalesce(pl.thk_2, '') as thk_2,
+      coalesce(r.warehouse, '') as warehouse,
+      coalesce(r.location, '') as location,
+      sum(r.qty_received) as qty_on_hand,
+      iac.actual_qty,
+      iac.updated_at as actual_updated_at
+    from receipts r
+    join po_lines pl on pl.id = r.po_line_id
+    join material_items mi on mi.id = pl.material_item_id
+    left join inventory_audit_counts iac
+      on iac.item_code = mi.item_code
+     and iac.size_1 = coalesce(pl.size_1, '')
+     and iac.size_2 = coalesce(pl.size_2, '')
+     and iac.thk_1 = coalesce(pl.thk_1, '')
+     and iac.thk_2 = coalesce(pl.thk_2, '')
+     and iac.warehouse = coalesce(r.warehouse, '')
+     and iac.location = coalesce(r.location, '')
+    ${whereSql}
+    group by
+      mi.item_code,
+      mi.description,
+      coalesce(pl.size_1, ''),
+      coalesce(pl.size_2, ''),
+      coalesce(pl.thk_1, ''),
+      coalesce(pl.thk_2, ''),
+      coalesce(r.warehouse, ''),
+      coalesce(r.location, ''),
+      iac.actual_qty,
+      iac.updated_at
+    order by mi.item_code, coalesce(r.warehouse, ''), coalesce(r.location, '')
+  `, params)).rows;
+  const filterQuery = getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter, ident_filter: identFilter });
+  const tableRows = rows.map((row, index) => {
+    const key = Buffer.from(JSON.stringify({
+      item_code: row.item_code || "",
+      description: row.description || "",
+      size_1: row.size_1 || "",
+      size_2: row.size_2 || "",
+      thk_1: row.thk_1 || "",
+      thk_2: row.thk_2 || "",
+      warehouse: row.warehouse || "",
+      location: row.location || ""
+    })).toString("base64url");
+    return `<tr>
+      <td>${esc(row.item_code)}</td>
+      <td>${esc(row.description)}</td>
+      <td>${esc(row.size_1 || "")}</td>
+      <td>${esc(row.size_2 || "")}</td>
+      <td>${esc(row.thk_1 || "")}</td>
+      <td>${esc(row.thk_2 || "")}</td>
+      <td>${esc(row.warehouse)}</td>
+      <td>${esc(row.location)}</td>
+      <td>${esc(formatQtyDisplay(row.qty_on_hand))}</td>
+      <td>
+        <form method="post" action="/inventory-audit/save" style="display:flex;gap:8px;align-items:center;">
+          <input type="hidden" name="key" value="${esc(key)}" />
+          <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <input name="actual_qty" value="${esc(row.actual_qty === null || row.actual_qty === undefined ? "" : formatQtyDisplay(row.actual_qty))}" placeholder="Actual qty" style="min-width:110px;" />
+          <button type="submit">Save</button>
+        </form>
+      </td>
+    </tr>`;
+  }).join("");
+  res.send(layout("Inventory Audit", `
+    <h1>Inventory Audit</h1>
+    <div class="card">
+      <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">
+        <form method="get" action="/inventory-audit" class="stack">
+          <label>Warehouse</label>
+          <input name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <div class="actions">
+            <button type="submit">Apply Warehouse</button>
+            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ location_filter: locationFilter, ident_filter: identFilter })}">Clear Warehouse</a>
+          </div>
+        </form>
+        <form method="get" action="/inventory-audit" class="stack">
+          <label>Location</label>
+          <input name="location_filter" value="${esc(locationFilter)}" />
+          <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <div class="actions">
+            <button type="submit">Apply Location</button>
+            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, ident_filter: identFilter })}">Clear Location</a>
+          </div>
+        </form>
+        <form method="get" action="/inventory-audit" class="stack">
+          <label>Ident</label>
+          <input name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <div class="actions">
+            <button type="submit">Apply Ident</button>
+            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter })}">Clear Ident</a>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Warehouse</th><th>Location</th><th>Qty On Hand</th><th>Actual On-Hand Qty</th></tr>
+        ${tableRows || `<tr><td colspan="10" class="muted">No inventory rows found for the current filters.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+}));
+
+app.post("/inventory-audit/save", requireAuth, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const key = String(req.body.key || "").trim();
+  if (!key) throw new Error("Invalid inventory audit row.");
+  let decoded;
+  try {
+    decoded = JSON.parse(Buffer.from(key, "base64url").toString("utf8"));
+  } catch {
+    throw new Error("Invalid inventory audit row.");
+  }
+  const actualQty = parseQtyValue(req.body.actual_qty || 0);
+  if (!Number.isFinite(actualQty) || actualQty < 0) throw new Error("Actual on-hand qty must be zero or greater.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      insert into inventory_audit_counts (
+        item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, actual_qty, updated_by, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+      on conflict (item_code, size_1, size_2, thk_1, thk_2, warehouse, location)
+      do update set
+        description = excluded.description,
+        actual_qty = excluded.actual_qty,
+        updated_by = excluded.updated_by,
+        updated_at = now()
+    `, [
+      String(decoded.item_code || ""),
+      String(decoded.description || ""),
+      String(decoded.size_1 || ""),
+      String(decoded.size_2 || ""),
+      String(decoded.thk_1 || ""),
+      String(decoded.thk_2 || ""),
+      String(decoded.warehouse || ""),
+      String(decoded.location || ""),
+      actualQty,
+      req.user.id || null
+    ]);
+    await auditLog(client, req.user.id, "update", "inventory_audit_counts", `${decoded.item_code}|${decoded.warehouse}|${decoded.location}`, `actual_qty=${actualQty}`);
+  });
+  res.redirect(`/inventory-audit?${getInventoryAuditQueryString(req.body)}`);
+}));
 
 app.get("/material-logs", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
   res.send(layout("Material Logs", `
