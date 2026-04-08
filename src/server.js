@@ -190,9 +190,16 @@ function roundQtyUpToHalf(value) {
   return Math.ceil(qty * 2) / 2;
 }
 
+function parseQtyValue(value, fallback = 0) {
+  if (value === null || value === undefined) return fallback;
+  const parsed = Number(String(value).replace(/,/g, "").trim());
+  return Number.isFinite(parsed) ? roundQtyUpToHalf(parsed) : fallback;
+}
+
 function formatQtyDisplay(value) {
   if (value === null || value === undefined || String(value).trim() === "") return "";
-  return roundQtyUpToHalf(value).toFixed(1);
+  const rounded = roundQtyUpToHalf(value);
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
 function formatShortDate(value) {
@@ -524,7 +531,7 @@ function buildPickTicketPdf(header, lines) {
         item.line_no || "",
         item.item_code || "",
         wrappedDescription[0] || "",
-        Number(item.qty_requested || 0).toFixed(2),
+        formatQtyDisplay(item.qty_requested),
         item.uom || "",
         wrappedLocation[0] || ""
       ];
@@ -1226,7 +1233,7 @@ function normalizeVendorFmrRequestLine(row) {
   for (const [target, keys] of Object.entries(aliases)) {
     const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] ?? "").trim() !== "");
     const raw = sourceKey ? row[sourceKey] : "";
-    if (target === "qty_ordered" || target === "qty_received") normalized[target] = numberValue(raw);
+    if (target === "qty_ordered" || target === "qty_received") normalized[target] = parseQtyValue(raw);
     else normalized[target] = textValue(raw);
   }
   normalized.crate_number = textValue(row.crate_number || row.container_no || row.package_number || "");
@@ -1382,7 +1389,7 @@ async function findOrCreateVendorByName(client, vendorName) {
 async function upsertRfqItemRow(client, rfqId, row) {
   const itemCode = String(row.item_code || "").trim();
   const poLine = String(row.po_line || row.line_no || row.line || "").trim();
-  const qty = num(row.qty);
+  const qty = parseQtyValue(row.qty);
   if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
   if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
   const materialItemId = await upsertMaterialItem(client, row);
@@ -1412,7 +1419,7 @@ async function upsertPurchaseOrderRow(client, row) {
   const poNo = String(row.po_no || row.po_number || "").trim();
   const vendorName = String(row.vendor_name || row.vendor || "").trim();
   const itemCode = String(row.item_code || "").trim();
-  const qtyOrdered = num(row.qty_ordered || row.qty || row.quantity);
+  const qtyOrdered = parseQtyValue(row.qty_ordered || row.qty || row.quantity);
   const unitPrice = num(row.unit_price || row.price || row.unitcost || row.unit_cost);
   const poLine = String(row.po_line || row.line_no || row.line || "").trim();
   if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
@@ -3089,9 +3096,9 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     </div>
     <div class="stats">
       <div class="stat"><div>Lines</div><strong>${coverage.line_count}</strong></div>
-      <div class="stat"><div>Qty Required</div><strong>${esc(coverage.qty_required)}</strong></div>
-      <div class="stat"><div>Qty Issued</div><strong>${esc(coverage.qty_issued)}</strong></div>
-      <div class="stat"><div>Requisitioned</div><strong>${esc(requisitionSummary.qty_requested)}</strong></div>
+      <div class="stat"><div>Qty Required</div><strong>${esc(formatQtyDisplay(coverage.qty_required))}</strong></div>
+      <div class="stat"><div>Qty Issued</div><strong>${esc(formatQtyDisplay(coverage.qty_issued))}</strong></div>
+      <div class="stat"><div>Requisitioned</div><strong>${esc(formatQtyDisplay(requisitionSummary.qty_requested))}</strong></div>
     </div>
     <div class="card">
       <h3>Create RFQ From BOM</h3>
@@ -3207,7 +3214,7 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
       `, [requisitionNo, bomId, req.user.id, String(req.body.requested_by_name || req.user.username).trim(), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
       let createdLineCount = 0;
     for (const lineId of selectedLineIds) {
-      const qtyRequested = num(req.body[`request_qty_${lineId}`]);
+      const qtyRequested = parseQtyValue(req.body[`request_qty_${lineId}`]);
       const line = (await client.query(`
         select
           bl.id,
@@ -3312,7 +3319,7 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
       const rowNumber = index + 2;
       const lineNo = String(row.line_no || "").trim();
       const itemCode = String(row.item_code || "").trim();
-      const qtyRequired = num(row.qty_required);
+      const qtyRequired = parseQtyValue(row.qty_required);
       if (!lineNo || !itemCode || qtyRequired <= 0) {
         skippedCount += 1;
         await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, and qty_required are required.", row);
@@ -3363,7 +3370,7 @@ app.get("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), asy
           <div><label>Description</label><input name="description" value="${esc(line.description)}" required /></div>
           <div><label>Material Type</label><input name="material_type" value="${esc(line.material_type)}" /></div>
           <div><label>UOM</label><input name="uom" value="${esc(line.uom)}" required /></div>
-          <div><label>Qty Required</label><input name="qty_required" value="${esc(line.qty_required)}" required /></div>
+          <div><label>Qty Required</label><input name="qty_required" value="${esc(formatQtyDisplay(line.qty_required))}" required /></div>
           <div><label>Spec</label><input name="spec" value="${esc(line.spec || "")}" /></div>
           <div><label>Commodity Code</label><input name="commodity_code" value="${esc(line.commodity_code || "")}" /></div>
           <div><label>Tag Number</label><input name="tag_number" value="${esc(line.tag_number || "")}" /></div>
@@ -3393,7 +3400,7 @@ app.post("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), as
           spec = $8, commodity_code = $9, tag_number = $10, iwp_no = $11, iso_no = $12, size_1 = $13, size_2 = $14, thk_1 = $15, thk_2 = $16,
           planning_status = $17, notes = $18, updated_at = now()
       where id = $1
-    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", num(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.planning_status || "PLANNED", req.body.notes || ""]);
+    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.planning_status || "PLANNED", req.body.notes || ""]);
     await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
     return current.bom_id;
   });
@@ -3512,11 +3519,11 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(line.material_type)}</td>
-      <td>${esc(line.qty_required)}</td>
-      <td>${esc(line.qty_issued)}</td>
-      <td>${esc(line.qty_remaining)}</td>
-      <td>${esc(line.qty_available)}</td>
-      <td><input name="request_qty_${line.id}" value="${esc(Math.min(num(line.qty_remaining), num(line.qty_available)))}" /></td>
+      <td>${esc(formatQtyDisplay(line.qty_required))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_remaining))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_available))}</td>
+      <td><input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(Math.min(num(line.qty_remaining), num(line.qty_available))))}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.spec || "")}</td>
       <td>${esc(line.commodity_code || "")}</td>
@@ -3642,7 +3649,7 @@ app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"),
     <td>${esc(row.requested_by_name)}</td>
     <td>${esc(row.iwp_no || "")}</td>
     <td>${row.line_count}</td>
-    <td>${esc(row.qty_requested)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
     <td><span class="chip">${esc(row.status)}</span></td>
     <td>${esc(row.created_at)}</td>
     <td>${row.status === "VERIFIED" ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>` : ""}</td>
@@ -3697,8 +3704,8 @@ app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHa
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
     <td>${esc(line.material_type || "")}</td>
-    <td>${esc(line.qty_required)}</td>
-    <td>${esc(line.qty_issued)}</td>
+    <td>${esc(formatQtyDisplay(line.qty_required))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
     <td>${esc(line.uom || "")}</td>
     <td>${esc(line.spec || "")}</td>
     <td>${esc(line.size_1 || "")}</td>
@@ -3751,8 +3758,8 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
     <td>${esc(line.iwp_no || "")}</td>
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
-    <td>${esc(line.qty_requested)}</td>
-    <td>${esc(line.qty_issued)}</td>
+    <td>${esc(formatQtyDisplay(line.qty_requested))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
     <td>${esc(line.uom)}</td>
     <td>${esc(line.spec || "")}</td>
     <td>${esc(line.size_1 || "")}</td>
@@ -3846,7 +3853,7 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("req
     inventoryMap.get(key).push({
       warehouse: row.warehouse,
       location: row.location,
-      qty_available: Number(row.qty_on_hand || 0)
+      qty_available: parseQtyValue(row.qty_on_hand || 0)
     });
   }
   const issuedMap = new Map();
@@ -3948,13 +3955,13 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("mater
   const printableLines = [...poReceiptLines.rows, ...manualLines.rows].map((row) => ({
     item_code: row.item_code || "",
     description: header.material_description || row.description || "",
-    qty: Number(row.received_qty || 0).toFixed(2),
+    qty: formatQtyDisplay(row.received_qty),
     location: [row.warehouse, row.location].filter(Boolean).join(" / "),
     grid: "",
     status: row.osd_status || "",
-    ordered: row.ordered_qty ? Number(row.ordered_qty).toFixed(2) : "",
-    shipped: row.ordered_qty ? Number(row.ordered_qty).toFixed(2) : "",
-    received: Number(row.received_qty || 0).toFixed(2),
+    ordered: row.ordered_qty ? formatQtyDisplay(row.ordered_qty) : "",
+    shipped: row.ordered_qty ? formatQtyDisplay(row.ordered_qty) : "",
+    received: formatQtyDisplay(row.received_qty),
     discrepancy: [row.osd_status && row.osd_status !== "OK" ? row.osd_status : "", row.notes || ""].filter(Boolean).join(" | ")
   }));
   const pdfBuffer = buildMrrFormPdf({
@@ -4083,13 +4090,13 @@ app.get("/requisitions/:id/edit", requireAuth, requirePermission("requisitions",
       <td>${esc(line.iwp_no || "")}</td>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
-      <td>${esc(line.qty_required)}</td>
-      <td>${esc(line.qty_issued)}</td>
-      <td>${esc(line.qty_available)}</td>
+      <td>${esc(formatQtyDisplay(line.qty_required))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_available))}</td>
       <td>${esc(line.uom)}</td>
-      <td><input name="qty_requested_${line.requisition_line_id}" value="${esc(line.qty_requested)}" /></td>
+      <td><input name="qty_requested_${line.requisition_line_id}" value="${esc(formatQtyDisplay(line.qty_requested))}" /></td>
       <td><button class="btn btn-danger" type="submit" name="remove_line_id" value="${line.requisition_line_id}">Remove</button></td>
-      <td class="muted">Max ${esc(maxQty)}</td>
+      <td class="muted">Max ${esc(formatQtyDisplay(maxQty))}</td>
     </tr>`;
   }).join("");
   res.send(layout(`Edit ${header.requisition_no}`, `
@@ -4192,7 +4199,7 @@ app.post("/requisitions/:id/edit", requireAuth, requirePermission("requisitions"
         await client.query("delete from material_requisition_lines where id = $1", [removeLineId]);
         continue;
       }
-      const requestedQty = num(req.body[`qty_requested_${line.requisition_line_id}`]);
+      const requestedQty = parseQtyValue(req.body[`qty_requested_${line.requisition_line_id}`]);
       if (requestedQty <= 0) throw new Error(`Requested qty for ${line.item_code} must be greater than zero.`);
       const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_available) + num(line.qty_requested));
       if (requestedQty > maxQty) throw new Error(`Requested qty for ${line.item_code} exceeds available stock.`);
@@ -5449,7 +5456,7 @@ app.post("/rfq-item/:id/edit", requireAuth, requirePermission("rfqs", "edit"), a
       update rfq_items
       set spec = $2, commodity_code = $3, tag_number = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, qty = $9, notes = $10, updated_at = now()
       where id = $1 and extract(epoch from updated_at)::text = $11
-    `, [itemId, req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", Number(req.body.qty || 0), req.body.notes || "", req.body.updated_token || ""]);
+    `, [itemId, req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", parseQtyValue(req.body.qty || 0), req.body.notes || "", req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This RFQ item was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "rfq_item", itemId, req.body.item_code?.trim() || "");
     return current.rfq_id;
@@ -5745,7 +5752,7 @@ app.post("/po/import/preview", requireAuth, requirePermission("pos", "edit"), up
     <td>${esc(row.po_description)}</td>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
-    <td>${esc(row.qty_ordered)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_ordered))}</td>
     <td>${esc(row.unit_price)}</td>
   </tr>`).join("");
   res.send(layout("Preview PO Import", `
@@ -5915,9 +5922,9 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
       <td>${esc(line.size_2 || "")}</td>
       <td>${esc(line.thk_1 || "")}</td>
       <td>${esc(line.thk_2 || "")}</td>
-      <td>${esc(line.qty_ordered)}</td>
-      <td>${esc(line.qty_received)}</td>
-      <td>${esc(remainingQty)}</td>
+    <td>${esc(formatQtyDisplay(line.qty_ordered))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_received))}</td>
+      <td>${esc(formatQtyDisplay(remainingQty))}</td>
       <td>${qtyCell}</td>
       <td>${warehouseCell}</td>
       <td>${locationCell}</td>
@@ -5927,7 +5934,7 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
     <td>${esc(row.received_at)}</td>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
-    <td>${esc(row.qty_received)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_received))}</td>
     <td>${esc(row.warehouse)}</td>
     <td>${esc(row.location)}</td>
     <td>${esc(row.osd_status)}</td>
@@ -6071,7 +6078,7 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
     let postedCount = 0;
     for (const rawLineId of lineIds) {
       const lineId = Number(rawLineId);
-      const qtyReceived = Number(req.body[`qty_received_${lineId}`] || 0);
+      const qtyReceived = parseQtyValue(req.body[`qty_received_${lineId}`] || 0);
       if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
       const line = (await client.query(`
         select pl.id, pl.qty_ordered, mi.item_code, mi.description, coalesce(sum(r.qty_received), 0) as qty_received
@@ -6184,7 +6191,7 @@ app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (re
     <td>${esc(line.size_2)}</td>
     <td>${esc(line.thk_1)}</td>
     <td>${esc(line.thk_2)}</td>
-    <td>${esc(line.qty_ordered)}</td>
+      <td>${esc(formatQtyDisplay(line.qty_ordered))}</td>
     <td>${esc(line.unit_price)}</td>
     <td><a class="btn btn-secondary" href="/po-line/${line.id}/edit">Edit Line</a></td>
   </tr>`).join("");
@@ -6258,7 +6265,7 @@ app.get("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), asyn
         <input type="hidden" name="updated_token" value="${esc(line.updated_token)}" />
         <div class="grid">
           <div><label>PO Line</label><input name="po_line" value="${esc(line.po_line || "")}" /></div>
-          <div><label>Qty Ordered</label><input name="qty_ordered" value="${esc(line.qty_ordered)}" required /></div>
+          <div><label>Qty Ordered</label><input name="qty_ordered" value="${esc(formatQtyDisplay(line.qty_ordered))}" required /></div>
           <div><label>Unit Price</label><input name="unit_price" value="${esc(line.unit_price)}" required /></div>
           <div><label>Size 1</label><input name="size_1" value="${esc(line.size_1 || "")}" /></div>
           <div><label>Size 2</label><input name="size_2" value="${esc(line.size_2 || "")}" /></div>
@@ -6277,7 +6284,7 @@ app.post("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), asy
       update po_lines
       set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
       where id = $1 and extract(epoch from updated_at)::text = $9
-    `, [req.params.id, req.body.po_line || "", Number(req.body.qty_ordered), Number(req.body.unit_price), req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.updated_token || ""]);
+    `, [req.params.id, req.body.po_line || "", parseQtyValue(req.body.qty_ordered), Number(req.body.unit_price), req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This PO line was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "po_line", req.params.id, "");
   });
@@ -6391,7 +6398,7 @@ app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), 
       case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
       pl.id
   `, [po.id])).rows : [];
-  const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(line.qty_ordered)} | Rec ${esc(line.qty_received)} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`).join("");
+  const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(formatQtyDisplay(line.qty_ordered))} | Rec ${esc(formatQtyDisplay(line.qty_received))} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`).join("");
   res.send(layout("Receive MRR", `
     <h1>Receive ${esc(mrr.mrr_number)}</h1>
     <div class="card">
@@ -6436,7 +6443,7 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
   await withTransaction(async (client) => {
     const mrr = (await client.query("select * from mrr_logs where id = $1", [mrrId])).rows[0];
     if (!mrr) throw new Error("MRR not found.");
-    const qtyReceived = Number(req.body.qty_received || 0);
+    const qtyReceived = parseQtyValue(req.body.qty_received || 0);
     if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
     await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
     if (String(req.body.mode || "") === "po") {
@@ -6515,7 +6522,7 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
   const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.item_code)}</td><td>${esc(row.description)}</td><td>${esc(row.size_1 || "")}</td><td>${esc(row.size_2 || "")}</td>
     <td>${esc(row.thk_1 || "")}</td><td>${esc(row.thk_2 || "")}</td><td>${esc(row.warehouse)}</td><td>${esc(row.location)}</td>
-    <td>${esc(row.qty_on_hand)}</td><td>${esc(row.qty_osd)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_on_hand))}</td><td>${esc(formatQtyDisplay(row.qty_osd))}</td>
   </tr>`).join("");
   res.send(layout("Inventory", `
     <h1>Inventory by Location</h1>
@@ -6721,7 +6728,7 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
     <td><input name="srn_number_${row.id}" value="${esc(row.srn_number || "")}" placeholder="Optional SRN" /></td>
     <td>${esc(row.po_line || "")}</td>
     <td>${esc(row.sub_line || "")}</td>
-    <td>${esc(row.qty_received)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_received))}</td>
     <td>${esc(row.mrr_number || "")}</td>
     <td>${esc(row.received_date || "")}</td>
   </tr>`).join("");
@@ -6803,7 +6810,7 @@ app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermissi
               source_filename = $10,
               updated_at = now()
           where id = $1
-        `, [existing.id, row.vendor_name, row.po_line, row.sub_line, row.qty_ordered, row.qty_received, row.mrr_number, row.issued_date, row.received_date, req.file?.originalname || ""]);
+        `, [existing.id, row.vendor_name, row.po_line, row.sub_line, parseQtyValue(row.qty_ordered), parseQtyValue(row.qty_received), row.mrr_number, row.issued_date, row.received_date, req.file?.originalname || ""]);
         updatedCount += 1;
       } else {
         await client.query(`
@@ -6811,7 +6818,7 @@ app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermissi
             vendor_name, po_number, item_code, abbrev_description, po_line, sub_line,
             qty_ordered, qty_received, mrr_number, issued_date, received_date, srn_number, crate_number, source_filename, updated_at
           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
-        `, [row.vendor_name, row.po_number, row.item_code, row.abbrev_description, row.po_line, row.sub_line, row.qty_ordered, row.qty_received, row.mrr_number, row.issued_date, row.received_date, row.srn_number || "", row.crate_number || "", req.file?.originalname || ""]);
+        `, [row.vendor_name, row.po_number, row.item_code, row.abbrev_description, row.po_line, row.sub_line, parseQtyValue(row.qty_ordered), parseQtyValue(row.qty_received), row.mrr_number, row.issued_date, row.received_date, row.srn_number || "", row.crate_number || "", req.file?.originalname || ""]);
         insertedCount += 1;
       }
     }
@@ -7047,7 +7054,7 @@ app.get("/material-logs/issue-report", requireAuth, requirePermission("material_
     <td>${esc(row.po_number)}</td>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
-    <td>${esc(row.received_qty)}</td>
+    <td>${esc(formatQtyDisplay(row.received_qty))}</td>
     <td>${esc(row.qty_unit)}</td>
     <td>${esc(row.mrr_number)}</td>
     <td>${esc(row.fmr_number)}</td>
@@ -7168,9 +7175,9 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
           textValue(row.size_2),
           textValue(row.thk_1),
           textValue(row.thk_2),
-          numberValue(row.bom_qty),
-          numberValue(row.ship_qty),
-          numberValue(row.received_qty),
+          parseQtyValue(row.bom_qty),
+          parseQtyValue(row.ship_qty),
+          parseQtyValue(row.received_qty),
           textValue(row.qty_unit),
           textValue(row.fmr_number),
           textValue(row.mrr_number),
@@ -7346,7 +7353,7 @@ app.post("/material-logs/receiving/add", requireAuth, requirePermission("materia
       req.body.po_number?.trim() || "",
       req.body.item_code?.trim() || "",
       req.body.description?.trim() || "",
-      Number(req.body.received_qty || 0),
+      parseQtyValue(req.body.received_qty || 0),
       req.body.qty_unit?.trim() || "",
       req.body.mrr_number?.trim() || "",
       req.body.fmr_number?.trim() || "",
@@ -7455,7 +7462,7 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requirePermission("mat
           <div><label>PO</label><input name="po_number" value="${esc(row.po_number)}" /></div>
           <div><label>Item Code</label><input name="item_code" value="${esc(row.item_code)}" /></div>
           <div><label>Description</label><input name="description" value="${esc(row.description)}" /></div>
-          <div><label>Received Qty</label><input name="received_qty" value="${esc(row.received_qty)}" /></div>
+          <div><label>Received Qty</label><input name="received_qty" value="${esc(formatQtyDisplay(row.received_qty))}" /></div>
           <div><label>Qty Unit</label><input name="qty_unit" value="${esc(row.qty_unit)}" /></div>
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
           <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" /></div>
@@ -7487,7 +7494,7 @@ app.post("/material-logs/receiving/:id/edit", requireAuth, requirePermission("ma
       req.body.po_number?.trim() || "",
       req.body.item_code?.trim() || "",
       req.body.description?.trim() || "",
-      Number(req.body.received_qty || 0),
+      parseQtyValue(req.body.received_qty || 0),
       req.body.qty_unit?.trim() || "",
       req.body.mrr_number?.trim() || "",
       req.body.fmr_number?.trim() || "",
@@ -7566,7 +7573,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_
         <td>${esc(line.po_line || "")}</td>
         <td>${esc(line.item_code || "")}</td>
         <td>${esc(line.description || "")}</td>
-        <td>${esc(line.qty_received)}</td>
+        <td>${esc(formatQtyDisplay(line.qty_received))}</td>
         <td>${esc(line.warehouse || "")}</td>
         <td>${esc(line.location || "")}</td>
         <td>${esc(line.osd_status || "")}</td>
