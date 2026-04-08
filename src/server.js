@@ -130,6 +130,11 @@ function canAccess(user, section, action = "view") {
   return Boolean(sectionPermissions[action]);
 }
 
+function canEditInventoryAudit(user) {
+  if (!user) return false;
+  return user.role === "admin" || canAccess(user, "inventory", "edit");
+}
+
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 app.use(cookieParser(undefined, { decode: safeCookieDecode }));
 app.use("/public", express.static(path.join(process.cwd(), "public")));
@@ -2251,6 +2256,14 @@ function requirePermission(section, action = "view") {
     }
     next();
   };
+}
+
+function requireInventoryAuditEdit(req, res, next) {
+  if (!canEditInventoryAudit(req.user)) {
+    res.status(403).send(layout("Forbidden", `<div class="card error"><h3>Forbidden</h3><p>You do not have permission for this action.</p></div>`, req.user));
+    return;
+  }
+  next();
 }
 
 function canEditRequisition(user, header) {
@@ -6771,7 +6784,7 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
     <h1>Inventory Audit</h1>
     <div class="card">
       <div class="actions">
-        ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-primary" href="/inventory-audit/new">New Audit</a>` : ""}
+        ${canEditInventoryAudit(req.user) ? `<a class="btn btn-primary" href="/inventory-audit/new">New Audit</a>` : ""}
         <a class="btn btn-secondary" href="/yard">Back To Yard</a>
       </div>
     </div>
@@ -6782,7 +6795,7 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
   `, req.user));
 }));
 
-app.get("/inventory-audit/new", requireAuth, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHandler(async (req, res) => {
   const warehouseFilter = String(req.query.warehouse_filter || "").trim();
   const locationWarehouseFilter = String(req.query.location_warehouse_filter || "").trim() || warehouseFilter;
   const locationFilter = String(req.query.location_filter || "").trim();
@@ -6920,7 +6933,7 @@ app.get("/inventory-audit/new", requireAuth, requirePermission("inventory", "edi
   `, req.user));
 }));
 
-app.post("/inventory-audit/save", requireAuth, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.post("/inventory-audit/save", requireAuth, requireInventoryAuditEdit, asyncHandler(async (req, res) => {
   const key = String(req.body.key || "").trim();
   if (!key) throw new Error("Invalid inventory audit row.");
   let decoded;
