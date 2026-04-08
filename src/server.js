@@ -1698,6 +1698,90 @@ async function getWarehouseLocationMap() {
   return map;
 }
 
+function getInventoryByLocationSubquery() {
+  return `
+    select
+      coalesce(receipt_inventory.item_code, adjustment_inventory.item_code) as item_code,
+      coalesce(receipt_inventory.description, adjustment_inventory.description) as description,
+      coalesce(receipt_inventory.size_1, adjustment_inventory.size_1) as size_1,
+      coalesce(receipt_inventory.size_2, adjustment_inventory.size_2) as size_2,
+      coalesce(receipt_inventory.thk_1, adjustment_inventory.thk_1) as thk_1,
+      coalesce(receipt_inventory.thk_2, adjustment_inventory.thk_2) as thk_2,
+      coalesce(receipt_inventory.warehouse, adjustment_inventory.warehouse) as warehouse,
+      coalesce(receipt_inventory.location, adjustment_inventory.location) as location,
+      coalesce(receipt_inventory.qty_on_hand, 0) + coalesce(adjustment_inventory.qty_adjustment, 0) as qty_on_hand,
+      coalesce(receipt_inventory.qty_osd, 0) as qty_osd
+    from (
+      select
+        mi.item_code,
+        mi.description,
+        coalesce(pl.size_1, '') as size_1,
+        coalesce(pl.size_2, '') as size_2,
+        coalesce(pl.thk_1, '') as thk_1,
+        coalesce(pl.thk_2, '') as thk_2,
+        coalesce(r.warehouse, '') as warehouse,
+        coalesce(r.location, '') as location,
+        sum(case when coalesce(r.osd_status, 'OK') = 'OK' then r.qty_received else 0 end) as qty_on_hand,
+        sum(case when coalesce(r.osd_status, 'OK') = 'OK' then 0 else r.qty_received end) as qty_osd
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join material_items mi on mi.id = pl.material_item_id
+      group by
+        mi.item_code,
+        mi.description,
+        coalesce(pl.size_1, ''),
+        coalesce(pl.size_2, ''),
+        coalesce(pl.thk_1, ''),
+        coalesce(pl.thk_2, ''),
+        coalesce(r.warehouse, ''),
+        coalesce(r.location, '')
+    ) receipt_inventory
+    full outer join (
+      select
+        item_code,
+        description,
+        coalesce(size_1, '') as size_1,
+        coalesce(size_2, '') as size_2,
+        coalesce(thk_1, '') as thk_1,
+        coalesce(thk_2, '') as thk_2,
+        coalesce(warehouse, '') as warehouse,
+        coalesce(location, '') as location,
+        sum(qty_adjustment) as qty_adjustment
+      from inventory_adjustment_lines
+      group by
+        item_code,
+        description,
+        coalesce(size_1, ''),
+        coalesce(size_2, ''),
+        coalesce(thk_1, ''),
+        coalesce(thk_2, ''),
+        coalesce(warehouse, ''),
+        coalesce(location, '')
+    ) adjustment_inventory
+      on adjustment_inventory.item_code = receipt_inventory.item_code
+     and adjustment_inventory.size_1 = receipt_inventory.size_1
+     and adjustment_inventory.size_2 = receipt_inventory.size_2
+     and adjustment_inventory.thk_1 = receipt_inventory.thk_1
+     and adjustment_inventory.thk_2 = receipt_inventory.thk_2
+     and adjustment_inventory.warehouse = receipt_inventory.warehouse
+     and adjustment_inventory.location = receipt_inventory.location
+  `;
+}
+
+function getInventoryTotalsSubquery() {
+  return `
+    select
+      item_code,
+      coalesce(size_1, '') as size_1,
+      coalesce(size_2, '') as size_2,
+      coalesce(thk_1, '') as thk_1,
+      coalesce(thk_2, '') as thk_2,
+      sum(qty_on_hand) as qty_on_hand
+    from (${getInventoryByLocationSubquery()}) inventory_by_location
+    group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+  `;
+}
+
 function normalizeWarehouseLocationImportRow(row) {
   const normalized = {};
   const aliases = {
@@ -2234,6 +2318,18 @@ async function getJobNumber(client = null) {
   return String(result.rows[0]?.value || "0000").trim() || "0000";
 }
 
+async function getNextInventoryAuditReportNumber(client = null) {
+  const runner = client || { query };
+  const jobNumber = await getJobNumber(client);
+  const result = await runner.query(`
+    select coalesce(max(cast(right(report_no, 5) as integer)), 0) as max_no
+    from inventory_audit_reports
+    where report_no ~ '-INV-[0-9]{5}$'
+  `);
+  const nextNumber = num(result.rows[0]?.max_no) + 1;
+  return `${jobNumber}-INV-${String(nextNumber).padStart(5, "0")}`;
+}
+
 async function getNextRfqNumber(client = null) {
   const runner = client || { query };
   const jobNumber = await getJobNumber(client);
@@ -2400,6 +2496,7 @@ app.get("/yard", requireAuth, requirePermission("yard", "view"), async (req, res
 function getInventoryAuditQueryString(source = {}) {
   return new URLSearchParams({
     warehouse_filter: String(source.warehouse_filter || ""),
+    location_warehouse_filter: String(source.location_warehouse_filter || ""),
     location_filter: String(source.location_filter || ""),
     ident_filter: String(source.ident_filter || "")
   }).toString();
@@ -3410,18 +3507,7 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
           greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
         from bom_lines bl
         left join (
-          select
-            mi.item_code,
-            coalesce(pl.size_1, '') as size_1,
-            coalesce(pl.size_2, '') as size_2,
-            coalesce(pl.thk_1, '') as thk_1,
-            coalesce(pl.thk_2, '') as thk_2,
-            sum(r.qty_received) as qty_on_hand
-          from receipts r
-          join po_lines pl on pl.id = r.po_line_id
-          join material_items mi on mi.id = pl.material_item_id
-          where coalesce(r.osd_status, 'OK') = 'OK'
-          group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+          ${getInventoryTotalsSubquery()}
         ) inv
           on inv.item_code = bl.item_code
          and inv.size_1 = coalesce(bl.size_1, '')
@@ -3638,18 +3724,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
           greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
         from bom_lines bl
         left join (
-          select
-            mi.item_code,
-            coalesce(pl.size_1, '') as size_1,
-            coalesce(pl.size_2, '') as size_2,
-            coalesce(pl.thk_1, '') as thk_1,
-            coalesce(pl.thk_2, '') as thk_2,
-            sum(r.qty_received) as qty_on_hand
-          from receipts r
-          join po_lines pl on pl.id = r.po_line_id
-          join material_items mi on mi.id = pl.material_item_id
-          where coalesce(r.osd_status, 'OK') = 'OK'
-          group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+          ${getInventoryTotalsSubquery()}
         ) inv
           on inv.item_code = bl.item_code
          and inv.size_1 = coalesce(bl.size_1, '')
@@ -4005,20 +4080,16 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("req
 
   const inventoryRows = (await query(`
     select
-      mi.item_code,
-      coalesce(pl.size_1, '') as size_1,
-      coalesce(pl.size_2, '') as size_2,
-      coalesce(pl.thk_1, '') as thk_1,
-      coalesce(pl.thk_2, '') as thk_2,
-      r.warehouse,
-      r.location,
-      sum(r.qty_received) as qty_on_hand
-    from receipts r
-    join po_lines pl on pl.id = r.po_line_id
-    join material_items mi on mi.id = pl.material_item_id
-    where coalesce(r.osd_status, 'OK') = 'OK'
-    group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, ''), r.warehouse, r.location
-    order by r.warehouse, r.location
+      item_code,
+      coalesce(size_1, '') as size_1,
+      coalesce(size_2, '') as size_2,
+      coalesce(thk_1, '') as thk_1,
+      coalesce(thk_2, '') as thk_2,
+      warehouse,
+      location,
+      qty_on_hand
+    from (${getInventoryByLocationSubquery()}) inventory_by_location
+    order by warehouse, location
   `)).rows;
   const issuedRows = (await query(`
     select
@@ -4213,18 +4284,7 @@ app.get("/requisitions/:id/edit", requireAuth, requirePermission("requisitions",
     from material_requisition_lines mrl
     join bom_lines bl on bl.id = mrl.bom_line_id
     left join (
-      select
-        mi.item_code,
-        coalesce(pl.size_1, '') as size_1,
-        coalesce(pl.size_2, '') as size_2,
-        coalesce(pl.thk_1, '') as thk_1,
-        coalesce(pl.thk_2, '') as thk_2,
-        sum(r.qty_received) as qty_on_hand
-      from receipts r
-      join po_lines pl on pl.id = r.po_line_id
-      join material_items mi on mi.id = pl.material_item_id
-      where coalesce(r.osd_status, 'OK') = 'OK'
-      group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+      ${getInventoryTotalsSubquery()}
     ) inv
       on inv.item_code = bl.item_code
      and inv.size_1 = coalesce(bl.size_1, '')
@@ -4324,18 +4384,7 @@ app.post("/requisitions/:id/edit", requireAuth, requirePermission("requisitions"
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
       left join (
-        select
-          mi.item_code,
-          coalesce(pl.size_1, '') as size_1,
-          coalesce(pl.size_2, '') as size_2,
-          coalesce(pl.thk_1, '') as thk_1,
-          coalesce(pl.thk_2, '') as thk_2,
-          sum(r.qty_received) as qty_on_hand
-        from receipts r
-        join po_lines pl on pl.id = r.po_line_id
-        join material_items mi on mi.id = pl.material_item_id
-        where coalesce(r.osd_status, 'OK') = 'OK'
-        group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+        ${getInventoryTotalsSubquery()}
       ) inv
         on inv.item_code = bl.item_code
        and inv.size_1 = coalesce(bl.size_1, '')
@@ -4432,18 +4481,7 @@ app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
       left join (
-        select
-          mi.item_code,
-          coalesce(pl.size_1, '') as size_1,
-          coalesce(pl.size_2, '') as size_2,
-          coalesce(pl.thk_1, '') as thk_1,
-          coalesce(pl.thk_2, '') as thk_2,
-          sum(r.qty_received) as qty_on_hand
-        from receipts r
-        join po_lines pl on pl.id = r.po_line_id
-        join material_items mi on mi.id = pl.material_item_id
-        where coalesce(r.osd_status, 'OK') = 'OK'
-        group by mi.item_code, coalesce(pl.size_1, ''), coalesce(pl.size_2, ''), coalesce(pl.thk_1, ''), coalesce(pl.thk_2, '')
+        ${getInventoryTotalsSubquery()}
       ) inv
         on inv.item_code = bl.item_code
        and inv.size_1 = coalesce(bl.size_1, '')
@@ -6696,15 +6734,9 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
 
 app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async (req, res) => {
   const rows = (await query(`
-    select mi.item_code, mi.description, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2,
-           r.warehouse, r.location,
-           sum(r.qty_received) as qty_on_hand,
-           sum(case when r.osd_status = 'OK' then 0 else r.qty_received end) as qty_osd
-    from receipts r
-    join po_lines pl on pl.id = r.po_line_id
-    join material_items mi on mi.id = pl.material_item_id
-    group by mi.item_code, mi.description, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, r.warehouse, r.location
-    order by mi.item_code
+    select *
+    from (${getInventoryByLocationSubquery()}) inventory_by_location
+    order by item_code, warehouse, location
   `)).rows;
   const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.item_code)}</td><td>${esc(row.description)}</td><td>${esc(row.size_1 || "")}</td><td>${esc(row.size_2 || "")}</td>
@@ -6719,66 +6751,61 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
 
 app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
   const warehouseFilter = String(req.query.warehouse_filter || "").trim();
+  const locationWarehouseFilter = String(req.query.location_warehouse_filter || "").trim() || warehouseFilter;
   const locationFilter = String(req.query.location_filter || "").trim();
   const identFilter = String(req.query.ident_filter || "").trim();
+  const [warehouseOptions, locationMap, recentReports] = await Promise.all([
+    getWarehouseOptions(),
+    getWarehouseLocationMap(),
+    query(`
+      select id, report_no, created_at
+      from inventory_audit_reports
+      order by id desc
+      limit 20
+    `)
+  ]);
   const params = [];
   const where = [];
   if (warehouseFilter) {
     params.push(`%${warehouseFilter}%`);
-    where.push(`coalesce(r.warehouse, '') ilike $${params.length}`);
+    where.push(`coalesce(inventory_by_location.warehouse, '') ilike $${params.length}`);
   }
   if (locationFilter) {
     params.push(`%${locationFilter}%`);
-    where.push(`coalesce(r.location, '') ilike $${params.length}`);
+    where.push(`coalesce(inventory_by_location.location, '') ilike $${params.length}`);
   }
   if (identFilter) {
     params.push(`%${identFilter}%`);
     where.push(`(
-      coalesce(mi.item_code, '') ilike $${params.length}
-      or coalesce(mi.description, '') ilike $${params.length}
+      coalesce(inventory_by_location.item_code, '') ilike $${params.length}
+      or coalesce(inventory_by_location.description, '') ilike $${params.length}
     )`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const rows = (await query(`
     select
-      mi.item_code,
-      mi.description,
-      coalesce(pl.size_1, '') as size_1,
-      coalesce(pl.size_2, '') as size_2,
-      coalesce(pl.thk_1, '') as thk_1,
-      coalesce(pl.thk_2, '') as thk_2,
-      coalesce(r.warehouse, '') as warehouse,
-      coalesce(r.location, '') as location,
-      sum(r.qty_received) as qty_on_hand,
+      inventory_by_location.*,
       iac.actual_qty,
       iac.updated_at as actual_updated_at
-    from receipts r
-    join po_lines pl on pl.id = r.po_line_id
-    join material_items mi on mi.id = pl.material_item_id
+    from (${getInventoryByLocationSubquery()}) inventory_by_location
     left join inventory_audit_counts iac
-      on iac.item_code = mi.item_code
-     and iac.size_1 = coalesce(pl.size_1, '')
-     and iac.size_2 = coalesce(pl.size_2, '')
-     and iac.thk_1 = coalesce(pl.thk_1, '')
-     and iac.thk_2 = coalesce(pl.thk_2, '')
-     and iac.warehouse = coalesce(r.warehouse, '')
-     and iac.location = coalesce(r.location, '')
+      on iac.item_code = inventory_by_location.item_code
+     and iac.size_1 = coalesce(inventory_by_location.size_1, '')
+     and iac.size_2 = coalesce(inventory_by_location.size_2, '')
+     and iac.thk_1 = coalesce(inventory_by_location.thk_1, '')
+     and iac.thk_2 = coalesce(inventory_by_location.thk_2, '')
+     and iac.warehouse = coalesce(inventory_by_location.warehouse, '')
+     and iac.location = coalesce(inventory_by_location.location, '')
     ${whereSql}
-    group by
-      mi.item_code,
-      mi.description,
-      coalesce(pl.size_1, ''),
-      coalesce(pl.size_2, ''),
-      coalesce(pl.thk_1, ''),
-      coalesce(pl.thk_2, ''),
-      coalesce(r.warehouse, ''),
-      coalesce(r.location, ''),
-      iac.actual_qty,
-      iac.updated_at
-    order by mi.item_code, coalesce(r.warehouse, ''), coalesce(r.location, '')
+    order by inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location
   `, params)).rows;
-  const filterQuery = getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter, ident_filter: identFilter });
-  const tableRows = rows.map((row, index) => {
+  const warehouseOptionsHtml = [`<option value="">All warehouses</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
+    .join("");
+  const locationWarehouseOptionsHtml = [`<option value="">Choose warehouse</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === locationWarehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
+    .join("");
+  const tableRows = rows.map((row) => {
     const key = Buffer.from(JSON.stringify({
       item_code: row.item_code || "",
       description: row.description || "",
@@ -6803,6 +6830,7 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
         <form method="post" action="/inventory-audit/save" style="display:flex;gap:8px;align-items:center;">
           <input type="hidden" name="key" value="${esc(key)}" />
           <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <input type="hidden" name="location_warehouse_filter" value="${esc(locationWarehouseFilter)}" />
           <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
           <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
           <input name="actual_qty" value="${esc(row.actual_qty === null || row.actual_qty === undefined ? "" : formatQtyDisplay(row.actual_qty))}" placeholder="Actual qty" style="min-width:110px;" />
@@ -6811,41 +6839,53 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
       </td>
     </tr>`;
   }).join("");
+  const recentReportRows = recentReports.rows.map((row) => `<tr>
+    <td>${esc(row.report_no)}</td>
+    <td>${esc(formatShortDateTime(row.created_at))}</td>
+    <td><a class="btn btn-secondary" href="/inventory-audit/reports/${row.id}">View</a></td>
+  </tr>`).join("");
   res.send(layout("Inventory Audit", `
     <h1>Inventory Audit</h1>
     <div class="card">
       <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">
         <form method="get" action="/inventory-audit" class="stack">
           <label>Warehouse</label>
-          <input name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <select name="warehouse_filter">${warehouseOptionsHtml}</select>
+          <input type="hidden" name="location_warehouse_filter" value="${esc(locationWarehouseFilter)}" />
           <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
           <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
           <div class="actions">
             <button type="submit">Apply Warehouse</button>
-            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ location_filter: locationFilter, ident_filter: identFilter })}">Clear Warehouse</a>
+            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ location_warehouse_filter: locationWarehouseFilter, location_filter: locationFilter, ident_filter: identFilter })}">Clear Warehouse</a>
           </div>
         </form>
         <form method="get" action="/inventory-audit" class="stack">
-          <label>Location</label>
-          <input name="location_filter" value="${esc(locationFilter)}" />
+          <label>Location Warehouse</label>
+          <select id="inventory-audit-location-warehouse" name="location_warehouse_filter" onchange='syncLocationOptions("inventory-audit-location-warehouse", "inventory-audit-location", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(locationFilter)}")'>${locationWarehouseOptionsHtml}</select>
           <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <div><label>Location</label><select id="inventory-audit-location" name="location_filter" data-placeholder="All locations"><option value="">All locations</option></select></div>
           <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
           <div class="actions">
             <button type="submit">Apply Location</button>
-            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, ident_filter: identFilter })}">Clear Location</a>
+            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_warehouse_filter: locationWarehouseFilter, ident_filter: identFilter })}">Clear Location</a>
           </div>
         </form>
         <form method="get" action="/inventory-audit" class="stack">
           <label>Ident</label>
           <input name="ident_filter" value="${esc(identFilter)}" />
           <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <input type="hidden" name="location_warehouse_filter" value="${esc(locationWarehouseFilter)}" />
           <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
           <div class="actions">
             <button type="submit">Apply Ident</button>
-            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter })}">Clear Ident</a>
+            <a class="btn btn-secondary" href="/inventory-audit?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_warehouse_filter: locationWarehouseFilter, location_filter: locationFilter })}">Clear Ident</a>
           </div>
         </form>
       </div>
+    </div>
+    <div class="card scroll">
+      <h3 style="margin-top:0;">Recent Inventory Audit Reports</h3>
+      <table><tr><th>Report #</th><th>Created</th><th>Action</th></tr>${recentReportRows || `<tr><td colspan="3" class="muted">No audit reports created yet.</td></tr>`}</table>
     </div>
     <div class="card scroll">
       <table>
@@ -6853,6 +6893,7 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
         ${tableRows || `<tr><td colspan="10" class="muted">No inventory rows found for the current filters.</td></tr>`}
       </table>
     </div>
+    <script>syncLocationOptions("inventory-audit-location-warehouse", "inventory-audit-location", ${JSON.stringify(locationMap)}, ${JSON.stringify(locationFilter)});</script>
   `, req.user));
 }));
 
@@ -6867,7 +6908,83 @@ app.post("/inventory-audit/save", requireAuth, requirePermission("inventory", "v
   }
   const actualQty = parseQtyValue(req.body.actual_qty || 0);
   if (!Number.isFinite(actualQty) || actualQty < 0) throw new Error("Actual on-hand qty must be zero or greater.");
+  let createdReportId = 0;
   await withTransaction(async (client) => {
+    const currentRow = (await client.query(`
+      select *
+      from (${getInventoryByLocationSubquery()}) inventory_by_location
+      where item_code = $1
+        and coalesce(size_1, '') = $2
+        and coalesce(size_2, '') = $3
+        and coalesce(thk_1, '') = $4
+        and coalesce(thk_2, '') = $5
+        and coalesce(warehouse, '') = $6
+        and coalesce(location, '') = $7
+      limit 1
+    `, [
+      String(decoded.item_code || ""),
+      String(decoded.size_1 || ""),
+      String(decoded.size_2 || ""),
+      String(decoded.thk_1 || ""),
+      String(decoded.thk_2 || ""),
+      String(decoded.warehouse || ""),
+      String(decoded.location || "")
+    ])).rows[0];
+    const bookQty = parseQtyValue(currentRow?.qty_on_hand || 0);
+    const adjustmentQty = parseQtyValue(actualQty - bookQty);
+    const reportNo = await getNextInventoryAuditReportNumber(client);
+    const reportInsert = await client.query(`
+      insert into inventory_audit_reports (
+        report_no, created_by, warehouse_filter, location_filter, ident_filter
+      ) values ($1,$2,$3,$4,$5)
+      returning id
+    `, [
+      reportNo,
+      req.user.id || null,
+      String(req.body.warehouse_filter || ""),
+      String(req.body.location_filter || ""),
+      String(req.body.ident_filter || "")
+    ]);
+    createdReportId = Number(reportInsert.rows[0]?.id || 0);
+    const lineInsert = await client.query(`
+      insert into inventory_audit_report_lines (
+        report_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, book_qty, actual_qty, adjustment_qty
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      returning id
+    `, [
+      createdReportId,
+      String(decoded.item_code || ""),
+      String(decoded.description || ""),
+      String(decoded.size_1 || ""),
+      String(decoded.size_2 || ""),
+      String(decoded.thk_1 || ""),
+      String(decoded.thk_2 || ""),
+      String(decoded.warehouse || ""),
+      String(decoded.location || ""),
+      bookQty,
+      actualQty,
+      adjustmentQty
+    ]);
+    if (adjustmentQty !== 0) {
+      await client.query(`
+        insert into inventory_adjustment_lines (
+          report_id, report_line_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, qty_adjustment, created_by
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      `, [
+        createdReportId,
+        Number(lineInsert.rows[0]?.id || 0),
+        String(decoded.item_code || ""),
+        String(decoded.description || ""),
+        String(decoded.size_1 || ""),
+        String(decoded.size_2 || ""),
+        String(decoded.thk_1 || ""),
+        String(decoded.thk_2 || ""),
+        String(decoded.warehouse || ""),
+        String(decoded.location || ""),
+        adjustmentQty,
+        req.user.id || null
+      ]);
+    }
     await client.query(`
       insert into inventory_audit_counts (
         item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, actual_qty, updated_by, updated_at
@@ -6890,9 +7007,54 @@ app.post("/inventory-audit/save", requireAuth, requirePermission("inventory", "v
       actualQty,
       req.user.id || null
     ]);
-    await auditLog(client, req.user.id, "update", "inventory_audit_counts", `${decoded.item_code}|${decoded.warehouse}|${decoded.location}`, `actual_qty=${actualQty}`);
+    await auditLog(client, req.user.id, "update", "inventory_audit_counts", `${decoded.item_code}|${decoded.warehouse}|${decoded.location}`, `actual_qty=${actualQty};report=${reportNo};delta=${adjustmentQty}`);
   });
-  res.redirect(`/inventory-audit?${getInventoryAuditQueryString(req.body)}`);
+  res.redirect(`/inventory-audit/reports/${createdReportId}`);
+}));
+
+app.get("/inventory-audit/reports/:id", requireAuth, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const report = (await query(`
+    select r.*, u.username as created_by_name
+    from inventory_audit_reports r
+    left join users u on u.id = r.created_by
+    where r.id = $1
+  `, [req.params.id])).rows[0];
+  if (!report) throw new Error("Inventory audit report not found.");
+  const lines = (await query(`
+    select *
+    from inventory_audit_report_lines
+    where report_id = $1
+    order by id
+  `, [req.params.id])).rows;
+  const lineRows = lines.map((row) => `<tr>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.size_1 || "")}</td>
+    <td>${esc(row.size_2 || "")}</td>
+    <td>${esc(row.thk_1 || "")}</td>
+    <td>${esc(row.thk_2 || "")}</td>
+    <td>${esc(row.warehouse || "")}</td>
+    <td>${esc(row.location || "")}</td>
+    <td>${esc(formatQtyDisplay(row.book_qty))}</td>
+    <td>${esc(formatQtyDisplay(row.actual_qty))}</td>
+    <td>${esc(formatQtyDisplay(row.adjustment_qty))}</td>
+  </tr>`).join("");
+  res.send(layout(`Inventory Audit ${report.report_no}`, `
+    <h1>${esc(report.report_no)}</h1>
+    <div class="card">
+      <div class="stats">
+        <div class="stat"><div>Created</div><strong>${esc(formatShortDateTime(report.created_at))}</strong></div>
+        <div class="stat"><div>Created By</div><strong>${esc(report.created_by_name || "")}</strong></div>
+        <div class="stat"><div>Warehouse Filter</div><strong>${esc(report.warehouse_filter || "All")}</strong></div>
+        <div class="stat"><div>Location Filter</div><strong>${esc(report.location_filter || "All")}</strong></div>
+        <div class="stat"><div>Ident Filter</div><strong>${esc(report.ident_filter || "All")}</strong></div>
+      </div>
+      <div class="actions" style="margin-top:12px;"><a class="btn btn-secondary" href="/inventory-audit">Back To Inventory Audit</a></div>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Warehouse</th><th>Location</th><th>Book Qty</th><th>Actual Qty</th><th>Adjustment</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No report lines found.</td></tr>`}</table>
+    </div>
+  `, req.user));
 }));
 
 app.get("/material-logs", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
