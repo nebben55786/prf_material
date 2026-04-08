@@ -6449,6 +6449,7 @@ app.get("/receive/by-po", requireAuth, requirePermission("receiving", "view"), a
 
 app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
   const mrrId = Number(req.params.mrrId);
+  const backHref = typeof req.query.back === "string" && req.query.back.startsWith("/") ? req.query.back : "/receive";
   const mrr = (await query("select * from mrr_logs where id = $1", [mrrId])).rows[0];
   if (!mrr) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR not found.</h3></div>`, req.user));
@@ -6520,10 +6521,10 @@ app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), 
           <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
-        <div class="actions"><button type="submit">${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="/receive">Back</a></div>
+        <div class="actions"><button type="submit">${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="${escAttr(backHref)}">Back</a></div>
       </form>
       <script>syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${JSON.stringify(locationMap)});</script>
-      ${po ? "" : `<p class="muted">No-PO receipts are logged for traceability, but they do not post into PO-based inventory until a PO line exists.</p>`}
+      ${po ? (openLines.length ? "" : `<p class="muted">All PO lines tied to this MRR are already fully received.</p>`) : `<p class="muted">No-PO receipts are logged for traceability, but they do not post into PO-based inventory until a PO line exists.</p>`}
     </div>
   `, req.user));
 });
@@ -6656,7 +6657,7 @@ app.get("/material-logs/mrr", requireAuth, requirePermission("material_logs", "v
     <td>${esc(row.received_by)}</td>
     <td>${esc(row.load_number)}</td>
     <td>${esc(row.opi_number)}</td>
-    <td><div class="actions"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
+    <td><div class="actions"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" href="/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit">Receive Missed Line</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
   </tr>`).join("");
   res.send(layout("MRR Log", `
     <h1>MRR Log</h1>
@@ -7689,7 +7690,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
         <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
-          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit">Receive Missed Line</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
         </form>
       </div>
       <div class="card scroll">
