@@ -6745,11 +6745,27 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
 });
 
 app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async (req, res) => {
+  const allowedSorts = {
+    item_code: "coalesce(item_code, '')",
+    description: "coalesce(description, '')",
+    size_1: "coalesce(size_1, '')",
+    size_2: "coalesce(size_2, '')",
+    thk_1: "coalesce(thk_1, '')",
+    thk_2: "coalesce(thk_2, '')",
+    warehouse: "coalesce(warehouse, '')",
+    location: "coalesce(location, '')",
+    qty_on_hand: "qty_on_hand",
+    qty_osd: "qty_osd"
+  };
+  const sort = String(req.query.sort || "item_code").trim();
+  const dir = String(req.query.dir || "asc").trim().toLowerCase() === "desc" ? "desc" : "asc";
+  const sortSql = allowedSorts[sort] || allowedSorts.item_code;
   const rows = (await query(`
     select *
     from (${getInventoryByLocationSubquery()}) inventory_by_location
-    order by item_code, warehouse, location
+    order by ${sortSql} ${dir}, item_code asc, warehouse asc, location asc
   `)).rows;
+  const sortLink = (column) => `/inventory?sort=${encodeURIComponent(column)}&dir=${encodeURIComponent(nextSortDir(sort, dir, column))}`;
   const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.item_code)}</td><td>${esc(row.description)}</td><td>${esc(row.size_1 || "")}</td><td>${esc(row.size_2 || "")}</td>
     <td>${esc(row.thk_1 || "")}</td><td>${esc(row.thk_2 || "")}</td><td>${esc(row.warehouse)}</td><td>${esc(row.location)}</td>
@@ -6757,7 +6773,7 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
   </tr>`).join("");
   res.send(layout("Inventory", `
     <h1>Inventory by Location</h1>
-    <div class="card scroll"><table><tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Warehouse</th><th>Location</th><th>Qty On Hand</th><th>Qty OS&D</th></tr>${tableRows}</table></div>
+    <div class="card scroll"><table><tr><th><a href="${sortLink("item_code")}">Item</a></th><th><a href="${sortLink("description")}">Description</a></th><th><a href="${sortLink("size_1")}">Size 1</a></th><th><a href="${sortLink("size_2")}">Size 2</a></th><th><a href="${sortLink("thk_1")}">Thk 1</a></th><th><a href="${sortLink("thk_2")}">Thk 2</a></th><th><a href="${sortLink("warehouse")}">Warehouse</a></th><th><a href="${sortLink("location")}">Location</a></th><th><a href="${sortLink("qty_on_hand")}">Qty On Hand</a></th><th><a href="${sortLink("qty_osd")}">Qty OS&D</a></th></tr>${tableRows}</table></div>
   `, req.user));
 });
 
