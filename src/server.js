@@ -6767,6 +6767,7 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
   const poNumber = String(req.query.po_number || "").trim();
   const itemCode = String(req.query.item_code || "").trim();
   const abbrevDescription = String(req.query.abbrev_description || "").trim();
+  const currentCrateNumber = String(req.query.current_crate_number || "").trim();
   const showRequested = String(req.query.show_requested || "").trim() === "1";
   const params = [];
   const where = [];
@@ -6794,6 +6795,11 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
     )`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const stagedCount = Number((await query(`
+    select count(*)::int as count
+    from vendor_fmr_request_lines
+    where selected_for_request = true
+  `)).rows[0]?.count || 0);
   const rows = (await query(`
     select
       vl.*,
@@ -6810,12 +6816,12 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
     limit 300
   `, params)).rows;
   const rowMarkup = rows.map((row) => `<tr>
-    <td>${row.already_requested ? `<span class="chip">Requested</span>` : `<input type="checkbox" name="selected_ids" value="${row.id}" />`}</td>
+    <td>${row.already_requested ? `<span class="chip">Requested</span>` : `<input type="checkbox" class="vendor-fmr-pick" data-row-id="${row.id}" name="selected_ids" value="${row.id}" ${row.selected_for_request ? "checked" : ""} />`}</td>
     <td>${esc(row.vendor_name)}</td>
     <td>${esc(row.po_number)}</td>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.abbrev_description)}</td>
-    <td><input name="crate_number_${row.id}" value="${esc(row.crate_number || "")}" placeholder="Enter crate #" /></td>
+    <td><input class="vendor-fmr-crate-input" data-row-id="${row.id}" name="crate_number_${row.id}" value="${esc(row.crate_number || "")}" placeholder="Enter crate #" /></td>
     <td><input name="srn_number_${row.id}" value="${esc(row.srn_number || "")}" placeholder="Optional SRN" /></td>
     <td>${esc(row.po_line || "")}</td>
     <td>${esc(row.sub_line || "")}</td>
@@ -6837,23 +6843,31 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
     </div>
     <div class="card">
       <form method="get" action="/material-logs/fmr/request-lines" class="stack">
-        <div class="grid" style="grid-template-columns: 1fr 1fr 1fr auto auto;">
+        <div class="grid" style="grid-template-columns: 1fr 1fr 1fr 1fr auto auto;">
           <div><label>PO</label><input name="po_number" value="${esc(poNumber)}" /></div>
           <div><label>Item Code</label><input name="item_code" value="${esc(itemCode)}" /></div>
           <div><label>Abbrev Description</label><input name="abbrev_description" value="${esc(abbrevDescription)}" /></div>
+          <div><label>Current Crate #</label><input name="current_crate_number" value="${esc(currentCrateNumber)}" placeholder="Use this crate # for checked rows" /></div>
           <div><label>Show Requested</label><select name="show_requested"><option value="0" ${showRequested ? "" : "selected"}>No</option><option value="1" ${showRequested ? "selected" : ""}>Yes</option></select></div>
           <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
         </div>
       </form>
     </div>
     <div class="card">
-      <div class="muted">Enter the crate/package number manually on the matching lines. When you generate Vendor FMRs, the app uses the first checked line for each vendor + crate combination. If SRN is blank, it is ignored.</div>
+      <div class="muted">Work one crate at a time here. Type the current crate number once, check the matching lines, and the app will fill that crate number into each checked row. Save as many staged crates as you need, then click Generate Vendor FMRs once to create all staged requests.</div>
+      <div class="muted" style="margin-top:8px;">Staged lines ready to generate: <strong>${stagedCount}</strong></div>
     </div>
     <form method="post" action="/material-logs/fmr/request-lines/bulk" class="stack">
       <input type="hidden" name="po_number" value="${esc(poNumber)}" />
       <input type="hidden" name="item_code" value="${esc(itemCode)}" />
       <input type="hidden" name="abbrev_description" value="${esc(abbrevDescription)}" />
       <input type="hidden" name="show_requested" value="${showRequested ? "1" : "0"}" />
+      <div class="card">
+        <div class="grid" style="grid-template-columns: 1fr auto;">
+          <div><label>Current Crate #</label><input id="current_crate_number" name="current_crate_number" value="${esc(currentCrateNumber)}" placeholder="Type crate # once, then check the matching lines" /></div>
+          <div style="align-self:end;"><button type="button" class="btn btn-secondary" id="apply_current_crate">Fill Checked Rows</button></div>
+        </div>
+      </div>
       <div class="actions">
         <button type="submit" name="action" value="save">Save Crate / SRN</button>
         <button type="submit" name="action" value="generate">Generate Vendor FMRs</button>
@@ -6862,6 +6876,30 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
         <table><tr><th>Pick</th><th>Vendor</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Crate #</th><th>SRN</th><th>Line</th><th>Sub</th><th>Rcvd</th><th>MRR #</th><th>Date Rcvd</th></tr>${rowMarkup || `<tr><td colspan="12" class="muted">No request lines found.</td></tr>`}</table>
       </div>
     </form>
+    <script>
+      (() => {
+        const crateSource = document.getElementById("current_crate_number");
+        const fillButton = document.getElementById("apply_current_crate");
+        if (!crateSource) return;
+        const applyCrateToCheckedRows = () => {
+          const crateValue = crateSource.value.trim();
+          if (!crateValue) return;
+          document.querySelectorAll(".vendor-fmr-pick:checked").forEach((checkbox) => {
+            const crateInput = document.querySelector('.vendor-fmr-crate-input[data-row-id="' + checkbox.dataset.rowId + '"]');
+            if (crateInput) crateInput.value = crateValue;
+          });
+        };
+        document.querySelectorAll(".vendor-fmr-pick").forEach((checkbox) => {
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) applyCrateToCheckedRows();
+          });
+        });
+        crateSource.addEventListener("input", applyCrateToCheckedRows);
+        if (fillButton) {
+          fillButton.addEventListener("click", applyCrateToCheckedRows);
+        }
+      })();
+    </script>
   `, req.user));
 }));
 
@@ -6922,6 +6960,7 @@ app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermissi
 
 app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
   const action = String(req.body.action || "save").trim();
+  const currentCrateNumber = String(req.body.current_crate_number || "").trim();
   const fieldIds = Object.keys(req.body)
     .map((key) => {
       const match = key.match(/^(crate_number|srn_number)_(\d+)$/);
@@ -6937,35 +6976,39 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
     po_number: String(req.body.po_number || ""),
     item_code: String(req.body.item_code || ""),
     abbrev_description: String(req.body.abbrev_description || ""),
-    show_requested: String(req.body.show_requested || "0")
+    show_requested: String(req.body.show_requested || "0"),
+    current_crate_number: currentCrateNumber
   }).toString();
   await withTransaction(async (client) => {
+    const selectedIdSet = new Set(selectedIds);
     for (const id of fieldIds) {
+      const savedCrateNumber = String(req.body[`crate_number_${id}`] || "").trim() || (selectedIdSet.has(id) ? currentCrateNumber : "");
       await client.query(`
         update vendor_fmr_request_lines
         set crate_number = $2,
             srn_number = $3,
+            selected_for_request = $4,
             updated_at = now()
         where id = $1
-      `, [id, String(req.body[`crate_number_${id}`] || "").trim(), String(req.body[`srn_number_${id}`] || "").trim()]);
+      `, [id, savedCrateNumber, String(req.body[`srn_number_${id}`] || "").trim(), selectedIdSet.has(id)]);
     }
     if (action !== "generate") {
       await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", fieldIds.join(","), `count=${fieldIds.length}`);
       return;
     }
-    if (selectedIds.length === 0) throw new Error("Select at least one line to generate Vendor FMRs.");
     const requestedSet = await getRequestedVendorCrateSet(client);
     const rows = (await client.query(`
       select *
       from vendor_fmr_request_lines
-      where id = any($1::bigint[])
+      where selected_for_request = true
       order by id
-    `, [selectedIds])).rows;
+    `)).rows;
+    if (rows.length === 0) throw new Error("Save at least one staged line before generating Vendor FMRs.");
     const requestGroups = new Map();
     let skippedRequestedCount = 0;
     for (const row of rows) {
-      const crateNumber = String(req.body[`crate_number_${row.id}`] || row.crate_number || "").trim();
-      const srnNumber = String(req.body[`srn_number_${row.id}`] || row.srn_number || "").trim();
+      const crateNumber = String(row.crate_number || "").trim();
+      const srnNumber = String(row.srn_number || "").trim();
       if (!crateNumber) throw new Error("Every selected line must have a crate number before generating Vendor FMRs.");
       const vendorKey = String(row.vendor_name || "").trim().toLowerCase();
       const crateKey = `${vendorKey}|${crateNumber.toLowerCase()}`;
@@ -7024,6 +7067,12 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
         createdLineCount += 1;
       }
     }
+    await client.query(`
+      update vendor_fmr_request_lines
+      set selected_for_request = false,
+          updated_at = now()
+      where selected_for_request = true
+    `);
     req._vendorFmrGenerateResult = { createdCount, createdLineCount, skippedRequestedCount };
   });
   if (action === "generate") {
