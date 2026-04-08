@@ -876,78 +876,6 @@ function layout(title, body, user) {
         targetForm.submit();
         return false;
       }
-      function blobToBase64(blob) {
-        return new Promise(function(resolve, reject) {
-          const reader = new FileReader();
-          reader.onloadend = function() {
-            const result = String(reader.result || "");
-            const parts = result.split(",");
-            resolve(parts[1] || "");
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
-      }
-      async function createOutlookRfqDraft(button, rfqId, vendorSelectId, rfqNumber, description) {
-        const vendorSelect = document.getElementById(vendorSelectId);
-        if (!vendorSelect) return false;
-        if (!vendorSelect.value) {
-          window.alert("Select a quote vendor first.");
-          return false;
-        }
-        const selectedOption = vendorSelect.options[vendorSelect.selectedIndex];
-        const vendorEmail = String(selectedOption?.getAttribute("data-email") || "").trim();
-        const vendorName = String(selectedOption?.textContent || "").trim();
-        const vendorContact = String(selectedOption?.getAttribute("data-contact-name") || "").trim();
-        if (!vendorEmail) {
-          window.alert("The selected vendor does not have a primary contact email.");
-          return false;
-        }
-        const originalText = button.textContent;
-        button.disabled = true;
-        button.textContent = "Creating Outlook Draft...";
-        try {
-          const pdfResponse = await fetch("/rfq/" + encodeURIComponent(rfqId) + "/sheet.pdf?vendor_id=" + encodeURIComponent(vendorSelect.value), {
-            credentials: "same-origin"
-          });
-          if (!pdfResponse.ok) {
-            throw new Error("Unable to generate the RFQ PDF.");
-          }
-          const pdfBlob = await pdfResponse.blob();
-          const pdfBase64 = await blobToBase64(pdfBlob);
-          const helperResponse = await fetch("http://127.0.0.1:47321/outlook/rfq-draft", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              to: vendorEmail,
-              subject: [rfqNumber, description].filter(Boolean).join(" | "),
-              body: [
-                "Please see the attached RFQ sheet.",
-                "",
-                "RFQ #: " + String(rfqNumber || ""),
-                "Vendor: " + vendorName,
-                vendorContact ? "Contact: " + vendorContact : ""
-              ].filter(Boolean).join("\\r\\n"),
-              attachmentName: String(rfqNumber || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_") + ".pdf",
-              attachmentBase64: pdfBase64
-            })
-          });
-          if (!helperResponse.ok) {
-            const errorText = await helperResponse.text();
-            throw new Error(errorText || "The Outlook helper did not accept the RFQ draft request.");
-          }
-          window.alert("Outlook draft created.");
-        } catch (error) {
-          const details = error && error.message ? error.message : "Start the local Outlook helper and try again.";
-          window.alert("Unable to create the Outlook draft. " + details);
-        } finally {
-          button.disabled = false;
-          button.textContent = originalText;
-        }
-        return false;
-      }
       function filterTableRows(inputId, tableId) {
         const input = document.getElementById(inputId);
         const table = document.getElementById(tableId);
@@ -4760,11 +4688,10 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
       select
         v.id,
         v.name,
-        coalesce(primary_contact.contact_name, v.contact_name, '') as primary_contact_name,
-        coalesce(primary_contact.email, v.email, '') as primary_email
+        coalesce(primary_contact.contact_name, v.contact_name, '') as primary_contact_name
       from vendors v
       left join lateral (
-        select contact_name, email
+        select contact_name
         from vendor_contacts
         where vendor_id = v.id and is_primary = true
         order by id asc
@@ -4870,7 +4797,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
   }
 
   const quoteVendorOptions = [`<option value="">Select vendor</option>`]
-    .concat(vendors.map((vendor) => `<option value="${vendor.id}" data-email="${escAttr(vendor.primary_email || "")}" data-contact-name="${escAttr(vendor.primary_contact_name || "")}" ${String(vendor.id) === activeQuoteVendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
+    .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === activeQuoteVendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
   const rfqStatusOptions = rfqStatuses
     .map((status) => `<option value="${status.value}" ${rfq.status === status.value ? "selected" : ""}>${esc(status.label)}</option>`)
@@ -4947,9 +4874,8 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
         <div class="actions">
           <button type="submit" name="award_all" value="1" onclick="return validateBulkAward(this.form)">Award Populated Rows</button>
           <button type="button" onclick="return promptPoNumber(this, 'rfq-quote-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}')">Create PO From Awarded Lines</button>
-          <button type="button" onclick="return createOutlookRfqDraft(this, ${rfqId}, 'rfq-quote-vendor-${rfqId}', ${escAttr(JSON.stringify(String(rfq.rfq_no || "")))}, ${escAttr(JSON.stringify(String(rfq.project_name || "")))})">Create RFQ PDF + Outlook Draft</button>
+          <a class="btn btn-secondary" target="_blank" href="/rfq/${rfqId}/sheet.pdf?vendor_id=${encodeURIComponent(activeQuoteVendorId)}">Open RFQ PDF</a>
         </div>
-        <div class="muted">Uses the selected quote vendor's primary contact email and requires the local Outlook helper running on this PC.</div>
         <table>
           <tr><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Thk</th><th>Notes</th><th>Unit Price</th><th>Lead Days</th><th>Award Status</th><th>Award Summary</th><th>Issued PO</th><th>Actions</th></tr>
           ${itemRows.join("") || `<tr><td colspan="15" class="muted">No RFQ items loaded yet.</td></tr>`}
@@ -4999,11 +4925,10 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), as
     vendorId ? query(`
       select
         v.name,
-        coalesce(primary_contact.contact_name, v.contact_name, '') as primary_contact_name,
-        coalesce(primary_contact.email, v.email, '') as primary_email
+        coalesce(primary_contact.contact_name, v.contact_name, '') as primary_contact_name
       from vendors v
       left join lateral (
-        select contact_name, email
+        select contact_name
         from vendor_contacts
         where vendor_id = v.id and is_primary = true
         order by id asc
