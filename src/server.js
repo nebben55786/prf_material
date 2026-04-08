@@ -871,6 +871,8 @@ function layout(title, body, user) {
       table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; }
       th, td { padding: 6px 7px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
       th { color: #223240; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; background: linear-gradient(180deg, #e5eaef 0%, #d3dbe3 100%); }
+      th.sortable-th { cursor: pointer; }
+      th.sortable-th .sort-indicator { margin-left: 4px; color: var(--muted); font-size: 10px; }
       tr:nth-child(even) td { background: #f7f9fb; }
       .data-grid { table-layout: fixed; min-width: 1400px; }
       .data-grid th { position: relative; user-select: none; }
@@ -1051,6 +1053,68 @@ function layout(title, body, user) {
           });
         });
       }
+      function parseSortableValue(text) {
+        const value = String(text || "").trim();
+        if (!value) return { type: "text", value: "" };
+        const shortDateMatch = value.match(/^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2}))?$/);
+        if (shortDateMatch) {
+          const year = Number(shortDateMatch[3]);
+          const month = Number(shortDateMatch[2]) - 1;
+          const day = Number(shortDateMatch[1]);
+          const hour = Number(shortDateMatch[4] || 0);
+          const minute = Number(shortDateMatch[5] || 0);
+          return { type: "number", value: new Date(year, month, day, hour, minute).getTime() };
+        }
+        const numericText = value.replace(/,/g, "");
+        if (/^-?\d+(?:\.\d+)?$/.test(numericText)) {
+          return { type: "number", value: Number(numericText) };
+        }
+        return { type: "text", value: value.toLowerCase() };
+      }
+      function makeTableSortable(table) {
+        if (!table) return;
+        const rows = Array.from(table.querySelectorAll("tr"));
+        if (rows.length < 2) return;
+        const headerRow = rows[0];
+        const headers = Array.from(headerRow.querySelectorAll("th"));
+        if (!headers.length) return;
+        headers.forEach((th, index) => {
+          if (th.querySelector("a")) return;
+          const headerText = String(th.innerText || "").trim().toLowerCase();
+          if (!headerText || headerText === "action" || headerText === "actions") return;
+          if (th.dataset.sortReady === "1") return;
+          th.dataset.sortReady = "1";
+          th.classList.add("sortable-th");
+          const indicator = document.createElement("span");
+          indicator.className = "sort-indicator";
+          indicator.textContent = "";
+          th.appendChild(indicator);
+          th.addEventListener("click", () => {
+            const currentIndex = Number(table.dataset.sortIndex || -1);
+            const nextDir = currentIndex === index && table.dataset.sortDir === "asc" ? "desc" : "asc";
+            const bodyRows = Array.from(table.querySelectorAll("tr")).slice(1);
+            bodyRows.sort((a, b) => {
+              const aParsed = parseSortableValue(a.children[index] ? a.children[index].innerText : "");
+              const bParsed = parseSortableValue(b.children[index] ? b.children[index].innerText : "");
+              let result = 0;
+              if (aParsed.type === "number" && bParsed.type === "number") {
+                result = aParsed.value - bParsed.value;
+              } else {
+                result = String(aParsed.value).localeCompare(String(bParsed.value), undefined, { numeric: true, sensitivity: "base" });
+              }
+              return nextDir === "asc" ? result : -result;
+            });
+            bodyRows.forEach((row) => table.appendChild(row));
+            table.dataset.sortIndex = String(index);
+            table.dataset.sortDir = nextDir;
+            headers.forEach((header, headerIndex) => {
+              const headerIndicator = header.querySelector(".sort-indicator");
+              if (!headerIndicator) return;
+              headerIndicator.textContent = headerIndex === index ? (nextDir === "asc" ? "↑" : "↓") : "";
+            });
+          });
+        });
+      }
       function randomSixDigitCode() {
         return String(Math.floor(100000 + Math.random() * 900000));
       }
@@ -1097,6 +1161,7 @@ function layout(title, body, user) {
         document.querySelectorAll("form[data-password-form='access-approve']").forEach((form) => {
           attachPasswordValidation(form.id, "temp_password", form.dataset.passwordMessageId);
         });
+        document.querySelectorAll(".card.scroll table").forEach((table) => makeTableSortable(table));
       });
     </script>
   </head>
@@ -1154,6 +1219,11 @@ function normalizeEmail(value) {
 function nextSortDir(currentSort, currentDir, column) {
   if (currentSort !== column) return "asc";
   return currentDir === "asc" ? "desc" : "asc";
+}
+
+function sortLabel(label, currentSort, currentDir, column) {
+  if (currentSort !== column) return label;
+  return `${label} ${currentDir === "asc" ? "↑" : "↓"}`;
 }
 
 async function syncLegacyVendorContact(client, vendorId) {
@@ -6773,7 +6843,7 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
   </tr>`).join("");
   res.send(layout("Inventory", `
     <h1>Inventory by Location</h1>
-    <div class="card scroll"><table><tr><th><a href="${sortLink("item_code")}">Item</a></th><th><a href="${sortLink("description")}">Description</a></th><th><a href="${sortLink("size_1")}">Size 1</a></th><th><a href="${sortLink("size_2")}">Size 2</a></th><th><a href="${sortLink("thk_1")}">Thk 1</a></th><th><a href="${sortLink("thk_2")}">Thk 2</a></th><th><a href="${sortLink("warehouse")}">Warehouse</a></th><th><a href="${sortLink("location")}">Location</a></th><th><a href="${sortLink("qty_on_hand")}">Qty On Hand</a></th><th><a href="${sortLink("qty_osd")}">Qty OS&D</a></th></tr>${tableRows}</table></div>
+    <div class="card scroll"><table><tr><th><a href="${sortLink("item_code")}">${esc(sortLabel("Item", sort, dir, "item_code"))}</a></th><th><a href="${sortLink("description")}">${esc(sortLabel("Description", sort, dir, "description"))}</a></th><th><a href="${sortLink("size_1")}">${esc(sortLabel("Size 1", sort, dir, "size_1"))}</a></th><th><a href="${sortLink("size_2")}">${esc(sortLabel("Size 2", sort, dir, "size_2"))}</a></th><th><a href="${sortLink("thk_1")}">${esc(sortLabel("Thk 1", sort, dir, "thk_1"))}</a></th><th><a href="${sortLink("thk_2")}">${esc(sortLabel("Thk 2", sort, dir, "thk_2"))}</a></th><th><a href="${sortLink("warehouse")}">${esc(sortLabel("Warehouse", sort, dir, "warehouse"))}</a></th><th><a href="${sortLink("location")}">${esc(sortLabel("Location", sort, dir, "location"))}</a></th><th><a href="${sortLink("qty_on_hand")}">${esc(sortLabel("Qty On Hand", sort, dir, "qty_on_hand"))}</a></th><th><a href="${sortLink("qty_osd")}">${esc(sortLabel("Qty OS&D", sort, dir, "qty_osd"))}</a></th></tr>${tableRows}</table></div>
   `, req.user));
 });
 
