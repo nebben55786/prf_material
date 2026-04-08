@@ -217,6 +217,28 @@ function formatShortDate(value) {
   return text;
 }
 
+function formatShortDateTime(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const text = String(value).trim();
+  if (!text) return "";
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2}))?/);
+  if (match) {
+    const dateText = `${match[3]}-${match[2]}-${match[1]}`;
+    return match[4] && match[5] ? `${dateText} ${match[4]}:${match[5]}` : dateText;
+  }
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) {
+    const day = String(parsed.getDate()).padStart(2, "0");
+    const month = String(parsed.getMonth() + 1).padStart(2, "0");
+    const year = String(parsed.getFullYear());
+    const hours = String(parsed.getHours()).padStart(2, "0");
+    const minutes = String(parsed.getMinutes()).padStart(2, "0");
+    const hasTime = parsed.getHours() !== 0 || parsed.getMinutes() !== 0 || /[T\s]\d{1,2}:\d{2}/.test(text);
+    return hasTime ? `${day}-${month}-${year} ${hours}:${minutes}` : `${day}-${month}-${year}`;
+  }
+  return text;
+}
+
 function buildSimplePdf(title, detailLines, tableLines) {
   const pageWidth = 612;
   const pageHeight = 792;
@@ -286,11 +308,7 @@ function buildSimplePdf(title, detailLines, tableLines) {
 }
 
 function formatPickTicketTimestamp(value = new Date()) {
-  try {
-    return value.toLocaleString("en-US");
-  } catch (_error) {
-    return value.toISOString().replace("T", " ").slice(0, 19);
-  }
+  return formatShortDateTime(value);
 }
 
 function buildRfqSheetPdf(rfq, items) {
@@ -361,7 +379,7 @@ function buildRfqSheetPdf(rfq, items) {
     content.push(makeText(left + 48, metaTop - 17, String(rfq.rfq_no || ""), "F1", 10));
     content.push(makeText(left + 168, metaTop - 17, "DESCRIPTION", "F2", 9));
     content.push(makeText(right - 162, metaTop - 17, "CREATED", "F2", 9));
-    content.push(makeText(right - 110, metaTop - 17, formatShortDate(rfq.created_at), "F1", 10));
+  content.push(makeText(right - 110, metaTop - 17, formatShortDateTime(rfq.created_at), "F1", 10));
 
     const descriptionBoxTop = metaTop - 26;
     content.push(rect(left, descriptionBoxTop - 30, usableWidth, 30));
@@ -496,7 +514,7 @@ function buildPickTicketPdf(header, lines) {
     content.push(makeText(left + 8, metaTop - 13, "REQUESTED BY", "F2", 8));
     content.push(makeText(left + 8, metaTop - 26, String(header.requested_by_name || "").slice(0, 34), "F1", 10));
     content.push(makeText(left + 248, metaTop - 13, "CREATED", "F2", 8));
-    content.push(makeText(left + 248, metaTop - 26, String(header.created_at || "").slice(0, 16), "F1", 9));
+  content.push(makeText(left + 248, metaTop - 26, formatShortDateTime(header.created_at), "F1", 9));
     content.push(makeText(left + 380, metaTop - 13, "PRINTED", "F2", 8));
     content.push(makeText(left + 380, metaTop - 26, formatPickTicketTimestamp().slice(0, 19), "F1", 9));
     content.push(makeText(left + 520, metaTop - 13, "BOM", "F2", 8));
@@ -608,11 +626,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const formatDate = (value) => {
     const text = String(value || "").trim();
     if (!text) return "";
-    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-      const [yyyy, mm, dd] = text.split("-");
-      return `${mm}/${dd}/${yyyy}`;
-    }
-    return text;
+    return formatShortDateTime(text);
   };
   const lineItems = lines.slice(0, 12);
   const discrepancyItems = lines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK").slice(0, 8);
@@ -2347,7 +2361,7 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
       <td>${esc(record.username)}</td>
       <td>${esc(record.role)}</td>
       <td>${record.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-      <td>${esc(record.created_at)}</td>
+              <td>${esc(formatShortDateTime(record.created_at))}</td>
       <td>
         <div class="stack">
           <form id="edit-user-${record.id}" method="post" action="/settings/users/${record.id}/edit" class="stack" data-password-form="edit-user" data-password-message-id="edit-user-${record.id}-password-error">
@@ -2386,7 +2400,7 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
   const accessRequestRows = accessRequestsRes.rows.map((record) => `
     <tr>
       <td>${esc(record.email)}</td>
-      <td>${esc(record.created_at)}</td>
+              <td>${esc(formatShortDateTime(record.created_at))}</td>
       <td>
         <form id="access-request-${record.id}" method="post" action="/settings/access-requests/${record.id}/approve" class="stack" data-password-form="access-approve" data-password-message-id="access-request-${record.id}-password-error">
           <div class="grid">
@@ -3160,7 +3174,7 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
   const coverage = coverageRes.rows[0];
   const requisitionSummary = requisitionSummaryRes.rows[0];
   const importRows = importsRes.rows.length > 0
-    ? importsRes.rows.map((batch) => `<tr><td><a href="/imports/${batch.id}">${batch.id}</a></td><td>${esc(batch.created_at)}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
+      ? importsRes.rows.map((batch) => `<tr><td><a href="/imports/${batch.id}">${batch.id}</a></td><td>${esc(formatShortDateTime(batch.created_at))}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
   res.send(layout(`BOM ${bom.bom_name || bom.description || bom.bom_no}`, `
     <h1>${esc(bom.bom_name || bom.description || bom.bom_no)}</h1>
@@ -3727,7 +3741,7 @@ app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"),
     <td>${row.line_count}</td>
     <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
     <td><span class="chip">${esc(row.status)}</span></td>
-    <td>${esc(row.created_at)}</td>
+    <td>${esc(formatShortDateTime(row.created_at))}</td>
     <td>${row.status === "VERIFIED" ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>` : ""}</td>
   </tr>`).join("");
   res.send(layout("Requisitions", `
@@ -3865,7 +3879,7 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
   res.send(layout(`Requisition ${header.requisition_no}`, `
     <h1>Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
-      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(header.created_at)}</p>
+      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(formatShortDateTime(header.created_at))}</p>
       <p class="muted">IWP: ${esc(header.iwp_no || "")}</p>
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
       ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}
@@ -4746,7 +4760,7 @@ app.get("/rfq", requireAuth, requirePermission("rfqs", "view"), async (req, res)
   const rows = rfqs.map((rfq) => `<tr>
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td>${esc(rfq.project_name)}</td>
-    <td>${esc(rfq.due_date || "")}</td>
+    <td>${esc(formatShortDateTime(rfq.due_date || ""))}</td>
     <td><span class="chip">${esc((rfqStatuses.find((item) => item.value === rfq.status) || { label: rfq.status }).label)}</span></td>
   </tr>`).join("");
   res.send(layout("RFQs", `
@@ -4962,7 +4976,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
     .join("");
   const rfqStatusLabel = (rfqStatuses.find((status) => status.value === rfq.status) || { label: rfq.status }).label;
   const importRows = recentImports.length > 0
-    ? recentImports.map((batch) => `<tr><td><a href="/imports/${batch.id}">${esc(batch.entity_type)}</a></td><td>${esc(batch.created_at)}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
+    ? recentImports.map((batch) => `<tr><td><a href="/imports/${batch.id}">${esc(batch.entity_type)}</a></td><td>${esc(formatShortDateTime(batch.created_at))}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
   const addItemCard = `
     <div class="card">
@@ -5404,7 +5418,7 @@ app.get("/rfq-item/:id/award", requireAuth, async (req, res) => {
   }
   const quoteOptions = quotesRes.rows.map((quote) => `<option value="${quote.vendor_id}" ${quote.vendor_id === item.awarded_vendor_id ? "selected" : ""}>${esc(quote.vendor_name)} | ${quoteCell(quote.unit_price, quote.lead_days)}</option>`).join("");
   const quoteRows = quotesRes.rows.length > 0
-    ? quotesRes.rows.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(quote.quoted_at)}</td></tr>`).join("")
+    ? quotesRes.rows.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(formatShortDateTime(quote.quoted_at))}</td></tr>`).join("")
     : `<tr><td colspan="4" class="muted">Add quotes before awarding this line.</td></tr>`;
   res.send(layout("Award RFQ Item", `
     <h1>Award RFQ Item</h1>
@@ -5582,10 +5596,10 @@ app.get("/rfq-item/:id/quotes", requireAuth, async (req, res) => {
   `, [req.params.id])).rows;
   const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
   const quoteRows = quotes.length > 0
-    ? quotes.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(quote.quoted_at)}</td>${item.awarded_vendor_id === quote.vendor_id ? `<td><span class="chip">Awarded</span></td>` : `<td></td>`}</tr>`).join("")
+    ? quotes.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(formatShortDateTime(quote.quoted_at))}</td>${item.awarded_vendor_id === quote.vendor_id ? `<td><span class="chip">Awarded</span></td>` : `<td></td>`}</tr>`).join("")
     : `<tr><td colspan="5" class="muted">No quotes yet</td></tr>`;
   const revisionRows = revisions.length > 0
-    ? revisions.map((revision) => `<tr><td>${esc(revision.vendor_name)}</td><td>$${Number(revision.unit_price).toFixed(2)}</td><td>${revision.lead_days} days</td><td>${esc(revision.source_type)}</td><td>${esc(revision.created_at)}</td></tr>`).join("")
+    ? revisions.map((revision) => `<tr><td>${esc(revision.vendor_name)}</td><td>$${Number(revision.unit_price).toFixed(2)}</td><td>${revision.lead_days} days</td><td>${esc(revision.source_type)}</td><td>${esc(formatShortDateTime(revision.created_at))}</td></tr>`).join("")
     : `<tr><td colspan="5" class="muted">No quote revisions yet</td></tr>`;
   res.send(layout("Manage Quotes", `
     <h1>Manage Quotes</h1>
@@ -5760,7 +5774,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
     <td>${esc(po.status)}</td>
     <td>${esc(po.po_line_refs || "")}</td>
     <td>${esc(po.open_items)}</td>
-    <td>${esc(po.created_at)}</td>
+    <td>${esc(formatShortDateTime(po.created_at))}</td>
     <td>
       <div class="actions">
         <a class="btn btn-secondary" href="/po/${po.id}/receive">Receive</a>
@@ -6007,7 +6021,7 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
     </tr>`;
   }).join("");
   const historyRows = history.map((row) => `<tr>
-    <td>${esc(row.received_at)}</td>
+    <td>${esc(formatShortDateTime(row.received_at))}</td>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
     <td>${esc(formatQtyDisplay(row.qty_received))}</td>
@@ -6274,7 +6288,7 @@ app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (re
   res.send(layout("Edit PO", `
     <h1>Edit PO</h1>
     <div class="card">
-      <p class="muted">RFQ: ${esc(record.rfq_no || "N/A")} | Created: ${esc(record.created_at)}</p>
+      <p class="muted">RFQ: ${esc(record.rfq_no || "N/A")} | Created: ${esc(formatShortDateTime(record.created_at))}</p>
       <form method="post" action="/po/${record.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(record.updated_token)}" />
         <div class="grid">
@@ -6638,7 +6652,7 @@ app.get("/material-logs/mrr", requireAuth, requirePermission("material_logs", "v
     <td>${esc(row.po_number)}</td>
     <td>${esc(row.pick_ticket)}</td>
     <td>${esc(row.material_description)}</td>
-    <td>${esc(row.received_date)}</td>
+    <td>${esc(formatShortDateTime(row.received_date))}</td>
     <td>${esc(row.received_by)}</td>
     <td>${esc(row.load_number)}</td>
     <td>${esc(row.opi_number)}</td>
@@ -6723,10 +6737,10 @@ app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "v
     <td>${esc(row.fluor_id)}</td>
     <td>${esc(row.fluor_desc)}</td>
     <td>${esc(row.mrr_number)}</td>
-    <td>${esc(row.request_date)}</td>
-    <td>${esc(row.need_date)}</td>
+    <td>${esc(formatShortDateTime(row.request_date))}</td>
+    <td>${esc(formatShortDateTime(row.need_date))}</td>
     <td>${esc(row.pickup_location)}</td>
-    <td>${esc(row.pickup_date)}</td>
+    <td>${esc(formatShortDateTime(row.pickup_date))}</td>
     <td><a class="btn btn-secondary" href="/material-logs/fmr/${row.id}/edit">Edit</a></td>
     </tr>`).join("");
     res.send(layout("Vendor FMR Log", `
@@ -6806,7 +6820,7 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
     <td>${esc(row.sub_line || "")}</td>
     <td>${esc(formatQtyDisplay(row.qty_received))}</td>
     <td>${esc(row.mrr_number || "")}</td>
-    <td>${esc(row.received_date || "")}</td>
+    <td>${esc(formatShortDateTime(row.received_date || ""))}</td>
   </tr>`).join("");
   res.send(layout("Build Vendor FMRs", `
     <h1>Build Vendor FMRs</h1>
@@ -7136,7 +7150,7 @@ app.get("/material-logs/issue-report", requireAuth, requirePermission("material_
     <td>${esc(row.fmr_number)}</td>
     <td>${esc(row.warehouse)}</td>
     <td>${esc(row.location)}</td>
-    <td>${esc(row.recv_date)}</td>
+    <td>${esc(formatShortDateTime(row.recv_date))}</td>
     <td><a class="btn btn-secondary" href="/material-logs/receiving/${row.id}/edit">Edit</a></td>
   </tr>`).join("");
   res.send(layout("Issue Report", `
@@ -7653,7 +7667,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_
         <td>${esc(line.warehouse || "")}</td>
         <td>${esc(line.location || "")}</td>
         <td>${esc(line.osd_status || "")}</td>
-        <td>${esc(line.line_date || "")}</td>
+        <td>${esc(formatShortDateTime(line.line_date || ""))}</td>
         <td>${esc(line.notes || "")}</td>
       </tr>`).join("");
     res.send(layout("Edit MRR Log", `
