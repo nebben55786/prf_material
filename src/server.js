@@ -1687,14 +1687,25 @@ async function getWarehouseLocationMap() {
 function normalizeWarehouseLocationImportRow(row) {
   const normalized = {};
   const aliases = {
+    warehouse_id: ["warehouse_id", "warehouseid"],
     warehouse_name: ["warehouse_name", "warehouse", "warehouse_code"],
-    location_name: ["location_name", "location", "bin", "slot"]
+    location_id: ["location_id", "locationid"],
+    location_name: ["location_name", "location", "bin", "slot"],
+    is_active: ["is_active", "active", "status"]
   };
   for (const [target, keys] of Object.entries(aliases)) {
     const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] || "").trim() !== "");
     normalized[target] = sourceKey ? String(row[sourceKey] || "").trim() : "";
   }
   return normalized;
+}
+
+function parseImportActiveFlag(value, fallback = true) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return fallback;
+  if (["true", "yes", "y", "1", "active"].includes(text)) return true;
+  if (["false", "no", "n", "0", "inactive"].includes(text)) return false;
+  return fallback;
 }
 
 async function assertValidWarehouseLocation(client, warehouseName, locationName) {
@@ -2494,8 +2505,8 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
       </form>
       <form method="post" enctype="multipart/form-data" action="/settings/warehouse-locations/import" class="stack" style="margin-top:16px;">
         <div><label>Import Warehouses / Locations From .xlsx</label><input type="file" name="sheet" accept=".xlsx,.csv" required /></div>
-        <div class="muted">Supported columns: <code>warehouse</code> and <code>location</code>. Repeat the warehouse name on each row that belongs to it.</div>
-        <div class="actions"><button type="submit">Import Warehouse Locations</button></div>
+        <div class="muted">Supported columns: <code>warehouse</code> and <code>location</code>. Export first if you want an update-friendly workbook with IDs and active status.</div>
+        <div class="actions"><button type="submit">Import Warehouse Locations</button><a class="btn btn-secondary" href="/settings/warehouse-locations/export.xlsx">Export Warehouses / Locations (.xlsx)</a></div>
       </form>
     </div>
     <div class="card scroll">
@@ -2670,28 +2681,93 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireRole(["admi
   await withTransaction(async (client) => {
     let importedCount = 0;
     for (const row of rows) {
+      const warehouseId = Number(row.warehouse_id || 0);
       const warehouseName = String(row.warehouse_name || "").trim();
+      const locationId = Number(row.location_id || 0);
       const locationName = String(row.location_name || "").trim();
-      if (!warehouseName || !locationName) continue;
-      const warehouse = (await client.query(`
-        insert into warehouses (name, is_active)
-        values ($1, true)
-        on conflict (name) do update
-        set is_active = true
-        returning id, name
-      `, [warehouseName])).rows[0];
-      await client.query(`
-        insert into warehouse_locations (warehouse_id, name, is_active)
-        values ($1, $2, true)
-        on conflict (warehouse_id, name) do update
-        set is_active = true
-      `, [warehouse.id, locationName]);
+      const isActive = parseImportActiveFlag(row.is_active, true);
+      if (!warehouseId && !warehouseName) continue;
+      let warehouse;
+      if (warehouseId > 0) {
+        warehouse = (await client.query(`
+          update warehouses
+          set name = coalesce(nullif($2, ''), name), is_active = $3
+          where id = $1
+          returning id, name
+        `, [warehouseId, warehouseName, isActive])).rows[0];
+        if (!warehouse) throw new Error(`Warehouse id ${warehouseId} was not found in the import file.`);
+      } else {
+        warehouse = (await client.query(`
+          insert into warehouses (name, is_active)
+          values ($1, $2)
+          on conflict (name) do update
+          set is_active = excluded.is_active
+          returning id, name
+        `, [warehouseName, isActive])).rows[0];
+      }
+      if (!locationId && !locationName) {
+        importedCount += 1;
+        continue;
+      }
+      if (locationId > 0) {
+        const updated = await client.query(`
+          update warehouse_locations
+          set warehouse_id = $2, name = coalesce(nullif($3, ''), name), is_active = $4
+          where id = $1
+        `, [locationId, warehouse.id, locationName, isActive]);
+        if (!updated.rowCount) throw new Error(`Location id ${locationId} was not found in the import file.`);
+      } else {
+        await client.query(`
+          insert into warehouse_locations (warehouse_id, name, is_active)
+          values ($1, $2, $3)
+          on conflict (warehouse_id, name) do update
+          set is_active = excluded.is_active
+        `, [warehouse.id, locationName, isActive]);
+      }
       importedCount += 1;
     }
-    if (!importedCount) throw new Error("No valid warehouse/location rows were found. Use columns named warehouse and location.");
+    if (!importedCount) throw new Error("No valid warehouse/location rows were found. Use columns named warehouse and location, or export the current workbook first.");
     await auditLog(client, req.user.id, "import", "warehouse_locations", "settings", `rows=${importedCount}`);
   });
   res.redirect("/settings");
+}));
+
+app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const rows = (await query(`
+    select
+      w.id as warehouse_id,
+      w.name as warehouse,
+      wl.id as location_id,
+      coalesce(wl.name, '') as location,
+      case when w.is_active and coalesce(wl.is_active, true) then 'active' else 'inactive' end as is_active
+    from warehouses w
+    left join warehouse_locations wl on wl.warehouse_id = w.id
+    order by w.name, wl.name
+  `)).rows;
+  const worksheetRows = rows.length ? rows : [{
+    warehouse_id: "",
+    warehouse: "",
+    location_id: "",
+    location: "",
+    is_active: "active"
+  }];
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.json_to_sheet(worksheetRows, {
+    header: ["warehouse_id", "warehouse", "location_id", "location", "is_active"]
+  });
+  worksheet["!cols"] = [
+    { wch: 14 },
+    { wch: 28 },
+    { wch: 14 },
+    { wch: 28 },
+    { wch: 12 }
+  ];
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Warehouse Locations");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  await auditLog(pool, req.user.id, "export", "warehouse_locations", "settings", `rows=${rows.length}`);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="warehouse-locations.xlsx"');
+  res.send(buffer);
 }));
 
 app.post("/settings/permissions", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
