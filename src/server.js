@@ -184,6 +184,32 @@ function wrapPdfText(value, width) {
   return lines;
 }
 
+function roundQtyUpToHalf(value) {
+  const qty = Number(value || 0);
+  if (!Number.isFinite(qty)) return 0;
+  return Math.ceil(qty * 2) / 2;
+}
+
+function formatQtyDisplay(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return "";
+  return roundQtyUpToHalf(value).toFixed(1);
+}
+
+function formatShortDate(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) return `${match[3]}-${match[2]}-${match[1]}`;
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) {
+    const day = String(parsed.getDate()).padStart(2, "0");
+    const month = String(parsed.getMonth() + 1).padStart(2, "0");
+    const year = String(parsed.getFullYear());
+    return `${day}-${month}-${year}`;
+  }
+  return text;
+}
+
 function buildSimplePdf(title, detailLines, tableLines) {
   const pageWidth = 612;
   const pageHeight = 792;
@@ -260,54 +286,117 @@ function formatPickTicketTimestamp(value = new Date()) {
   }
 }
 
-function buildRfqSheetPdf(rfq, items, options = {}) {
-  const vendorName = String(options.vendorName || "").trim();
-  const vendorContact = String(options.vendorContact || "").trim();
-  const detailLines = [
-    `RFQ #: ${rfq.rfq_no || ""}`,
-    `Project: ${rfq.project_name || ""}`,
-    `Vendor: ${vendorName || "Not Selected"}`,
-    `Contact: ${vendorContact || ""}`,
-    `Due Date: ${rfq.due_date || ""}`,
-    `Status: ${rfq.status || ""}`,
-    `Created: ${rfq.created_at || ""}`
+function buildRfqSheetPdf(rfq, items) {
+  const pageWidth = 792;
+  const pageHeight = 612;
+  const left = 28;
+  const right = pageWidth - 28;
+  const top = pageHeight - 24;
+  const usableWidth = right - left;
+  const cols = [
+    { key: "line", label: "LINE", width: 78 },
+    { key: "item", label: "ITEM", width: 150 },
+    { key: "description", label: "DESCRIPTION", width: 398 },
+    { key: "qty", label: "QTY", width: 60 },
+    { key: "uom", label: "UOM", width: 50 }
   ];
-  const tableLines = [
-    [
-      padPdfColumn("LINE", 8),
-      padPdfColumn("ITEM", 22),
-      padPdfColumn("QTY", 8, "right"),
-      padPdfColumn("UOM", 8),
-      padPdfColumn("DESCRIPTION", 60)
-    ].join(" ")
-  ];
-  tableLines.push("-".repeat(115));
-  for (const item of items) {
-    const descriptionLines = wrapPdfText(item.description || "", 60);
-    descriptionLines.forEach((descriptionLine, index) => {
-      tableLines.push([
-        padPdfColumn(index === 0 ? item.po_line || "" : "", 8),
-        padPdfColumn(index === 0 ? item.item_code || "" : "", 22),
-        padPdfColumn(index === 0 ? String(item.qty || "") : "", 8, "right"),
-        padPdfColumn(index === 0 ? item.uom || "" : "", 8),
-        padPdfColumn(descriptionLine, 60)
-      ].join(" "));
-    });
-    if (item.spec || item.notes) {
-      const meta = [item.spec ? `Spec: ${item.spec}` : "", item.notes ? `Notes: ${item.notes}` : ""].filter(Boolean).join(" | ");
-      wrapPdfText(meta, 102).forEach((metaLine) => {
-        tableLines.push([
-          padPdfColumn("", 8),
-          padPdfColumn("", 22),
-          padPdfColumn("", 8),
-          padPdfColumn("", 8),
-          padPdfColumn(metaLine, 60)
-        ].join(" "));
-      });
+  const makeText = (x, y, text, font = "F1", size = 9) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
+  const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
+  const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
+
+  const rows = items.map((item) => {
+    const lineLines = wrapPdfText(item.po_line || "", 12);
+    const itemLines = wrapPdfText(item.item_code || "", 22);
+    const descriptionLines = wrapPdfText(item.description || "", 58);
+    const extraDescription = [];
+    if (item.spec) extraDescription.push(...wrapPdfText(`Spec: ${item.spec}`, 58));
+    if (item.notes) extraDescription.push(...wrapPdfText(`Notes: ${item.notes}`, 58));
+    const combinedDescription = descriptionLines.concat(extraDescription);
+    const lineCount = Math.max(lineLines.length, itemLines.length, combinedDescription.length, 1);
+    return {
+      lineLines,
+      itemLines,
+      descriptionLines: combinedDescription.length ? combinedDescription : [""],
+      qty: formatQtyDisplay(item.qty),
+      uom: String(item.uom || ""),
+      height: 10 + (lineCount * 11)
+    };
+  });
+
+  const pages = [];
+  let currentPage = [];
+  let currentHeight = 0;
+  const tableHeaderHeight = 24;
+  const reservedHeaderHeight = 82;
+  const footerPadding = 22;
+  const pageBodyLimit = pageHeight - reservedHeaderHeight - footerPadding - 36;
+  for (const row of rows) {
+    if (currentPage.length && currentHeight + row.height > pageBodyLimit) {
+      pages.push(currentPage);
+      currentPage = [];
+      currentHeight = 0;
     }
-    tableLines.push("");
+    currentPage.push(row);
+    currentHeight += row.height;
   }
-  return buildSimplePdf(`REQUEST FOR QUOTE ${rfq.rfq_no || ""}`, detailLines, tableLines);
+  if (!pages.length || currentPage.length) pages.push(currentPage);
+
+  return buildDrawnPdf(pages.map((pageRows, pageIndex) => {
+    const content = [];
+    content.push("0.2 w");
+    content.push("0 0 0 RG");
+
+    const metaTop = top;
+    content.push(rect(left, metaTop - 26, usableWidth, 26));
+    content.push(line(left + 160, metaTop, left + 160, metaTop - 26));
+    content.push(line(right - 170, metaTop, right - 170, metaTop - 26));
+    content.push(makeText(left + 8, metaTop - 17, "RFQ #", "F2", 9));
+    content.push(makeText(left + 48, metaTop - 17, String(rfq.rfq_no || ""), "F1", 10));
+    content.push(makeText(left + 168, metaTop - 17, "DESCRIPTION", "F2", 9));
+    content.push(makeText(right - 162, metaTop - 17, "CREATED", "F2", 9));
+    content.push(makeText(right - 110, metaTop - 17, formatShortDate(rfq.created_at), "F1", 10));
+
+    const descriptionBoxTop = metaTop - 26;
+    content.push(rect(left, descriptionBoxTop - 30, usableWidth, 30));
+    const headerDescription = wrapPdfText(String(rfq.project_name || ""), 92);
+    content.push(makeText(left + 8, descriptionBoxTop - 19, headerDescription[0] || "", "F1", 10));
+
+    const tableTop = descriptionBoxTop - 42;
+    let x = left;
+    content.push(rect(left, tableTop - tableHeaderHeight, usableWidth, tableHeaderHeight));
+    cols.forEach((column) => {
+      content.push(makeText(x + 6, tableTop - 16, column.label, "F2", 8));
+      x += column.width;
+      if (x < right) content.push(line(x, tableTop, x, tableTop - tableHeaderHeight));
+    });
+
+    let y = tableTop - tableHeaderHeight;
+    for (const row of pageRows) {
+      const rowTop = y;
+      const rowBottom = y - row.height;
+      x = left;
+      content.push(rect(left, rowBottom, usableWidth, row.height));
+      cols.forEach((column) => {
+        x += column.width;
+        if (x < right) content.push(line(x, rowTop, x, rowBottom));
+      });
+
+      const rowLineCount = Math.max(row.lineLines.length, row.itemLines.length, row.descriptionLines.length, 1);
+      for (let index = 0; index < rowLineCount; index += 1) {
+        const baseline = rowTop - 14 - (index * 11);
+        if (row.lineLines[index]) content.push(makeText(left + 6, baseline, row.lineLines[index], "F1", 8.5));
+        if (row.itemLines[index]) content.push(makeText(left + cols[0].width + 6, baseline, row.itemLines[index], "F1", 8.5));
+        if (row.descriptionLines[index]) content.push(makeText(left + cols[0].width + cols[1].width + 6, baseline, row.descriptionLines[index], "F1", 8.5));
+        if (index === 0 && row.qty) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + 18, baseline, row.qty, "F1", 8.5));
+        if (index === 0 && row.uom) content.push(makeText(right - cols[4].width + 6, baseline, row.uom, "F1", 8.5));
+      }
+
+      y = rowBottom;
+    }
+
+    content.push(makeText(right - 92, 18, `Page ${pageIndex + 1} of ${pages.length}`, "F1", 8));
+    return content.join("\n");
+  }), { pageWidth, pageHeight });
 }
 
 function buildDrawnPdf(pages, options = {}) {
@@ -4684,21 +4773,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
     `, [rfqId]),
-    query(`
-      select
-        v.id,
-        v.name,
-        coalesce(primary_contact.contact_name, v.contact_name, '') as primary_contact_name
-      from vendors v
-      left join lateral (
-        select contact_name
-        from vendor_contacts
-        where vendor_id = v.id and is_primary = true
-        order by id asc
-        limit 1
-      ) primary_contact on true
-      order by v.name
-    `),
+    query("select id, name from vendors order by name"),
     query("select count(*) from purchase_orders where rfq_id = $1", [rfqId]),
     query(`
       select ib.id, ib.entity_type, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
@@ -4777,7 +4852,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
       <td>${esc(item.po_line || "")}</td>
       <td><input type="hidden" name="rfq_item_id_${item.id}" value="${item.id}" />${esc(item.item_code)}</td>
       <td>${esc(item.description)}</td>
-      <td>${esc(item.qty)}</td>
+      <td>${esc(formatQtyDisplay(item.qty))}</td>
       <td>${esc(item.uom)}</td>
       <td>${esc(item.spec || "")}</td>
       <td>${esc([item.size_1, item.size_2].filter(Boolean).join(" x "))}</td>
@@ -4874,7 +4949,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
         <div class="actions">
           <button type="submit" name="award_all" value="1" onclick="return validateBulkAward(this.form)">Award Populated Rows</button>
           <button type="button" onclick="return promptPoNumber(this, 'rfq-quote-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}')">Create PO From Awarded Lines</button>
-          <a class="btn btn-secondary" target="_blank" href="/rfq/${rfqId}/sheet.pdf?vendor_id=${encodeURIComponent(activeQuoteVendorId)}">Open RFQ PDF</a>
+          <a class="btn btn-secondary" target="_blank" href="/rfq/${rfqId}/sheet.pdf">Open RFQ PDF</a>
         </div>
         <table>
           <tr><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Thk</th><th>Notes</th><th>Unit Price</th><th>Lead Days</th><th>Award Status</th><th>Award Summary</th><th>Issued PO</th><th>Actions</th></tr>
@@ -4902,8 +4977,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
 
 app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
-  const vendorId = Number(req.query.vendor_id || 0);
-  const [rfqRes, itemsRes, vendorRes] = await Promise.all([
+  const [rfqRes, itemsRes] = await Promise.all([
     query("select * from rfqs where id = $1", [rfqId]),
     query(`
       select
@@ -4921,29 +4995,11 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), as
         case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
-    `, [rfqId]),
-    vendorId ? query(`
-      select
-        v.name,
-        coalesce(primary_contact.contact_name, v.contact_name, '') as primary_contact_name
-      from vendors v
-      left join lateral (
-        select contact_name
-        from vendor_contacts
-        where vendor_id = v.id and is_primary = true
-        order by id asc
-        limit 1
-      ) primary_contact on true
-      where v.id = $1
-    `, [vendorId]) : Promise.resolve({ rows: [] })
+    `, [rfqId])
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
-  const vendor = vendorRes.rows[0] || {};
-  const pdfBuffer = buildRfqSheetPdf(rfq, itemsRes.rows, {
-    vendorName: vendor.name || "",
-    vendorContact: vendor.primary_contact_name || ""
-  });
+  const pdfBuffer = buildRfqSheetPdf(rfq, itemsRes.rows);
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
   res.send(pdfBuffer);
