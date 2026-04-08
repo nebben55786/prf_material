@@ -6657,7 +6657,7 @@ app.get("/material-logs/mrr", requireAuth, requirePermission("material_logs", "v
     <td>${esc(row.received_by)}</td>
     <td>${esc(row.load_number)}</td>
     <td>${esc(row.opi_number)}</td>
-    <td><div class="actions"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" href="/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit">Receive Missed Line</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
+    <td><div class="actions"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
   </tr>`).join("");
   res.send(layout("MRR Log", `
     <h1>MRR Log</h1>
