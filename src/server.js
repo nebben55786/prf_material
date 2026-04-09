@@ -857,7 +857,7 @@ function layout(title, body, user) {
       .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; padding: 10px 12px; background: linear-gradient(180deg, var(--header) 0%, var(--header-strong) 100%); border: 1px solid var(--line-strong); border-radius: 2px; box-shadow: inset 0 1px 0 rgba(255,255,255,.55); }
       .brand-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; }
       .brand-link { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; min-width: 0; }
-      .brand-logo { width: 62px; height: 38px; object-fit: contain; flex-shrink: 0; }
+      .brand-logo { width: 74px; height: 46px; object-fit: contain; flex-shrink: 0; }
       .brand-copy { min-width: 0; }
       .brand { font-size: 22px; font-weight: 700; letter-spacing: .01em; }
       .userline { color: var(--muted); font-size: 12px; }
@@ -1403,7 +1403,7 @@ function landingPage() {
       body { margin: 0; font-family: "Segoe UI", Tahoma, Verdana, sans-serif; background: linear-gradient(180deg, #dfe3e8 0%, #c7d0da 100%); color: #16212b; }
       .hero { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
       .panel { width: min(760px, 100%); background: #fff; border: 1px solid #798693; padding: 24px; text-align: center; }
-      .logo { max-width: 280px; width: 100%; height: auto; margin-bottom: 20px; }
+      .logo { max-width: 336px; width: 100%; height: auto; margin-bottom: 20px; }
       h1 { margin: 0 0 8px; font-size: 34px; }
       p { margin: 0 0 20px; color: #4d5b69; }
       .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
