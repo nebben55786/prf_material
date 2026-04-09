@@ -855,6 +855,10 @@ function layout(title, body, user) {
       body { margin: 0; font-family: "Segoe UI", Tahoma, Verdana, sans-serif; color: var(--ink); background: var(--bg); }
       .shell { max-width: 1600px; margin: 0 auto; padding: 12px; }
       .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; padding: 10px 12px; background: linear-gradient(180deg, var(--header) 0%, var(--header-strong) 100%); border: 1px solid var(--line-strong); border-radius: 2px; box-shadow: inset 0 1px 0 rgba(255,255,255,.55); }
+      .brand-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; }
+      .brand-link { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; min-width: 0; }
+      .brand-logo { width: 62px; height: 38px; object-fit: contain; flex-shrink: 0; }
+      .brand-copy { min-width: 0; }
       .brand { font-size: 22px; font-weight: 700; letter-spacing: .01em; }
       .userline { color: var(--muted); font-size: 12px; }
       nav { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -901,6 +905,7 @@ function layout(title, body, user) {
       .tab-link { display: inline-flex; align-items: center; justify-content: center; min-width: 92px; min-height: 32px; padding: 6px 12px; border-radius: 2px; border: 1px solid var(--line-strong); background: linear-gradient(180deg, #eef3f7 0%, #d9e1e8 100%); color: #18354e; font-weight: 700; text-decoration: none; }
       .tab-link.active { background: linear-gradient(180deg, #4278a9 0%, var(--brand) 100%); border-color: rgba(0,0,0,.15); color: white; }
       .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+      .dashboard-sections { display: grid; gap: 10px; }
       .error { border-color: #d0a19b; background: #f8ecea; color: var(--warn); }
       .stack { display: grid; gap: 10px; }
       @media (max-width: 900px) { .grid, .grid-4, .stats, .summary-grid { grid-template-columns: 1fr; } .topbar { flex-direction: column; align-items: flex-start; } }
@@ -1188,9 +1193,14 @@ function layout(title, body, user) {
   <body>
     <div class="shell">
       <div class="topbar">
-        <div>
-          <div class="brand">Material Control</div>
-          ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
+        <div class="brand-wrap">
+          <a class="brand-link" href="${user ? "/dashboard" : "/"}">
+            <img class="brand-logo" src="/public/prf-logo.png" alt="Performance Contractors logo" />
+            <div class="brand-copy">
+              <div class="brand">Material Control</div>
+              ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
+            </div>
+          </a>
         </div>
         ${user ? `<nav>${navLinks}</nav>` : ""}
       </div>
@@ -2615,13 +2625,17 @@ app.get("/dashboard", requireAuth, requirePermission("dashboard", "view"), async
     <h1>Operations Dashboard</h1>
     ${req.user.role === "admin" && Number(pendingAccessRequests.rows[0].count) > 0 ? `<div class="card error"><strong>${pendingAccessRequests.rows[0].count} pending access request(s)</strong><div class="actions" style="margin-top:10px;"><a class="btn btn-primary" href="/settings">Review Requests</a></div></div>` : ""}
     <div class="card"><strong>Job Number:</strong> ${esc(jobNumber)}</div>
-    <div class="stats">
-      <div class="stat"><div>RFQs</div><strong>${rfqs.rows[0].count}</strong></div>
-      <div class="stat"><div>POs</div><strong>${pos.rows[0].count}</strong></div>
-      <div class="stat"><div>Receipts</div><strong>${receipts.rows[0].count}</strong></div>
-      <div class="stat"><div>OS&D Cases</div><strong>${osd.rows[0].count}</strong></div>
+    <div class="dashboard-sections">
+      <div class="card">
+        <div class="stats">
+          <div class="stat"><div>RFQs</div><strong>${rfqs.rows[0].count}</strong></div>
+          <div class="stat"><div>POs</div><strong>${pos.rows[0].count}</strong></div>
+          <div class="stat"><div>POs Received</div><strong>${receipts.rows[0].count}</strong></div>
+          <div class="stat"><div>Open OS&amp;Ds</div><strong>${osd.rows[0].count}</strong></div>
+        </div>
+      </div>
+      ${rfqStatusCards}
     </div>
-    ${rfqStatusCards}
   `, req.user));
 });
 
