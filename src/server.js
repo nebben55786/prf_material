@@ -2836,6 +2836,7 @@ app.get("/yard", requireAuth, requirePermission("yard", "view"), async (req, res
     <div class="card">
       <div class="actions">
         <a class="btn btn-primary" href="/inventory">Inventory</a>
+        <a class="btn btn-primary" href="/yard/locations">Locations</a>
         <a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>
       </div>
     </div>
@@ -2860,24 +2861,66 @@ function getInventoryAuditQueryString(source = {}) {
   }).toString();
 }
 
+function getSafeReturnPath(req, fallback = "/settings") {
+  const returnTo = String(req.body?.return_to || req.query?.return_to || "").trim();
+  if (returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//")) return returnTo;
+  return fallback;
+}
+
 app.get("/settings", requireAuth, requirePermission("settings", "view"), async (req, res) => {
+  const accessRequestsRes = await query("select * from access_requests where status = 'PENDING' order by created_at asc");
+  const accessRequestRows = accessRequestsRes.rows.map((record) => `
+    <tr>
+      <td>${esc(record.email)}</td>
+              <td>${esc(formatShortDateTime(record.created_at))}</td>
+      <td>
+        <form id="access-request-${record.id}" method="post" action="/settings/access-requests/${record.id}/approve" class="stack" data-password-form="access-approve" data-password-message-id="access-request-${record.id}-password-error">
+          <input type="hidden" name="return_to" value="/settings" />
+          <div class="grid">
+            <div><input name="username" placeholder="Username" required /></div>
+            <div><input name="temp_password" placeholder="Temp Password" required /></div>
+            <div>
+              <select name="role">
+                <option value="buyer">buyer</option>
+                <option value="warehouse">warehouse</option>
+                <option value="field">field</option>
+                <option value="supervisor">supervisor</option>
+                <option value="admin">admin</option>
+              </select>
+            </div>
+          </div>
+          <div class="actions">
+            <button type="submit">Approve</button>
+            <button class="btn btn-danger" type="submit" formaction="/settings/access-requests/${record.id}/deny">Deny</button>
+          </div>
+          <div id="access-request-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
+        </form>
+      </td>
+    </tr>
+  `).join("");
+  res.send(layout("Settings", `
+    <h1>Settings</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-primary" href="/settings/job-setup">Job Setup</a>
+        <a class="btn btn-primary" href="/settings/warehouse-setup">Warehouse Setup</a>
+        <a class="btn btn-primary" href="/settings/user-management">User Management</a>
+      </div>
+      <p class="muted" style="margin-top:12px;">Use these setup pages to manage job settings, warehouse/location setup, and users without crowding the main settings screen.</p>
+    </div>
+    <div class="card scroll">
+      <h3>Access Requests</h3>
+      <table>
+        <tr><th>Email</th><th>Requested</th><th>Approve / Deny</th></tr>
+        ${accessRequestRows || `<tr><td colspan="3" class="muted">No pending access requests.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+});
+
+app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"), async (req, res) => {
   const jobNumber = await getJobNumber();
   const vendorCategoryText = vendorCategories.join("\n");
-  const accessRequestsRes = await query("select * from access_requests where status = 'PENDING' order by created_at asc");
-  const warehousesRes = req.user.role === "admin"
-    ? await query("select id, name, is_active from warehouses order by name")
-    : { rows: [] };
-  const warehouseLocationsRes = req.user.role === "admin"
-    ? await query(`
-        select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
-        from warehouse_locations wl
-        join warehouses w on w.id = wl.warehouse_id
-        order by w.name, wl.name
-      `)
-    : { rows: [] };
-  const usersRes = req.user.role === "admin"
-    ? await query("select id, username, role, is_active, created_at from users order by username")
-    : { rows: [] };
   const permissionRows = permissionSections.map((section) => {
     const cells = permissionRoles.map((role) => {
       const perms = {
@@ -2907,15 +2950,154 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
     }).join("");
     return `<tr><td><strong>${esc(section.label)}</strong></td>${cells}</tr>`;
   }).join("");
+  res.send(layout("Job Setup", `
+    <h1>Job Setup</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
+    </div>
+    <div class="card">
+      <form method="post" action="/settings/job-number" class="stack">
+        <input type="hidden" name="return_to" value="/settings/job-setup" />
+        <div class="grid">
+          <div><label>Job Number</label><input name="job_number" value="${esc(jobNumber)}" required /></div>
+        </div>
+        <p class="muted">Future RFQs will use this format: <strong>${esc(jobNumber)}-RFQ-00001</strong></p>
+        <div class="actions"><button type="submit">Save Job Number</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Vendor Categories</h3>
+      <form method="post" action="/settings/vendor-categories" class="stack">
+        <input type="hidden" name="return_to" value="/settings/job-setup" />
+        <div><label>One Category Per Line</label><textarea name="vendor_categories">${esc(vendorCategoryText)}</textarea></div>
+        <div class="muted">These values control the category checkboxes on vendor screens.</div>
+        <div class="actions"><button type="submit">Save Vendor Categories</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Material Log Imports</h3>
+      <div class="muted">Import receiving, MRR, and FMR workbook data from a separate admin page.</div>
+      <div class="actions" style="margin-top:12px;"><a class="btn btn-primary" href="/settings/material-log-imports">Open Material Log Imports</a></div>
+    </div>
+    ${req.user.role === "admin" ? `
+      <div class="card scroll">
+        <h3>Sheet Permissions</h3>
+        <form method="post" action="/settings/permissions" class="stack">
+          <input type="hidden" name="return_to" value="/settings/job-setup" />
+          <table>
+            <tr><th>Sheet</th><th>Admin</th><th>Buyer</th><th>Warehouse</th><th>Field</th><th>Supervisor</th></tr>
+            ${permissionRows}
+          </table>
+          <div class="actions"><button type="submit">Save Permissions</button></div>
+        </form>
+      </div>
+    ` : ""}
+  `, req.user));
+});
+
+app.get("/settings/warehouse-setup", requireAuth, requirePermission("settings", "view"), async (req, res) => {
+  const warehousesRes = req.user.role === "admin"
+    ? await query("select id, name, is_active from warehouses order by name")
+    : { rows: [] };
+  const warehouseLocationsRes = req.user.role === "admin"
+    ? await query(`
+        select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
+        from warehouse_locations wl
+        join warehouses w on w.id = wl.warehouse_id
+        order by w.name, wl.name
+      `)
+    : { rows: [] };
+  const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
+  const warehouseRows = warehousesRes.rows.map((row) => `
+    <tr>
+      <td>${esc(row.name)}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>
+        <form method="post" action="/settings/warehouses/${row.id}/toggle">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
+        </form>
+      </td>
+    </tr>
+  `).join("");
+  const warehouseLocationRows = warehouseLocationsRes.rows.map((row) => `
+    <tr>
+      <td>${esc(row.warehouse_name)}</td>
+      <td>${esc(row.name)}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>
+        <form method="post" action="/settings/warehouse-locations/${row.id}/toggle">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
+        </form>
+      </td>
+    </tr>
+  `).join("");
+  res.send(layout("Warehouse Setup", `
+    <h1>Warehouse Setup</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
+    </div>
+    ${req.user.role === "admin" ? `
+      <div class="card">
+        <h3>Warehouses</h3>
+        <form method="post" action="/settings/warehouses/add" class="stack">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <div class="grid">
+            <div><label>Warehouse Name</label><input name="name" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Warehouse</button></div>
+        </form>
+      </div>
+      <div class="card scroll">
+        <table>
+          <tr><th>Warehouse</th><th>Status</th><th>Action</th></tr>
+          ${warehouseRows || `<tr><td colspan="3" class="muted">No warehouses saved yet.</td></tr>`}
+        </table>
+      </div>
+      <div class="card">
+        <h3>Warehouse Locations</h3>
+        <form method="post" action="/settings/warehouse-locations/add" class="stack">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <div class="grid">
+            <div><label>Warehouse</label><select name="warehouse_id" required><option value="">Select warehouse</option>${warehouseOptions}</select></div>
+            <div><label>Location Name</label><input name="name" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Location</button></div>
+        </form>
+        <form method="post" enctype="multipart/form-data" action="/settings/warehouse-locations/import" class="stack" style="margin-top:16px;">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <div><label>Import Warehouses / Locations From .xlsx</label><input type="file" name="sheet" accept=".xlsx,.csv" required /></div>
+          <div class="muted">Supported columns: <code>warehouse</code> and <code>location</code>. Export first if you want an update-friendly workbook with IDs and active status.</div>
+          <div class="actions"><button type="submit">Import Warehouse Locations</button><a class="btn btn-secondary" href="/settings/warehouse-locations/export.xlsx">Export Warehouses / Locations (.xlsx)</a></div>
+        </form>
+      </div>
+      <div class="card scroll">
+        <table>
+          <tr><th>Warehouse</th><th>Location</th><th>Status</th><th>Action</th></tr>
+          ${warehouseLocationRows || `<tr><td colspan="4" class="muted">No warehouse locations saved yet.</td></tr>`}
+        </table>
+      </div>
+    ` : `<div class="card error"><p>You do not have access to warehouse setup.</p></div>`}
+  `, req.user));
+});
+
+app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const usersRes = await query("select id, username, role, is_active, created_at from users order by username");
   const userRows = usersRes.rows.map((record) => `
     <tr>
       <td>${esc(record.username)}</td>
       <td>${esc(record.role)}</td>
       <td>${record.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-              <td>${esc(formatShortDateTime(record.created_at))}</td>
+      <td>${esc(formatShortDateTime(record.created_at))}</td>
       <td>
         <div class="stack">
           <form id="edit-user-${record.id}" method="post" action="/settings/users/${record.id}/edit" class="stack" data-password-form="edit-user" data-password-message-id="edit-user-${record.id}-password-error">
+            <input type="hidden" name="return_to" value="/settings/user-management" />
             <div class="grid">
               <div><input name="username" value="${esc(record.username)}" required /></div>
               <div>
@@ -2942,147 +3124,22 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
             <div class="muted">Passwords are never displayed. Enter a new password only if you want to reset it.</div>
           </form>
           <div class="actions">
-            ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="/settings/users/${record.id}/delete">Delete</a>`}
+            ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="/settings/users/${record.id}/delete?return_to=%2Fsettings%2Fuser-management">Delete</a>`}
           </div>
         </div>
       </td>
     </tr>
   `).join("");
-  const accessRequestRows = accessRequestsRes.rows.map((record) => `
-    <tr>
-      <td>${esc(record.email)}</td>
-              <td>${esc(formatShortDateTime(record.created_at))}</td>
-      <td>
-        <form id="access-request-${record.id}" method="post" action="/settings/access-requests/${record.id}/approve" class="stack" data-password-form="access-approve" data-password-message-id="access-request-${record.id}-password-error">
-          <div class="grid">
-            <div><input name="username" placeholder="Username" required /></div>
-            <div><input name="temp_password" placeholder="Temp Password" required /></div>
-            <div>
-              <select name="role">
-                <option value="buyer">buyer</option>
-                <option value="warehouse">warehouse</option>
-                <option value="field">field</option>
-                <option value="supervisor">supervisor</option>
-                <option value="admin">admin</option>
-              </select>
-            </div>
-          </div>
-          <div class="actions">
-            <button type="submit">Approve</button>
-            <button class="btn btn-danger" type="submit" formaction="/settings/access-requests/${record.id}/deny">Deny</button>
-          </div>
-          <div id="access-request-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
-        </form>
-      </td>
-    </tr>
-  `).join("");
-  const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
-  const warehouseRows = warehousesRes.rows.map((row) => `
-    <tr>
-      <td>${esc(row.name)}</td>
-      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-      <td>
-        <form method="post" action="/settings/warehouses/${row.id}/toggle">
-          <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
-        </form>
-      </td>
-    </tr>
-  `).join("");
-  const warehouseLocationRows = warehouseLocationsRes.rows.map((row) => `
-    <tr>
-      <td>${esc(row.warehouse_name)}</td>
-      <td>${esc(row.name)}</td>
-      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-      <td>
-        <form method="post" action="/settings/warehouse-locations/${row.id}/toggle">
-          <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
-        </form>
-      </td>
-    </tr>
-  `).join("");
-  res.send(layout("Settings", `
-    <h1>Settings</h1>
+  res.send(layout("User Management", `
+    <h1>User Management</h1>
     <div class="card">
-      <form method="post" action="/settings/job-number" class="stack">
-        <div class="grid">
-          <div><label>Job Number</label><input name="job_number" value="${esc(jobNumber)}" required /></div>
-        </div>
-        <p class="muted">Future RFQs will use this format: <strong>${esc(jobNumber)}-RFQ-00001</strong></p>
-        <div class="actions"><button type="submit">Save Job Number</button></div>
-      </form>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
     </div>
     <div class="card">
-      <h3>Vendor Categories</h3>
-      <form method="post" action="/settings/vendor-categories" class="stack">
-        <div><label>One Category Per Line</label><textarea name="vendor_categories">${esc(vendorCategoryText)}</textarea></div>
-        <div class="muted">These values control the category checkboxes on vendor screens.</div>
-        <div class="actions"><button type="submit">Save Vendor Categories</button></div>
-      </form>
-    </div>
-    <div class="card">
-      <h3>Material Log Imports</h3>
-      <div class="muted">Import receiving, MRR, and FMR workbook data from a separate admin page.</div>
-      <div class="actions" style="margin-top:12px;"><a class="btn btn-primary" href="/settings/material-log-imports">Open Material Log Imports</a></div>
-    </div>
-    ${req.user.role === "admin" ? `
-    <div class="card scroll">
-      <h3>Sheet Permissions</h3>
-      <form method="post" action="/settings/permissions" class="stack">
-        <table>
-          <tr><th>Sheet</th><th>Admin</th><th>Buyer</th><th>Warehouse</th><th>Field</th><th>Supervisor</th></tr>
-          ${permissionRows}
-        </table>
-        <div class="actions"><button type="submit">Save Permissions</button></div>
-      </form>
-    </div>
-    ` : ""}
-    <div class="card scroll">
-      <h3>Access Requests</h3>
-      <table>
-        <tr><th>Email</th><th>Requested</th><th>Approve / Deny</th></tr>
-        ${accessRequestRows || `<tr><td colspan="3" class="muted">No pending access requests.</td></tr>`}
-      </table>
-    </div>
-    ${req.user.role === "admin" ? `
-    <div class="card">
-      <h3>Warehouses</h3>
-      <form method="post" action="/settings/warehouses/add" class="stack">
-        <div class="grid">
-          <div><label>Warehouse Name</label><input name="name" required /></div>
-        </div>
-        <div class="actions"><button type="submit">Add Warehouse</button></div>
-      </form>
-    </div>
-    <div class="card scroll">
-      <table>
-        <tr><th>Warehouse</th><th>Status</th><th>Action</th></tr>
-        ${warehouseRows || `<tr><td colspan="3" class="muted">No warehouses saved yet.</td></tr>`}
-      </table>
-    </div>
-    <div class="card">
-      <h3>Warehouse Locations</h3>
-      <form method="post" action="/settings/warehouse-locations/add" class="stack">
-        <div class="grid">
-          <div><label>Warehouse</label><select name="warehouse_id" required><option value="">Select warehouse</option>${warehouseOptions}</select></div>
-          <div><label>Location Name</label><input name="name" required /></div>
-        </div>
-        <div class="actions"><button type="submit">Add Location</button></div>
-      </form>
-      <form method="post" enctype="multipart/form-data" action="/settings/warehouse-locations/import" class="stack" style="margin-top:16px;">
-        <div><label>Import Warehouses / Locations From .xlsx</label><input type="file" name="sheet" accept=".xlsx,.csv" required /></div>
-        <div class="muted">Supported columns: <code>warehouse</code> and <code>location</code>. Export first if you want an update-friendly workbook with IDs and active status.</div>
-        <div class="actions"><button type="submit">Import Warehouse Locations</button><a class="btn btn-secondary" href="/settings/warehouse-locations/export.xlsx">Export Warehouses / Locations (.xlsx)</a></div>
-      </form>
-    </div>
-    <div class="card scroll">
-      <table>
-        <tr><th>Warehouse</th><th>Location</th><th>Status</th><th>Action</th></tr>
-        ${warehouseLocationRows || `<tr><td colspan="4" class="muted">No warehouse locations saved yet.</td></tr>`}
-      </table>
-    </div>
-    <div class="card">
-      <h3>User Management</h3>
       <form id="new-user-form" method="post" action="/settings/users/add" class="stack">
+        <input type="hidden" name="return_to" value="/settings/user-management" />
         <div class="grid">
           <div><label>Username</label><input name="username" required /></div>
           <div>
@@ -3117,7 +3174,78 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
         ${userRows || `<tr><td colspan="5" class="muted">No users found.</td></tr>`}
       </table>
     </div>
+  `, req.user));
+});
+
+app.get("/yard/locations", requireAuth, requirePermission("yard", "view"), async (req, res) => {
+  const warehousesRes = await query("select id, name, is_active from warehouses order by name");
+  const warehouseLocationsRes = await query(`
+    select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
+    from warehouse_locations wl
+    join warehouses w on w.id = wl.warehouse_id
+    order by w.name, wl.name
+  `);
+  const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
+  const canManageLocations = req.user.role === "admin" || canAccess(req.user, "settings", "edit");
+  const warehouseRows = warehousesRes.rows.map((row) => `
+    <tr>
+      <td>${esc(row.name)}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>${canManageLocations ? `<form method="post" action="/settings/warehouses/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}</td>
+    </tr>
+  `).join("");
+  const locationRows = warehouseLocationsRes.rows.map((row) => `
+    <tr>
+      <td>${esc(row.warehouse_name)}</td>
+      <td>${esc(row.name)}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>${canManageLocations ? `<form method="post" action="/settings/warehouse-locations/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}</td>
+    </tr>
+  `).join("");
+  res.send(layout("Locations", `
+    <h1>Locations</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/yard">Back To Yard</a>
+      </div>
+    </div>
+    ${canManageLocations ? `
+      <div class="card">
+        <h3>Warehouses</h3>
+        <form method="post" action="/settings/warehouses/add" class="stack">
+          <input type="hidden" name="return_to" value="/yard/locations" />
+          <div class="grid">
+            <div><label>Warehouse Name</label><input name="name" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Warehouse</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Locations</h3>
+        <form method="post" action="/settings/warehouse-locations/add" class="stack">
+          <input type="hidden" name="return_to" value="/yard/locations" />
+          <div class="grid">
+            <div><label>Warehouse</label><select name="warehouse_id" required><option value="">Select warehouse</option>${warehouseOptions}</select></div>
+            <div><label>Location Name</label><input name="name" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Location</button></div>
+        </form>
+      </div>
     ` : ""}
+    <div class="card scroll">
+      <h3>Warehouse List</h3>
+      <table>
+        <tr><th>Warehouse</th><th>Status</th><th>Action</th></tr>
+        ${warehouseRows || `<tr><td colspan="3" class="muted">No warehouses saved yet.</td></tr>`}
+      </table>
+    </div>
+    <div class="card scroll">
+      <h3>Location List</h3>
+      <table>
+        <tr><th>Warehouse</th><th>Location</th><th>Status</th><th>Action</th></tr>
+        ${locationRows || `<tr><td colspan="4" class="muted">No warehouse locations saved yet.</td></tr>`}
+      </table>
+    </div>
   `, req.user));
 });
 
@@ -3158,7 +3286,7 @@ app.post("/settings/job-number", requireAuth, requirePermission("settings", "edi
     `, [jobNumber]);
     await auditLog(client, req.user.id, "update", "app_setting", "job_number", jobNumber);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 });
 
 app.post("/settings/vendor-categories", requireAuth, requirePermission("settings", "edit"), async (req, res) => {
@@ -3174,7 +3302,7 @@ app.post("/settings/vendor-categories", requireAuth, requirePermission("settings
     await auditLog(client, req.user.id, "update", "app_setting", "vendor_categories", categories.join(", "));
   });
   setVendorCategories(categories);
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 });
 
 app.post("/settings/warehouses/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
@@ -3190,7 +3318,7 @@ app.post("/settings/warehouses/add", requireAuth, requireRole(["admin"]), requir
     `, [name]);
     await auditLog(client, req.user.id, "create", "warehouse", insert.rows[0].id, name);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
 app.post("/settings/warehouses/:id/toggle", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
@@ -3201,7 +3329,7 @@ app.post("/settings/warehouses/:id/toggle", requireAuth, requireRole(["admin"]),
     await client.query("update warehouses set is_active = $2 where id = $1", [req.params.id, nextState]);
     await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse", req.params.id, current.name);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
 app.post("/settings/warehouse-locations/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
@@ -3221,7 +3349,7 @@ app.post("/settings/warehouse-locations/add", requireAuth, requireRole(["admin"]
     `, [warehouseId, name]);
     await auditLog(client, req.user.id, "create", "warehouse_location", insert.rows[0].id, `${warehouse.name}:${name}`);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
 app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
@@ -3237,7 +3365,7 @@ app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireRole(["
     await client.query("update warehouse_locations set is_active = $2 where id = $1", [req.params.id, nextState]);
     await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse_location", req.params.id, `${current.warehouse_name}:${current.name}`);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
 app.post("/settings/warehouse-locations/import", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
@@ -3294,7 +3422,7 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireRole(["admi
     if (!importedCount) throw new Error("No valid warehouse/location rows were found. Use columns named warehouse and location, or export the current workbook first.");
     await auditLog(client, req.user.id, "import", "warehouse_locations", "settings", `rows=${importedCount}`);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
 app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
@@ -3365,7 +3493,7 @@ app.post("/settings/permissions", requireAuth, requireRole(["admin"]), requirePe
     await auditLog(client, req.user.id, "update", "app_setting", "permission_matrix", "updated");
   });
   setPermissionMatrix(nextMatrix);
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 }));
 
 app.get("/settings/material-log-imports", requireAuth, requirePermission("settings", "view"), async (req, res) => {
@@ -3378,7 +3506,7 @@ app.get("/settings/material-log-imports", requireAuth, requirePermission("settin
           <div><label>Log Type</label><select name="log_type"><option value="receiving">Issue Report</option><option value="mrr">MRR Log</option><option value="fmr">Vendor FMR Log</option></select></div>
           <div><label>Workbook File</label><input type="file" name="sheet" required /></div>
         </div>
-        <div class="actions"><button type="submit">Import Workbook</button><a class="btn btn-secondary" href="/settings">Back To Settings</a></div>
+        <div class="actions"><button type="submit">Import Workbook</button><a class="btn btn-secondary" href="/settings/job-setup">Back To Job Setup</a></div>
       </form>
     </div>
   `, req.user));
@@ -3412,7 +3540,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
     `, [requestId, req.user.id, username]);
     await auditLog(client, req.user.id, "approve", "access_request", requestId, `${requestRecord.email}|${username}|${role}`);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 }));
 
 app.post("/settings/access-requests/:id/deny", requireAuth, requireRole(["admin"]), async (req, res) => {
@@ -3429,7 +3557,7 @@ app.post("/settings/access-requests/:id/deny", requireAuth, requireRole(["admin"
     `, [requestId, req.user.id]);
     await auditLog(client, req.user.id, "deny", "access_request", requestId, requestRecord.email);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings"));
 });
 
 app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
@@ -3446,7 +3574,7 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandle
     await client.query("insert into users (username, password_hash, role, is_active) values ($1, $2, $3, true)", [username, passwordHash, role]);
     await auditLog(client, req.user.id, "create", "user", username, role);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings"));
 }));
 
 app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
@@ -3482,7 +3610,7 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
     }
     await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}|${isActive ? "active" : "inactive"}`);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/user-management"));
 }));
 
 app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
@@ -3498,8 +3626,11 @@ app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), async
       <p><strong>Status:</strong> ${current.is_active ? "Active" : "Inactive"}</p>
       <p class="muted">This will mark the user inactive. They will no longer be able to sign in, but their history will remain in the system.</p>
       <div class="actions">
-        <form method="post" action="/settings/users/${current.id}/delete"><button class="btn btn-danger" type="submit">Confirm Deactivate</button></form>
-        <a class="btn btn-secondary" href="/settings">Cancel</a>
+        <form method="post" action="/settings/users/${current.id}/delete">
+          <input type="hidden" name="return_to" value="${esc(getSafeReturnPath(req, "/settings/user-management"))}" />
+          <button class="btn btn-danger" type="submit">Confirm Deactivate</button>
+        </form>
+        <a class="btn btn-secondary" href="${esc(getSafeReturnPath(req, "/settings/user-management"))}">Cancel</a>
       </div>
     </div>
   `, req.user));
@@ -3518,7 +3649,7 @@ app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyn
     await client.query("update users set is_active = false where id = $1", [userId]);
     await auditLog(client, req.user.id, "deactivate", "user", userId, current.username);
   });
-  res.redirect("/settings");
+  res.redirect(getSafeReturnPath(req, "/settings/user-management"));
 }));
 
 app.get("/bom", requireAuth, requirePermission("bom", "view"), async (req, res) => {
@@ -3839,10 +3970,29 @@ app.post("/bom/:id/to-rfq", requireAuth, requirePermission("bom", "edit"), async
 
 app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
-  const selectedLineIds = []
-    .concat(req.body.selected_line_ids || [])
-    .map((value) => Number(value))
-    .filter((value) => Number.isFinite(value) && value > 0);
+  const selectedLineQtys = new Map();
+  try {
+    const stagedSelection = JSON.parse(String(req.body.staged_selection || "{}"));
+    if (stagedSelection && typeof stagedSelection === "object" && !Array.isArray(stagedSelection)) {
+      for (const [lineId, qty] of Object.entries(stagedSelection)) {
+        const numericLineId = Number(lineId);
+        const qtyRequested = parseQtyValue(qty, NaN);
+        if (Number.isFinite(numericLineId) && numericLineId > 0 && Number.isFinite(qtyRequested) && qtyRequested > 0) {
+          selectedLineQtys.set(numericLineId, qtyRequested);
+        }
+      }
+    }
+  } catch {
+    // fall back to visible checkbox submission
+  }
+  for (const value of [].concat(req.body.selected_line_ids || [])) {
+    const lineId = Number(value);
+    const qtyRequested = parseQtyValue(req.body[`request_qty_${lineId}`], NaN);
+    if (Number.isFinite(lineId) && lineId > 0 && Number.isFinite(qtyRequested) && qtyRequested > 0) {
+      selectedLineQtys.set(lineId, qtyRequested);
+    }
+  }
+  const selectedLineIds = Array.from(selectedLineQtys.keys());
   if (selectedLineIds.length === 0) throw new Error("Select at least one BOM line for the requisition.");
   const requisitionId = await withTransaction(async (client) => {
     const bom = (await client.query("select * from bom_headers where id = $1", [bomId])).rows[0];
@@ -3852,10 +4002,10 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
         insert into material_requisitions (requisition_no, bom_id, requested_by_user_id, requested_by_name, iwp_no, iso_no, status, notes)
         values ($1, $2, $3, $4, $5, $6, $7, $8)
         returning id
-      `, [requisitionNo, bomId, req.user.id, String(req.body.requested_by_name || req.user.username).trim(), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
+    `, [requisitionNo, bomId, req.user.id, String(req.body.requested_by_name || req.user.username).trim(), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
       let createdLineCount = 0;
     for (const lineId of selectedLineIds) {
-      const qtyRequested = parseQtyValue(req.body[`request_qty_${lineId}`]);
+      const qtyRequested = selectedLineQtys.get(lineId);
       const line = (await client.query(`
         select
           bl.id,
@@ -4058,12 +4208,26 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
   `)).rows;
   const selectedBomId = Number(req.query.bom_id || availableBoms[0]?.id || 0);
   const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
+  const clearFilters = String(req.query.clear_filters || "") === "1";
   const lineFilter = {
-    iwp: String(req.query.iwp || "").trim(),
-    itemCode: String(req.query.item_code || "").trim(),
-    lineNo: String(req.query.line_no || "").trim(),
+    iwp: clearFilters ? "" : String(req.query.iwp || "").trim(),
+    itemCode: clearFilters ? "" : String(req.query.item_code || "").trim(),
+    lineNo: clearFilters ? "" : String(req.query.line_no || "").trim(),
     limit: Math.min(Math.max(num(req.query.limit, 250), 50), 1000)
   };
+  let stagedSelection = {};
+  try {
+    const parsed = JSON.parse(String(req.query.staged_selection || "{}"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      stagedSelection = Object.fromEntries(
+        Object.entries(parsed)
+          .map(([lineId, qty]) => [String(num(lineId, 0)), parseQtyValue(qty, NaN)])
+          .filter(([lineId, qty]) => num(lineId, 0) > 0 && Number.isFinite(qty) && qty > 0)
+      );
+    }
+  } catch {
+    stagedSelection = {};
+  }
   let filteredCount = 0;
   let lineRows = "";
   if (selectedBom) {
@@ -4132,7 +4296,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
     ]);
     filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
     lineRows = linesRes.rows.map((line) => `<tr>
-      <td><input type="checkbox" name="selected_line_ids" value="${line.id}" /></td>
+      <td><input type="checkbox" name="selected_line_ids" value="${line.id}" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
       <td>${esc(line.line_no)}</td>
       <td>${esc(line.iwp_no || "")}</td>
       <td>${esc(line.item_code)}</td>
@@ -4142,7 +4306,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
       <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
       <td>${esc(formatQtyDisplay(line.qty_remaining))}</td>
       <td>${esc(formatQtyDisplay(line.qty_available))}</td>
-      <td><input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(Math.min(num(line.qty_remaining), num(line.qty_available))))}" /></td>
+      <td><input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(stagedSelection[String(line.id)] ?? Math.min(num(line.qty_remaining), num(line.qty_available))))}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.spec || "")}</td>
       <td>${esc(line.commodity_code || "")}</td>
@@ -4157,10 +4321,12 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
     </tr>`).join("");
   }
   const bomOptions = availableBoms.map((row) => `<option value="${row.id}" ${Number(row.id) === selectedBomId ? "selected" : ""}>${esc(row.bom_name || row.description || row.bom_no)} | ${esc(row.bom_no)}</option>`).join("");
+  const stagedSelectionJson = escAttr(JSON.stringify(stagedSelection));
   res.send(layout("New Request", `
     <h1>New Material Request</h1>
     <div class="card">
-      <form method="get" action="/requisitions/new" class="stack">
+      <form method="get" action="/requisitions/new" class="stack" id="requisition-filter-form">
+        <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
         <div class="grid">
           <div><label>Piping BOM</label><select name="bom_id">${bomOptions || `<option value="">No piping BOMs found</option>`}</select></div>
           <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
@@ -4168,14 +4334,19 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
           <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
           <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" /></div>
         </div>
-        <div class="actions"><button type="submit">Load Lines</button><a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a></div>
+        <div class="actions">
+          <button type="submit">Load Lines</button>
+          <button class="btn btn-secondary" type="submit" name="clear_filters" value="1">Clear Filter</button>
+          <a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a>
+        </div>
       </form>
     </div>
     ${selectedBom ? `
       <div class="card">
         <h3>Create Material Requisition</h3>
         <p class="muted">BOM: ${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
-        <form method="post" action="/bom/${selectedBom.id}/requisitions" class="stack">
+        <form method="post" action="/bom/${selectedBom.id}/requisitions" class="stack" id="requisition-create-form">
+          <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid">
             <div><label>Requested By</label><input name="requested_by_name" value="${esc(req.user.username)}" required /></div>
             <div><label>Status</label><select name="status">${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${value === "REQUESTED" ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
@@ -4238,7 +4409,39 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
           <div class="actions"><button type="submit">Create Material Requisition</button></div>
         </form>
       </div>
-      <script>enableResizableTable("requisition-builder-table");</script>
+      <script>
+        enableResizableTable("requisition-builder-table");
+        (function () {
+          const stagedSelection = ${JSON.stringify(stagedSelection)};
+          const rowCheckboxes = Array.from(document.querySelectorAll('input[name="selected_line_ids"]'));
+          const filterInput = document.getElementById("requisition-filter-staged-selection");
+          const createInput = document.getElementById("requisition-create-staged-selection");
+          function syncStagedSelection() {
+            rowCheckboxes.forEach((checkbox) => {
+              const lineId = String(checkbox.value || "");
+              const qtyInput = document.querySelector('input[name="request_qty_' + lineId + '"]');
+              delete stagedSelection[lineId];
+              if (checkbox.checked && qtyInput) {
+                const qty = parseFloat(String(qtyInput.value || "").trim());
+                if (Number.isFinite(qty) && qty > 0) stagedSelection[lineId] = qty;
+              }
+            });
+            const payload = JSON.stringify(stagedSelection);
+            if (filterInput) filterInput.value = payload;
+            if (createInput) createInput.value = payload;
+          }
+          rowCheckboxes.forEach((checkbox) => {
+            checkbox.addEventListener("change", syncStagedSelection);
+            const lineId = String(checkbox.value || "");
+            const qtyInput = document.querySelector('input[name="request_qty_' + lineId + '"]');
+            if (qtyInput) qtyInput.addEventListener("input", syncStagedSelection);
+          });
+          const filterForm = document.getElementById("requisition-filter-form");
+          const createForm = document.getElementById("requisition-create-form");
+          if (filterForm) filterForm.addEventListener("submit", syncStagedSelection);
+          if (createForm) createForm.addEventListener("submit", syncStagedSelection);
+        }());
+      </script>
     ` : `<div class="card error"><h3>No Piping BOM Found</h3><p>Select or create a piping BOM first.</p></div>`}
   `, req.user));
 });
