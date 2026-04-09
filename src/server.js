@@ -132,7 +132,7 @@ function canAccess(user, section, action = "view") {
 
 function canEditInventoryAudit(user) {
   if (!user) return false;
-  return user.role === "admin" || canAccess(user, "inventory", "edit");
+  return user.role === "admin" || user.role === "warehouse" || canAccess(user, "inventory", "edit");
 }
 
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
@@ -1330,6 +1330,9 @@ function normalizePoImportRow(row) {
     const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] || "").trim() !== "");
     normalized[target] = sourceKey ? String(row[sourceKey] || "").trim() : "";
   }
+  const normalizedNames = normalizeWarehouseLocationValues(normalized.warehouse_name, normalized.location_name);
+  normalized.warehouse_name = normalizedNames.warehouse;
+  normalized.location_name = normalizedNames.location;
   return normalized;
 }
 
@@ -1725,6 +1728,23 @@ function formatTimestamp(value) {
   return textValue(value).replace("T", " ").replace("Z", "");
 }
 
+function normalizeWarehouseName(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  return text.replace(/\b[a-z]/g, (match) => match.toUpperCase());
+}
+
+function normalizeLocationName(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function normalizeWarehouseLocationValues(warehouseName, locationName) {
+  return {
+    warehouse: normalizeWarehouseName(warehouseName),
+    location: normalizeLocationName(locationName)
+  };
+}
+
 async function saveMaterialLogLookup(client, kind, value) {
   const normalized = String(value || "").trim();
   if (!normalized) return;
@@ -1779,7 +1799,15 @@ async function getWarehouseOptions() {
     where is_active = true
     order by name
   `);
-  return result.rows;
+  const seen = new Set();
+  return result.rows
+    .map((row) => ({ ...row, name: normalizeWarehouseName(row.name) }))
+    .filter((row) => {
+      const key = row.name.toLowerCase();
+      if (!row.name || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 async function getWarehouseLocationOptions() {
@@ -1790,7 +1818,22 @@ async function getWarehouseLocationOptions() {
     where wl.is_active = true and w.is_active = true
     order by w.name, wl.name
   `);
-  return result.rows;
+  const seen = new Set();
+  return result.rows
+    .map((row) => {
+      const normalizedNames = normalizeWarehouseLocationValues(row.warehouse_name, row.name);
+      return {
+        ...row,
+        warehouse_name: normalizedNames.warehouse,
+        name: normalizedNames.location
+      };
+    })
+    .filter((row) => {
+      const key = `${row.warehouse_name.toLowerCase()}|${row.name.toLowerCase()}`;
+      if (!row.warehouse_name || !row.name || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 async function getWarehouseLocationMap() {
@@ -1824,8 +1867,8 @@ function getInventoryByLocationSubquery() {
         coalesce(pl.size_2, '') as size_2,
         coalesce(pl.thk_1, '') as thk_1,
         coalesce(pl.thk_2, '') as thk_2,
-        coalesce(r.warehouse, '') as warehouse,
-        coalesce(r.location, '') as location,
+        initcap(lower(coalesce(r.warehouse, ''))) as warehouse,
+        upper(coalesce(r.location, '')) as location,
         sum(case when coalesce(r.osd_status, 'OK') = 'OK' then r.qty_received else 0 end) as qty_on_hand,
         sum(case when coalesce(r.osd_status, 'OK') = 'OK' then 0 else r.qty_received end) as qty_osd
       from receipts r
@@ -1838,8 +1881,8 @@ function getInventoryByLocationSubquery() {
         coalesce(pl.size_2, ''),
         coalesce(pl.thk_1, ''),
         coalesce(pl.thk_2, ''),
-        coalesce(r.warehouse, ''),
-        coalesce(r.location, '')
+        initcap(lower(coalesce(r.warehouse, ''))),
+        upper(coalesce(r.location, ''))
     ) receipt_inventory
     full outer join (
       select
@@ -1849,8 +1892,8 @@ function getInventoryByLocationSubquery() {
         coalesce(size_2, '') as size_2,
         coalesce(thk_1, '') as thk_1,
         coalesce(thk_2, '') as thk_2,
-        coalesce(warehouse, '') as warehouse,
-        coalesce(location, '') as location,
+        initcap(lower(coalesce(warehouse, ''))) as warehouse,
+        upper(coalesce(location, '')) as location,
         sum(qty_adjustment) as qty_adjustment
       from inventory_adjustment_lines
       group by
@@ -1860,8 +1903,8 @@ function getInventoryByLocationSubquery() {
         coalesce(size_2, ''),
         coalesce(thk_1, ''),
         coalesce(thk_2, ''),
-        coalesce(warehouse, ''),
-        coalesce(location, '')
+        initcap(lower(coalesce(warehouse, ''))),
+        upper(coalesce(location, ''))
     ) adjustment_inventory
       on adjustment_inventory.item_code = receipt_inventory.item_code
      and adjustment_inventory.size_1 = receipt_inventory.size_1
@@ -1927,8 +1970,8 @@ function normalizeInventoryTrueUpRow(row) {
     size_2: textValue(normalized.size_2),
     thk_1: textValue(normalized.thk_1),
     thk_2: textValue(normalized.thk_2),
-    warehouse: textValue(normalized.warehouse),
-    location: textValue(normalized.location),
+    warehouse: normalizeWarehouseName(normalized.warehouse),
+    location: normalizeLocationName(normalized.location),
     actual_qty: parseQtyValue(normalized.actual_qty, NaN)
   };
 }
@@ -2009,8 +2052,9 @@ function parseImportActiveFlag(value, fallback = true) {
 }
 
 async function assertValidWarehouseLocation(client, warehouseName, locationName) {
-  const warehouse = String(warehouseName || "").trim();
-  const location = String(locationName || "").trim();
+  const normalizedNames = normalizeWarehouseLocationValues(warehouseName, locationName);
+  const warehouse = normalizedNames.warehouse;
+  const location = normalizedNames.location;
   if (!warehouse) throw new Error("Warehouse is required.");
   if (!location) throw new Error("Location is required.");
   const match = (await client.query(`
@@ -2027,8 +2071,9 @@ async function assertValidWarehouseLocation(client, warehouseName, locationName)
 }
 
 async function ensureWarehouseLocationExists(client, warehouseName, locationName) {
-  const warehouse = String(warehouseName || "").trim();
-  const location = String(locationName || "").trim();
+  const normalizedNames = normalizeWarehouseLocationValues(warehouseName, locationName);
+  const warehouse = normalizedNames.warehouse;
+  const location = normalizedNames.location;
   if (!warehouse || !location) return;
   let warehouseRow = (await client.query(`
     select id
@@ -3048,7 +3093,7 @@ app.get("/settings/warehouse-setup", requireAuth, requirePermission("settings", 
   const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
   const warehouseRows = warehousesRes.rows.map((row) => `
     <tr>
-      <td>${esc(row.name)}</td>
+      <td>${esc(normalizeWarehouseName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>
         <form method="post" action="/settings/warehouses/${row.id}/toggle">
@@ -3060,8 +3105,8 @@ app.get("/settings/warehouse-setup", requireAuth, requirePermission("settings", 
   `).join("");
   const warehouseLocationRows = warehouseLocationsRes.rows.map((row) => `
     <tr>
-      <td>${esc(row.warehouse_name)}</td>
-      <td>${esc(row.name)}</td>
+      <td>${esc(normalizeWarehouseName(row.warehouse_name))}</td>
+      <td>${esc(normalizeLocationName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>
         <form method="post" action="/settings/warehouse-locations/${row.id}/toggle">
@@ -3225,15 +3270,15 @@ app.get("/yard/locations", requireAuth, requirePermission("yard", "view"), async
   const canManageLocations = req.user.role === "admin" || canAccess(req.user, "settings", "edit");
   const warehouseRows = warehousesRes.rows.map((row) => `
     <tr>
-      <td>${esc(row.name)}</td>
+      <td>${esc(normalizeWarehouseName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>${canManageLocations ? `<form method="post" action="/settings/warehouses/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}</td>
     </tr>
   `).join("");
   const locationRows = warehouseLocationsRes.rows.map((row) => `
     <tr>
-      <td>${esc(row.warehouse_name)}</td>
-      <td>${esc(row.name)}</td>
+      <td>${esc(normalizeWarehouseName(row.warehouse_name))}</td>
+      <td>${esc(normalizeLocationName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>${canManageLocations ? `<form method="post" action="/settings/warehouse-locations/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}</td>
     </tr>
@@ -3342,7 +3387,7 @@ app.post("/settings/vendor-categories", requireAuth, requirePermission("settings
 });
 
 app.post("/settings/warehouses/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
-  const name = String(req.body.name || "").trim();
+  const name = normalizeWarehouseName(req.body.name);
   if (!name) throw new Error("Warehouse name is required.");
   await withTransaction(async (client) => {
     const insert = await client.query(`
@@ -3370,7 +3415,7 @@ app.post("/settings/warehouses/:id/toggle", requireAuth, requireRole(["admin"]),
 
 app.post("/settings/warehouse-locations/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const warehouseId = Number(req.body.warehouse_id);
-  const name = String(req.body.name || "").trim();
+  const name = normalizeLocationName(req.body.name);
   if (!warehouseId) throw new Error("Warehouse is required.");
   if (!name) throw new Error("Location name is required.");
   await withTransaction(async (client) => {
@@ -3411,9 +3456,9 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireRole(["admi
     let importedCount = 0;
     for (const row of rows) {
       const warehouseId = Number(row.warehouse_id || 0);
-      const warehouseName = String(row.warehouse_name || "").trim();
+      const warehouseName = normalizeWarehouseName(row.warehouse_name);
       const locationId = Number(row.location_id || 0);
-      const locationName = String(row.location_name || "").trim();
+      const locationName = normalizeLocationName(row.location_name);
       const isActive = parseImportActiveFlag(row.is_active, true);
       if (!warehouseId && !warehouseName) continue;
       let warehouse;
@@ -7127,8 +7172,8 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
       if (!line) throw new Error("PO line not found.");
       const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
       if (remainingQty <= 0) throw new Error("Fully received PO lines cannot be edited.");
-      const warehouse = String(req.body[`warehouse_${lineId}`] || "").trim();
-      const location = String(req.body[`location_${lineId}`] || "").trim();
+      const warehouse = normalizeWarehouseName(req.body[`warehouse_${lineId}`]);
+      const location = normalizeLocationName(req.body[`location_${lineId}`]);
       await assertValidWarehouseLocation(client, warehouse, location);
       const enteredStatus = String(req.body.osd_status || "OK").trim() || "OK";
       const enteredNotes = String(req.body.osd_notes || "").trim();
@@ -7483,6 +7528,7 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
     const qtyReceived = parseQtyValue(req.body.qty_received || 0);
     if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
     await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
+    const normalizedNames = normalizeWarehouseLocationValues(req.body.warehouse, req.body.location);
     if (String(req.body.mode || "") === "po") {
       const poLine = (await client.query(`
         select po.id as po_id, po.po_no, po.rfq_id, mi.item_code, mi.description
@@ -7495,7 +7541,7 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
         insert into receipts (mrr_log_id, po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
         values ($1, $2, $3, $4, $5, $6, $7)
         returning id
-      `, [mrrId, Number(req.body.po_line_id), qtyReceived, req.body.warehouse?.trim(), req.body.location?.trim(), req.body.osd_status || "OK", req.body.osd_notes || ""]);
+      `, [mrrId, Number(req.body.po_line_id), qtyReceived, normalizedNames.warehouse, normalizedNames.location, req.body.osd_status || "OK", req.body.osd_notes || ""]);
       if ((req.body.osd_status || "OK") !== "OK") {
         await createOsdLog(client, {
           mrr_log_id: mrrId,
@@ -7506,8 +7552,8 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
           po_number: poLine?.po_no || mrr.po_number || "",
           item_code: poLine?.item_code || "",
           description: poLine?.description || "",
-          warehouse: req.body.warehouse?.trim() || "",
-          location: req.body.location?.trim() || "",
+          warehouse: normalizedNames.warehouse,
+          location: normalizedNames.location,
           expected_qty: qtyReceived,
           received_qty: qtyReceived,
           osd_qty: qtyReceived,
@@ -7533,8 +7579,8 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
         qtyReceived,
         req.body.qty_unit?.trim() || "",
         mrr.mrr_number || "",
-        req.body.warehouse?.trim() || "",
-        req.body.location?.trim() || "",
+        normalizedNames.warehouse,
+        normalizedNames.location,
         mrr.received_date || "",
         req.body.osd_notes?.trim() || ""
       ]);
@@ -7852,8 +7898,9 @@ app.post("/inventory-audit/commit", requireAuth, requireInventoryAuditEdit, asyn
     }
     const actualQty = parseQtyValue(rawActualQty);
     if (!Number.isFinite(actualQty) || actualQty < 0) throw new Error("Actual on-hand qty must be zero or greater.");
-    const targetWarehouse = String(req.body[`warehouse_${index}`] || decoded.warehouse || "").trim();
-    const targetLocation = String(req.body[`location_${index}`] || decoded.location || "").trim();
+    const normalizedNames = normalizeWarehouseLocationValues(req.body[`warehouse_${index}`] || decoded.warehouse || "", req.body[`location_${index}`] || decoded.location || "");
+    const targetWarehouse = normalizedNames.warehouse;
+    const targetLocation = normalizedNames.location;
     if (!targetWarehouse || !targetLocation) throw new Error("Choose a warehouse and location for each counted audit row.");
     const sourceRow = {
       item_code: String(decoded.item_code || ""),
@@ -8808,8 +8855,8 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
           textValue(row.item_type),
           textValue(row.short_code),
           textValue(row.received_by),
-          textValue(row.warehouse),
-          textValue(row.location),
+          normalizeWarehouseName(row.warehouse),
+          normalizeLocationName(row.location),
           textValue(row.recv_date),
           textValue(row.received_status),
           textValue(row.comments),
@@ -8967,8 +9014,8 @@ app.post("/material-logs/receiving/add", requireAuth, requirePermission("materia
       req.body.qty_unit?.trim() || "",
       req.body.mrr_number?.trim() || "",
       req.body.fmr_number?.trim() || "",
-      req.body.warehouse?.trim() || "",
-      req.body.location?.trim() || "",
+      normalizeWarehouseName(req.body.warehouse),
+      normalizeLocationName(req.body.location),
       req.body.recv_date?.trim() || ""
     ]);
     await auditLog(client, req.user.id, "create", "material_receiving_log", result.rows[0].id, req.body.item_code?.trim() || "");
@@ -9056,10 +9103,12 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requirePermission("mat
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Receiving log row not found.</h3></div>`, req.user));
     return;
   }
+  const normalizedRowWarehouse = normalizeWarehouseName(row.warehouse);
+  const normalizedRowLocation = normalizeLocationName(row.location);
   const warehouseOptions = await getWarehouseOptions();
   const locationMap = await getWarehouseLocationMap();
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
-    .concat(warehouseOptions.map((warehouse) => `<option value="${esc(warehouse.name)}" ${warehouse.name === row.warehouse ? "selected" : ""}>${esc(warehouse.name)}</option>`))
+    .concat(warehouseOptions.map((warehouse) => `<option value="${esc(warehouse.name)}" ${warehouse.name === normalizedRowWarehouse ? "selected" : ""}>${esc(warehouse.name)}</option>`))
     .join("");
   res.send(layout("Edit Receiving Log", `
     <h1>Edit Material Receiving Line</h1>
@@ -9076,14 +9125,14 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requirePermission("mat
           <div><label>Qty Unit</label><input name="qty_unit" value="${esc(row.qty_unit)}" /></div>
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
           <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" /></div>
-          <div><label>Warehouse</label><select id="receiving-log-warehouse-${row.id}" name="warehouse" onchange='syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(row.location || "")}")'>${warehouseOptionsHtml}</select></div>
+          <div><label>Warehouse</label><select id="receiving-log-warehouse-${row.id}" name="warehouse" onchange='syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(normalizedRowLocation)}")'>${warehouseOptionsHtml}</select></div>
           <div><label>Location</label><select id="receiving-log-location-${row.id}" name="location" data-placeholder="Select location"><option value="">Select location</option></select></div>
         </div>
         <div><label>Received Date</label><input name="recv_date" value="${esc(formatShortDateTime(row.recv_date))}" /></div>
         <div><label>Comments</label><textarea name="comments">${esc(row.comments)}</textarea></div>
         <div class="actions"><button type="submit">Save Receiving Line</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
       </form>
-      <script>syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${JSON.stringify(locationMap)}, ${JSON.stringify(row.location || "")});</script>
+      <script>syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${JSON.stringify(locationMap)}, ${JSON.stringify(normalizedRowLocation)});</script>
     </div>
   `, req.user));
 });
@@ -9108,8 +9157,8 @@ app.post("/material-logs/receiving/:id/edit", requireAuth, requirePermission("ma
       req.body.qty_unit?.trim() || "",
       req.body.mrr_number?.trim() || "",
       req.body.fmr_number?.trim() || "",
-      req.body.warehouse?.trim() || "",
-      req.body.location?.trim() || "",
+      normalizeWarehouseName(req.body.warehouse),
+      normalizeLocationName(req.body.location),
       req.body.recv_date?.trim() || "",
       req.body.comments?.trim() || ""
     ]);
