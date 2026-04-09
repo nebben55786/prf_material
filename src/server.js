@@ -2026,6 +2026,42 @@ async function assertValidWarehouseLocation(client, warehouseName, locationName)
   if (!match) throw new Error("Select a valid location for the chosen warehouse.");
 }
 
+async function ensureWarehouseLocationExists(client, warehouseName, locationName) {
+  const warehouse = String(warehouseName || "").trim();
+  const location = String(locationName || "").trim();
+  if (!warehouse || !location) return;
+  let warehouseRow = (await client.query(`
+    select id
+    from warehouses
+    where lower(name) = lower($1)
+    limit 1
+  `, [warehouse])).rows[0];
+  if (!warehouseRow) {
+    warehouseRow = (await client.query(`
+      insert into warehouses (name, is_active)
+      values ($1, true)
+      returning id
+    `, [warehouse])).rows[0];
+  } else {
+    await client.query("update warehouses set is_active = true where id = $1", [warehouseRow.id]);
+  }
+  const locationRow = (await client.query(`
+    select wl.id
+    from warehouse_locations wl
+    where wl.warehouse_id = $1
+      and lower(wl.name) = lower($2)
+    limit 1
+  `, [warehouseRow.id, location])).rows[0];
+  if (!locationRow) {
+    await client.query(`
+      insert into warehouse_locations (warehouse_id, name, is_active)
+      values ($1, $2, true)
+    `, [warehouseRow.id, location]);
+  } else {
+    await client.query("update warehouse_locations set is_active = true where id = $1", [locationRow.id]);
+  }
+}
+
 async function getNextMrrNumber(client = null) {
   const runner = client || { query };
   const latest = (await runner.query(`
@@ -7881,6 +7917,16 @@ app.post("/inventory-audit/import", requireAuth, requireInventoryAuditEdit, uplo
       importedCount += 1;
     }
     if (importedCount === 0) throw new Error("The workbook did not contain any usable inventory rows.");
+    const ensuredPairs = new Set();
+    for (const desiredRow of desiredRows.values()) {
+      const warehouse = String(desiredRow.warehouse || "").trim();
+      const location = String(desiredRow.location || "").trim();
+      if (!warehouse || !location) continue;
+      const pairKey = `${warehouse.toLowerCase()}|${location.toLowerCase()}`;
+      if (ensuredPairs.has(pairKey)) continue;
+      await ensureWarehouseLocationExists(client, warehouse, location);
+      ensuredPairs.add(pairKey);
+    }
     const result = await saveInventoryAuditReport(client, {
       userId: req.user.id || null,
       identFilter: `FULL RESET IMPORT | ${req.file.originalname || "inventory workbook"}`,
