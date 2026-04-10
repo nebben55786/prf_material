@@ -7803,15 +7803,15 @@ app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHan
       <td>${esc(row.thk_1 || "")}</td>
       <td>${esc(row.thk_2 || "")}</td>
       <td>
-        <select id="${warehouseSelectId}" name="warehouse_${index}" onchange='syncLocationOptions("${warehouseSelectId}", "${locationSelectId}", ${escAttr(JSON.stringify(locationMap))})'>${rowWarehouseOptionsHtml.replace(`value="${esc(row.warehouse)}"`, `value="${esc(row.warehouse)}" selected`)}</select>
+        <select id="${warehouseSelectId}" name="warehouse_${index}" tabindex="-1" onchange='syncLocationOptions("${warehouseSelectId}", "${locationSelectId}", ${escAttr(JSON.stringify(locationMap))})'>${rowWarehouseOptionsHtml.replace(`value="${esc(row.warehouse)}"`, `value="${esc(row.warehouse)}" selected`)}</select>
       </td>
       <td>
-        <select id="${locationSelectId}" name="location_${index}" data-placeholder="Select location"><option value="">Select location</option></select>
+        <select id="${locationSelectId}" name="location_${index}" tabindex="-1" data-placeholder="Select location"><option value="">Select location</option></select>
       </td>
       <td>${esc(formatQtyDisplay(row.qty_on_hand))}</td>
       <td>
         <input type="hidden" name="key_${index}" value="${esc(key)}" />
-        <input name="actual_qty_${index}" value="" placeholder="Actual qty" style="min-width:110px;" />
+        <input name="actual_qty_${index}" value="" placeholder="Actual qty" style="min-width:110px;" inputmode="decimal" enterkeyhint="next" autocapitalize="off" autocomplete="off" data-qty-input="true" />
       </td>
     </tr>`;
   }).join("");
@@ -7856,7 +7856,7 @@ app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHan
         </form>
       </div>
     </div>
-    <form method="post" action="/inventory-audit/commit" class="stack">
+    <form method="post" action="/inventory-audit/commit" class="stack" id="inventory-audit-commit-form">
       <input type="hidden" name="row_count" value="${rows.length}" />
       <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
       <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
@@ -7878,6 +7878,35 @@ app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHan
     <script>
       syncLocationOptions("inventory-audit-warehouse", "inventory-audit-location", ${JSON.stringify(locationMap)}, ${JSON.stringify(locationFilter)});
       ${rowLocationScripts.join("\n      ")}
+      (function () {
+        const commitForm = document.getElementById("inventory-audit-commit-form");
+        const qtyInputs = Array.from(document.querySelectorAll('input[data-qty-input="true"]'));
+        if (!commitForm || !qtyInputs.length) return;
+        function focusNextQty(currentInput) {
+          const currentIndex = qtyInputs.indexOf(currentInput);
+          if (currentIndex >= 0 && currentIndex < qtyInputs.length - 1) {
+            const nextInput = qtyInputs[currentIndex + 1];
+            nextInput.focus();
+            nextInput.select();
+          }
+        }
+        commitForm.addEventListener("keydown", function (event) {
+          const target = event.target;
+          if (!target || event.key !== "Enter") return;
+          if (target.matches('button[type="submit"], input[type="submit"]')) return;
+          if (target.matches('input[data-qty-input="true"]')) {
+            event.preventDefault();
+            focusNextQty(target);
+            return;
+          }
+          event.preventDefault();
+        });
+        qtyInputs.forEach((input) => {
+          input.addEventListener("focus", function () {
+            input.select();
+          });
+        });
+      }());
     </script>
   `, req.user));
 }));
