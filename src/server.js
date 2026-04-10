@@ -5282,6 +5282,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
   }
   let filteredCount = 0;
   let lineRows = "";
+  let lineNumberOptionsHtml = "";
   if (selectedBom) {
     const lineWhere = ["bom_id = $1"];
     const lineParams = [selectedBom.id];
@@ -5289,7 +5290,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
     if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
     if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
     const lineWhereSql = lineWhere.join(" and ");
-    const [linesRes, filteredCountRes] = await Promise.all([
+    const [linesRes, filteredCountRes, lineNumberOptionsRes] = await Promise.all([
       query(`
         select
           bl.*,
@@ -5344,9 +5345,17 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
         order by coalesce(bl.iwp_no, ''), bl.line_no, bl.id
         limit ${lineFilter.limit}
       `, lineParams),
-      query(`select count(*) as filtered_count from bom_lines where ${lineWhereSql}`, lineParams)
+      query(`select count(*) as filtered_count from bom_lines where ${lineWhereSql}`, lineParams),
+      query(`
+        select distinct line_no
+        from bom_lines
+        where bom_id = $1
+          and coalesce(line_no, '') <> ''
+        order by line_no
+      `, [selectedBom.id])
     ]);
     filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
+    lineNumberOptionsHtml = lineNumberOptionsRes.rows.map((row) => `<option value="${esc(row.line_no)}"></option>`).join("");
     lineRows = linesRes.rows.map((line) => `<tr>
       <td><input type="checkbox" name="selected_line_ids" value="${line.id}" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
       <td>${esc(line.line_no)}</td>
@@ -5386,8 +5395,9 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
             <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
             <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
             <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
-            <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" /></div>
+            <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" list="requisition-line-no-options" /></div>
           </div>
+          <datalist id="requisition-line-no-options">${lineNumberOptionsHtml}</datalist>
           <div class="actions">
             <button type="submit">Load Lines</button>
             <button class="btn btn-secondary" type="submit" name="clear_filters" value="1">Clear Filter</button>
