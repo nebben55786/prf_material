@@ -2148,6 +2148,49 @@ async function getCurrentOnHandRows(runner = { query }, { whereSql = "", params 
   return applyIssuedInventoryToRows(baseRows, issuedRows);
 }
 
+async function getInventoryAuditVisibleRows(runner = { query }, { whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
+  const baseRows = (await runner.query(`
+    select inventory_by_location.*
+    from (
+      select
+        coalesce(current_rows.item_code, counted_rows.item_code) as item_code,
+        coalesce(current_rows.description, counted_rows.description) as description,
+        coalesce(current_rows.size_1, counted_rows.size_1) as size_1,
+        coalesce(current_rows.size_2, counted_rows.size_2) as size_2,
+        coalesce(current_rows.thk_1, counted_rows.thk_1) as thk_1,
+        coalesce(current_rows.thk_2, counted_rows.thk_2) as thk_2,
+        coalesce(current_rows.warehouse, counted_rows.warehouse) as warehouse,
+        coalesce(current_rows.location, counted_rows.location) as location,
+        coalesce(current_rows.qty_on_hand, 0) as qty_on_hand,
+        coalesce(current_rows.qty_osd, 0) as qty_osd
+      from (${getInventoryByLocationSubquery()}) current_rows
+      full outer join (
+        select
+          item_code,
+          description,
+          coalesce(size_1, '') as size_1,
+          coalesce(size_2, '') as size_2,
+          coalesce(thk_1, '') as thk_1,
+          coalesce(thk_2, '') as thk_2,
+          initcap(lower(coalesce(warehouse, ''))) as warehouse,
+          upper(coalesce(location, '')) as location
+        from inventory_audit_counts
+      ) counted_rows
+        on counted_rows.item_code = current_rows.item_code
+       and counted_rows.size_1 = current_rows.size_1
+       and counted_rows.size_2 = current_rows.size_2
+       and counted_rows.thk_1 = current_rows.thk_1
+       and counted_rows.thk_2 = current_rows.thk_2
+       and counted_rows.warehouse = current_rows.warehouse
+       and counted_rows.location = current_rows.location
+    ) inventory_by_location
+    ${whereSql}
+    order by ${orderSql}
+  `, params)).rows;
+  const issuedRows = await getIssuedInventoryTotals(runner);
+  return applyIssuedInventoryToRows(baseRows, issuedRows);
+}
+
 function normalizeWarehouseLocationImportRow(row) {
   const normalized = {};
   const aliases = {
@@ -8249,7 +8292,7 @@ app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHan
     )`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  const rows = await getCurrentOnHandRows({ query }, {
+  const rows = await getInventoryAuditVisibleRows({ query }, {
     whereSql,
     params,
     orderSql: "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location"
