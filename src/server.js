@@ -3251,6 +3251,12 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
           <input type="hidden" name="return_to" value="/settings" />
           <div class="grid">
             <div><input name="username" placeholder="Username" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+            <div><input name="first_name" placeholder="First name" autocomplete="off" /></div>
+            <div><input name="last_name" placeholder="Last name" autocomplete="off" /></div>
+          </div>
+          <div class="grid">
+            <div><input name="email" placeholder="Email" value="${esc(normalizeEmail(record.email || ""))}" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+            <div><input name="phone" placeholder="Phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /></div>
             <div><input name="temp_password" placeholder="Temp Password" required autocomplete="new-password" autocapitalize="off" spellcheck="false" /></div>
             <div>
               <select name="role">
@@ -3562,10 +3568,14 @@ app.get("/settings/warehouse-setup", requireAuth, requirePermission("settings", 
 });
 
 app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async (req, res) => {
-  const usersRes = await query("select id, username, role, is_active, created_at from users order by username");
+  const usersRes = await query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username");
   const userRows = usersRes.rows.map((record) => `
     <tr>
       <td>${esc(record.username)}</td>
+      <td>${esc(record.first_name || "")}</td>
+      <td>${esc(record.last_name || "")}</td>
+      <td>${esc(normalizeEmail(record.email || ""))}</td>
+      <td>${esc(normalizePhone(record.phone || ""))}</td>
       <td>${esc(record.role)}</td>
       <td>${record.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>${esc(formatShortDateTime(record.created_at))}</td>
@@ -3575,6 +3585,12 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
             <input type="hidden" name="return_to" value="/settings/user-management" />
             <div class="grid">
               <div><input name="username" value="${esc(record.username)}" required /></div>
+              <div><input name="first_name" value="${esc(record.first_name || "")}" placeholder="First name" autocomplete="off" /></div>
+              <div><input name="last_name" value="${esc(record.last_name || "")}" placeholder="Last name" autocomplete="off" /></div>
+            </div>
+            <div class="grid">
+              <div><input name="email" value="${esc(normalizeEmail(record.email || ""))}" placeholder="Email" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+              <div><input name="phone" value="${esc(normalizePhone(record.phone || ""))}" placeholder="Phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /></div>
               <div>
                 <select name="role">
                   <option value="admin" ${record.role === "admin" ? "selected" : ""}>admin</option>
@@ -3596,7 +3612,7 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
               <button type="submit">Save User</button>
             </div>
             <div id="edit-user-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
-            <div class="muted">Passwords are never displayed. Enter a new password only if you want to reset it.</div>
+            <div class="muted">Passwords are never displayed. Enter a new password only if you want to reset it. Phone accepts 000-000-0000, 1-000-000-0000, or 0000000000.</div>
           </form>
           <div class="actions">
             ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="/settings/users/${record.id}/delete?return_to=%2Fsettings%2Fuser-management">Delete</a>`}
@@ -3617,6 +3633,12 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
         <input type="hidden" name="return_to" value="/settings/user-management" />
         <div class="grid">
           <div><label>Username</label><input name="username" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+          <div><label>First Name</label><input name="first_name" autocomplete="off" /></div>
+          <div><label>Last Name</label><input name="last_name" autocomplete="off" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Email</label><input name="email" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+          <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
           <div>
             <label>Role</label>
             <select name="role">
@@ -3645,8 +3667,8 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
     <div class="card scroll">
       <h3>Existing Users</h3>
       <table>
-        <tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th>Edit / Delete</th></tr>
-        ${userRows || `<tr><td colspan="5" class="muted">No users found.</td></tr>`}
+        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Role</th><th>Status</th><th>Created</th><th>Edit / Delete</th></tr>
+        ${userRows || `<tr><td colspan="9" class="muted">No users found.</td></tr>`}
       </table>
     </div>
   `, req.user));
@@ -4169,6 +4191,10 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
   const username = String(req.body.username || "").trim();
   const tempPassword = String(req.body.temp_password || "");
   const role = String(req.body.role || "field").trim();
+  const firstName = String(req.body.first_name || "").trim();
+  const lastName = String(req.body.last_name || "").trim();
+  const email = normalizeEmail(req.body.email);
+  const phone = normalizePhone(req.body.phone);
   if (!username) throw new Error("Username is required.");
   if (!tempPassword) throw new Error("Temporary password is required.");
   if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
@@ -4179,8 +4205,8 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
     const requestRecord = (await client.query("select * from access_requests where id = $1 and status = 'PENDING'", [requestId])).rows[0];
     if (!requestRecord) throw new Error("Access request not found.");
     await client.query(
-      "insert into users (username, password_hash, role, is_active) values ($1, $2, $3, true)",
-      [username, passwordHash, role]
+      "insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true)",
+      [username, passwordHash, role, firstName, lastName, email || normalizeEmail(requestRecord.email), phone]
     );
     await client.query(`
       update access_requests
@@ -4216,6 +4242,10 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandle
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
   const role = String(req.body.role || "field").trim();
+  const firstName = String(req.body.first_name || "").trim();
+  const lastName = String(req.body.last_name || "").trim();
+  const email = normalizeEmail(req.body.email);
+  const phone = normalizePhone(req.body.phone);
   if (!username) throw new Error("Username is required.");
   if (!password) throw new Error("Password is required.");
   if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
@@ -4223,8 +4253,8 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandle
   if (passwordError) throw new Error(passwordError);
   const passwordHash = await bcrypt.hash(password, 8);
   await withTransaction(async (client) => {
-    await client.query("insert into users (username, password_hash, role, is_active) values ($1, $2, $3, true)", [username, passwordHash, role]);
-    await auditLog(client, req.user.id, "create", "user", username, role);
+    await client.query("insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true)", [username, passwordHash, role, firstName, lastName, email, phone]);
+    await auditLog(client, req.user.id, "create", "user", username, `${role}|${firstName}|${lastName}|${email}|${phone}`);
   });
   res.redirect(getSafeReturnPath(req, "/settings"));
 }));
@@ -4233,7 +4263,11 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
   const userId = Number(req.params.id);
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
-  const role = String(req.body.role || "buyer").trim();
+  const role = String(req.body.role || "field").trim();
+  const firstName = String(req.body.first_name || "").trim();
+  const lastName = String(req.body.last_name || "").trim();
+  const email = normalizeEmail(req.body.email);
+  const phone = normalizePhone(req.body.phone);
   const isActive = String(req.body.is_active || "true") === "true";
   if (!username) throw new Error("Username is required.");
   if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
@@ -4256,11 +4290,11 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
     }
     if (req.user.id === userId && !isActive) throw new Error("You cannot deactivate your own user.");
     if (passwordHash) {
-      await client.query("update users set username = $2, role = $3, password_hash = $4, is_active = $5 where id = $1", [userId, username, role, passwordHash, isActive]);
+      await client.query("update users set username = $2, role = $3, password_hash = $4, is_active = $5, first_name = $6, last_name = $7, email = $8, phone = $9 where id = $1", [userId, username, role, passwordHash, isActive, firstName, lastName, email, phone]);
     } else {
-      await client.query("update users set username = $2, role = $3, is_active = $4 where id = $1", [userId, username, role, isActive]);
+      await client.query("update users set username = $2, role = $3, is_active = $4, first_name = $5, last_name = $6, email = $7, phone = $8 where id = $1", [userId, username, role, isActive, firstName, lastName, email, phone]);
     }
-    await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}|${isActive ? "active" : "inactive"}`);
+    await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}|${isActive ? "active" : "inactive"}|${firstName}|${lastName}|${email}|${phone}`);
   });
   res.redirect(getSafeReturnPath(req, "/settings/user-management"));
 }));
