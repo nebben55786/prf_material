@@ -1511,6 +1511,33 @@ function normalizePoImportRow(row) {
   return normalized;
 }
 
+function parseManualPoLineRows(body, poNo) {
+  const rowCount = Math.max(1, Math.min(50, Number(body.row_count || 12) || 12));
+  const rows = [];
+  for (let index = 0; index < rowCount; index += 1) {
+    const rawRow = {
+      po_line: body[`po_line_${index}`],
+      item_code: body[`item_code_${index}`],
+      description: body[`description_${index}`],
+      material_type: body[`material_type_${index}`],
+      uom: body[`uom_${index}`],
+      size_1: body[`size_1_${index}`],
+      size_2: body[`size_2_${index}`],
+      thk_1: body[`thk_1_${index}`],
+      thk_2: body[`thk_2_${index}`],
+      qty_ordered: body[`qty_ordered_${index}`],
+      unit_price: body[`unit_price_${index}`]
+    };
+    if (!Object.values(rawRow).some((value) => String(value || "").trim() !== "")) continue;
+    const row = normalizePoImportRow({
+      po_no: poNo,
+      ...rawRow
+    });
+    rows.push(row);
+  }
+  return rows;
+}
+
 function normalizeBomImportRow(row) {
   const text = (...values) => {
     for (const value of values) {
@@ -1846,6 +1873,111 @@ async function upsertPurchaseOrderRow(client, row) {
     insert into po_lines (po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
     values ($1, null, $2, $3, $4, $5, $6, $7, $8, $9, now())
   `, [poId, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
+  return { status: "inserted" };
+}
+
+async function upsertPurchaseOrderHeaderRow(client, row) {
+  const poNo = String(row.po_no || row.po_number || "").trim();
+  const vendorName = String(row.vendor_name || row.vendor || "").trim();
+  if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
+  if (!vendorName) return { status: "skipped", errorCode: "missing_vendor", message: "Vendor name is required." };
+
+  const vendorId = await findOrCreateVendorByName(client, vendorName);
+  const poRow = (await client.query("select id from purchase_orders where po_no = $1", [poNo])).rows[0];
+  if (poRow) {
+    await client.query(`
+      update purchase_orders
+      set vendor_id = $2,
+          vendor_contact = $3,
+          freight_terms = $4,
+          ship_to = $5,
+          bill_to = $6,
+          description = $7,
+          notes = $8,
+          buyer_name = $9,
+          status = $10,
+          updated_at = now()
+      where id = $1
+    `, [
+      poRow.id,
+      vendorId,
+      String(row.vendor_contact || row.contact_name || "").trim(),
+      String(row.freight_terms || "").trim(),
+      String(row.ship_to || "").trim(),
+      String(row.bill_to || "").trim(),
+      String(row.po_description || "").trim(),
+      String(row.notes || "").trim(),
+      String(row.buyer_name || row.buyer || "").trim(),
+      String(row.status || "OPEN").trim() || "OPEN"
+    ]);
+    return { status: "updated" };
+  }
+
+  await client.query(`
+    insert into purchase_orders (po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, description, notes, buyer_name, status, updated_at)
+    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
+  `, [
+    poNo,
+    vendorId,
+    String(row.vendor_contact || row.contact_name || "").trim(),
+    String(row.freight_terms || "").trim(),
+    String(row.ship_to || "").trim(),
+    String(row.bill_to || "").trim(),
+    String(row.po_description || "").trim(),
+    String(row.notes || "").trim(),
+    String(row.buyer_name || row.buyer || "").trim(),
+    String(row.status || "OPEN").trim() || "OPEN"
+  ]);
+  return { status: "inserted" };
+}
+
+async function upsertPurchaseOrderLineRow(client, row) {
+  const poNo = String(row.po_no || row.po_number || "").trim();
+  const itemCode = String(row.item_code || "").trim();
+  const qtyOrdered = parseQtyValue(row.qty_ordered || row.qty || row.quantity);
+  const unitPrice = num(row.unit_price || row.price || row.unitcost || row.unit_cost);
+  const poLine = String(row.po_line || row.line_no || row.line || "").trim();
+  if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
+  if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
+  if (!String(row.description || "").trim()) return { status: "skipped", errorCode: "missing_description", message: "Description is required." };
+  if (qtyOrdered <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty ordered must be greater than zero." };
+  if (unitPrice < 0) return { status: "skipped", errorCode: "invalid_unit_price", message: "Unit price cannot be negative." };
+
+  const poRow = (await client.query("select id from purchase_orders where po_no = $1", [poNo])).rows[0];
+  if (!poRow) return { status: "skipped", errorCode: "missing_po_header", message: "PO header not found. Import or create the PO header first." };
+
+  const materialItemId = await upsertMaterialItem(client, {
+    item_code: itemCode,
+    description: row.description || row.item_description || itemCode,
+    material_type: row.material_type || row.type || "misc",
+    uom: row.uom || row.unit || "EA"
+  });
+
+  const size1 = String(row.size_1 || "").trim();
+  const size2 = String(row.size_2 || "").trim();
+  const thk1 = String(row.thk_1 || "").trim();
+  const thk2 = String(row.thk_2 || "").trim();
+  const existingLine = (await client.query(`
+    select id
+    from po_lines
+    where po_id = $1 and material_item_id = $2
+      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
+      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
+    limit 1
+  `, [poRow.id, materialItemId, size1, size2, thk1, thk2])).rows[0];
+  if (existingLine) {
+    await client.query(`
+      update po_lines
+      set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
+      where id = $1
+    `, [existingLine.id, poLine, qtyOrdered, unitPrice, size1, size2, thk1, thk2]);
+    return { status: "updated" };
+  }
+
+  await client.query(`
+    insert into po_lines (po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
+    values ($1, null, $2, $3, $4, $5, $6, $7, $8, $9, now())
+  `, [poRow.id, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
   return { status: "inserted" };
 }
 
@@ -7312,6 +7444,8 @@ app.get("/imports/:id", requireAuth, async (req, res) => {
   const errorRows = errors.length > 0
     ? errors.map((error) => `<tr><td>${error.row_number}</td><td>${esc(error.error_code)}</td><td>${esc(error.message)}</td><td><code>${esc(JSON.stringify(error.raw_payload))}</code></td></tr>`).join("")
     : `<tr><td colspan="4" class="muted">No row-level errors.</td></tr>`;
+  const importBackHref = batch.rfq_id ? `/rfq/${batch.rfq_id}` : "/po";
+  const importBackLabel = batch.rfq_id ? "Back To RFQ" : "Back To POs";
   res.send(layout("Import Results", `
     <h1>Import Results</h1>
     <div class="card">
@@ -7327,7 +7461,7 @@ app.get("/imports/:id", requireAuth, async (req, res) => {
         <div class="stat"><div>Skipped</div><strong>${batch.skipped_count}</strong></div>
         <div class="stat"><div>Errors</div><strong>${errors.length}</strong></div>
       </div>
-      <div class="actions" style="margin-top:18px;"><a class="btn btn-secondary" href="/rfq/${batch.rfq_id}">Back To RFQ</a></div>
+      <div class="actions" style="margin-top:18px;"><a class="btn btn-secondary" href="${importBackHref}">${importBackLabel}</a></div>
     </div>
     <div class="card scroll">
       <h3>Row Results</h3>
@@ -7871,74 +8005,157 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
 });
 
 app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+  const poHeaders = (await query(`
+    select po_no, coalesce(description, '') as description
+    from purchase_orders
+    order by po_no
+  `)).rows;
+  const poOptions = poHeaders.length > 0
+    ? poHeaders.map((po) => `<option value="${esc(po.po_no)}">${esc(po.po_no)}${po.description ? ` | ${esc(po.description)}` : ""}</option>`).join("")
+    : `<option value="">No PO headers available</option>`;
+  const manualRows = Array.from({ length: 12 }, (_value, index) => `<tr>
+    <td><input name="po_line_${index}" /></td>
+    <td><input name="item_code_${index}" /></td>
+    <td><input name="description_${index}" /></td>
+    <td><input name="material_type_${index}" value="misc" /></td>
+    <td><input name="uom_${index}" value="EA" /></td>
+    <td><input name="size_1_${index}" /></td>
+    <td><input name="size_2_${index}" /></td>
+    <td><input name="thk_1_${index}" /></td>
+    <td><input name="thk_2_${index}" /></td>
+    <td><input name="qty_ordered_${index}" inputmode="decimal" /></td>
+    <td><input name="unit_price_${index}" inputmode="decimal" /></td>
+  </tr>`).join("");
   res.send(layout("Import Existing POs", `
     <h1>Import Existing POs</h1>
     <div class="card">
-      <p class="muted">Upload a CSV/XLSX file to create or update PO headers and lines. Missing vendors are added to the vendors table, missing item codes are added to the items table, and imported PO lines are tied to those item records.</p>
-      <p class="muted">Supported columns: po_no, po_line, vendor_name, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status. Alternate headers like PO Number, Vendor, Supplier, Item No, Qty, Ordered Qty, Unit Cost, Price, and PO Description are also accepted.</p>
-      <div class="actions"><a class="btn btn-secondary" href="/po/import/template">Download Template</a></div>
-      <form method="post" enctype="multipart/form-data" action="/po/import/preview" class="stack">
+      <h3>Import PO Headers</h3>
+      <p class="muted">Use this import for the PO header data only. Missing vendors are added automatically. Supported columns: po_no, vendor_name, po_description, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status.</p>
+      <div class="actions"><a class="btn btn-secondary" href="/po/import/headers/template">Download Header Template</a></div>
+      <form method="post" enctype="multipart/form-data" action="/po/import/headers/preview" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
         <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
-        <div class="actions"><button type="submit">Preview Import</button><a class="btn btn-secondary" href="/po">Back</a></div>
+        <div class="actions"><button type="submit">Preview Header Import</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Import PO Lines</h3>
+      <p class="muted">Use this import after the PO headers already exist. Missing items are added automatically. Supported columns: po_no, po_line, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price.</p>
+      <div class="actions"><a class="btn btn-secondary" href="/po/import/lines/template">Download Line Template</a></div>
+      <form method="post" enctype="multipart/form-data" action="/po/import/lines/preview" class="stack">
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
+        <div class="actions"><button type="submit">Preview Line Import</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Manual PO Lines</h3>
+      <p class="muted">Pick an existing PO header, then enter or paste line values into the grid below.</p>
+      <form method="post" action="/po/import/lines/manual" class="stack">
+        <input type="hidden" name="row_count" value="12" />
+        <div class="grid">
+          <div><label>PO Header</label><select name="po_no" ${poHeaders.length === 0 ? "disabled" : ""}>${poOptions}</select></div>
+        </div>
+        <div class="card scroll" style="padding:0;">
+          <table>
+            <tr><th>PO Line</th><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Size 1</th><th>Size 2</th><th>THK 1</th><th>THK 2</th><th>Qty Ordered</th><th>Unit Price</th></tr>
+            ${manualRows}
+          </table>
+        </div>
+        <div class="actions"><button type="submit" ${poHeaders.length === 0 ? "disabled" : ""}>Add Manual PO Lines</button><a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
     </div>
   `, req.user));
 });
 
-app.get("/po/import/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
+app.get("/po/import/headers/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
   const csv = [
-    "po_no,po_line,vendor_name,po_description,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price,vendor_contact,freight_terms,ship_to,bill_to,notes,buyer_name,status",
-    "PO-00001,0010,Example Vendor,Pipe Supports Release 1,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75,John Smith,FOB,SITE A,OFFICE A,Legacy import sample,Buyer One,OPEN"
+    "po_no,vendor_name,po_description,vendor_contact,freight_terms,ship_to,bill_to,notes,buyer_name,status",
+    "PO-00001,Example Vendor,Pipe Supports Release 1,John Smith,FOB,SITE A,OFFICE A,Legacy header import sample,Buyer One,OPEN"
   ].join("\\n");
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", 'attachment; filename="po-import-template.csv"');
+  res.setHeader("Content-Disposition", 'attachment; filename="po-header-import-template.csv"');
   res.send(csv);
 });
 
-app.post("/po/import/preview", requireAuth, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
+app.get("/po/import/lines/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
+  const csv = [
+    "po_no,po_line,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price",
+    "PO-00001,0010,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75"
+  ].join("\\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="po-line-import-template.csv"');
+  res.send(csv);
+});
+
+app.post("/po/import/headers/preview", requireAuth, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
+  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizePoImportRow);
+  if (rows.length === 0) throw new Error("No rows found.");
+  const previewRows = rows.slice(0, 100).map((row) => `<tr>
+    <td>${esc(row.po_no)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_description)}</td>
+    <td>${esc(row.vendor_contact)}</td>
+    <td>${esc(row.freight_terms)}</td>
+    <td>${esc(row.status || "OPEN")}</td>
+  </tr>`).join("");
+  res.send(layout("Preview PO Header Import", `
+    <h1>Preview PO Header Import</h1>
+    <div class="card">
+      <p class="muted">${rows.length} row(s) parsed. Review the mapped values below, then confirm the import.</p>
+      <form method="post" action="/po/import/headers/commit" class="stack">
+        <input type="hidden" name="rows_json" value="${esc(JSON.stringify(rows))}" />
+        <div class="actions"><button type="submit">Confirm Header Import</button><a class="btn btn-secondary" href="/po/import">Back</a></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>PO #</th><th>Vendor</th><th>Description</th><th>Contact</th><th>Freight</th><th>Status</th></tr>${previewRows}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/po/import/lines/preview", requireAuth, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
   const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizePoImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
   const previewRows = rows.slice(0, 100).map((row) => `<tr>
     <td>${esc(row.po_no)}</td>
     <td>${esc(row.po_line)}</td>
-    <td>${esc(row.vendor_name)}</td>
-    <td>${esc(row.po_description)}</td>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
+    <td>${esc(row.material_type)}</td>
     <td>${esc(formatQtyDisplay(row.qty_ordered))}</td>
     <td>${esc(row.unit_price)}</td>
   </tr>`).join("");
-  res.send(layout("Preview PO Import", `
-    <h1>Preview PO Import</h1>
+  res.send(layout("Preview PO Line Import", `
+    <h1>Preview PO Line Import</h1>
     <div class="card">
       <p class="muted">${rows.length} row(s) parsed. Review the mapped values below, then confirm the import.</p>
-      <form method="post" action="/po/import/commit" class="stack">
+      <form method="post" action="/po/import/lines/commit" class="stack">
         <input type="hidden" name="rows_json" value="${esc(JSON.stringify(rows))}" />
-        <div class="actions"><button type="submit">Confirm Import</button><a class="btn btn-secondary" href="/po/import">Back</a></div>
+        <div class="actions"><button type="submit">Confirm Line Import</button><a class="btn btn-secondary" href="/po/import">Back</a></div>
       </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>PO #</th><th>PO Line</th><th>Vendor</th><th>PO Description</th><th>Item Code</th><th>Description</th><th>Qty Ordered</th><th>Unit Price</th></tr>${previewRows}</table>
+      <table><tr><th>PO #</th><th>PO Line</th><th>Item Code</th><th>Description</th><th>Type</th><th>Qty Ordered</th><th>Unit Price</th></tr>${previewRows}</table>
     </div>
   `, req.user));
 });
 
-app.post("/po/import/commit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po/import/headers/commit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
   const rows = JSON.parse(String(req.body.rows_json || "[]"));
   if (!Array.isArray(rows) || rows.length === 0) throw new Error("No rows found.");
   const batchId = await withTransaction(async (client) => {
     const batchId = await createImportBatch(client, {
-      entityType: "purchase_orders",
+      entityType: "purchase_order_headers",
       rfqId: null,
       uploadedBy: req.user.id,
-      filename: req.file?.originalname || ""
+      filename: "PO Header Import"
     });
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
     for (let index = 0; index < rows.length; index += 1) {
-      const result = await upsertPurchaseOrderRow(client, rows[index]);
+      const result = await upsertPurchaseOrderHeaderRow(client, rows[index]);
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
@@ -7947,7 +8164,67 @@ app.post("/po/import/commit", requireAuth, requirePermission("pos", "edit"), asy
       }
     }
     await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
-    await auditLog(client, req.user.id, "import", "purchase_orders", batchId, `rows=${rows.length}`);
+    await auditLog(client, req.user.id, "import", "purchase_order_headers", batchId, `rows=${rows.length}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.post("/po/import/lines/commit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+  const rows = JSON.parse(String(req.body.rows_json || "[]"));
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error("No rows found.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "purchase_order_lines",
+      rfqId: null,
+      uploadedBy: req.user.id,
+      filename: "PO Line Import"
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertPurchaseOrderLineRow(client, rows[index]);
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 2, result.errorCode, result.message, rows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "purchase_order_lines", batchId, `rows=${rows.length}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.post("/po/import/lines/manual", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+  const poNo = String(req.body.po_no || "").trim();
+  if (!poNo) throw new Error("Choose a PO header before adding manual lines.");
+  const rows = parseManualPoLineRows(req.body, poNo);
+  if (rows.length === 0) throw new Error("Enter at least one manual PO line.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "purchase_order_lines",
+      rfqId: null,
+      uploadedBy: req.user.id,
+      filename: `Manual PO Lines - ${poNo}`
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertPurchaseOrderLineRow(client, rows[index]);
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 2, result.errorCode, result.message, rows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "purchase_order_lines", batchId, `rows=${rows.length};manual=true;po=${poNo}`);
     return batchId;
   });
   res.redirect(`/imports/${batchId}`);
