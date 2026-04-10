@@ -4780,6 +4780,7 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
+    const validRowsBySourceUid = new Map();
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const rowNumber = index + 2;
@@ -4791,24 +4792,108 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
         await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, and qty_required are required.", row);
         continue;
       }
-      const existingLine = await client.query(
-        "select id from bom_lines where bom_id = $1 and source_uid = ($2 || '|' || $3)",
-        [bomId, lineNo, itemCode]
-      );
-      if (existingLine.rows[0]) {
+      const sourceUid = `${lineNo}|${itemCode}`;
+      if (validRowsBySourceUid.has(sourceUid)) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "duplicate_bom_line", "Duplicate line no and item code found in the import. The last row was kept.", row);
+      }
+      validRowsBySourceUid.set(sourceUid, {
+        lineNo,
+        itemCode,
+        description: row.description || itemCode,
+        materialType: row.material_type || "misc",
+        uom: row.uom || "EA",
+        spec: row.spec || "",
+        commodityCode: row.commodity_code || "",
+        tagNumber: row.tag_number || "",
+        iwpNo: row.iwp_no || row.iwp || "",
+        isoNo: row.iso_no || row.iso || "",
+        size1: row.size_1 || "",
+        size2: row.size_2 || "",
+        thk1: row.thk_1 || "",
+        thk2: row.thk_2 || "",
+        qtyRequired,
+        notes: row.notes || ""
+      });
+    }
+    const validRows = Array.from(validRowsBySourceUid.values());
+    if (validRows.length) {
+      const existingSourceUids = new Set((await client.query(
+        "select source_uid from bom_lines where bom_id = $1 and source_uid = any($2::text[])",
+        [bomId, validRows.map((row) => `${row.lineNo}|${row.itemCode}`)]
+      )).rows.map((row) => String(row.source_uid || "")));
+      const existingCount = validRows.filter((row) => existingSourceUids.has(`${row.lineNo}|${row.itemCode}`)).length;
+      updatedCount += existingCount;
+      insertedCount += validRows.length - existingCount;
+      const chunkSize = 250;
+      for (let index = 0; index < validRows.length; index += chunkSize) {
+        const chunk = validRows.slice(index, index + chunkSize);
         await client.query(`
-          update bom_lines
-          set item_code = $2, description = $3, material_type = $4, uom = $5, spec = $6, commodity_code = $7, tag_number = $8,
-              iwp_no = $9, iso_no = $10, size_1 = $11, size_2 = $12, thk_1 = $13, thk_2 = $14, qty_required = $15, notes = $16, updated_at = now()
-          where id = $1
-        `, [existingLine.rows[0].id, itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA", row.spec || "", row.commodity_code || "", row.tag_number || "", row.iwp_no || row.iwp || "", row.iso_no || row.iso || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qtyRequired, row.notes || ""]);
-        updatedCount += 1;
-      } else {
-        await client.query(`
-          insert into bom_lines (bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
-        `, [bomId, lineNo, itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA", row.spec || "", row.commodity_code || "", row.tag_number || "", row.iwp_no || row.iwp || "", row.iso_no || row.iso || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qtyRequired, row.notes || ""]);
-        insertedCount += 1;
+          insert into bom_lines (
+            bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
+            iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes, updated_at
+          )
+          select
+            $1,
+            data.line_no,
+            data.item_code,
+            data.description,
+            data.material_type,
+            data.uom,
+            data.spec,
+            data.commodity_code,
+            data.tag_number,
+            data.iwp_no,
+            data.iso_no,
+            data.size_1,
+            data.size_2,
+            data.thk_1,
+            data.thk_2,
+            data.qty_required,
+            data.notes,
+            now()
+          from unnest(
+            $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[],
+            $10::text[], $11::text[], $12::text[], $13::text[], $14::text[], $15::text[], $16::numeric[], $17::text[]
+          ) as data(
+            line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
+            iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes
+          )
+          on conflict (bom_id, source_uid) do update
+          set description = excluded.description,
+              material_type = excluded.material_type,
+              uom = excluded.uom,
+              spec = excluded.spec,
+              commodity_code = excluded.commodity_code,
+              tag_number = excluded.tag_number,
+              iwp_no = excluded.iwp_no,
+              iso_no = excluded.iso_no,
+              size_1 = excluded.size_1,
+              size_2 = excluded.size_2,
+              thk_1 = excluded.thk_1,
+              thk_2 = excluded.thk_2,
+              qty_required = excluded.qty_required,
+              notes = excluded.notes,
+              updated_at = now()
+        `, [
+          bomId,
+          chunk.map((row) => row.lineNo),
+          chunk.map((row) => row.itemCode),
+          chunk.map((row) => row.description),
+          chunk.map((row) => row.materialType),
+          chunk.map((row) => row.uom),
+          chunk.map((row) => row.spec),
+          chunk.map((row) => row.commodityCode),
+          chunk.map((row) => row.tagNumber),
+          chunk.map((row) => row.iwpNo),
+          chunk.map((row) => row.isoNo),
+          chunk.map((row) => row.size1),
+          chunk.map((row) => row.size2),
+          chunk.map((row) => row.thk1),
+          chunk.map((row) => row.thk2),
+          chunk.map((row) => row.qtyRequired),
+          chunk.map((row) => row.notes)
+        ]);
       }
     }
     await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
