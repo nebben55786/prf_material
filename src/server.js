@@ -2721,7 +2721,8 @@ function readSession(token) {
 }
 
 function currentUser(req) {
-  return readSession(req.cookies.session_token);
+  const sessionToken = req?.cookies?.session_token;
+  return sessionToken ? readSession(sessionToken) : null;
 }
 
 function requireAuth(req, res, next) {
