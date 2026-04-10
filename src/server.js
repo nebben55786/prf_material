@@ -2178,9 +2178,15 @@ function normalizeInventoryTrueUpRow(row) {
   };
   const normalized = {};
   for (const [target, keys] of Object.entries(aliases)) {
-    const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] ?? "").trim() !== "");
+    const sourceKey = target === "actual_qty"
+      ? keys.find((key) => row[key] !== undefined)
+      : keys.find((key) => row[key] !== undefined && String(row[key] ?? "").trim() !== "");
     normalized[target] = sourceKey ? row[sourceKey] : "";
   }
+  const rawActualQty = normalized.actual_qty;
+  const actualQty = String(rawActualQty ?? "").trim() === ""
+    ? 0
+    : parseQtyValue(rawActualQty, NaN);
   return {
     item_code: textValue(normalized.item_code),
     description: textValue(normalized.description),
@@ -2190,7 +2196,7 @@ function normalizeInventoryTrueUpRow(row) {
     thk_2: textValue(normalized.thk_2),
     warehouse: normalizeWarehouseName(normalized.warehouse),
     location: normalizeLocationName(normalized.location),
-    actual_qty: parseQtyValue(normalized.actual_qty, NaN)
+    actual_qty: actualQty
   };
 }
 
