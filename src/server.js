@@ -1800,7 +1800,7 @@ async function writeQuoteRevision(client, { rfqItemId, vendorId, unitPrice, lead
   `, [rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId, createdBy]);
 }
 
-async function createImportBatch(client, { entityType, rfqId, uploadedBy, filename }) {
+async function createImportBatch(client, { entityType, rfqId = null, uploadedBy, filename }) {
   const result = await client.query(`
     insert into import_batches (entity_type, rfq_id, uploaded_by, filename, status)
     values ($1, $2, $3, $4, 'COMPLETED')
@@ -4773,7 +4773,6 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
   const batchId = await withTransaction(async (client) => {
     const batchId = await createImportBatch(client, {
       entityType: "bom_lines",
-      rfqId: bomId,
       uploadedBy: req.user.id,
       filename: req.file?.originalname || ""
     });
