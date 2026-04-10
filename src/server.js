@@ -2069,8 +2069,83 @@ function getInventoryTotalsSubquery() {
       coalesce(thk_2, '') as thk_2,
       sum(qty_on_hand) as qty_on_hand
     from (${getInventoryByLocationSubquery()}) inventory_by_location
-    group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+      group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
   `;
+}
+
+function buildInventoryIssueKey(parts) {
+  return JSON.stringify({
+    item_code: normalizeInventoryKeyPart(parts.item_code),
+    size_1: normalizeInventoryKeyPart(parts.size_1),
+    size_2: normalizeInventoryKeyPart(parts.size_2),
+    thk_1: normalizeInventoryKeyPart(parts.thk_1),
+    thk_2: normalizeInventoryKeyPart(parts.thk_2)
+  });
+}
+
+async function getIssuedInventoryTotals(runner = { query }) {
+  return (await runner.query(`
+    select
+      bl.item_code,
+      coalesce(bl.size_1, '') as size_1,
+      coalesce(bl.size_2, '') as size_2,
+      coalesce(bl.thk_1, '') as thk_1,
+      coalesce(bl.thk_2, '') as thk_2,
+      sum(mrl.qty_issued) as qty_issued_total
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where coalesce(mrl.qty_issued, 0) > 0
+    group by
+      bl.item_code,
+      coalesce(bl.size_1, ''),
+      coalesce(bl.size_2, ''),
+      coalesce(bl.thk_1, ''),
+      coalesce(bl.thk_2, '')
+  `)).rows;
+}
+
+function applyIssuedInventoryToRows(rows, issuedRows = []) {
+  const issuedMap = new Map(
+    issuedRows.map((row) => [buildInventoryIssueKey(row), parseQtyValue(row.qty_issued_total || 0)])
+  );
+  const clonedRows = rows.map((row) => ({
+    ...row,
+    qty_on_hand: parseQtyValue(row.qty_on_hand || 0),
+    qty_osd: parseQtyValue(row.qty_osd || 0)
+  }));
+  const groupedRows = new Map();
+  for (const row of clonedRows) {
+    const key = buildInventoryIssueKey(row);
+    if (!groupedRows.has(key)) groupedRows.set(key, []);
+    groupedRows.get(key).push(row);
+  }
+  for (const [key, group] of groupedRows.entries()) {
+    let issuedRemaining = parseQtyValue(issuedMap.get(key) || 0);
+    group.sort((a, b) => (
+      String(a.warehouse || "").localeCompare(String(b.warehouse || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.location || "").localeCompare(String(b.location || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.item_code || "").localeCompare(String(b.item_code || ""), undefined, { numeric: true, sensitivity: "base" })
+    ));
+    for (const row of group) {
+      if (issuedRemaining <= 0) break;
+      const availableQty = Math.max(parseQtyValue(row.qty_on_hand || 0), 0);
+      const consumed = Math.min(availableQty, issuedRemaining);
+      row.qty_on_hand = parseQtyValue(parseQtyValue(row.qty_on_hand || 0) - consumed, 0);
+      issuedRemaining = parseQtyValue(issuedRemaining - consumed, 0);
+    }
+  }
+  return clonedRows;
+}
+
+async function getCurrentOnHandRows(runner = { query }, { whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
+  const baseRows = (await runner.query(`
+    select inventory_by_location.*
+    from (${getInventoryByLocationSubquery()}) inventory_by_location
+    ${whereSql}
+    order by ${orderSql}
+  `, params)).rows;
+  const issuedRows = await getIssuedInventoryTotals(runner);
+  return applyIssuedInventoryToRows(baseRows, issuedRows);
 }
 
 function normalizeWarehouseLocationImportRow(row) {
@@ -2823,10 +2898,7 @@ async function getNextInventoryAuditReportNumber(client = null) {
 
 async function saveInventoryAuditReport(client, { userId, warehouseFilter = "", locationFilter = "", identFilter = "", desiredRows = [] }) {
   if (!desiredRows.length) throw new Error("No inventory rows were provided for this audit.");
-  const currentRows = (await client.query(`
-    select *
-    from (${getInventoryByLocationSubquery()}) inventory_by_location
-  `)).rows;
+  const currentRows = await getCurrentOnHandRows(client);
   const currentMap = new Map(currentRows.map((row) => [buildInventoryEntryKey(row), row]));
   const reportNo = await getNextInventoryAuditReportNumber(client);
   const reportInsert = await client.query(`
@@ -3602,12 +3674,11 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
     ) item_history
     order by transaction_date desc nulls last, source_type, warehouse, location
   `, [`%${itemFilter}%`])).rows : [];
-  const currentRows = itemFilter ? (await query(`
-    select *
-    from (${getInventoryByLocationSubquery()}) inventory_by_location
-    where coalesce(item_code, '') ilike $1 or coalesce(description, '') ilike $1
-    order by warehouse, location, item_code
-  `, [`%${itemFilter}%`])).rows : [];
+  const currentRows = itemFilter ? await getCurrentOnHandRows({ query }, {
+    whereSql: "where coalesce(item_code, '') ilike $1 or coalesce(description, '') ilike $1",
+    params: [`%${itemFilter}%`],
+    orderSql: "inventory_by_location.warehouse, inventory_by_location.location, inventory_by_location.item_code"
+  }) : [];
   const currentRowMarkup = currentRows.map((row) => `<tr>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
@@ -8171,12 +8242,11 @@ app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHan
     )`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  const rows = (await query(`
-    select inventory_by_location.*
-    from (${getInventoryByLocationSubquery()}) inventory_by_location
-    ${whereSql}
-    order by inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location
-  `, params)).rows;
+  const rows = await getCurrentOnHandRows({ query }, {
+    whereSql,
+    params,
+    orderSql: "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location"
+  });
   const warehouseOptionsHtml = [`<option value="">All warehouses</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
     .join("");
@@ -8371,11 +8441,8 @@ app.post("/inventory-audit/import", requireAuth, requireInventoryAuditEdit, uplo
   if (!importedRows.length) throw new Error("No inventory rows were found in the workbook.");
   let createdReportNo = "";
   await withTransaction(async (client) => {
-    const currentRows = (await client.query(`
-      select *
-      from (${getInventoryByLocationSubquery()}) inventory_by_location
-    `)).rows;
-    const desiredRows = new Map();
+      const currentRows = await getCurrentOnHandRows(client);
+      const desiredRows = new Map();
     for (const currentRow of currentRows) {
       setDesiredInventoryRow(desiredRows, {
         item_code: currentRow.item_code,
