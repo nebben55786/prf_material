@@ -8528,12 +8528,11 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
     sort: String(source.sort || sort),
     dir: String(source.dir || dir)
   }).toString();
-  const rows = (await query(`
-    select *
-    from (${getInventoryByLocationSubquery()}) inventory_by_location
-    ${whereSql}
-    order by ${sortSql} ${dir}, item_code asc, warehouse asc, location asc
-  `, params)).rows;
+  const rows = await getCurrentOnHandRows({ query }, {
+    whereSql,
+    params,
+    orderSql: `${sortSql} ${dir}, inventory_by_location.item_code asc, inventory_by_location.warehouse asc, inventory_by_location.location asc`
+  });
   const sortLink = (column) => `/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter, ident_filter: identFilter, sort: column, dir: nextSortDir(sort, dir, column) })}`;
   const warehouseOptionsHtml = [`<option value="">All warehouses</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
