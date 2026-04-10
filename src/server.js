@@ -3062,6 +3062,7 @@ app.get("/yard", requireAuth, requirePermission("yard", "view"), async (req, res
         <a class="btn btn-primary" href="/inventory">Inventory</a>
         <a class="btn btn-primary" href="/yard/locations">Locations</a>
         <a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>
+        ${req.user.role === "admin" ? `<a class="btn btn-primary" href="/yard/item-history">Item History</a>` : ""}
       </div>
     </div>
     <div class="stats">
@@ -3498,6 +3499,167 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
     </div>
   `, req.user));
 });
+
+app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermission("yard", "view"), asyncHandler(async (req, res) => {
+  const itemFilter = String(req.query.item || "").trim();
+  const historyRows = itemFilter ? (await query(`
+    select *
+    from (
+      select
+        r.received_at as transaction_date,
+        mi.item_code,
+        mi.description,
+        initcap(lower(coalesce(r.warehouse, ''))) as warehouse,
+        upper(coalesce(r.location, '')) as location,
+        r.qty_received as transaction_qty,
+        case when coalesce(r.osd_status, 'OK') = 'OK' then r.qty_received else 0 end as inventory_effect,
+        true as affects_on_hand,
+        'Receipt' as source_type,
+        coalesce(m.received_by, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          case when coalesce(po.po_no, '') <> '' then concat('PO ', po.po_no) else '' end,
+          case when coalesce(m.mrr_number, '') <> '' then concat('MRR ', m.mrr_number) else '' end,
+          case when coalesce(r.osd_status, 'OK') <> 'OK' then concat('OS&D ', r.osd_status) else '' end,
+          coalesce(r.osd_notes, '')
+        )) as details
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join material_items mi on mi.id = pl.material_item_id
+      left join purchase_orders po on po.id = pl.po_id
+      left join mrr_logs m on m.id = r.mrr_log_id
+      where mi.item_code ilike $1 or mi.description ilike $1
+
+      union all
+
+      select
+        ial.created_at as transaction_date,
+        ial.item_code,
+        ial.description,
+        initcap(lower(coalesce(ial.warehouse, ''))) as warehouse,
+        upper(coalesce(ial.location, '')) as location,
+        abs(ial.qty_adjustment) as transaction_qty,
+        ial.qty_adjustment as inventory_effect,
+        true as affects_on_hand,
+        'Inventory Audit' as source_type,
+        coalesce(u.username, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          case when coalesce(r.report_no, '') <> '' then concat('Report ', r.report_no) else '' end,
+          case when ial.qty_adjustment < 0 then 'Decrease' when ial.qty_adjustment > 0 then 'Increase' else '' end
+        )) as details
+      from inventory_adjustment_lines ial
+      left join inventory_audit_reports r on r.id = ial.report_id
+      left join users u on u.id = ial.created_by
+      where ial.item_code ilike $1 or ial.description ilike $1
+
+      union all
+
+      select
+        mrl.created_at as transaction_date,
+        coalesce(nullif(mrl.item_code, ''), nullif(mrl.ident_code, ''), nullif(mrl.fluor_item_code, '')) as item_code,
+        mrl.description,
+        initcap(lower(coalesce(mrl.warehouse, ''))) as warehouse,
+        upper(coalesce(mrl.location, '')) as location,
+        mrl.received_qty as transaction_qty,
+        0::numeric as inventory_effect,
+        false as affects_on_hand,
+        'Manual Receiving Log' as source_type,
+        coalesce(mrl.received_by, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          case when coalesce(mrl.mrr_number, '') <> '' then concat('MRR ', mrl.mrr_number) else '' end,
+          case when coalesce(mrl.po_number, '') <> '' then concat('PO ', mrl.po_number) else '' end,
+          coalesce(mrl.comments, '')
+        )) as details
+      from material_receiving_logs mrl
+      where (
+        coalesce(nullif(mrl.item_code, ''), nullif(mrl.ident_code, ''), nullif(mrl.fluor_item_code, '')) ilike $1
+        or coalesce(mrl.description, '') ilike $1
+      )
+
+      union all
+
+      select
+        coalesce(mr.issued_at, mr.created_at) as transaction_date,
+        bl.item_code,
+        bl.description,
+        '' as warehouse,
+        '' as location,
+        mrl.qty_issued as transaction_qty,
+        0::numeric as inventory_effect,
+        false as affects_on_hand,
+        'Material Issue' as source_type,
+        coalesce(u.username, mr.requested_by_name, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          concat('REQ ', mr.requisition_no),
+          case when coalesce(mr.iwp_no, '') <> '' then concat('IWP ', mr.iwp_no) else '' end,
+          case when coalesce(mr.iso_no, '') <> '' then concat('ISO ', mr.iso_no) else '' end
+        )) as details
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      left join users u on u.id = mr.issued_by_user_id
+      where mrl.qty_issued > 0
+        and (bl.item_code ilike $1 or bl.description ilike $1)
+    ) item_history
+    order by transaction_date desc nulls last, source_type, warehouse, location
+  `, [`%${itemFilter}%`])).rows : [];
+  const currentRows = itemFilter ? (await query(`
+    select *
+    from (${getInventoryByLocationSubquery()}) inventory_by_location
+    where coalesce(item_code, '') ilike $1 or coalesce(description, '') ilike $1
+    order by warehouse, location, item_code
+  `, [`%${itemFilter}%`])).rows : [];
+  const currentRowMarkup = currentRows.map((row) => `<tr>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.warehouse)}</td>
+    <td>${esc(row.location)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_on_hand))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_osd))}</td>
+  </tr>`).join("");
+  const historyMarkup = historyRows.map((row) => {
+    const effect = Number(row.inventory_effect || 0);
+    const effectText = effect > 0 ? `+${formatQtyDisplay(effect)}` : formatQtyDisplay(effect);
+    return `<tr>
+      <td>${esc(formatShortDateTime(row.transaction_date))}</td>
+      <td>${esc(row.source_type)}</td>
+      <td>${esc(row.item_code || "")}</td>
+      <td>${esc(row.description || "")}</td>
+      <td>${esc(row.warehouse || "")}</td>
+      <td>${esc(row.location || "")}</td>
+      <td>${esc(formatQtyDisplay(row.transaction_qty))}</td>
+      <td>${row.affects_on_hand ? "Yes" : "No"}</td>
+      <td>${esc(effectText)}</td>
+      <td>${esc(row.actor_name || "")}</td>
+      <td>${esc(row.details || "")}</td>
+    </tr>`;
+  }).join("");
+  res.send(layout("Item History", `
+    <h1>Item History</h1>
+    <div class="card">
+      <form method="get" action="/yard/item-history" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto auto;">
+          <div><label>Item Filter</label><input name="item" value="${esc(itemFilter)}" placeholder="Item code or description" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+          <div style="align-self:end;"><a class="btn btn-secondary" href="/yard/item-history">Clear</a></div>
+        </div>
+      </form>
+      <div class="actions" style="margin-top:12px;">
+        <a class="btn btn-secondary" href="/yard">Back To Yard</a>
+      </div>
+      <p class="muted" style="margin-top:12px;">Negative on-hand rows usually mean the posted inventory audit adjustments drove that warehouse/location below the receipt-backed balance. This page shows the transaction trail for the filtered item so you can see the receipts and adjustments behind it.</p>
+    </div>
+    ${itemFilter ? `
+      <div class="card scroll">
+        <h3 style="margin-top:0;">Current Inventory Rows</h3>
+        <table><tr><th>Item</th><th>Description</th><th>Warehouse</th><th>Location</th><th>Qty On Hand</th><th>Qty OS&D</th></tr>${currentRowMarkup || `<tr><td colspan="6" class="muted">No current inventory rows match that filter.</td></tr>`}</table>
+      </div>
+      <div class="card scroll">
+        <h3 style="margin-top:0;">Transaction History</h3>
+        <table><tr><th>Date</th><th>Source</th><th>Item</th><th>Description</th><th>Warehouse</th><th>Location</th><th>Qty</th><th>Affects On-Hand</th><th>On-Hand Effect</th><th>User / Name</th><th>Details</th></tr>${historyMarkup || `<tr><td colspan="11" class="muted">No item history was found for that filter.</td></tr>`}</table>
+      </div>
+    ` : `<div class="card"><p class="muted">Filter by an item code or description to view the posted history for that item.</p></div>`}
+  `, req.user));
+}));
 
 app.get("/yard/locations", requireAuth, requirePermission("yard", "view"), async (req, res) => {
   const warehousesRes = await query("select id, name, is_active from warehouses order by name");
