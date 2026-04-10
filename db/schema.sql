@@ -162,6 +162,17 @@ create table if not exists material_requisition_lines (
   created_at timestamptz not null default now()
 );
 
+create table if not exists material_issue_transactions (
+  id bigserial primary key,
+  requisition_id bigint not null references material_requisitions(id) on delete cascade,
+  requisition_line_id bigint not null references material_requisition_lines(id) on delete cascade,
+  warehouse text not null,
+  location text not null,
+  qty_issued numeric(18,4) not null,
+  created_by bigint references users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
 alter table material_requisitions add column if not exists verified_at timestamptz;
 alter table material_requisitions add column if not exists verified_by_user_id bigint references users(id) on delete set null;
 alter table material_requisitions add column if not exists issued_at timestamptz;

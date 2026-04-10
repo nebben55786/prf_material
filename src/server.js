@@ -350,7 +350,7 @@ async function runResetTarget(client, target, user) {
   if (!user?.id) throw new Error("A signed-in admin user is required.");
   switch (target) {
     case "full_reset":
-      await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
       await client.query("delete from users where id <> $1", [user.id]);
       await client.query("update users set is_active = true where id = $1", [user.id]);
       await client.query(`
@@ -362,14 +362,14 @@ async function runResetTarget(client, target, user) {
       await auditLog(client, user.id, "reset", "app_data", target, "Full reset completed.");
       return;
     case "data_only":
-      await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
       await auditLog(client, user.id, "reset", "app_data", target, "Operational data reset completed.");
       return;
     case "vendors":
       await client.query("truncate table vendor_contacts, vendors restart identity cascade");
       break;
     case "boms_reqs":
-      await client.query("truncate table material_requisition_lines, material_requisitions, bom_lines, bom_headers restart identity cascade");
+        await client.query("truncate table material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers restart identity cascade");
       break;
     case "rfq_procurement":
       await client.query("truncate table receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs restart identity cascade");
@@ -637,6 +637,24 @@ function buildPickLocationPlan(locationRows, qtyRequested) {
   if (!plan.length) return "No inventory location";
   if (qtyNeeded > 0) plan.push(`Short ${qtyNeeded}`);
   return plan.join(", ");
+}
+
+function buildPickLocationAllocations(locationRows, qtyRequested) {
+  let qtyNeeded = parseQtyValue(qtyRequested || 0);
+  const allocations = [];
+  for (const row of locationRows) {
+    if (qtyNeeded <= 0) break;
+    const qtyAvailable = parseQtyValue(row.qty_available || 0);
+    if (qtyAvailable <= 0) continue;
+    const qtyIssued = Math.min(qtyNeeded, qtyAvailable);
+    allocations.push({
+      warehouse: String(row.warehouse || ""),
+      location: String(row.location || ""),
+      qty_issued: parseQtyValue(qtyIssued, 0)
+    });
+    qtyNeeded = parseQtyValue(qtyNeeded - qtyIssued, 0);
+  }
+  return allocations;
 }
 
 function buildPickTicketPdf(header, lines) {
@@ -1579,6 +1597,15 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+function getHttpErrorStatus(error) {
+  if (Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode < 600) return error.statusCode;
+  const message = String(error?.message || "").toLowerCase();
+  if (/(required|must be|choose|select|invalid|exceeds|cannot|already|only .* can|no .* found|not found|refresh and try again|at least one|greater than zero|before saving)/i.test(message)) {
+    return 400;
+  }
+  return 500;
+}
+
 function landingPage() {
   return `<!doctype html>
   <html>
@@ -2126,24 +2153,60 @@ function buildInventoryIssueKey(parts) {
 
 async function getIssuedInventoryTotals(runner = { query }) {
   return (await runner.query(`
-    select
-      bl.item_code,
-      coalesce(bl.size_1, '') as size_1,
-      coalesce(bl.size_2, '') as size_2,
-      coalesce(bl.thk_1, '') as thk_1,
-      coalesce(bl.thk_2, '') as thk_2,
-      sum(mrl.qty_issued) as qty_issued_total
-    from material_requisition_lines mrl
-    join material_requisitions mr on mr.id = mrl.requisition_id
-    join bom_lines bl on bl.id = mrl.bom_line_id
-    where coalesce(mrl.qty_issued, 0) > 0
-      and coalesce(mr.status, '') <> 'CANCELLED'
-    group by
-      bl.item_code,
-      coalesce(bl.size_1, ''),
-      coalesce(bl.size_2, ''),
-      coalesce(bl.thk_1, ''),
-      coalesce(bl.thk_2, '')
+    select *
+    from (
+      select
+        bl.item_code,
+        coalesce(bl.size_1, '') as size_1,
+        coalesce(bl.size_2, '') as size_2,
+        coalesce(bl.thk_1, '') as thk_1,
+        coalesce(bl.thk_2, '') as thk_2,
+        initcap(lower(coalesce(mit.warehouse, ''))) as warehouse,
+        upper(coalesce(mit.location, '')) as location,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+      group by
+        bl.item_code,
+        coalesce(bl.size_1, ''),
+        coalesce(bl.size_2, ''),
+        coalesce(bl.thk_1, ''),
+        coalesce(bl.thk_2, ''),
+        initcap(lower(coalesce(mit.warehouse, ''))),
+        upper(coalesce(mit.location, ''))
+
+      union all
+
+      select
+        bl.item_code,
+        coalesce(bl.size_1, '') as size_1,
+        coalesce(bl.size_2, '') as size_2,
+        coalesce(bl.thk_1, '') as thk_1,
+        coalesce(bl.thk_2, '') as thk_2,
+        '' as warehouse,
+        '' as location,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by
+        bl.item_code,
+        coalesce(bl.size_1, ''),
+        coalesce(bl.size_2, ''),
+        coalesce(bl.thk_1, ''),
+        coalesce(bl.thk_2, '')
+    ) issued_inventory
   `)).rows;
 }
 
@@ -2242,14 +2305,28 @@ async function markBomLinesReceivedFromInventory(client, bomId, userId = null) {
 }
 
 function applyIssuedInventoryToRows(rows, issuedRows = []) {
-  const issuedMap = new Map(
-    issuedRows.map((row) => [buildInventoryIssueKey(row), parseQtyValue(row.qty_issued_total || 0)])
-  );
+  const exactIssuedMap = new Map();
+  const fallbackIssuedMap = new Map();
+  for (const row of issuedRows) {
+    const qtyIssued = parseQtyValue(row.qty_issued_total || 0);
+    if (qtyIssued <= 0) continue;
+    if (String(row.warehouse || "").trim() && String(row.location || "").trim()) {
+      exactIssuedMap.set(buildInventoryEntryKey(row), qtyIssued);
+    } else {
+      fallbackIssuedMap.set(buildInventoryIssueKey(row), qtyIssued);
+    }
+  }
   const clonedRows = rows.map((row) => ({
     ...row,
     qty_on_hand: parseQtyValue(row.qty_on_hand || 0),
     qty_osd: parseQtyValue(row.qty_osd || 0)
   }));
+  for (const row of clonedRows) {
+    const exactIssued = parseQtyValue(exactIssuedMap.get(buildInventoryEntryKey(row)) || 0);
+    if (exactIssued > 0) {
+      row.qty_on_hand = parseQtyValue(parseQtyValue(row.qty_on_hand || 0) - exactIssued, 0);
+    }
+  }
   const groupedRows = new Map();
   for (const row of clonedRows) {
     const key = buildInventoryIssueKey(row);
@@ -2257,7 +2334,7 @@ function applyIssuedInventoryToRows(rows, issuedRows = []) {
     groupedRows.get(key).push(row);
   }
   for (const [key, group] of groupedRows.entries()) {
-    let issuedRemaining = parseQtyValue(issuedMap.get(key) || 0);
+    let issuedRemaining = parseQtyValue(fallbackIssuedMap.get(key) || 0);
     group.sort((a, b) => (
       String(a.warehouse || "").localeCompare(String(b.warehouse || ""), undefined, { numeric: true, sensitivity: "base" })
       || String(a.location || "").localeCompare(String(b.location || ""), undefined, { numeric: true, sensitivity: "base" })
@@ -3876,6 +3953,33 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
       union all
 
       select
+        coalesce(mit.created_at, mr.issued_at, mr.created_at) as transaction_date,
+        bl.item_code,
+        bl.description,
+        initcap(lower(coalesce(mit.warehouse, ''))) as warehouse,
+        upper(coalesce(mit.location, '')) as location,
+        mit.qty_issued as transaction_qty,
+        (0 - mit.qty_issued) as inventory_effect,
+        true as affects_on_hand,
+        'Material Issue' as source_type,
+        coalesce(u.username, mr.requested_by_name, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          concat('REQ ', mr.requisition_no),
+          case when coalesce(mr.iwp_no, '') <> '' then concat('IWP ', mr.iwp_no) else '' end,
+          case when coalesce(mr.iso_no, '') <> '' then concat('ISO ', mr.iso_no) else '' end
+        )) as details
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      left join users u on u.id = mr.issued_by_user_id
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and (bl.item_code ilike $1 or bl.description ilike $1)
+
+      union all
+
+      select
         coalesce(mr.issued_at, mr.created_at) as transaction_date,
         bl.item_code,
         bl.description,
@@ -3896,8 +4000,14 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
       join bom_lines bl on bl.id = mrl.bom_line_id
       left join users u on u.id = mr.issued_by_user_id
       where mrl.qty_issued > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
         and (bl.item_code ilike $1 or bl.description ilike $1)
-    ) item_history
+      ) item_history
     order by transaction_date desc nulls last, source_type, warehouse, location
   `, [`%${itemFilter}%`])).rows : [];
   const currentRows = itemFilter ? await getCurrentOnHandRows({ query }, {
@@ -5290,7 +5400,6 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid">
             <div><label>Requested By</label><input name="requested_by_name" value="${esc(req.user.username)}" required /></div>
-            <div><label>Status</label><select name="status">${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${value === "REQUESTED" ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
             <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
           </div>
           <div><label>Notes</label><input name="notes" /></div>
@@ -6006,12 +6115,27 @@ app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions
     const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (header.status !== "VERIFIED") throw new Error("Requisition must be verified before issue.");
+    const currentRows = await getCurrentOnHandRows(client);
+    const inventoryMap = new Map();
+    for (const row of currentRows) {
+      const key = buildInventoryIssueKey(row);
+      if (!inventoryMap.has(key)) inventoryMap.set(key, []);
+      inventoryMap.get(key).push({
+        warehouse: row.warehouse,
+        location: row.location,
+        qty_available: parseQtyValue(row.qty_on_hand || 0)
+      });
+    }
     const lines = (await client.query(`
       select
         mrl.id as requisition_line_id,
         mrl.qty_requested,
         bl.id as bom_line_id,
         bl.item_code,
+        coalesce(bl.size_1, '') as size_1,
+        coalesce(bl.size_2, '') as size_2,
+        coalesce(bl.thk_1, '') as thk_1,
+        coalesce(bl.thk_2, '') as thk_2,
         bl.qty_required,
         bl.qty_issued,
         greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
@@ -6064,11 +6188,30 @@ app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions
       order by bl.line_no, bl.id
     `, [req.params.id, req.params.id])).rows;
     if (lines.length === 0) throw new Error("No requisition lines found.");
+    const lineAllocations = new Map();
     for (const line of lines) {
       if (num(line.qty_requested) > num(line.qty_available)) {
         throw new Error(`Cannot issue ${line.item_code}; requested qty exceeds available stock.`);
       }
+      const locationRows = (inventoryMap.get(buildInventoryIssueKey(line)) || []).map((row) => ({ ...row }));
+      const allocations = buildPickLocationAllocations(locationRows, line.qty_requested);
+      const allocatedQty = allocations.reduce((sum, row) => parseQtyValue(sum + parseQtyValue(row.qty_issued || 0), 0), 0);
+      if (allocatedQty < num(line.qty_requested)) {
+        throw new Error(`Cannot issue ${line.item_code}; not enough warehouse/location inventory is available.`);
+      }
+      lineAllocations.set(Number(line.requisition_line_id), allocations);
+      let qtyToReserve = parseQtyValue(line.qty_requested || 0);
+      const currentLocationRows = inventoryMap.get(buildInventoryIssueKey(line)) || [];
+      for (const location of currentLocationRows) {
+        if (qtyToReserve <= 0) break;
+        const availableQty = parseQtyValue(location.qty_available || 0);
+        if (availableQty <= 0) continue;
+        const consumed = Math.min(availableQty, qtyToReserve);
+        location.qty_available = parseQtyValue(availableQty - consumed, 0);
+        qtyToReserve = parseQtyValue(qtyToReserve - consumed, 0);
+      }
     }
+    await client.query("delete from material_issue_transactions where requisition_id = $1", [req.params.id]);
     for (const line of lines) {
       await client.query(`
         update bom_lines
@@ -6085,6 +6228,13 @@ app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions
         set qty_issued = qty_requested
         where id = $1
       `, [line.requisition_line_id]);
+      const allocations = lineAllocations.get(Number(line.requisition_line_id)) || [];
+      for (const allocation of allocations) {
+        await client.query(`
+          insert into material_issue_transactions (requisition_id, requisition_line_id, warehouse, location, qty_issued, created_by)
+          values ($1, $2, $3, $4, $5, $6)
+        `, [req.params.id, line.requisition_line_id, allocation.warehouse, allocation.location, allocation.qty_issued, req.user.id || null]);
+      }
     }
     await client.query(`
       update material_requisitions
@@ -6126,6 +6276,12 @@ app.post("/requisitions/:id/cancel", requireAuth, requirePermission("requisition
         where id = $1
       `, [line.bom_line_id, nextIssued, nextStatus]);
     }
+      await client.query(`delete from material_issue_transactions where requisition_id = $1`, [req.params.id]);
+      await client.query(`
+        update material_requisition_lines
+        set qty_issued = 0
+        where requisition_id = $1
+      `, [req.params.id]);
       await client.query(`
         update material_requisitions
         set status = 'CANCELLED'
@@ -10320,7 +10476,9 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
 
 app.use((error, req, res, _next) => {
   const user = currentUser(req);
-  res.status(400).send(layout("Error", `<div class="card error"><h3>Error</h3><pre>${esc(error.message)}</pre></div>`, user));
+  const statusCode = getHttpErrorStatus(error);
+  if (statusCode >= 500) console.error(error);
+  res.status(statusCode).send(layout("Error", `<div class="card error"><h3>Error</h3><pre>${esc(error.message)}</pre></div>`, user));
 });
 
 await initDb();
