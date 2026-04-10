@@ -1209,6 +1209,18 @@ function layout(title, body, user) {
           });
         });
       }
+      function getSortableCellText(cell) {
+        if (!cell) return "";
+        if (cell.dataset && cell.dataset.sortValue !== undefined) return String(cell.dataset.sortValue || "");
+        const select = cell.querySelector("select");
+        if (select) {
+          const selectedOption = select.options[select.selectedIndex];
+          return selectedOption ? String(selectedOption.text || selectedOption.value || "") : String(select.value || "");
+        }
+        const input = cell.querySelector("input, textarea");
+        if (input) return String(input.value || input.getAttribute("value") || "");
+        return String(cell.innerText || cell.textContent || "");
+      }
       function parseSortableValue(text) {
         const value = String(text || "").trim();
         if (!value) return { type: "text", value: "" };
@@ -1245,16 +1257,16 @@ function layout(title, body, user) {
           indicator.className = "sort-indicator";
           indicator.textContent = "";
           th.appendChild(indicator);
-          th.addEventListener("click", () => {
-            const currentIndex = Number(table.dataset.sortIndex || -1);
-            const nextDir = currentIndex === index && table.dataset.sortDir === "asc" ? "desc" : "asc";
-            const bodyRows = Array.from(table.querySelectorAll("tr")).slice(1);
-            bodyRows.sort((a, b) => {
-              const aParsed = parseSortableValue(a.children[index] ? a.children[index].innerText : "");
-              const bParsed = parseSortableValue(b.children[index] ? b.children[index].innerText : "");
-              let result = 0;
-              if (aParsed.type === "number" && bParsed.type === "number") {
-                result = aParsed.value - bParsed.value;
+            th.addEventListener("click", () => {
+              const currentIndex = Number(table.dataset.sortIndex || -1);
+              const nextDir = currentIndex === index && table.dataset.sortDir === "asc" ? "desc" : "asc";
+              const bodyRows = Array.from(table.querySelectorAll("tr")).slice(1);
+              bodyRows.sort((a, b) => {
+                const aParsed = parseSortableValue(getSortableCellText(a.children[index]));
+                const bParsed = parseSortableValue(getSortableCellText(b.children[index]));
+                let result = 0;
+                if (aParsed.type === "number" && bParsed.type === "number") {
+                  result = aParsed.value - bParsed.value;
               } else {
                 result = String(aParsed.value).localeCompare(String(bParsed.value), undefined, { numeric: true, sensitivity: "base" });
               }
