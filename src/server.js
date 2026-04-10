@@ -260,6 +260,50 @@ function renderVendorSelectionOptions(vendors, selectedVendorIds = []) {
   `).join("");
 }
 
+const APP_RESET_CONFIRM_TEXT = "DELETE ALL DATA";
+const appResetTableNames = [
+  "inventory_adjustment_lines",
+  "inventory_audit_report_lines",
+  "inventory_audit_reports",
+  "inventory_audit_counts",
+  "vendor_fmr_request_lines",
+  "opi_logs",
+  "osd_logs",
+  "fmr_logs",
+  "mrr_logs",
+  "material_receiving_logs",
+  "receipts",
+  "po_lines",
+  "purchase_orders",
+  "quote_revisions",
+  "quotes",
+  "rfq_vendors",
+  "rfq_items",
+  "rfqs",
+  "material_requisition_lines",
+  "material_requisitions",
+  "bom_lines",
+  "bom_headers",
+  "material_items",
+  "vendor_contacts",
+  "vendors",
+  "warehouse_locations",
+  "warehouses",
+  "import_batch_errors",
+  "import_batches",
+  "material_log_lookup_values",
+  "access_requests",
+  "audit_log"
+];
+
+async function resetAppData(client, user) {
+  if (!user?.id) throw new Error("A signed-in admin user is required.");
+  await client.query(`truncate table ${appResetTableNames.join(", ")} restart identity cascade`);
+  await client.query("delete from users where id <> $1", [user.id]);
+  await client.query("update users set is_active = true where id = $1", [user.id]);
+  await auditLog(client, user.id, "reset", "app_data", "all", "All operational data deleted by admin reset.");
+}
+
 function buildSimplePdf(title, detailLines, tableLines) {
   const pageWidth = 612;
   const pageHeight = 792;
@@ -2949,6 +2993,7 @@ function getSafeReturnPath(req, fallback = "/settings") {
 }
 
 app.get("/settings", requireAuth, requirePermission("settings", "view"), async (req, res) => {
+  const resetComplete = String(req.query.reset || "").trim() === "1";
   const accessRequestsRes = await query("select * from access_requests where status = 'PENDING' order by created_at asc");
   const accessRequestRows = accessRequestsRes.rows.map((record) => `
     <tr>
@@ -2981,6 +3026,7 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
   `).join("");
   res.send(layout("Settings", `
     <h1>Settings</h1>
+    ${resetComplete ? `<div class="card success"><strong>App reset complete.</strong> Operational data was deleted, and the app is ready for a fresh setup/import.</div>` : ""}
     <div class="card">
       <div class="actions">
         <a class="btn btn-primary" href="/settings/job-setup">Job Setup</a>
@@ -2989,6 +3035,15 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
       </div>
       <p class="muted" style="margin-top:12px;">Use these setup pages to manage job settings, warehouse/location setup, and users without crowding the main settings screen.</p>
     </div>
+    ${req.user.role === "admin" ? `
+      <div class="card error">
+        <h3 style="margin-top:0;">Danger Zone</h3>
+        <p>This admin-only reset clears the app's operational data so you can start fresh. It keeps the current admin login and the app setup settings so you are not locked out.</p>
+        <div class="actions">
+          <a class="btn btn-danger" href="/settings/reset-app">Reset App Data</a>
+        </div>
+      </div>
+    ` : ""}
     <div class="card scroll">
       <h3>Access Requests</h3>
       <table>
@@ -2998,6 +3053,41 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
     </div>
   `, req.user));
 });
+
+app.get("/settings/reset-app", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  res.send(layout("Reset App Data", `
+    <h1>Reset App Data</h1>
+    <div class="card error">
+      <h3 style="margin-top:0;">This action deletes app data.</h3>
+      <p>This will permanently remove operational records including vendors, BOMs, RFQs, POs, receipts, requisitions, MRR/FMR/OPI logs, inventory audits, warehouses, locations, imports, and audit history.</p>
+      <p><strong>The current admin account and app setup settings will be kept so you can sign back in after the reset.</strong></p>
+      <p>To continue, type <code>${APP_RESET_CONFIRM_TEXT}</code> and your current username <code>${esc(req.user.username)}</code>.</p>
+    </div>
+    <div class="card">
+      <form method="post" action="/settings/reset-app" class="stack">
+        <div class="grid">
+          <div><label>Confirmation Phrase</label><input name="confirm_text" autocomplete="off" required /></div>
+          <div><label>Current Username</label><input name="confirm_username" autocomplete="off" required /></div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-danger" type="submit">Delete All App Data</button>
+          <a class="btn btn-secondary" href="/settings">Cancel</a>
+        </div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/settings/reset-app", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const confirmText = String(req.body.confirm_text || "").trim();
+  const confirmUsername = String(req.body.confirm_username || "").trim();
+  if (confirmText !== APP_RESET_CONFIRM_TEXT) throw new Error(`Type ${APP_RESET_CONFIRM_TEXT} to confirm the reset.`);
+  if (confirmUsername !== String(req.user.username || "").trim()) throw new Error("Enter your current username exactly to confirm the reset.");
+  await withTransaction(async (client) => {
+    await resetAppData(client, req.user);
+  });
+  res.redirect("/settings?reset=1");
+}));
 
 app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"), async (req, res) => {
   const jobNumber = await getJobNumber();
