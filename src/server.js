@@ -5258,7 +5258,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
     where bom_type = 'pipe'
     order by id desc
   `)).rows;
-  const selectedBomId = Number(req.query.bom_id || availableBoms[0]?.id || 0);
+  const selectedBomId = Number(req.query.bom_id || 0);
   const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
   const clearFilters = String(req.query.clear_filters || "") === "1";
   const lineFilter = {
@@ -5376,24 +5376,26 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
   const stagedSelectionJson = escAttr(JSON.stringify(stagedSelection));
   res.send(layout("New Request", `
     <h1>New Material Request</h1>
-    <div class="card">
-      <form method="get" action="/requisitions/new" class="stack" id="requisition-filter-form">
-        <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
-        <div class="grid">
-          <div><label>Piping BOM</label><select name="bom_id">${bomOptions || `<option value="">No piping BOMs found</option>`}</select></div>
-          <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
-          <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
-          <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
-          <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" /></div>
-        </div>
-        <div class="actions">
-          <button type="submit">Load Lines</button>
-          <button class="btn btn-secondary" type="submit" name="clear_filters" value="1">Clear Filter</button>
-          <a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a>
-        </div>
-      </form>
-    </div>
     ${selectedBom ? `
+      <div class="card">
+        <form method="get" action="/requisitions/new" class="stack" id="requisition-filter-form">
+          <input type="hidden" name="bom_id" value="${selectedBom.id}" />
+          <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
+          <div class="grid">
+            <div><label>Piping BOM</label><input value="${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}" readonly /></div>
+            <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
+            <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
+            <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
+            <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" /></div>
+          </div>
+          <div class="actions">
+            <button type="submit">Load Lines</button>
+            <button class="btn btn-secondary" type="submit" name="clear_filters" value="1">Clear Filter</button>
+            <a class="btn btn-secondary" href="/requisitions/new">Change BOM</a>
+            <a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a>
+          </div>
+        </form>
+      </div>
       <div class="card">
         <h3>Create Material Requisition</h3>
         <p class="muted">BOM: ${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
@@ -5527,8 +5529,17 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
           if (createForm) createForm.addEventListener("submit", syncStagedSelection);
           syncSelectAllVisible();
         }());
-      </script>
-    ` : `<div class="card error"><h3>No Piping BOM Found</h3><p>Select or create a piping BOM first.</p></div>`}
+        </script>
+    ` : `<div class="card">
+      <form method="get" action="/requisitions/new" class="stack">
+        <div><label>Select Piping BOM</label><select name="bom_id" required><option value="">Choose BOM</option>${bomOptions || ""}</select></div>
+        <div class="actions">
+          <button type="submit">Continue</button>
+          <a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a>
+        </div>
+      </form>
+      ${availableBoms.length ? `<p class="muted" style="margin-top:12px;">Choose the BOM first, then we’ll take you to the request builder for that BOM.</p>` : `<div class="error" style="margin-top:12px;"><h3>No Piping BOM Found</h3><p>Select or create a piping BOM first.</p></div>`}
+    </div>`}
   `, req.user));
 });
 
