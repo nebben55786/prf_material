@@ -260,48 +260,135 @@ function renderVendorSelectionOptions(vendors, selectedVendorIds = []) {
   `).join("");
 }
 
-const APP_RESET_CONFIRM_TEXT = "DELETE ALL DATA";
-const appResetTableNames = [
-  "inventory_adjustment_lines",
-  "inventory_audit_report_lines",
-  "inventory_audit_reports",
-  "inventory_audit_counts",
-  "vendor_fmr_request_lines",
-  "opi_logs",
-  "osd_logs",
-  "fmr_logs",
-  "mrr_logs",
-  "material_receiving_logs",
-  "receipts",
-  "po_lines",
-  "purchase_orders",
-  "quote_revisions",
-  "quotes",
-  "rfq_vendors",
-  "rfq_items",
-  "rfqs",
-  "material_requisition_lines",
-  "material_requisitions",
-  "bom_lines",
-  "bom_headers",
-  "material_items",
-  "vendor_contacts",
-  "vendors",
-  "warehouse_locations",
-  "warehouses",
-  "import_batch_errors",
-  "import_batches",
-  "material_log_lookup_values",
-  "access_requests",
-  "audit_log"
+const defaultJobNumberValue = String(process.env.DEFAULT_JOB_NUMBER || "0000").trim() || "0000";
+const resetTargetGroups = {
+  full_reset: {
+    label: "Full Reset",
+    confirmText: "DELETE FULL RESET",
+    description: "Deletes operational data, removes other users, and resets the job number back to the default value."
+  },
+  data_only: {
+    label: "Operational Data Only",
+    confirmText: "DELETE OPERATIONAL DATA",
+    description: "Deletes the app's working data but keeps users and setup settings."
+  },
+  vendors: {
+    label: "Vendors",
+    confirmText: "DELETE VENDORS",
+    description: "Deletes vendors and vendor contacts."
+  },
+  boms_reqs: {
+    label: "BOMs And REQs",
+    confirmText: "DELETE BOMS AND REQS",
+    description: "Deletes BOMs and material requisitions."
+  },
+  rfq_procurement: {
+    label: "RFQs / POs / Quotes",
+    confirmText: "DELETE RFQS POS QUOTES",
+    description: "Deletes RFQs, vendor selections, quotes, purchase orders, PO lines, and receipts."
+  },
+  material_logs: {
+    label: "Material Logs",
+    confirmText: "DELETE MATERIAL LOGS",
+    description: "Deletes receiving logs, MRR/FMR/OPI/OS&D logs, request-builder lines, and material log lookups."
+  },
+  inventory: {
+    label: "Inventory / Warehouses",
+    confirmText: "DELETE INVENTORY",
+    description: "Deletes inventory audit history, inventory adjustments, warehouses, and locations."
+  },
+  imports: {
+    label: "Import History",
+    confirmText: "DELETE IMPORT HISTORY",
+    description: "Deletes stored import batches and import errors."
+  },
+  access_requests: {
+    label: "Access Requests",
+    confirmText: "DELETE ACCESS REQUESTS",
+    description: "Deletes all pending and historical access requests."
+  },
+  audit_log: {
+    label: "Audit Log",
+    confirmText: "DELETE AUDIT LOG",
+    description: "Deletes the audit history log."
+  },
+  job_number: {
+    label: "Reset Job Number",
+    confirmText: "RESET JOB NUMBER",
+    description: `Resets the job number back to ${defaultJobNumberValue}.`
+  }
+};
+
+const resetTargetSections = [
+  {
+    heading: "Full Reset Options",
+    targets: ["full_reset", "data_only", "job_number"]
+  },
+  {
+    heading: "Delete Individual Data Sets",
+    targets: ["vendors", "boms_reqs", "rfq_procurement", "material_logs", "inventory", "imports", "access_requests", "audit_log"]
+  }
 ];
 
-async function resetAppData(client, user) {
+function getResetTargetConfig(target) {
+  return resetTargetGroups[target] || null;
+}
+
+async function runResetTarget(client, target, user) {
   if (!user?.id) throw new Error("A signed-in admin user is required.");
-  await client.query(`truncate table ${appResetTableNames.join(", ")} restart identity cascade`);
-  await client.query("delete from users where id <> $1", [user.id]);
-  await client.query("update users set is_active = true where id = $1", [user.id]);
-  await auditLog(client, user.id, "reset", "app_data", "all", "All operational data deleted by admin reset.");
+  switch (target) {
+    case "full_reset":
+      await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+      await client.query("delete from users where id <> $1", [user.id]);
+      await client.query("update users set is_active = true where id = $1", [user.id]);
+      await client.query(`
+        insert into app_settings (key, value, updated_at)
+        values ('job_number', $1, now())
+        on conflict (key) do update
+        set value = excluded.value, updated_at = now()
+      `, [defaultJobNumberValue]);
+      await auditLog(client, user.id, "reset", "app_data", target, "Full reset completed.");
+      return;
+    case "data_only":
+      await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+      await auditLog(client, user.id, "reset", "app_data", target, "Operational data reset completed.");
+      return;
+    case "vendors":
+      await client.query("truncate table vendor_contacts, vendors restart identity cascade");
+      break;
+    case "boms_reqs":
+      await client.query("truncate table material_requisition_lines, material_requisitions, bom_lines, bom_headers restart identity cascade");
+      break;
+    case "rfq_procurement":
+      await client.query("truncate table receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs restart identity cascade");
+      break;
+    case "material_logs":
+      await client.query("truncate table vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, material_log_lookup_values restart identity cascade");
+      break;
+    case "inventory":
+      await client.query("truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, warehouse_locations, warehouses restart identity cascade");
+      break;
+    case "imports":
+      await client.query("truncate table import_batch_errors, import_batches restart identity cascade");
+      break;
+    case "access_requests":
+      await client.query("truncate table access_requests restart identity cascade");
+      break;
+    case "audit_log":
+      await client.query("truncate table audit_log restart identity cascade");
+      break;
+    case "job_number":
+      await client.query(`
+        insert into app_settings (key, value, updated_at)
+        values ('job_number', $1, now())
+        on conflict (key) do update
+        set value = excluded.value, updated_at = now()
+      `, [defaultJobNumberValue]);
+      break;
+    default:
+      throw new Error("Unknown reset target.");
+  }
+  await auditLog(client, user.id, "reset", "app_data", target, `Reset target ${target} completed.`);
 }
 
 function buildSimplePdf(title, detailLines, tableLines) {
@@ -3038,9 +3125,9 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
     ${req.user.role === "admin" ? `
       <div class="card error">
         <h3 style="margin-top:0;">Danger Zone</h3>
-        <p>This admin-only reset clears the app's operational data so you can start fresh. It keeps the current admin login and the app setup settings so you are not locked out.</p>
+        <p>This admin-only page lets you delete specific data sections or run a broader reset with verification.</p>
         <div class="actions">
-          <a class="btn btn-danger" href="/settings/reset-app">Reset App Data</a>
+          <a class="btn btn-danger" href="/settings/reset-app">Open Reset Controls</a>
         </div>
       </div>
     ` : ""}
@@ -3055,38 +3142,90 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
 });
 
 app.get("/settings/reset-app", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const completedTarget = String(req.query.done || "").trim();
+  const completedConfig = getResetTargetConfig(completedTarget);
+  const sectionMarkup = resetTargetSections.map((section) => `
+    <div class="card">
+      <h3 style="margin-top:0;">${esc(section.heading)}</h3>
+      <div class="stack">
+        ${section.targets.map((target) => {
+          const config = getResetTargetConfig(target);
+          return `
+            <div style="border:1px solid #b7c3d0; padding:12px; border-radius:4px;">
+              <div style="display:flex; justify-content:space-between; gap:16px; align-items:flex-start; flex-wrap:wrap;">
+                <div style="flex:1 1 420px;">
+                  <strong>${esc(config.label)}</strong>
+                  <div class="muted" style="margin-top:6px;">${esc(config.description)}</div>
+                </div>
+                <div class="actions">
+                  <a class="btn btn-danger" href="/settings/reset-app/${encodeURIComponent(target)}">Open Delete Confirmation</a>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
+  `).join("");
   res.send(layout("Reset App Data", `
     <h1>Reset App Data</h1>
+    ${completedConfig ? `<div class="card success"><strong>${esc(completedConfig.label)} complete.</strong> The selected reset action finished successfully.</div>` : ""}
     <div class="card error">
-      <h3 style="margin-top:0;">This action deletes app data.</h3>
-      <p>This will permanently remove operational records including vendors, BOMs, RFQs, POs, receipts, requisitions, MRR/FMR/OPI logs, inventory audits, warehouses, locations, imports, and audit history.</p>
-      <p><strong>The current admin account and app setup settings will be kept so you can sign back in after the reset.</strong></p>
-      <p>To continue, type <code>${APP_RESET_CONFIRM_TEXT}</code> and your current username <code>${esc(req.user.username)}</code>.</p>
+      <h3 style="margin-top:0;">Admin-only reset controls</h3>
+      <p>Each action below has its own confirmation step. Use the broader reset options only if you are intentionally clearing large parts of the app.</p>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
+    </div>
+    ${sectionMarkup}
+  `, req.user));
+}));
+
+app.get("/settings/reset-app/:target", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const config = getResetTargetConfig(String(req.params.target || "").trim());
+  if (!config) throw new Error("Reset target not found.");
+  res.send(layout(config.label, `
+    <h1>${esc(config.label)}</h1>
+    <div class="card error">
+      <h3 style="margin-top:0;">Verification required</h3>
+      <p>${esc(config.description)}</p>
+      <p>To continue, type <code>${esc(config.confirmText)}</code> and your current username <code>${esc(req.user.username)}</code>.</p>
     </div>
     <div class="card">
-      <form method="post" action="/settings/reset-app" class="stack">
+      <form method="post" action="/settings/reset-app/${encodeURIComponent(String(req.params.target || "").trim())}" class="stack">
         <div class="grid">
           <div><label>Confirmation Phrase</label><input name="confirm_text" autocomplete="off" required /></div>
           <div><label>Current Username</label><input name="confirm_username" autocomplete="off" required /></div>
         </div>
         <div class="actions">
-          <button class="btn btn-danger" type="submit">Delete All App Data</button>
-          <a class="btn btn-secondary" href="/settings">Cancel</a>
+          <button class="btn btn-danger" type="submit">Confirm ${esc(config.label)}</button>
+          <a class="btn btn-secondary" href="/settings/reset-app">Cancel</a>
         </div>
       </form>
     </div>
   `, req.user));
 }));
 
-app.post("/settings/reset-app", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/reset-app/:target", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const target = String(req.params.target || "").trim();
+  const config = getResetTargetConfig(target);
+  if (!config) throw new Error("Reset target not found.");
   const confirmText = String(req.body.confirm_text || "").trim();
   const confirmUsername = String(req.body.confirm_username || "").trim();
-  if (confirmText !== APP_RESET_CONFIRM_TEXT) throw new Error(`Type ${APP_RESET_CONFIRM_TEXT} to confirm the reset.`);
+  if (confirmText !== config.confirmText) throw new Error(`Type ${config.confirmText} to confirm this reset.`);
   if (confirmUsername !== String(req.user.username || "").trim()) throw new Error("Enter your current username exactly to confirm the reset.");
   await withTransaction(async (client) => {
-    await resetAppData(client, req.user);
+    await runResetTarget(client, target, req.user);
   });
-  res.redirect("/settings?reset=1");
+  if (target === "full_reset" || target === "job_number") {
+    await query(`
+      insert into app_settings (key, value, updated_at)
+      values ('job_number', $1, now())
+      on conflict (key) do update
+      set value = excluded.value, updated_at = now()
+    `, [defaultJobNumberValue]);
+  }
+  res.redirect(`/settings/reset-app?done=${encodeURIComponent(target)}`);
 }));
 
 app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"), async (req, res) => {
