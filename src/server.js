@@ -36,6 +36,10 @@ const permissionSections = [
   { key: "settings", label: "Settings", href: "/settings" }
 ];
 const permissionRoles = ["admin", "buyer", "warehouse", "field", "supervisor"];
+const defaultJobNumberValue = String(process.env.DEFAULT_JOB_NUMBER || "0000").trim() || "0000";
+let headerJobNumber = defaultJobNumberValue;
+let headerPlantName = "";
+let headerPerformanceJobNumber = "";
 
 const defaultPermissionMatrix = {
   admin: {
@@ -133,6 +137,15 @@ function canAccess(user, section, action = "view") {
 function canEditInventoryAudit(user) {
   if (!user) return false;
   return user.role === "admin" || user.role === "warehouse" || canAccess(user, "inventory", "edit");
+}
+
+function getAppHeaderTitle() {
+  const parts = [];
+  if (headerPlantName) parts.push(headerPlantName);
+  if (headerJobNumber) parts.push(headerJobNumber);
+  parts.push("Material Control");
+  if (headerPerformanceJobNumber) parts.push(headerPerformanceJobNumber);
+  return parts.filter(Boolean).join(" - ");
 }
 
 app.use(express.urlencoded({ extended: true, limit: "20mb", parameterLimit: 20000 }));
@@ -260,7 +273,6 @@ function renderVendorSelectionOptions(vendors, selectedVendorIds = []) {
   `).join("");
 }
 
-const defaultJobNumberValue = String(process.env.DEFAULT_JOB_NUMBER || "0000").trim() || "0000";
 const resetTargetGroups = {
   full_reset: {
     label: "Full Reset",
@@ -955,6 +967,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
 }
 
 function layout(title, body, user) {
+  const appHeaderTitle = getAppHeaderTitle();
   const navLinks = user
     ? permissionSections
         .filter((section) => canAccess(user, section.key, "view"))
@@ -1340,7 +1353,7 @@ function layout(title, body, user) {
           <a class="brand-link" href="${user ? "/dashboard" : "/"}">
             <img class="brand-logo" src="/public/prf-logo.png" alt="Performance Contractors logo" />
             <div class="brand-copy">
-              <div class="brand">Material Control</div>
+              <div class="brand">${esc(appHeaderTitle)}</div>
               ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
             </div>
           </a>
@@ -2934,6 +2947,18 @@ async function getJobNumber(client = null) {
   return String(result.rows[0]?.value || "0000").trim() || "0000";
 }
 
+async function getAppSettingValue(key, fallback = "", client = null) {
+  const runner = client || { query };
+  const result = await runner.query("select value from app_settings where key = $1", [key]);
+  return String(result.rows[0]?.value || fallback).trim() || fallback;
+}
+
+async function refreshHeaderSettings(client = null) {
+  headerJobNumber = await getJobNumber(client);
+  headerPlantName = await getAppSettingValue("plant_name", "", client);
+  headerPerformanceJobNumber = await getAppSettingValue("performance_job_number", "", client);
+}
+
 async function getNextInventoryAuditReportNumber(client = null) {
   const runner = client || { query };
   const jobNumber = await getJobNumber(client);
@@ -3365,6 +3390,8 @@ app.post("/settings/reset-app/:target", requireAuth, requireRole(["admin"]), req
 
 app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"), async (req, res) => {
   const jobNumber = await getJobNumber();
+  const plantName = await getAppSettingValue("plant_name", "");
+  const performanceJobNumber = await getAppSettingValue("performance_job_number", "");
   const vendorCategoryText = vendorCategories.join("\n");
   const permissionRows = permissionSections.map((section) => {
     const cells = permissionRoles.map((role) => {
@@ -3407,7 +3434,10 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
         <input type="hidden" name="return_to" value="/settings/job-setup" />
         <div class="grid">
           <div><label>Job Number</label><input name="job_number" value="${esc(jobNumber)}" required /></div>
+          <div><label>Plant Name</label><input name="plant_name" value="${esc(plantName)}" placeholder="Novelis" /></div>
+          <div><label>Performance Job Number</label><input name="performance_job_number" value="${esc(performanceJobNumber)}" placeholder="8613" /></div>
         </div>
+        <p class="muted">Header preview: <strong>${esc([plantName, jobNumber, "Material Control", performanceJobNumber].filter(Boolean).join(" - "))}</strong></p>
         <p class="muted">Future RFQs will use this format: <strong>${esc(jobNumber)}-RFQ-00001</strong></p>
         <div class="actions"><button type="submit">Save Job Number</button></div>
       </form>
@@ -3881,6 +3911,8 @@ app.post("/request-access", async (req, res) => {
 
 app.post("/settings/job-number", requireAuth, requirePermission("settings", "edit"), async (req, res) => {
   const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
+  const plantName = String(req.body.plant_name || "").trim();
+  const performanceJobNumber = String(req.body.performance_job_number || "").trim();
   if (!jobNumber) throw new Error("Job number is required.");
   await withTransaction(async (client) => {
     await client.query(`
@@ -3889,9 +3921,24 @@ app.post("/settings/job-number", requireAuth, requirePermission("settings", "edi
       on conflict (key) do update
       set value = excluded.value, updated_at = now()
     `, [jobNumber]);
+    await client.query(`
+      insert into app_settings (key, value, updated_at)
+      values ('plant_name', $1, now())
+      on conflict (key) do update
+      set value = excluded.value, updated_at = now()
+    `, [plantName]);
+    await client.query(`
+      insert into app_settings (key, value, updated_at)
+      values ('performance_job_number', $1, now())
+      on conflict (key) do update
+      set value = excluded.value, updated_at = now()
+    `, [performanceJobNumber]);
     await auditLog(client, req.user.id, "update", "app_setting", "job_number", jobNumber);
+    await auditLog(client, req.user.id, "update", "app_setting", "plant_name", plantName);
+    await auditLog(client, req.user.id, "update", "app_setting", "performance_job_number", performanceJobNumber);
+    await refreshHeaderSettings(client);
   });
-  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 });
 
 app.post("/settings/vendor-categories", requireAuth, requirePermission("settings", "edit"), async (req, res) => {
@@ -9954,6 +10001,7 @@ app.use((error, req, res, _next) => {
 });
 
 await initDb();
+await refreshHeaderSettings();
 
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
