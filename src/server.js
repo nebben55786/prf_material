@@ -5291,8 +5291,23 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
             <div><label>Status</label><select name="status">${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${value === "REQUESTED" ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
             <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
           </div>
-          <div><label>Notes</label><textarea name="notes"></textarea></div>
-          <div class="scroll">
+          <div><label>Notes</label><input name="notes" /></div>
+          <div class="actions">
+            <button type="submit">Create Material Requisition</button>
+          </div>
+          <style>
+            #requisition-builder-scroll {
+              max-height: calc(100vh - 240px);
+              overflow: auto;
+            }
+            #requisition-builder-table thead th {
+              position: sticky;
+              top: 0;
+              z-index: 2;
+              background: #dbe4ee;
+            }
+          </style>
+          <div class="scroll" id="requisition-builder-scroll">
             <table id="requisition-builder-table" class="data-grid">
               <colgroup>
                 <col style="width:80px" />
@@ -5318,8 +5333,9 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
                 <col style="width:120px" />
                 <col style="width:140px" />
               </colgroup>
+              <thead>
               <tr>
-                <th class="nowrap" data-resizable="true">Pick</th>
+                <th class="nowrap" data-resizable="true"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="requisition-select-all-visible" /> Pick</label></th>
                 <th class="wrap" data-resizable="true">Line</th>
                 <th class="nowrap" data-resizable="true">IWP</th>
                 <th class="nowrap" data-resizable="true">Item</th>
@@ -5342,10 +5358,12 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
                 <th class="nowrap" data-resizable="true">Status</th>
                 <th class="nowrap" data-resizable="true">Actions</th>
               </tr>
+              </thead>
+              <tbody>
               ${lineRows || `<tr><td colspan="22" class="muted">No BOM lines match the current filter.</td></tr>`}
+              </tbody>
             </table>
           </div>
-          <div class="actions"><button type="submit">Create Material Requisition</button></div>
         </form>
       </div>
       <script>
@@ -5355,6 +5373,13 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
           const rowCheckboxes = Array.from(document.querySelectorAll('input[name="selected_line_ids"]'));
           const filterInput = document.getElementById("requisition-filter-staged-selection");
           const createInput = document.getElementById("requisition-create-staged-selection");
+          const selectAllVisible = document.getElementById("requisition-select-all-visible");
+          function syncSelectAllVisible() {
+            if (!selectAllVisible || rowCheckboxes.length === 0) return;
+            const checkedCount = rowCheckboxes.filter((checkbox) => checkbox.checked).length;
+            selectAllVisible.checked = checkedCount > 0 && checkedCount === rowCheckboxes.length;
+            selectAllVisible.indeterminate = checkedCount > 0 && checkedCount < rowCheckboxes.length;
+          }
           function syncStagedSelection() {
             rowCheckboxes.forEach((checkbox) => {
               const lineId = String(checkbox.value || "");
@@ -5368,6 +5393,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
             const payload = JSON.stringify(stagedSelection);
             if (filterInput) filterInput.value = payload;
             if (createInput) createInput.value = payload;
+            syncSelectAllVisible();
           }
           rowCheckboxes.forEach((checkbox) => {
             checkbox.addEventListener("change", syncStagedSelection);
@@ -5375,10 +5401,19 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
             const qtyInput = document.querySelector('input[name="request_qty_' + lineId + '"]');
             if (qtyInput) qtyInput.addEventListener("input", syncStagedSelection);
           });
+          if (selectAllVisible) {
+            selectAllVisible.addEventListener("change", () => {
+              rowCheckboxes.forEach((checkbox) => {
+                checkbox.checked = selectAllVisible.checked;
+              });
+              syncStagedSelection();
+            });
+          }
           const filterForm = document.getElementById("requisition-filter-form");
           const createForm = document.getElementById("requisition-create-form");
           if (filterForm) filterForm.addEventListener("submit", syncStagedSelection);
           if (createForm) createForm.addEventListener("submit", syncStagedSelection);
+          syncSelectAllVisible();
         }());
       </script>
     ` : `<div class="card error"><h3>No Piping BOM Found</h3><p>Select or create a piping BOM first.</p></div>`}
