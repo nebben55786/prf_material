@@ -7996,7 +7996,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
       </form>
     </div>
     <div class="card">
-      <div class="actions"><a class="btn btn-primary" href="/po/import">Import Existing POs</a></div>
+      <div class="actions"><a class="btn btn-primary" href="/po/new">Add PO</a><a class="btn btn-secondary" href="/po/import">Import Existing POs</a></div>
     </div>
     <div class="card scroll">
       <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>PO Line</th><th>Open Items</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="13" class="muted">No POs match the current filter.</td></tr>`}</table>
@@ -8005,29 +8005,8 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
 });
 
 app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
-  const poHeaders = (await query(`
-    select po_no, coalesce(description, '') as description
-    from purchase_orders
-    order by po_no
-  `)).rows;
-  const poOptions = poHeaders.length > 0
-    ? poHeaders.map((po) => `<option value="${esc(po.po_no)}">${esc(po.po_no)}${po.description ? ` | ${esc(po.description)}` : ""}</option>`).join("")
-    : `<option value="">No PO headers available</option>`;
-  const manualRows = Array.from({ length: 12 }, (_value, index) => `<tr>
-    <td><input name="po_line_${index}" /></td>
-    <td><input name="item_code_${index}" /></td>
-    <td><input name="description_${index}" /></td>
-    <td><input name="material_type_${index}" value="misc" /></td>
-    <td><input name="uom_${index}" value="EA" /></td>
-    <td><input name="size_1_${index}" /></td>
-    <td><input name="size_2_${index}" /></td>
-    <td><input name="thk_1_${index}" /></td>
-    <td><input name="thk_2_${index}" /></td>
-    <td><input name="qty_ordered_${index}" inputmode="decimal" /></td>
-    <td><input name="unit_price_${index}" inputmode="decimal" /></td>
-  </tr>`).join("");
-  res.send(layout("Import Existing POs", `
-    <h1>Import Existing POs</h1>
+  res.send(layout("Import PO", `
+    <h1>Import PO</h1>
     <div class="card">
       <h3>Import PO Headers</h3>
       <p class="muted">Use this import for the PO header data only. Missing vendors are added automatically. Supported columns: po_no, vendor_name, po_description, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status.</p>
@@ -8045,24 +8024,7 @@ app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req,
       <form method="post" enctype="multipart/form-data" action="/po/import/lines/preview" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
         <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
-        <div class="actions"><button type="submit">Preview Line Import</button></div>
-      </form>
-    </div>
-    <div class="card">
-      <h3>Manual PO Lines</h3>
-      <p class="muted">Pick an existing PO header, then enter or paste line values into the grid below.</p>
-      <form method="post" action="/po/import/lines/manual" class="stack">
-        <input type="hidden" name="row_count" value="12" />
-        <div class="grid">
-          <div><label>PO Header</label><select name="po_no" ${poHeaders.length === 0 ? "disabled" : ""}>${poOptions}</select></div>
-        </div>
-        <div class="card scroll" style="padding:0;">
-          <table>
-            <tr><th>PO Line</th><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Size 1</th><th>Size 2</th><th>THK 1</th><th>THK 2</th><th>Qty Ordered</th><th>Unit Price</th></tr>
-            ${manualRows}
-          </table>
-        </div>
-        <div class="actions"><button type="submit" ${poHeaders.length === 0 ? "disabled" : ""}>Add Manual PO Lines</button><a class="btn btn-secondary" href="/po">Back</a></div>
+        <div class="actions"><button type="submit">Preview Line Import</button><a class="btn btn-secondary" href="/po/new">Back</a></div>
       </form>
     </div>
   `, req.user));
@@ -8231,11 +8193,47 @@ app.post("/po/import/lines/manual", requireAuth, requirePermission("pos", "edit"
 });
 
 app.get("/po/new", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
-  const vendors = (await query("select id, name from vendors where is_active = true order by name")).rows;
-  const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
   res.send(layout("Add PO", `
     <h1>Add PO</h1>
     <div class="card">
+      <p class="muted">Choose how you want to add this purchase order.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="/po/new/manual">Manual Entry</a>
+        <a class="btn btn-secondary" href="/po/import">Import PO</a>
+        <a class="btn btn-secondary" href="/po">Back</a>
+      </div>
+    </div>
+  `, req.user));
+});
+
+app.get("/po/new/manual", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+  const vendors = (await query("select id, name from vendors where is_active = true order by name")).rows;
+  const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
+  const poHeaders = (await query(`
+    select po_no, coalesce(description, '') as description
+    from purchase_orders
+    order by po_no
+  `)).rows;
+  const poOptions = poHeaders.length > 0
+    ? poHeaders.map((po) => `<option value="${esc(po.po_no)}">${esc(po.po_no)}${po.description ? ` | ${esc(po.description)}` : ""}</option>`).join("")
+    : `<option value="">No PO headers available</option>`;
+  const manualRows = Array.from({ length: 12 }, (_value, index) => `<tr>
+    <td><input name="po_line_${index}" /></td>
+    <td><input name="item_code_${index}" /></td>
+    <td><input name="description_${index}" /></td>
+    <td><input name="material_type_${index}" value="misc" /></td>
+    <td><input name="uom_${index}" value="EA" /></td>
+    <td><input name="size_1_${index}" /></td>
+    <td><input name="size_2_${index}" /></td>
+    <td><input name="thk_1_${index}" /></td>
+    <td><input name="thk_2_${index}" /></td>
+    <td><input name="qty_ordered_${index}" inputmode="decimal" /></td>
+    <td><input name="unit_price_${index}" inputmode="decimal" /></td>
+  </tr>`).join("");
+  res.send(layout("Manual PO Entry", `
+    <h1>Manual PO Entry</h1>
+    <div class="card">
+      <h3>PO Header</h3>
       <form method="post" action="/po/add" class="stack">
         <div class="grid">
           <div><label>PO Number</label><input name="po_no" required /></div>
@@ -8245,7 +8243,24 @@ app.get("/po/new", requireAuth, requirePermission("pos", "edit"), async (req, re
         <div class="grid">
           <div><label>Description</label><input name="description" /></div>
         </div>
-        <div class="actions"><button type="submit">Add PO</button><a class="btn btn-secondary" href="/po">Back</a></div>
+        <div class="actions"><button type="submit">Add PO Header</button><a class="btn btn-secondary" href="/po/new">Back</a></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Manual PO Lines</h3>
+      <p class="muted">Create the PO header first, then pick it below and enter the line details.</p>
+      <form method="post" action="/po/import/lines/manual" class="stack">
+        <input type="hidden" name="row_count" value="12" />
+        <div class="grid">
+          <div><label>PO Header</label><select name="po_no" ${poHeaders.length === 0 ? "disabled" : ""}>${poOptions}</select></div>
+        </div>
+        <div class="card scroll" style="padding:0;">
+          <table>
+            <tr><th>PO Line</th><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Size 1</th><th>Size 2</th><th>THK 1</th><th>THK 2</th><th>Qty Ordered</th><th>Unit Price</th></tr>
+            ${manualRows}
+          </table>
+        </div>
+        <div class="actions"><button type="submit" ${poHeaders.length === 0 ? "disabled" : ""}>Add Manual PO Lines</button><a class="btn btn-secondary" href="/po/new">Back</a></div>
       </form>
     </div>
   `, req.user));
