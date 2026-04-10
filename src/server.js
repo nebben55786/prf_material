@@ -135,7 +135,7 @@ function canEditInventoryAudit(user) {
   return user.role === "admin" || user.role === "warehouse" || canAccess(user, "inventory", "edit");
 }
 
-app.use(express.urlencoded({ extended: true, limit: "20mb" }));
+app.use(express.urlencoded({ extended: true, limit: "20mb", parameterLimit: 20000 }));
 app.use(cookieParser(undefined, { decode: safeCookieDecode }));
 app.use("/public", express.static(path.join(process.cwd(), "public")));
 
