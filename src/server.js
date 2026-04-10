@@ -8284,15 +8284,15 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
           </div>
         </form>
         <form method="get" action="/inventory" class="stack">
-          <label>Ident</label>
+          <label>Ident Or Description</label>
           <input name="ident_filter" value="${esc(identFilter)}" />
           <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
           <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
           <input type="hidden" name="sort" value="${esc(sort)}" />
           <input type="hidden" name="dir" value="${esc(dir)}" />
           <div class="actions">
-            <button type="submit">Apply Ident</button>
-            <a class="btn btn-secondary" href="/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter })}">Clear Ident</a>
+            <button type="submit">Apply Filter</button>
+            <a class="btn btn-secondary" href="/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter })}">Clear Filter</a>
           </div>
         </form>
       </div>
@@ -8449,13 +8449,13 @@ app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHan
           </div>
         </form>
         <form method="get" action="/inventory-audit/new" class="stack">
-          <label>Ident</label>
+          <label>Ident Or Description</label>
           <input name="ident_filter" value="${esc(identFilter)}" />
           <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
           <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
           <div class="actions">
-            <button type="submit">Apply Ident</button>
-            <a class="btn btn-secondary" href="/inventory-audit/new?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter })}">Clear Ident</a>
+            <button type="submit">Apply Filter</button>
+            <a class="btn btn-secondary" href="/inventory-audit/new?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter })}">Clear Filter</a>
           </div>
         </form>
       </div>
