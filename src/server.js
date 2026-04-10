@@ -1458,7 +1458,8 @@ async function syncLegacyVendorContact(client, vendorId) {
 function parseUploadedRows(file, pastedText) {
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (file?.buffer?.length) {
-    if ((file.originalname || "").toLowerCase().endsWith(".xlsx")) {
+    const lowerName = String(file.originalname || "").toLowerCase();
+    if (/\.(xlsx|xlsm|xlsb|xls)$/.test(lowerName)) {
       const workbook = XLSX.read(file.buffer, { type: "buffer" });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
