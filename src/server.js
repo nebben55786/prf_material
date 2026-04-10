@@ -2145,6 +2145,100 @@ async function getIssuedInventoryTotals(runner = { query }) {
   `)).rows;
 }
 
+async function getVerifiedAllocatedInventoryTotals(runner = { query }) {
+  return (await runner.query(`
+    select
+      bl.item_code,
+      coalesce(bl.size_1, '') as size_1,
+      coalesce(bl.size_2, '') as size_2,
+      coalesce(bl.thk_1, '') as thk_1,
+      coalesce(bl.thk_2, '') as thk_2,
+      sum(mrl.qty_requested) as qty_allocated_total
+    from material_requisition_lines mrl
+    join material_requisitions mr on mr.id = mrl.requisition_id
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mr.status = 'VERIFIED'
+    group by
+      bl.item_code,
+      coalesce(bl.size_1, ''),
+      coalesce(bl.size_2, ''),
+      coalesce(bl.thk_1, ''),
+      coalesce(bl.thk_2, '')
+  `)).rows;
+}
+
+async function markBomLinesReceivedFromInventory(client, bomId, userId = null) {
+  const [linesRes, inventoryRes, issuedRes, allocatedRes] = await Promise.all([
+    client.query(`
+      select id, line_no, item_code, coalesce(size_1, '') as size_1, coalesce(size_2, '') as size_2,
+             coalesce(thk_1, '') as thk_1, coalesce(thk_2, '') as thk_2,
+             qty_required, qty_received, qty_issued, planning_status
+      from bom_lines
+      where bom_id = $1
+      order by line_no, id
+    `, [bomId]),
+    client.query(getInventoryTotalsSubquery()),
+    getIssuedInventoryTotals(client),
+    getVerifiedAllocatedInventoryTotals(client)
+  ]);
+
+  const availableMap = new Map(
+    inventoryRes.rows.map((row) => [buildInventoryIssueKey(row), parseQtyValue(row.qty_on_hand || 0)])
+  );
+  for (const row of issuedRes) {
+    const key = buildInventoryIssueKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_issued_total || 0), 0));
+  }
+  for (const row of allocatedRes) {
+    const key = buildInventoryIssueKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_allocated_total || 0), 0));
+  }
+
+  let updatedCount = 0;
+  let fullyReceivedCount = 0;
+  let alreadyReceivedCount = 0;
+  let untouchedCount = 0;
+
+  for (const line of linesRes.rows) {
+    const qtyRequired = parseQtyValue(line.qty_required || 0);
+    const qtyReceived = parseQtyValue(line.qty_received || 0);
+    const qtyIssued = parseQtyValue(line.qty_issued || 0);
+    const key = buildInventoryIssueKey(line);
+    const availableQty = Math.max(parseQtyValue(availableMap.get(key) || 0), 0);
+    const remainingQty = Math.max(qtyRequired - qtyReceived, 0);
+
+    let nextQtyReceived = qtyReceived;
+    let nextStatus = line.planning_status;
+
+    if (qtyRequired > 0 && remainingQty <= 0) {
+      nextQtyReceived = qtyRequired;
+      nextStatus = qtyIssued > 0 ? "ISSUED_TO_FIELD" : "RECEIVED";
+      alreadyReceivedCount += 1;
+    } else if (qtyRequired > 0 && availableQty >= remainingQty) {
+      nextQtyReceived = qtyRequired;
+      nextStatus = qtyIssued > 0 ? "ISSUED_TO_FIELD" : "RECEIVED";
+      availableMap.set(key, parseQtyValue(availableQty - remainingQty));
+      fullyReceivedCount += 1;
+    } else {
+      untouchedCount += 1;
+    }
+
+    if (nextQtyReceived !== qtyReceived || nextStatus !== line.planning_status) {
+      await client.query(`
+        update bom_lines
+        set qty_received = $2,
+            planning_status = $3,
+            updated_at = now()
+        where id = $1
+      `, [line.id, nextQtyReceived, nextStatus]);
+      updatedCount += 1;
+    }
+  }
+
+  await auditLog(client, userId, "one_time_receive", "bom_header", bomId, `updated=${updatedCount}|filled_from_inventory=${fullyReceivedCount}|already_received=${alreadyReceivedCount}|untouched=${untouchedCount}`);
+  return { updatedCount, fullyReceivedCount, alreadyReceivedCount, untouchedCount };
+}
+
 function applyIssuedInventoryToRows(rows, issuedRows = []) {
   const issuedMap = new Map(
     issuedRows.map((row) => [buildInventoryIssueKey(row), parseQtyValue(row.qty_issued_total || 0)])
@@ -4540,6 +4634,10 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
     return;
   }
+  const inventoryMarked = Number(req.query.inventory_marked || 0);
+  const inventoryEligible = Number(req.query.inventory_eligible || 0);
+  const inventoryAlready = Number(req.query.inventory_already || 0);
+  const inventoryUntouched = Number(req.query.inventory_untouched || 0);
   const [importsRes, coverageRes, requisitionSummaryRes] = await Promise.all([
     query(`
       select ib.id, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
@@ -4574,11 +4672,20 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
   res.send(layout(`BOM ${bom.bom_name || bom.description || bom.bom_no}`, `
     <h1>${esc(bom.bom_name || bom.description || bom.bom_no)}</h1>
+    ${inventoryMarked || inventoryEligible || inventoryAlready || inventoryUntouched ? `
+      <div class="card success">
+        <strong>One-time inventory receive complete.</strong>
+        Updated ${esc(String(inventoryMarked))} line(s).
+        Filled from inventory: ${esc(String(inventoryEligible))}.
+        Already received: ${esc(String(inventoryAlready))}.
+        Left unchanged: ${esc(String(inventoryUntouched))}.
+      </div>
+    ` : ""}
     <div class="card">
       <p class="muted">BOM #: ${esc(bom.bom_no)} | Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system_name || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}</p>
       <p>${esc(bom.description || "")}</p>
       ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
-      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a></div>
+      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a>${req.user.role === "admin" ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>
     </div>
     <div class="stats">
       <div class="stat"><div>Lines</div><strong>${coverage.line_count}</strong></div>
@@ -4929,6 +5036,40 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
   });
   res.redirect(`/imports/${batchId}`);
 });
+
+app.get("/bom/:id/receive-from-inventory", requireAuth, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1", [req.params.id])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  res.send(layout("Confirm One-Time Receive", `
+    <h1>One-Time BOM Receive From Inventory</h1>
+    <div class="card error">
+      <p><strong>BOM:</strong> ${esc(bom.bom_name || bom.description || bom.bom_no)}</p>
+      <p class="muted">This temporary admin utility will mark BOM lines as <code>RECEIVED</code> only when current available inventory can fully cover the remaining required quantity for that exact item/size/thickness match. It does not create receipts and it does not partially fill lines.</p>
+      <div class="actions">
+        <form method="post" action="/bom/${bom.id}/receive-from-inventory">
+          <button class="btn btn-primary" type="submit">Confirm One-Time Receive Update</button>
+        </form>
+        <a class="btn btn-secondary" href="/bom/${bom.id}">Cancel</a>
+      </div>
+    </div>
+  `, req.user));
+}));
+
+app.post("/bom/:id/receive-from-inventory", requireAuth, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const result = await withTransaction(async (client) => {
+    const bom = (await client.query("select id from bom_headers where id = $1", [bomId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    return markBomLinesReceivedFromInventory(client, bomId, req.user.id || null);
+  });
+  const params = new URLSearchParams({
+    inventory_marked: String(result.updatedCount || 0),
+    inventory_eligible: String(result.fullyReceivedCount || 0),
+    inventory_already: String(result.alreadyReceivedCount || 0),
+    inventory_untouched: String(result.untouchedCount || 0)
+  });
+  res.redirect(`/bom/${bomId}?${params.toString()}`);
+}));
 
 app.get("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   const line = (await query("select bl.*, bh.bom_no from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1", [req.params.id])).rows[0];
