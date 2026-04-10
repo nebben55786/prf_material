@@ -1492,6 +1492,34 @@ function normalizePoImportRow(row) {
   return normalized;
 }
 
+function normalizeBomImportRow(row) {
+  const text = (...values) => {
+    for (const value of values) {
+      const normalized = String(value ?? "").trim();
+      if (normalized) return normalized;
+    }
+    return "";
+  };
+  return {
+    line_no: text(row.line_no, row.line, row.line_number),
+    item_code: text(row.item_code, row.ident, row.ident_code, row.item),
+    description: text(row.description, row.abbrev_description, row.abbrev_desc),
+    material_type: text(row.material_type, row.category, row.type, "misc"),
+    uom: text(row.uom, row.unit, row.unit_of_measure, "EA"),
+    spec: text(row.spec),
+    commodity_code: text(row.commodity_code, row.commodity),
+    tag_number: text(row.tag_number, row.tag),
+    iwp_no: text(row.iwp_no, row.iwp),
+    iso_no: text(row.iso_no, row.iso),
+    size_1: text(row.size_1, row.size1),
+    size_2: text(row.size_2, row.size2),
+    thk_1: text(row.thk_1, row.thk1),
+    thk_2: text(row.thk_2, row.thk2),
+    qty_required: text(row.qty_required, row.qty, row.quantity, row.bom_qty),
+    notes: text(row.notes, row.note, row.remarks)
+  };
+}
+
 function normalizeVendorFmrRequestLine(row) {
   const aliases = {
     po_number: ["po", "po_number"],
@@ -4768,7 +4796,7 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
 
 app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"), upload.single("sheet"), async (req, res) => {
   const bomId = Number(req.params.id);
-  const rows = parseUploadedRows(req.file, req.body.csv_text);
+  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeBomImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
   const batchId = await withTransaction(async (client) => {
     const batchId = await createImportBatch(client, {
