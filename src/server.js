@@ -2134,8 +2134,10 @@ async function getIssuedInventoryTotals(runner = { query }) {
       coalesce(bl.thk_2, '') as thk_2,
       sum(mrl.qty_issued) as qty_issued_total
     from material_requisition_lines mrl
+    join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
     where coalesce(mrl.qty_issued, 0) > 0
+      and coalesce(mr.status, '') <> 'CANCELLED'
     group by
       bl.item_code,
       coalesce(bl.size_1, ''),
