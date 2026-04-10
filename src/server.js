@@ -3250,13 +3250,13 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
         <form id="access-request-${record.id}" method="post" action="/settings/access-requests/${record.id}/approve" class="stack" data-password-form="access-approve" data-password-message-id="access-request-${record.id}-password-error">
           <input type="hidden" name="return_to" value="/settings" />
           <div class="grid">
-            <div><input name="username" placeholder="Username" required /></div>
-            <div><input name="temp_password" placeholder="Temp Password" required /></div>
+            <div><input name="username" placeholder="Username" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+            <div><input name="temp_password" placeholder="Temp Password" required autocomplete="new-password" autocapitalize="off" spellcheck="false" /></div>
             <div>
               <select name="role">
                 <option value="buyer">buyer</option>
                 <option value="warehouse">warehouse</option>
-                <option value="field">field</option>
+                <option value="field" selected>field</option>
                 <option value="supervisor">supervisor</option>
                 <option value="admin">admin</option>
               </select>
@@ -3616,13 +3616,13 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       <form id="new-user-form" method="post" action="/settings/users/add" class="stack">
         <input type="hidden" name="return_to" value="/settings/user-management" />
         <div class="grid">
-          <div><label>Username</label><input name="username" required /></div>
+          <div><label>Username</label><input name="username" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
           <div>
             <label>Role</label>
             <select name="role">
               <option value="buyer">buyer</option>
               <option value="warehouse">warehouse</option>
-              <option value="field">field</option>
+              <option value="field" selected>field</option>
               <option value="supervisor">supervisor</option>
               <option value="admin">admin</option>
             </select>
@@ -3632,7 +3632,7 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
           <div>
             <label>Password</label>
             <div class="actions">
-              <input id="new-user-password" type="password" name="password" required />
+              <input id="new-user-password" type="password" name="password" required autocomplete="new-password" autocapitalize="off" spellcheck="false" />
               <button type="button" class="btn btn-secondary" onclick="togglePassword(this, 'new-user-password')">Show</button>
             </div>
             <div id="new-user-password-error" class="muted" style="color:#a23622;"></div>
@@ -4168,7 +4168,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
   const requestId = Number(req.params.id);
   const username = String(req.body.username || "").trim();
   const tempPassword = String(req.body.temp_password || "");
-  const role = String(req.body.role || "buyer").trim();
+  const role = String(req.body.role || "field").trim();
   if (!username) throw new Error("Username is required.");
   if (!tempPassword) throw new Error("Temporary password is required.");
   if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
@@ -4215,7 +4215,7 @@ app.post("/settings/access-requests/:id/deny", requireAuth, requireRole(["admin"
 app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
-  const role = String(req.body.role || "buyer").trim();
+  const role = String(req.body.role || "field").trim();
   if (!username) throw new Error("Username is required.");
   if (!password) throw new Error("Password is required.");
   if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
