@@ -6234,8 +6234,21 @@ app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHa
     where.push(`coalesce(bl.line_no, '') ilike $${params.length}`);
   }
   const lines = (await query(`
-    select bl.*
+    select
+      bl.*,
+      coalesce(inv.qty_on_hand, 0) as qty_on_hand,
+      coalesce(need.qty_needed, 0) as qty_needed
     from bom_lines bl
+    left join (
+      select item_code, sum(qty_on_hand) as qty_on_hand
+      from (${getInventoryTotalsSubquery()}) inventory_totals
+      group by item_code
+    ) inv on inv.item_code = bl.item_code
+    left join (
+      select item_code, sum(greatest(qty_required - qty_issued, 0)) as qty_needed
+      from bom_lines
+      group by item_code
+    ) need on need.item_code = bl.item_code
     where ${where.join(" and ")}
     order by coalesce(bl.iwp_no, ''), coalesce(bl.line_no, ''), bl.id
   `, params)).rows;
@@ -6247,13 +6260,14 @@ app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHa
     <td>${esc(line.material_type || "")}</td>
     <td>${esc(formatQtyDisplay(line.qty_required))}</td>
     <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_on_hand))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_needed))}</td>
     <td>${esc(line.uom || "")}</td>
     <td>${esc(line.spec || "")}</td>
     <td>${esc(line.size_1 || "")}</td>
     <td>${esc(line.size_2 || "")}</td>
     <td>${esc(line.thk_1 || "")}</td>
     <td>${esc(line.thk_2 || "")}</td>
-    <td><span class="chip">${esc(line.planning_status || "")}</span></td>
     <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a></div></td>
   </tr>`).join("");
   res.send(layout(`BOM Lines ${bom.bom_name || bom.description || bom.bom_no}`, `
@@ -6275,7 +6289,7 @@ app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHa
         <div class="actions"><button type="submit">Filter Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Clear</a><span class="muted">${lines.length} line(s)</span></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Status</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="15" class="muted">No BOM lines found.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Needed Qty</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="16" class="muted">No BOM lines found.</td></tr>`}</table></div>
   `, req.user));
 }));
 
