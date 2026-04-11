@@ -1498,7 +1498,8 @@ function normalizePoImportRow(row) {
     po_description: ["po_description", "purchase_order_description", "project_name", "project"],
     notes: ["notes", "comments", "remarks", "purchase_type", "purchase_agreement_id", "vendor_account"],
     buyer_name: ["buyer_name", "buyer", "purchased_by"],
-    status: ["status", "po_status", "approval_status"]
+    status: ["status", "po_status"],
+    approval_status: ["approval_status"]
   };
   const normalized = {};
   for (const [target, keys] of Object.entries(aliases)) {
@@ -8058,7 +8059,7 @@ app.post("/po/import/headers/preview", requireAuth, requirePermission("pos", "ed
     <td>${esc(row.vendor_name)}</td>
     <td>${esc(row.po_description)}</td>
     <td>${esc(row.vendor_contact)}</td>
-    <td>${esc(row.freight_terms)}</td>
+    <td>${esc(row.approval_status || "")}</td>
     <td>${esc(row.status || "OPEN")}</td>
   </tr>`).join("");
   res.send(layout("Preview PO Header Import", `
@@ -8071,7 +8072,7 @@ app.post("/po/import/headers/preview", requireAuth, requirePermission("pos", "ed
       </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>PO #</th><th>Vendor</th><th>Description</th><th>Contact</th><th>Freight</th><th>Status</th></tr>${previewRows}</table>
+      <table><tr><th>PO #</th><th>Vendor</th><th>Project</th><th>Comments</th><th>Approval Status</th><th>Status</th></tr>${previewRows}</table>
     </div>
   `, req.user));
 });
