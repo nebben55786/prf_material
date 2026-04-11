@@ -273,6 +273,63 @@ function renderVendorSelectionOptions(vendors, selectedVendorIds = []) {
   `).join("");
 }
 
+function renderVendorPicker(vendors, selectedVendors = [], config = {}) {
+  const {
+    dialogId = "vendor-picker-dialog",
+    inputId = "vendor-picker-input",
+    selectedListId = "vendor-selected-list",
+    hiddenContainerId = "vendor-selected-hidden",
+    datalistId = "vendor-picker-options",
+    addButtonLabel = "Add Vendor"
+  } = config;
+  const optionMap = new Map(vendors.map((vendor) => [Number(vendor.id), vendor.name]));
+  const normalizedSelected = selectedVendors
+    .map((vendor) => ({ id: Number(vendor.id || vendor.vendor_id), name: vendor.name || optionMap.get(Number(vendor.id || vendor.vendor_id)) || "" }))
+    .filter((vendor) => Number.isFinite(vendor.id) && vendor.id > 0 && vendor.name);
+  const seen = new Set();
+  const selectedItems = normalizedSelected
+    .filter((vendor) => {
+      if (seen.has(vendor.id)) return false;
+      seen.add(vendor.id);
+      return true;
+    })
+    .map((vendor) => `
+      <span class="chip" data-vendor-chip="${vendor.id}">
+        ${esc(vendor.name)}
+        <button type="button" class="chip-remove" onclick="removeVendorSelection(${vendor.id}, '${selectedListId}', '${hiddenContainerId}')">x</button>
+      </span>
+    `)
+    .join("");
+  const hiddenInputs = Array.from(seen)
+    .map((vendorId) => `<input type="hidden" name="vendor_ids" value="${vendorId}" data-vendor-hidden="${vendorId}" />`)
+    .join("");
+  const datalistOptions = vendors
+    .map((vendor) => `<option value="${esc(vendor.name)}" data-vendor-id="${vendor.id}"></option>`)
+    .join("");
+  const vendorLookup = JSON.stringify(vendors.map((vendor) => ({ id: Number(vendor.id), name: vendor.name })));
+  return `
+    <div class="stack">
+      <label>Participating Vendors</label>
+      <div id="${selectedListId}" class="chip-row">${selectedItems || `<span class="muted">No vendors selected yet.</span>`}</div>
+      <div id="${hiddenContainerId}">${hiddenInputs}</div>
+      <div class="actions">
+        <button type="button" onclick='openVendorPicker("${dialogId}", "${inputId}")'>${esc(addButtonLabel)}</button>
+      </div>
+    </div>
+    <dialog id="${dialogId}" class="modal-card" data-vendors='${esc(vendorLookup)}' data-selected-list-id="${selectedListId}" data-hidden-container-id="${hiddenContainerId}">
+      <div class="stack">
+        <h3>Add Vendor</h3>
+        <div><label>Active Vendor</label><input id="${inputId}" list="${datalistId}" autocomplete="off" /></div>
+        <datalist id="${datalistId}">${datalistOptions}</datalist>
+        <div class="actions">
+          <button type="button" onclick='addVendorFromPicker("${dialogId}", "${inputId}")'>Add Vendor</button>
+          <button type="button" class="btn btn-secondary" onclick='closeVendorPicker("${dialogId}")'>Cancel</button>
+        </div>
+      </div>
+    </dialog>
+  `;
+}
+
 const resetTargetGroups = {
   full_reset: {
     label: "Full Reset",
@@ -1189,6 +1246,81 @@ function layout(title, body, user) {
         rows.forEach((row) => {
           row.style.display = row.innerText.toLowerCase().includes(term) ? "" : "none";
         });
+      }
+      function openVendorPicker(dialogId, inputId) {
+        const dialog = document.getElementById(dialogId);
+        const input = document.getElementById(inputId);
+        if (!dialog) return false;
+        if (typeof dialog.showModal === "function") dialog.showModal();
+        else dialog.setAttribute("open", "open");
+        if (input) {
+          input.value = "";
+          window.setTimeout(() => input.focus(), 0);
+        }
+        return false;
+      }
+      function closeVendorPicker(dialogId) {
+        const dialog = document.getElementById(dialogId);
+        if (!dialog) return false;
+        if (typeof dialog.close === "function") dialog.close();
+        else dialog.removeAttribute("open");
+        return false;
+      }
+      function removeVendorSelection(vendorId, selectedListId, hiddenContainerId) {
+        const selectedList = document.getElementById(selectedListId);
+        const hiddenContainer = document.getElementById(hiddenContainerId);
+        if (hiddenContainer) {
+          const hiddenInput = hiddenContainer.querySelector('[data-vendor-hidden="' + vendorId + '"]');
+          if (hiddenInput) hiddenInput.remove();
+        }
+        if (selectedList) {
+          const chip = selectedList.querySelector('[data-vendor-chip="' + vendorId + '"]');
+          if (chip) chip.remove();
+          if (!selectedList.querySelector('[data-vendor-chip]')) {
+            selectedList.innerHTML = '<span class="muted">No vendors selected yet.</span>';
+          }
+        }
+        return false;
+      }
+      function addVendorFromPicker(dialogId, inputId) {
+        const dialog = document.getElementById(dialogId);
+        const input = document.getElementById(inputId);
+        if (!dialog || !input) return false;
+        const selectedList = document.getElementById(dialog.getAttribute("data-selected-list-id"));
+        const hiddenContainer = document.getElementById(dialog.getAttribute("data-hidden-container-id"));
+        const vendors = JSON.parse(dialog.getAttribute("data-vendors") || "[]");
+        const term = String(input.value || "").trim().toLowerCase();
+        if (!term) {
+          window.alert("Choose an active vendor.");
+          return false;
+        }
+        const vendor = vendors.find((entry) => String(entry.name || "").trim().toLowerCase() === term);
+        if (!vendor) {
+          window.alert("Choose a vendor from the active vendor list.");
+          return false;
+        }
+        if (!selectedList || !hiddenContainer) return false;
+        if (hiddenContainer.querySelector('[data-vendor-hidden="' + vendor.id + '"]')) {
+          closeVendorPicker(dialogId);
+          return false;
+        }
+        const emptyState = selectedList.querySelector(".muted");
+        if (emptyState) emptyState.remove();
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        chip.setAttribute("data-vendor-chip", String(vendor.id));
+        chip.innerHTML = vendor.name + ' <button type="button" class="chip-remove">x</button>';
+        const removeButton = chip.querySelector(".chip-remove");
+        if (removeButton) removeButton.addEventListener("click", () => removeVendorSelection(vendor.id, dialog.getAttribute("data-selected-list-id"), dialog.getAttribute("data-hidden-container-id")));
+        selectedList.appendChild(chip);
+        const hiddenInput = document.createElement("input");
+        hiddenInput.type = "hidden";
+        hiddenInput.name = "vendor_ids";
+        hiddenInput.value = String(vendor.id);
+        hiddenInput.setAttribute("data-vendor-hidden", String(vendor.id));
+        hiddenContainer.appendChild(hiddenInput);
+        closeVendorPicker(dialogId);
+        return false;
       }
       function syncLocationOptions(warehouseSelectId, locationSelectId, optionsByWarehouse, selectedValue) {
         const warehouseSelect = document.getElementById(warehouseSelectId);
@@ -6776,7 +6908,7 @@ app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, 
   const [nextRfqNo, jobNumber, vendorsRes] = await Promise.all([
     getNextRfqNumber(),
     getJobNumber(),
-    query("select id, name from vendors order by name")
+    query("select id, name from vendors where is_active = true order by name")
   ]);
   const vendors = vendorsRes.rows;
   const rfqStatusOptions = rfqStatuses.map((status) => `<option value="${status.value}" ${status.value === "SEND_FOR_QUOTES" ? "selected" : ""}>${esc(status.label)}</option>`).join("");
@@ -6795,12 +6927,14 @@ app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, 
         <div class="grid">
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
-        <div>
-          <label>Participating Vendors</label>
-          <div class="check-grid">
-            ${renderVendorSelectionOptions(vendors)}
-          </div>
-        </div>
+        ${renderVendorPicker(vendors, [], {
+          dialogId: "rfq-create-vendor-dialog",
+          inputId: "rfq-create-vendor-input",
+          selectedListId: "rfq-create-vendor-list",
+          hiddenContainerId: "rfq-create-vendor-hidden",
+          datalistId: "rfq-create-vendor-options",
+          addButtonLabel: "Add Vendor"
+        })}
         <div class="actions">
           <button type="submit">Create RFQ</button>
           <a class="btn btn-secondary" href="/rfq">Back</a>
@@ -6875,7 +7009,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
     `, [rfqId]),
-    query("select id, name from vendors order by name"),
+    query("select id, name from vendors where is_active = true order by name"),
     query(`
       select rv.vendor_id, v.name
       from rfq_vendors rv
@@ -7127,9 +7261,14 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
     <div class="card">
       <h3>Selected Vendors</h3>
       <form method="post" action="/rfq/${rfqId}/vendors" class="stack">
-        <div class="check-grid">
-          ${renderVendorSelectionOptions(vendors, selectedVendorIds)}
-        </div>
+        ${renderVendorPicker(vendors, selectedVendors.map((vendor) => ({ id: vendor.vendor_id, name: vendor.name })), {
+          dialogId: `rfq-${rfqId}-vendor-dialog`,
+          inputId: `rfq-${rfqId}-vendor-input`,
+          selectedListId: `rfq-${rfqId}-vendor-list`,
+          hiddenContainerId: `rfq-${rfqId}-vendor-hidden`,
+          datalistId: `rfq-${rfqId}-vendor-options`,
+          addButtonLabel: "Add Vendor"
+        })}
         <div class="actions">
           <button type="submit">Save Vendor List</button>
           <span class="muted">Choose the vendors for this RFQ once, then enter quotes vendor-by-vendor in the tabs below.</span>
