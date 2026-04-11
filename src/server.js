@@ -541,29 +541,41 @@ function buildRfqSheetPdf(rfq, items) {
   const top = pageHeight - 24;
   const usableWidth = right - left;
   const cols = [
-    { key: "line", label: "LINE", width: 78 },
-    { key: "item", label: "ITEM", width: 150 },
-    { key: "description", label: "DESCRIPTION", width: 398 },
-    { key: "qty", label: "QTY", width: 60 },
-    { key: "uom", label: "UOM", width: 50 }
+    { key: "line", label: "LINE", width: 36 },
+    { key: "item", label: "ITEM", width: 95 },
+    { key: "description", label: "DESCRIPTION", width: 310 },
+    { key: "size_1", label: "SIZE 1", width: 55 },
+    { key: "size_2", label: "SIZE 2", width: 55 },
+    { key: "thk_1", label: "THK 1", width: 55 },
+    { key: "thk_2", label: "THK 2", width: 55 },
+    { key: "qty", label: "QTY", width: 40 },
+    { key: "uom", label: "UOM", width: 35 }
   ];
   const makeText = (x, y, text, font = "F1", size = 9) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
   const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
   const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
 
   const rows = items.map((item) => {
-    const lineLines = wrapPdfText(item.po_line || "", 12);
-    const itemLines = wrapPdfText(item.item_code || "", 22);
-    const descriptionLines = wrapPdfText(item.description || "", 58);
+    const lineLines = wrapPdfText(item.po_line || "", 6);
+    const itemLines = wrapPdfText(item.item_code || "", 14);
+    const descriptionLines = wrapPdfText(item.description || "", 44);
     const extraDescription = [];
-    if (item.spec) extraDescription.push(...wrapPdfText(`Spec: ${item.spec}`, 58));
-    if (item.notes) extraDescription.push(...wrapPdfText(`Notes: ${item.notes}`, 58));
+    if (item.spec) extraDescription.push(...wrapPdfText(`Spec: ${item.spec}`, 44));
+    if (item.notes) extraDescription.push(...wrapPdfText(`Notes: ${item.notes}`, 44));
     const combinedDescription = descriptionLines.concat(extraDescription);
-    const lineCount = Math.max(lineLines.length, itemLines.length, combinedDescription.length, 1);
+    const size1Lines = wrapPdfText(String(item.size_1 || ""), 8);
+    const size2Lines = wrapPdfText(String(item.size_2 || ""), 8);
+    const thk1Lines = wrapPdfText(String(item.thk_1 || ""), 8);
+    const thk2Lines = wrapPdfText(String(item.thk_2 || ""), 8);
+    const lineCount = Math.max(lineLines.length, itemLines.length, combinedDescription.length, size1Lines.length, size2Lines.length, thk1Lines.length, thk2Lines.length, 1);
     return {
       lineLines,
       itemLines,
       descriptionLines: combinedDescription.length ? combinedDescription : [""],
+      size1Lines: size1Lines.length ? size1Lines : [""],
+      size2Lines: size2Lines.length ? size2Lines : [""],
+      thk1Lines: thk1Lines.length ? thk1Lines : [""],
+      thk2Lines: thk2Lines.length ? thk2Lines : [""],
       qty: formatQtyDisplay(item.qty),
       uom: String(item.uom || ""),
       height: 10 + (lineCount * 11)
@@ -628,14 +640,18 @@ function buildRfqSheetPdf(rfq, items) {
         if (x < right) content.push(line(x, rowTop, x, rowBottom));
       });
 
-      const rowLineCount = Math.max(row.lineLines.length, row.itemLines.length, row.descriptionLines.length, 1);
+      const rowLineCount = Math.max(row.lineLines.length, row.itemLines.length, row.descriptionLines.length, row.size1Lines.length, row.size2Lines.length, row.thk1Lines.length, row.thk2Lines.length, 1);
       for (let index = 0; index < rowLineCount; index += 1) {
         const baseline = rowTop - 14 - (index * 11);
         if (row.lineLines[index]) content.push(makeText(left + 6, baseline, row.lineLines[index], "F1", 8.5));
         if (row.itemLines[index]) content.push(makeText(left + cols[0].width + 6, baseline, row.itemLines[index], "F1", 8.5));
         if (row.descriptionLines[index]) content.push(makeText(left + cols[0].width + cols[1].width + 6, baseline, row.descriptionLines[index], "F1", 8.5));
-        if (index === 0 && row.qty) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + 18, baseline, row.qty, "F1", 8.5));
-        if (index === 0 && row.uom) content.push(makeText(right - cols[4].width + 6, baseline, row.uom, "F1", 8.5));
+        if (row.size1Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + 6, baseline, row.size1Lines[index], "F1", 8.5));
+        if (row.size2Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + 6, baseline, row.size2Lines[index], "F1", 8.5));
+        if (row.thk1Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + cols[4].width + 6, baseline, row.thk1Lines[index], "F1", 8.5));
+        if (row.thk2Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + cols[4].width + cols[5].width + 6, baseline, row.thk2Lines[index], "F1", 8.5));
+        if (index === 0 && row.qty) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + cols[4].width + cols[5].width + cols[6].width + 8, baseline, row.qty, "F1", 8.5));
+        if (index === 0 && row.uom) content.push(makeText(right - cols[8].width + 4, baseline, row.uom, "F1", 8.5));
       }
 
       y = rowBottom;
@@ -1752,6 +1768,15 @@ function quoteCell(unitPrice, leadDays) {
   return `$${Number(unitPrice).toFixed(2)} | ${num(leadDays)}d`;
 }
 
+async function getNextRfqLineNumber(client, rfqId) {
+  const result = await client.query(`
+    select coalesce(max(case when coalesce(po_line, '') ~ '^[0-9]+$' then po_line::integer else null end), 0) + 1 as next_line
+    from rfq_items
+    where rfq_id = $1
+  `, [rfqId]);
+  return String(result.rows[0]?.next_line || 1);
+}
+
 function validatePasswordRules(password) {
   const value = String(password || "");
   if (value.length < 10) return "Password must be at least 10 characters.";
@@ -1869,19 +1894,20 @@ async function findOrCreateVendorByName(client, vendorName) {
 
 async function upsertRfqItemRow(client, rfqId, row) {
   const itemCode = String(row.item_code || "").trim();
-  const poLine = String(row.po_line || row.line_no || row.line || "").trim();
+  const requestedLine = String(row.po_line || row.line_no || row.line || "").trim();
   const qty = parseQtyValue(row.qty);
   if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
   if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
   const materialItemId = await upsertMaterialItem(client, row);
   const existingItem = await client.query(`
-    select id
+    select id, coalesce(po_line, '') as po_line
     from rfq_items
     where rfq_id = $1 and material_item_id = $2
       and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
       and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
   `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || ""]);
   if (existingItem.rows[0]) {
+    const poLine = requestedLine || existingItem.rows[0].po_line || await getNextRfqLineNumber(client, rfqId);
     await client.query(`
       update rfq_items
       set po_line = $2, spec = $3, commodity_code = $4, tag_number = $5, qty = $6, notes = $7, updated_at = now()
@@ -1889,6 +1915,7 @@ async function upsertRfqItemRow(client, rfqId, row) {
     `, [existingItem.rows[0].id, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
     return { status: "updated" };
   }
+  const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
   await client.query(`
     insert into rfq_items (rfq_id, material_item_id, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
@@ -7382,7 +7409,6 @@ app.get("/rfq/:id/items/new", requireAuth, requirePermission("rfqs", "edit"), as
       <td><input name="description_${index}" /></td>
       <td><input name="material_type_${index}" /></td>
       <td><input name="uom_${index}" /></td>
-      <td><input name="po_line_${index}" /></td>
       <td><input name="spec_${index}" /></td>
       <td><input name="commodity_code_${index}" /></td>
       <td><input name="tag_number_${index}" /></td>
@@ -7402,7 +7428,7 @@ app.get("/rfq/:id/items/new", requireAuth, requirePermission("rfqs", "edit"), as
       <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
         <div class="scroll">
           <table class="data-grid">
-            <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>PO Line</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
+            <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
             <tbody>${newItemRows}</tbody>
           </table>
         </div>
@@ -7500,7 +7526,6 @@ app.post("/rfq/:id/items/grid", requireAuth, requirePermission("rfqs", "edit"), 
   const rfqId = Number(req.params.id);
   const usedItemCodes = new Set();
   const rows = Array.from({ length: 8 }, (_, index) => ({
-    po_line: req.body[`po_line_${index}`],
     item_code: req.body[`item_code_${index}`],
     description: req.body[`description_${index}`],
     material_type: req.body[`material_type_${index}`],
