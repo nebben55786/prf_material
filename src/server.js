@@ -1120,6 +1120,7 @@ function layout(title, body, user) {
       .data-grid td.nowrap, .data-grid th.nowrap { white-space: nowrap; }
       .resize-handle { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: col-resize; }
       .chip { display: inline-block; padding: 3px 8px; border-radius: 2px; background: #e3ebf2; border: 1px solid #b6c4d1; color: #264b69; font-weight: 700; }
+      .chip-remove { font-size: 0.2em; line-height: 1; padding: 0 1px; margin-left: 4px; min-width: 0; min-height: 0; vertical-align: middle; }
       .tab-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
       .tab-link { display: inline-flex; align-items: center; justify-content: center; min-width: 92px; min-height: 32px; padding: 6px 12px; border-radius: 2px; border: 1px solid var(--line-strong); background: linear-gradient(180deg, #eef3f7 0%, #d9e1e8 100%); color: #18354e; font-weight: 700; text-decoration: none; }
       .tab-link.active { background: linear-gradient(180deg, #4278a9 0%, var(--brand) 100%); border-color: rgba(0,0,0,.15); color: white; }
