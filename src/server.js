@@ -5463,6 +5463,182 @@ app.post("/bom/:id/receive-from-inventory", requireAuth, requireRole(["admin"]),
   res.redirect(`/bom/${bomId}?${params.toString()}`);
 }));
 
+function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = []) {
+  const normalizedRows = Array.from({ length: Math.max(rowValues.length, 8) }, (_, index) => ({
+    line_no: String(rowValues[index]?.line_no || "").trim(),
+    item_code: String(rowValues[index]?.item_code || "").trim(),
+    description: String(rowValues[index]?.description || "").trim(),
+    material_type: String(rowValues[index]?.material_type || "misc").trim() || "misc",
+    uom: String(rowValues[index]?.uom || "EA").trim() || "EA",
+    qty_required: String(rowValues[index]?.qty_required || "").trim(),
+    spec: String(rowValues[index]?.spec || "").trim(),
+    commodity_code: String(rowValues[index]?.commodity_code || "").trim(),
+    tag_number: String(rowValues[index]?.tag_number || "").trim(),
+    iwp_no: String(rowValues[index]?.iwp_no || "").trim(),
+    iso_no: String(rowValues[index]?.iso_no || "").trim(),
+    size_1: String(rowValues[index]?.size_1 || "").trim(),
+    size_2: String(rowValues[index]?.size_2 || "").trim(),
+    thk_1: String(rowValues[index]?.thk_1 || "").trim(),
+    thk_2: String(rowValues[index]?.thk_2 || "").trim(),
+    planning_status: String(rowValues[index]?.planning_status || "PLANNED").trim() || "PLANNED",
+    notes: String(rowValues[index]?.notes || "").trim()
+  }));
+  const gridRows = normalizedRows.map((row, index) => `
+    <tr>
+      <td><input name="line_no_${index}" value="${esc(row.line_no)}" /></td>
+      <td><input name="item_code_${index}" value="${esc(row.item_code)}" /></td>
+      <td><input name="description_${index}" value="${esc(row.description)}" /></td>
+      <td><input name="material_type_${index}" value="${esc(row.material_type)}" /></td>
+      <td><input name="uom_${index}" value="${esc(row.uom)}" /></td>
+      <td><input name="qty_required_${index}" value="${esc(row.qty_required)}" /></td>
+      <td><input name="spec_${index}" value="${esc(row.spec)}" /></td>
+      <td><input name="commodity_code_${index}" value="${esc(row.commodity_code)}" /></td>
+      <td><input name="tag_number_${index}" value="${esc(row.tag_number)}" /></td>
+      <td><input name="iwp_no_${index}" value="${esc(row.iwp_no)}" /></td>
+      <td><input name="iso_no_${index}" value="${esc(row.iso_no)}" /></td>
+      <td><input name="size_1_${index}" value="${esc(row.size_1)}" /></td>
+      <td><input name="size_2_${index}" value="${esc(row.size_2)}" /></td>
+      <td><input name="thk_1_${index}" value="${esc(row.thk_1)}" /></td>
+      <td><input name="thk_2_${index}" value="${esc(row.thk_2)}" /></td>
+      <td><select name="planning_status_${index}">${bomLineStatuses.map((value) => `<option value="${esc(value)}" ${row.planning_status === value ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></td>
+      <td><input name="notes_${index}" value="${esc(row.notes)}" /></td>
+    </tr>
+  `).join("");
+  return layout(`Add BOM Lines ${bom.bom_name || bom.description || bom.bom_no}`, `
+    <h1>Add BOM Lines</h1>
+    <div class="card"><strong>BOM:</strong> ${esc(bom.bom_name || bom.description || bom.bom_no)} | <strong>BOM #:</strong> ${esc(bom.bom_no)}</div>
+    ${errorMessages.length ? `<div class="card error"><strong>Could not save all BOM lines.</strong><ul>${errorMessages.map((message) => `<li>${esc(message)}</li>`).join("")}</ul></div>` : ""}
+    <div class="card">
+      <p class="muted">Use this like an Excel grid. Leave blank rows blank. Each saved row needs Line No, Item Code, Description, UOM, and Qty Required.</p>
+      <form id="bom-grid-form-${bom.id}" method="post" action="/bom/${bom.id}/lines/grid" class="stack">
+        <div class="scroll">
+          <table class="data-grid">
+            <thead><tr><th>Line No</th><th>Item Code</th><th>Description</th><th>Material Type</th><th>UOM</th><th>Qty Required</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>IWP</th><th>ISO</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Status</th><th>Notes</th></tr></thead>
+            <tbody>${gridRows}</tbody>
+          </table>
+        </div>
+        <div class="actions"><button type="submit">Save BOM Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Back To BOM Lines</a></div>
+      </form>
+    </div>
+  `, req.user);
+}
+
+app.get("/bom/:id/lines/new", requireAuth, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1", [req.params.id])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  res.send(buildBomLineGridPage(req, bom));
+}));
+
+app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1", [bomId])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  const rowCount = 8;
+  const rows = Array.from({ length: rowCount }, (_, index) => ({
+    line_no: String(req.body[`line_no_${index}`] || "").trim(),
+    item_code: String(req.body[`item_code_${index}`] || "").trim(),
+    description: String(req.body[`description_${index}`] || "").trim(),
+    material_type: String(req.body[`material_type_${index}`] || "misc").trim() || "misc",
+    uom: String(req.body[`uom_${index}`] || "EA").trim() || "EA",
+    qty_required: String(req.body[`qty_required_${index}`] || "").trim(),
+    spec: String(req.body[`spec_${index}`] || "").trim(),
+    commodity_code: String(req.body[`commodity_code_${index}`] || "").trim(),
+    tag_number: String(req.body[`tag_number_${index}`] || "").trim(),
+    iwp_no: String(req.body[`iwp_no_${index}`] || "").trim(),
+    iso_no: String(req.body[`iso_no_${index}`] || "").trim(),
+    size_1: String(req.body[`size_1_${index}`] || "").trim(),
+    size_2: String(req.body[`size_2_${index}`] || "").trim(),
+    thk_1: String(req.body[`thk_1_${index}`] || "").trim(),
+    thk_2: String(req.body[`thk_2_${index}`] || "").trim(),
+    planning_status: String(req.body[`planning_status_${index}`] || "PLANNED").trim() || "PLANNED",
+    notes: String(req.body[`notes_${index}`] || "").trim()
+  }));
+  const nonBlankRows = rows
+    .map((row, index) => ({ ...row, rowNumber: index + 1 }))
+    .filter((row) => Object.entries(row).some(([key, value]) => key !== "rowNumber" && String(value || "").trim()));
+  if (!nonBlankRows.length) {
+    res.status(400).send(buildBomLineGridPage(req, bom, rows, ["Enter at least one BOM line before saving."]));
+    return;
+  }
+  const errors = [];
+  const seenKeys = new Set();
+  const validRows = [];
+  for (const row of nonBlankRows) {
+    const rowLabel = `Row ${row.rowNumber}`;
+    if (!row.line_no || !row.item_code || !row.description || !row.uom || !row.qty_required) {
+      errors.push(`${rowLabel}: Line No, Item Code, Description, UOM, and Qty Required are required.`);
+      continue;
+    }
+    const qtyRequired = parseQtyValue(row.qty_required, NaN);
+    if (!Number.isFinite(qtyRequired) || qtyRequired <= 0) {
+      errors.push(`${rowLabel}: Qty Required must be greater than zero.`);
+      continue;
+    }
+    const sourceUid = `${row.line_no}|${row.item_code}`;
+    if (seenKeys.has(sourceUid)) {
+      errors.push(`${rowLabel}: Duplicate line/item combination in this save batch.`);
+      continue;
+    }
+    seenKeys.add(sourceUid);
+    validRows.push({ ...row, qtyRequired, sourceUid });
+  }
+  if (validRows.length) {
+    const existingRows = (await query("select source_uid from bom_lines where bom_id = $1 and source_uid = any($2::text[])", [bomId, validRows.map((row) => row.sourceUid)])).rows;
+    const existingSet = new Set(existingRows.map((row) => String(row.source_uid || "")));
+    validRows.forEach((row) => {
+      if (existingSet.has(row.sourceUid)) {
+        errors.push(`Row ${row.rowNumber}: ${row.line_no} / ${row.item_code} already exists on this BOM.`);
+      }
+    });
+  }
+  const insertRows = validRows.filter((row) => !errors.some((message) => message.startsWith(`Row ${row.rowNumber}:`)));
+  if (!insertRows.length) {
+    res.status(400).send(buildBomLineGridPage(req, bom, rows, errors));
+    return;
+  }
+  await withTransaction(async (client) => {
+    for (const row of insertRows) {
+      await client.query(`
+        insert into bom_lines (
+          bom_id, line_no, item_code, description, material_type, uom, qty_required,
+          spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2,
+          planning_status, notes, updated_at
+        ) values (
+          $1, $2, $3, $4, $5, $6, $7,
+          $8, $9, $10, $11, $12, $13, $14, $15, $16,
+          $17, $18, now()
+        )
+      `, [
+        bomId,
+        row.line_no,
+        row.item_code,
+        row.description,
+        row.material_type || "misc",
+        row.uom || "EA",
+        row.qtyRequired,
+        row.spec,
+        row.commodity_code,
+        row.tag_number,
+        row.iwp_no,
+        row.iso_no,
+        row.size_1,
+        row.size_2,
+        row.thk_1,
+        row.thk_2,
+        row.planning_status || "PLANNED",
+        row.notes
+      ]);
+      await auditLog(client, req.user.id, "create", "bom_line", `${bomId}:${row.sourceUid}`, row.item_code);
+    }
+  });
+  const params = new URLSearchParams({
+    added_lines: String(insertRows.length),
+    skipped_lines: String(errors.length)
+  });
+  if (errors.length) params.set("line_save_errors", errors.join(" | "));
+  res.redirect(`/bom/${bomId}/lines?${params.toString()}`);
+}));
+
 app.get("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   const line = (await query("select bl.*, bh.bom_no from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1", [req.params.id])).rows[0];
   if (!line) {
@@ -5883,6 +6059,9 @@ app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"),
 app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHandler(async (req, res) => {
   const bom = (await query("select * from bom_headers where id = $1", [req.params.id])).rows[0];
   if (!bom) throw new Error("BOM not found.");
+  const addedLines = Number(req.query.added_lines || 0);
+  const skippedLines = Number(req.query.skipped_lines || 0);
+  const lineSaveErrors = String(req.query.line_save_errors || "").trim();
   const search = String(req.query.search || "").trim();
   const iwp = String(req.query.iwp || "").trim();
   const lineNo = String(req.query.line_no || "").trim();
@@ -5927,8 +6106,11 @@ app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHa
     <h1>BOM Lines</h1>
     <div class="card">
       <p class="muted">BOM: <a href="/bom/${bom.id}">${esc(bom.bom_name || bom.description || bom.bom_no)}</a> | BOM #: ${esc(bom.bom_no)} | Type: ${esc(bom.bom_type)} | Status: ${esc(bom.status)}</p>
-      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}">Back to BOM</a></div>
+      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}">Back to BOM</a>${canAccess(req.user, "bom", "edit") ? `<a class="btn btn-primary" href="/bom/${bom.id}/lines/new">Add BOM Line</a>` : ""}</div>
     </div>
+    ${addedLines ? `<div class="card success"><strong>Added ${addedLines} BOM line${addedLines === 1 ? "" : "s"}.</strong>${skippedLines ? ` ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.` : ""}</div>` : ""}
+    ${!addedLines && skippedLines ? `<div class="card error"><strong>No BOM lines were added.</strong> ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.</div>` : ""}
+    ${lineSaveErrors ? `<div class="card error"><strong>Manual BOM line issues:</strong><pre>${esc(lineSaveErrors.split(" | ").join("\n"))}</pre></div>` : ""}
     <div class="card">
       <form method="get" action="/bom/${bom.id}/lines" class="stack">
         <div class="grid">
