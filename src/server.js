@@ -280,7 +280,8 @@ function renderVendorPicker(vendors, selectedVendors = [], config = {}) {
     selectedListId = "vendor-selected-list",
     hiddenContainerId = "vendor-selected-hidden",
     datalistId = "vendor-picker-options",
-    addButtonLabel = "Add Vendor"
+    addButtonLabel = "Add Vendor",
+    formId = ""
   } = config;
   const optionMap = new Map(vendors.map((vendor) => [Number(vendor.id), vendor.name]));
   const normalizedSelected = selectedVendors
@@ -296,7 +297,7 @@ function renderVendorPicker(vendors, selectedVendors = [], config = {}) {
     .map((vendor) => `
       <span class="chip" data-vendor-chip="${vendor.id}">
         ${esc(vendor.name)}
-        <button type="button" class="chip-remove" onclick="removeVendorSelection(${vendor.id}, '${selectedListId}', '${hiddenContainerId}')">x</button>
+        <button type="button" class="chip-remove" onclick="removeVendorSelection(${vendor.id}, '${selectedListId}', '${hiddenContainerId}', '${formId}')">x</button>
       </span>
     `)
     .join("");
@@ -316,7 +317,7 @@ function renderVendorPicker(vendors, selectedVendors = [], config = {}) {
         <button type="button" onclick='openVendorPicker("${dialogId}", "${inputId}")'>${esc(addButtonLabel)}</button>
       </div>
     </div>
-    <dialog id="${dialogId}" class="modal-card" data-vendors='${esc(vendorLookup)}' data-selected-list-id="${selectedListId}" data-hidden-container-id="${hiddenContainerId}">
+    <dialog id="${dialogId}" class="modal-card" data-vendors='${esc(vendorLookup)}' data-selected-list-id="${selectedListId}" data-hidden-container-id="${hiddenContainerId}" data-form-id="${formId}">
       <div class="stack">
         <h3>Add Vendor</h3>
         <div><label>Active Vendor</label><input id="${inputId}" list="${datalistId}" autocomplete="off" /></div>
@@ -1267,7 +1268,7 @@ function layout(title, body, user) {
         else dialog.removeAttribute("open");
         return false;
       }
-      function removeVendorSelection(vendorId, selectedListId, hiddenContainerId) {
+      function removeVendorSelection(vendorId, selectedListId, hiddenContainerId, formId) {
         const selectedList = document.getElementById(selectedListId);
         const hiddenContainer = document.getElementById(hiddenContainerId);
         if (hiddenContainer) {
@@ -1281,6 +1282,8 @@ function layout(title, body, user) {
             selectedList.innerHTML = '<span class="muted">No vendors selected yet.</span>';
           }
         }
+        const form = formId ? document.getElementById(formId) : null;
+        if (form) form.submit();
         return false;
       }
       function addVendorFromPicker(dialogId, inputId) {
@@ -1312,7 +1315,7 @@ function layout(title, body, user) {
         chip.setAttribute("data-vendor-chip", String(vendor.id));
         chip.innerHTML = vendor.name + ' <button type="button" class="chip-remove">x</button>';
         const removeButton = chip.querySelector(".chip-remove");
-        if (removeButton) removeButton.addEventListener("click", () => removeVendorSelection(vendor.id, dialog.getAttribute("data-selected-list-id"), dialog.getAttribute("data-hidden-container-id")));
+        if (removeButton) removeButton.addEventListener("click", () => removeVendorSelection(vendor.id, dialog.getAttribute("data-selected-list-id"), dialog.getAttribute("data-hidden-container-id"), dialog.getAttribute("data-form-id")));
         selectedList.appendChild(chip);
         const hiddenInput = document.createElement("input");
         hiddenInput.type = "hidden";
@@ -1321,6 +1324,9 @@ function layout(title, body, user) {
         hiddenInput.setAttribute("data-vendor-hidden", String(vendor.id));
         hiddenContainer.appendChild(hiddenInput);
         closeVendorPicker(dialogId);
+        const formId = dialog.getAttribute("data-form-id");
+        const form = formId ? document.getElementById(formId) : null;
+        if (form) form.submit();
         return false;
       }
       function syncLocationOptions(warehouseSelectId, locationSelectId, optionsByWarehouse, selectedValue) {
@@ -6896,7 +6902,7 @@ app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, 
   res.send(layout("Create RFQ", `
     <h1>Create RFQ</h1>
     <div class="card">
-      <form method="post" action="/rfq" class="stack">
+      <form id="rfq-create-form" method="post" action="/rfq" class="stack">
         <div class="grid">
           <div><label>Job Number</label><input value="${esc(jobNumber)}" readonly /></div>
           <div><label>Next RFQ Number</label><input value="${esc(nextRfqNo)}" readonly /></div>
@@ -6914,7 +6920,8 @@ app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, 
           selectedListId: "rfq-create-vendor-list",
           hiddenContainerId: "rfq-create-vendor-hidden",
           datalistId: "rfq-create-vendor-options",
-          addButtonLabel: "Add Vendor"
+          addButtonLabel: "Add Vendor",
+          formId: "rfq-create-form"
         })}
         <div class="actions">
           <button type="submit">Create RFQ</button>
@@ -7185,22 +7192,22 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
           <div><label>Due Date</label><input value="${esc(formatShortDate(rfq.due_date))}" readonly /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
-        <div class="actions"><button type="submit">Save Status</button><span class="chip">${esc(rfqStatusLabel)}</span><a class="btn btn-danger" href="/rfq/${rfqId}/delete">Delete RFQ</a></div>
+        <div class="actions"><button type="submit">Save Status</button><a class="btn btn-danger" href="/rfq/${rfqId}/delete">Delete RFQ</a></div>
       </form>
     </div>
     <div class="card">
       <h3>Selected Vendors</h3>
-      <form method="post" action="/rfq/${rfqId}/vendors" class="stack">
+      <form id="rfq-${rfqId}-vendors-form" method="post" action="/rfq/${rfqId}/vendors" class="stack">
         ${renderVendorPicker(vendors, selectedVendors.map((vendor) => ({ id: vendor.vendor_id, name: vendor.name })), {
           dialogId: `rfq-${rfqId}-vendor-dialog`,
           inputId: `rfq-${rfqId}-vendor-input`,
           selectedListId: `rfq-${rfqId}-vendor-list`,
           hiddenContainerId: `rfq-${rfqId}-vendor-hidden`,
           datalistId: `rfq-${rfqId}-vendor-options`,
-          addButtonLabel: "Add Vendor"
+          addButtonLabel: "Add Vendor",
+          formId: `rfq-${rfqId}-vendors-form`
         })}
         <div class="actions">
-          <button type="submit">Save Vendor List</button>
           <span class="muted">Choose the vendors for this RFQ once, then enter quotes vendor-by-vendor in the tabs below.</span>
         </div>
       </form>
