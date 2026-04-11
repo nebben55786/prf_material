@@ -5708,7 +5708,7 @@ app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), a
   }));
   const nonBlankRows = rows
     .map((row, index) => ({ ...row, rowNumber: index + 1 }))
-    .filter((row) => Object.entries(row).some(([key, value]) => key !== "rowNumber" && String(value || "").trim()));
+    .filter((row) => String(row.line_no || "").trim());
   const autocomplete = await getBomLineEntryAutocomplete(bom.id);
   if (!nonBlankRows.length) {
     res.status(400).send(buildBomLineGridPage(req, bom, rows, ["Enter at least one BOM line before saving."], autocomplete));
