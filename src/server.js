@@ -1823,26 +1823,6 @@ function requestAccessPage(error = "", success = "") {
 
 const rfqItemColumns = ["po_line", "item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
 
-function parseDelimitedRows(text, columns = rfqItemColumns) {
-  if (!text?.trim()) return [];
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => line.trim());
-  if (lines.length === 0) return [];
-  const delimiter = lines.some((line) => line.includes("\t")) ? "\t" : ",";
-  const splitLine = (line) => line.split(delimiter).map((cell) => String(cell ?? "").trim());
-  const firstRow = splitLine(lines[0]);
-  const normalizedFirstRow = firstRow.map((cell) => String(cell ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""));
-  const hasHeaders = normalizedFirstRow.some((cell) => columns.includes(cell));
-  const headers = hasHeaders ? normalizedFirstRow : columns;
-  const dataLines = hasHeaders ? lines.slice(1) : lines;
-  return dataLines.map((line) => {
-    const values = splitLine(line);
-    return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").trim()]));
-  });
-}
-
 async function upsertMaterialItem(client, row) {
   const itemCode = String(row.item_code || "").trim();
   const description = String(row.description || "").trim();
@@ -7160,62 +7140,11 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
   const importRows = recentImports.length > 0
     ? recentImports.map((batch) => `<tr><td><a href="/imports/${batch.id}">${esc(batch.entity_type)}</a></td><td>${esc(formatShortDateTime(batch.created_at))}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
-  const addItemCard = `
-    <div class="card">
-      <h3>Existing Items</h3>
-      <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
-      <div class="grid" style="grid-template-columns: 1fr auto;">
-        <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" placeholder="Search item code, description, type, or UOM" /></div>
-        <div style="align-self:end;"><button type="button" onclick="filterTableRows('existing-items-filter-${rfqId}', 'existing-items-table-${rfqId}')">Apply Filter</button></div>
-      </div>
-      <div class="scroll">
-        <table id="existing-items-table-${rfqId}">
-          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Add</th></tr></thead>
-          <tbody>${materialItemRows || `<tr><td colspan="5" class="muted">No existing items found.</td></tr>`}</tbody>
-        </table>
-      </div>
-    </div>
-    <div class="card">
-      <h3>Add New RFQ Items</h3>
-      <p class="muted">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
-      <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
-        <div class="scroll">
-          <table class="data-grid">
-            <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>PO Line</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
-            <tbody>${newItemRows}</tbody>
-          </table>
-        </div>
-        <div class="actions"><button type="submit">Save Grid Rows</button></div>
-      </form>
-    </div>`;
-  const uploadItemsCard = `
-    <div class="card">
-      <h3>Import RFQ Items From File</h3>
-      <p class="muted">CSV/XLSX columns: po_line, item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes</p>
-      <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/items/import" class="stack">
-        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
-        <div class="actions"><button type="submit">Import File</button></div>
-      </form>
-    </div>`;
-  const pasteItemsCard = `
-    <div class="card">
-      <h3>Paste RFQ Items</h3>
-      <p class="muted">Paste CSV with columns: po_line, item_code, description, material_type, uom, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes</p>
-      <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
-        <div><label>Pasted CSV</label><textarea name="csv_text"></textarea></div>
-        <div class="actions"><button type="submit">Paste Items</button></div>
-      </form>
-    </div>`;
-  const importQuotesCard = `
-    <div class="card">
-      <h3>Import Quotes For ${esc(activeVendor?.name || "Selected Vendor")}</h3>
-      <p class="muted">CSV/XLSX columns: item_code, unit_price, lead_days. If you include vendor_name, it must match one of the selected RFQ vendors.</p>
-      <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/quotes/import" class="stack">
-        <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
-        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
-        <div><label>Or Paste Quote CSV</label><textarea name="csv_text"></textarea></div>
-        <div class="actions"><button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Import Quotes</button></div>
-      </form>
+  const workspaceActions = `
+    <div class="actions">
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/existing">Add Existing</a>` : ""}
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/new">Add New</a>` : ""}
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Import Quotes</a>` : ""}
     </div>`;
   const awardSummaryCard = `
     <div class="card">
@@ -7280,6 +7209,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
     <div class="card scroll">
       <h3>Vendor Quote Workspace</h3>
       ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted" style="margin-bottom:10px;">Save at least one selected vendor to unlock quote tabs.</div>`}
+      ${workspaceActions}
       <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
         <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
         <div class="grid" style="grid-template-columns: minmax(0, 260px) 1fr;">
@@ -7295,10 +7225,6 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
         </table>
       </form>
     </div>
-    ${poCount === 0 ? addItemCard : ""}
-    ${poCount === 0 ? uploadItemsCard : ""}
-    ${poCount === 0 ? pasteItemsCard : ""}
-    ${poCount === 0 ? importQuotesCard : ""}
     <div class="card scroll">
       <h3>Recent Imports</h3>
       <table>
@@ -7392,6 +7318,133 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), as
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
   res.send(pdfBuffer);
+}));
+
+app.get("/rfq/:id/items/existing", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const [rfqRes, materialItemsRes] = await Promise.all([
+    query("select id, rfq_no, project_name from rfqs where id = $1", [rfqId]),
+    query("select item_code, description, material_type, uom from material_items order by item_code limit 500", [])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const materialItemRows = materialItemsRes.rows
+    .map((item) => `<tr>
+      <td>${esc(item.item_code)}</td>
+      <td>${esc(item.description)}</td>
+      <td>${esc(item.material_type)}</td>
+      <td>${esc(item.uom)}</td>
+      <td>
+        <form method="post" action="/rfq/${rfqId}/items/add">
+          <input type="hidden" name="item_code" value="${esc(item.item_code)}" />
+          <input type="hidden" name="description" value="${esc(item.description)}" />
+          <input type="hidden" name="material_type" value="${esc(item.material_type)}" />
+          <input type="hidden" name="uom" value="${esc(item.uom)}" />
+          <input type="hidden" name="qty" value="1" />
+          <button type="submit">Add</button>
+        </form>
+      </td>
+    </tr>`).join("");
+  res.send(layout(`Add Existing Items`, `
+    <h1>Add Existing Items</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
+      <div class="grid" style="grid-template-columns: 1fr auto;">
+        <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" placeholder="Search item code, description, type, or UOM" /></div>
+        <div style="align-self:end;"><button type="button" onclick="filterTableRows('existing-items-filter-${rfqId}', 'existing-items-table-${rfqId}')">Apply Filter</button></div>
+      </div>
+      <div class="scroll">
+        <table id="existing-items-table-${rfqId}">
+          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Add</th></tr></thead>
+          <tbody>${materialItemRows || `<tr><td colspan="5" class="muted">No existing items found.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="actions"><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
+    </div>
+  `, req.user));
+}));
+
+app.get("/rfq/:id/items/new", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1", [rfqId])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const newItemRows = Array.from({ length: 8 }, (_, index) => `
+    <tr>
+      <td><input name="item_code_${index}" /></td>
+      <td><input name="description_${index}" /></td>
+      <td><input name="material_type_${index}" /></td>
+      <td><input name="uom_${index}" /></td>
+      <td><input name="po_line_${index}" /></td>
+      <td><input name="spec_${index}" /></td>
+      <td><input name="commodity_code_${index}" /></td>
+      <td><input name="tag_number_${index}" /></td>
+      <td><input name="size_1_${index}" /></td>
+      <td><input name="size_2_${index}" /></td>
+      <td><input name="thk_1_${index}" /></td>
+      <td><input name="thk_2_${index}" /></td>
+      <td><input name="qty_${index}" /></td>
+      <td><input name="notes_${index}" /></td>
+    </tr>
+  `).join("");
+  res.send(layout(`Add New RFQ Items`, `
+    <h1>Add New RFQ Items</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      <p class="muted">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
+      <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
+        <div class="scroll">
+          <table class="data-grid">
+            <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>PO Line</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
+            <tbody>${newItemRows}</tbody>
+          </table>
+        </div>
+        <div class="actions"><button type="submit">Save Grid Rows</button><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.get("/rfq/:id/quotes/import-page", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  await backfillRfqVendors(pool, rfqId);
+  const selectedVendorId = String(req.query.vendor_tab_id || "").trim();
+  const [rfqRes, selectedVendorsRes] = await Promise.all([
+    query("select id, rfq_no, project_name from rfqs where id = $1", [rfqId]),
+    query(`
+      select rv.vendor_id, v.name
+      from rfq_vendors rv
+      join vendors v on v.id = rv.vendor_id
+      where rv.rfq_id = $1
+      order by v.name
+    `, [rfqId])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const selectedVendors = selectedVendorsRes.rows;
+  const selectedVendorIds = selectedVendors.map((vendor) => Number(vendor.vendor_id));
+  const activeQuoteVendorId = selectedVendorIds.includes(Number(selectedVendorId))
+    ? String(selectedVendorId)
+    : String(selectedVendors[0]?.vendor_id || "");
+  const activeVendor = selectedVendors.find((vendor) => String(vendor.vendor_id) === activeQuoteVendorId) || null;
+  const vendorTabs = selectedVendors.length > 0
+    ? selectedVendors.map((vendor) => `<a class="tab-link ${String(vendor.vendor_id) === activeQuoteVendorId ? "active" : ""}" href="/rfq/${rfqId}/quotes/import-page?vendor_tab_id=${vendor.vendor_id}">${esc(vendor.name)}</a>`).join("")
+    : "";
+  res.send(layout(`Import RFQ Quotes`, `
+    <h1>Import Quotes</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted">Save at least one selected vendor first.</div>`}
+      <p class="muted">CSV/XLSX columns: item_code, unit_price, lead_days. If you include vendor_name, it must match one of the selected RFQ vendors.</p>
+      <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/quotes/import" class="stack">
+        <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
+        <div><label>Active Quote Vendor</label><input value="${esc(activeVendor?.name || "Select a participating vendor")}" readonly /></div>
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>Or Paste Quote CSV</label><textarea name="csv_text"></textarea></div>
+        <div class="actions"><button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Import Quotes</button><a class="btn btn-secondary" href="/rfq/${rfqId}${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Back To RFQ</a></div>
+      </form>
+    </div>
+  `, req.user));
 }));
 
 app.post("/rfq/:id/items/import", requireAuth, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
@@ -7488,38 +7541,6 @@ app.post("/rfq/:id/items/grid", requireAuth, requirePermission("rfqs", "edit"), 
     }
     await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
     await auditLog(client, req.user.id, "grid_add", "rfq_items", rfqId, `rows=${rows.length};batch=${batchId}`);
-    return batchId;
-  });
-  res.redirect(`/imports/${batchId}`);
-});
-
-app.post("/rfq/:id/items/paste", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
-  const rfqId = Number(req.params.id);
-  const rows = parseDelimitedRows(req.body.table_text);
-  if (rows.length === 0) throw new Error("No pasted rows found.");
-  const batchId = await withTransaction(async (client) => {
-    const batchId = await createImportBatch(client, {
-      entityType: "rfq_items",
-      rfqId,
-      uploadedBy: req.user.id,
-      filename: "pasted-table"
-    });
-    let insertedCount = 0;
-    let updatedCount = 0;
-    let skippedCount = 0;
-    for (let index = 0; index < rows.length; index += 1) {
-      const row = rows[index];
-      const rowNumber = index + 1;
-      const result = await upsertRfqItemRow(client, rfqId, row);
-      if (result.status === "inserted") insertedCount += 1;
-      else if (result.status === "updated") updatedCount += 1;
-      else {
-        skippedCount += 1;
-        await addImportBatchError(client, batchId, rowNumber, result.errorCode, result.message, row);
-      }
-    }
-    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
-    await auditLog(client, req.user.id, "paste", "rfq_items", rfqId, `rows=${rows.length};batch=${batchId}`);
     return batchId;
   });
   res.redirect(`/imports/${batchId}`);
