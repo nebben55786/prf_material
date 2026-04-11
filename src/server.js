@@ -5464,7 +5464,7 @@ app.post("/bom/:id/receive-from-inventory", requireAuth, requireRole(["admin"]),
 }));
 
 async function getBomLineEntryAutocomplete(bomId) {
-  const [lineNoRes, itemCodeRes] = await Promise.all([
+  const [lineNoRes, materialItemRes, bomItemDetailRes] = await Promise.all([
     query(`
       select distinct line_no
       from bom_lines
@@ -5473,22 +5473,76 @@ async function getBomLineEntryAutocomplete(bomId) {
       order by line_no
     `, [bomId]),
     query(`
-      select item_code, description
+      select item_code, description, material_type, uom
       from material_items
       where coalesce(item_code, '') <> ''
       order by item_code
       limit 1000
+    `),
+    query(`
+      select distinct on (item_code)
+        item_code,
+        description,
+        material_type,
+        uom,
+        coalesce(spec, '') as spec,
+        coalesce(size_1, '') as size_1,
+        coalesce(size_2, '') as size_2,
+        coalesce(thk_1, '') as thk_1,
+        coalesce(thk_2, '') as thk_2
+      from bom_lines
+      where coalesce(item_code, '') <> ''
+      order by item_code, updated_at desc, id desc
     `)
   ]);
+  const itemDetails = {};
+  for (const row of materialItemRes.rows) {
+    const itemCode = String(row.item_code || "").trim();
+    if (!itemCode) continue;
+    itemDetails[itemCode.toLowerCase()] = {
+      item_code: itemCode,
+      description: String(row.description || "").trim(),
+      material_type: String(row.material_type || "").trim(),
+      uom: String(row.uom || "").trim(),
+      spec: "",
+      size_1: "",
+      size_2: "",
+      thk_1: "",
+      thk_2: ""
+    };
+  }
+  for (const row of bomItemDetailRes.rows) {
+    const itemCode = String(row.item_code || "").trim();
+    const key = itemCode.toLowerCase();
+    if (!key) continue;
+    itemDetails[key] = {
+      item_code: itemCode || itemDetails[key]?.item_code || "",
+      description: String(row.description || itemDetails[key]?.description || "").trim(),
+      material_type: String(row.material_type || itemDetails[key]?.material_type || "").trim(),
+      uom: String(row.uom || itemDetails[key]?.uom || "").trim(),
+      spec: String(row.spec || "").trim(),
+      size_1: String(row.size_1 || "").trim(),
+      size_2: String(row.size_2 || "").trim(),
+      thk_1: String(row.thk_1 || "").trim(),
+      thk_2: String(row.thk_2 || "").trim()
+    };
+  }
   return {
     lineNoOptions: lineNoRes.rows.map((row) => `<option value="${esc(row.line_no)}"></option>`).join(""),
-    itemCodeOptions: itemCodeRes.rows.map((row) => `<option value="${esc(row.item_code)}">${esc(row.description || "")}</option>`).join("")
+    itemCodeOptions: Array.from(new Set([
+      ...materialItemRes.rows.map((row) => String(row.item_code || "").trim()),
+      ...bomItemDetailRes.rows.map((row) => String(row.item_code || "").trim())
+    ].filter(Boolean)))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+      .map((itemCode) => `<option value="${esc(itemCode)}"></option>`).join(""),
+    itemDetails
   };
 }
 
 function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], autocomplete = {}) {
   const lineNoOptions = autocomplete.lineNoOptions || "";
   const itemCodeOptions = autocomplete.itemCodeOptions || "";
+  const itemDetailsJson = JSON.stringify(autocomplete.itemDetails || {}).replace(/</g, "\\u003c");
   const normalizedRows = Array.from({ length: Math.max(rowValues.length, 8) }, (_, index) => ({
     line_no: String(rowValues[index]?.line_no || "").trim(),
     item_code: String(rowValues[index]?.item_code || "").trim(),
@@ -5535,17 +5589,88 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
     ${errorMessages.length ? `<div class="card error"><strong>Could not save all BOM lines.</strong><ul>${errorMessages.map((message) => `<li>${esc(message)}</li>`).join("")}</ul></div>` : ""}
     <div class="card">
       <p class="muted">Use this like an Excel grid. Leave blank rows blank. Each saved row needs Line No, Item Code, Description, UOM, and Qty Required.</p>
+      <style>
+        #bom-grid-form-${bom.id} table td { padding: 0; }
+        #bom-grid-form-${bom.id} table td input,
+        #bom-grid-form-${bom.id} table td select {
+          width: 100%;
+          min-width: 0;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+          box-shadow: none;
+          padding: 8px 10px;
+        }
+        #bom-grid-form-${bom.id} table td input:focus,
+        #bom-grid-form-${bom.id} table td select:focus {
+          outline: 2px solid #7ea5c8;
+          outline-offset: -2px;
+          background: #f7fbff;
+        }
+      </style>
       <form id="bom-grid-form-${bom.id}" method="post" action="/bom/${bom.id}/lines/grid" class="stack">
         <datalist id="bom-line-no-options-${bom.id}">${lineNoOptions}</datalist>
         <datalist id="bom-item-code-options-${bom.id}">${itemCodeOptions}</datalist>
         <div class="scroll">
           <table class="data-grid">
+            <colgroup>
+              <col style="width:180px" />
+              <col style="width:120px" />
+              <col style="width:260px" />
+              <col style="width:120px" />
+              <col style="width:80px" />
+              <col style="width:110px" />
+              <col style="width:130px" />
+              <col style="width:120px" />
+              <col style="width:120px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:110px" />
+              <col style="width:160px" />
+            </colgroup>
             <thead><tr><th>Line No</th><th>Item Code</th><th>Description</th><th>Material Type</th><th>UOM</th><th>Qty Required</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>IWP</th><th>ISO</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Status</th><th>Notes</th></tr></thead>
             <tbody>${gridRows}</tbody>
           </table>
         </div>
         <div class="actions"><button type="submit">Save BOM Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Back To BOM Lines</a></div>
       </form>
+      <script>
+        (function () {
+          const itemDetails = ${itemDetailsJson};
+          const form = document.getElementById("bom-grid-form-${bom.id}");
+          if (!form) return;
+          function fillRowFromItemCode(index) {
+            const itemCodeInput = form.querySelector('[name="item_code_' + index + '"]');
+            if (!itemCodeInput) return;
+            const detail = itemDetails[String(itemCodeInput.value || "").trim().toLowerCase()];
+            if (!detail) return;
+            const fieldMap = {
+              description: detail.description || "",
+              material_type: detail.material_type || "",
+              uom: detail.uom || "",
+              spec: detail.spec || "",
+              size_1: detail.size_1 || "",
+              size_2: detail.size_2 || "",
+              thk_1: detail.thk_1 || "",
+              thk_2: detail.thk_2 || ""
+            };
+            Object.entries(fieldMap).forEach(([field, value]) => {
+              const input = form.querySelector('[name="' + field + '_' + index + '"]');
+              if (input) input.value = value;
+            });
+          }
+          Array.from({ length: ${Math.max(rowValues.length, 8)} }, (_, index) => index).forEach((index) => {
+            const itemCodeInput = form.querySelector('[name="item_code_' + index + '"]');
+            if (!itemCodeInput) return;
+            itemCodeInput.addEventListener("change", () => fillRowFromItemCode(index));
+            itemCodeInput.addEventListener("blur", () => fillRowFromItemCode(index));
+          });
+        }());
+      </script>
     </div>
   `, req.user);
 }
