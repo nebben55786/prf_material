@@ -7996,7 +7996,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
       </form>
     </div>
     <div class="card">
-      <div class="actions"><a class="btn btn-primary" href="/po/new">Add PO</a><a class="btn btn-secondary" href="/po/import">Import Existing POs</a></div>
+      <div class="actions"><a class="btn btn-primary" href="/po/new">Add PO</a></div>
     </div>
     <div class="card scroll">
       <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>PO Line</th><th>Open Items</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="13" class="muted">No POs match the current filter.</td></tr>`}</table>
