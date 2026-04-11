@@ -5559,7 +5559,6 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
     size_2: String(rowValues[index]?.size_2 || "").trim(),
     thk_1: String(rowValues[index]?.thk_1 || "").trim(),
     thk_2: String(rowValues[index]?.thk_2 || "").trim(),
-    planning_status: String(rowValues[index]?.planning_status || "PLANNED").trim() || "PLANNED",
     notes: String(rowValues[index]?.notes || "").trim()
   }));
   const gridRows = normalizedRows.map((row, index) => `
@@ -5579,7 +5578,6 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
       <td><input name="size_2_${index}" value="${esc(row.size_2)}" /></td>
       <td><input name="thk_1_${index}" value="${esc(row.thk_1)}" /></td>
       <td><input name="thk_2_${index}" value="${esc(row.thk_2)}" /></td>
-      <td><select name="planning_status_${index}">${bomLineStatuses.map((value) => `<option value="${esc(value)}" ${row.planning_status === value ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></td>
       <td><input name="notes_${index}" value="${esc(row.notes)}" /></td>
     </tr>
   `).join("");
@@ -5629,10 +5627,9 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
               <col style="width:90px" />
               <col style="width:90px" />
               <col style="width:90px" />
-              <col style="width:110px" />
               <col style="width:160px" />
             </colgroup>
-            <thead><tr><th>Line No</th><th>Item Code</th><th>Description</th><th>Material Type</th><th>UOM</th><th>Qty Required</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>IWP</th><th>ISO</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Status</th><th>Notes</th></tr></thead>
+            <thead><tr><th>Line No</th><th>Item Code</th><th>Description</th><th>Material Type</th><th>UOM</th><th>Qty Required</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>IWP</th><th>ISO</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th></tr></thead>
             <tbody>${gridRows}</tbody>
           </table>
         </div>
@@ -5703,7 +5700,6 @@ app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), a
     size_2: String(req.body[`size_2_${index}`] || "").trim(),
     thk_1: String(req.body[`thk_1_${index}`] || "").trim(),
     thk_2: String(req.body[`thk_2_${index}`] || "").trim(),
-    planning_status: String(req.body[`planning_status_${index}`] || "PLANNED").trim() || "PLANNED",
     notes: String(req.body[`notes_${index}`] || "").trim()
   }));
   const nonBlankRows = rows
@@ -5779,7 +5775,7 @@ app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), a
         row.size_2,
         row.thk_1,
         row.thk_2,
-        row.planning_status || "PLANNED",
+        "PLANNED",
         row.notes
       ]);
       await auditLog(client, req.user.id, "create", "bom_line", `${bomId}:${row.sourceUid}`, row.item_code);
@@ -5799,7 +5795,6 @@ app.get("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), asy
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM line not found.</h3></div>`, req.user));
     return;
   }
-  const statusOptions = bomLineStatuses.map((value) => `<option value="${esc(value)}" ${line.planning_status === value ? "selected" : ""}>${esc(value)}</option>`).join("");
   res.send(layout("Edit BOM Line", `
     <h1>Edit BOM Line</h1>
     <div class="card"><strong>BOM:</strong> ${esc(line.bom_no)} | <strong>Line:</strong> ${esc(line.line_no)}</div>
@@ -5821,7 +5816,6 @@ app.get("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), asy
           <div><label>Size 2</label><input name="size_2" value="${esc(line.size_2 || "")}" /></div>
           <div><label>Thk 1</label><input name="thk_1" value="${esc(line.thk_1 || "")}" /></div>
           <div><label>Thk 2</label><input name="thk_2" value="${esc(line.thk_2 || "")}" /></div>
-          <div><label>Status</label><select name="planning_status">${statusOptions}</select></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(line.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save BOM Line</button><a class="btn btn-secondary" href="/bom/${line.bom_id}">Back</a></div>
@@ -5833,7 +5827,7 @@ app.get("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), asy
 app.post("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
   const lineId = Number(req.params.id);
   const bomId = await withTransaction(async (client) => {
-    const current = (await client.query("select bom_id from bom_lines where id = $1", [lineId])).rows[0];
+    const current = (await client.query("select bom_id, planning_status from bom_lines where id = $1", [lineId])).rows[0];
     if (!current) throw new Error("BOM line not found.");
     await client.query(`
       update bom_lines
@@ -5841,7 +5835,7 @@ app.post("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), as
           spec = $8, commodity_code = $9, tag_number = $10, iwp_no = $11, iso_no = $12, size_1 = $13, size_2 = $14, thk_1 = $15, thk_2 = $16,
           planning_status = $17, notes = $18, updated_at = now()
       where id = $1
-    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.planning_status || "PLANNED", req.body.notes || ""]);
+    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", current.planning_status || "PLANNED", req.body.notes || ""]);
     await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
     return current.bom_id;
   });
