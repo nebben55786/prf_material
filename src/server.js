@@ -7334,6 +7334,10 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), as
         ri.qty,
         ri.notes,
         ri.spec,
+        ri.size_1,
+        ri.size_2,
+        ri.thk_1,
+        ri.thk_2,
         mi.item_code,
         mi.description,
         mi.uom
@@ -7358,7 +7362,34 @@ app.get("/rfq/:id/items/existing", requireAuth, requirePermission("rfqs", "edit"
   const rfqId = Number(req.params.id);
   const [rfqRes, materialItemsRes] = await Promise.all([
     query("select id, rfq_no, project_name from rfqs where id = $1", [rfqId]),
-    query("select item_code, description, material_type, uom from material_items order by item_code limit 500", [])
+    query(`
+      select
+        mi.item_code,
+        mi.description,
+        mi.material_type,
+        mi.uom,
+        coalesce(dimensions.size_1, '') as size_1,
+        coalesce(dimensions.size_2, '') as size_2,
+        coalesce(dimensions.thk_1, '') as thk_1,
+        coalesce(dimensions.thk_2, '') as thk_2
+      from material_items mi
+      left join lateral (
+        select distinct
+          coalesce(bl.size_1, '') as size_1,
+          coalesce(bl.size_2, '') as size_2,
+          coalesce(bl.thk_1, '') as thk_1,
+          coalesce(bl.thk_2, '') as thk_2
+        from bom_lines bl
+        where bl.item_code = mi.item_code
+      ) dimensions on true
+      order by
+        mi.item_code,
+        coalesce(dimensions.size_1, ''),
+        coalesce(dimensions.size_2, ''),
+        coalesce(dimensions.thk_1, ''),
+        coalesce(dimensions.thk_2, '')
+      limit 500
+    `, [])
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
@@ -7366,12 +7397,20 @@ app.get("/rfq/:id/items/existing", requireAuth, requirePermission("rfqs", "edit"
     .map((item) => `<tr>
       <td>${esc(item.item_code)}</td>
       <td>${esc(item.description)}</td>
+      <td>${esc(item.size_1 || "")}</td>
+      <td>${esc(item.size_2 || "")}</td>
+      <td>${esc(item.thk_1 || "")}</td>
+      <td>${esc(item.thk_2 || "")}</td>
       <td>${esc(item.material_type)}</td>
       <td>${esc(item.uom)}</td>
       <td>
         <form method="post" action="/rfq/${rfqId}/items/add">
           <input type="hidden" name="item_code" value="${esc(item.item_code)}" />
           <input type="hidden" name="description" value="${esc(item.description)}" />
+          <input type="hidden" name="size_1" value="${esc(item.size_1 || "")}" />
+          <input type="hidden" name="size_2" value="${esc(item.size_2 || "")}" />
+          <input type="hidden" name="thk_1" value="${esc(item.thk_1 || "")}" />
+          <input type="hidden" name="thk_2" value="${esc(item.thk_2 || "")}" />
           <input type="hidden" name="material_type" value="${esc(item.material_type)}" />
           <input type="hidden" name="uom" value="${esc(item.uom)}" />
           <input type="hidden" name="qty" value="1" />
@@ -7385,13 +7424,13 @@ app.get("/rfq/:id/items/existing", requireAuth, requirePermission("rfqs", "edit"
     <div class="card">
       <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
       <div class="grid" style="grid-template-columns: 1fr auto;">
-        <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" placeholder="Search item code, description, type, or UOM" /></div>
+        <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" placeholder="Search item code, description, size, thickness, type, or UOM" /></div>
         <div style="align-self:end;"><button type="button" onclick="filterTableRows('existing-items-filter-${rfqId}', 'existing-items-table-${rfqId}')">Apply Filter</button></div>
       </div>
       <div class="scroll">
         <table id="existing-items-table-${rfqId}">
-          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Add</th></tr></thead>
-          <tbody>${materialItemRows || `<tr><td colspan="5" class="muted">No existing items found.</td></tr>`}</tbody>
+          <thead><tr><th>Item Code</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Add</th></tr></thead>
+          <tbody>${materialItemRows || `<tr><td colspan="9" class="muted">No existing items found.</td></tr>`}</tbody>
         </table>
       </div>
       <div class="actions"><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
