@@ -5463,7 +5463,32 @@ app.post("/bom/:id/receive-from-inventory", requireAuth, requireRole(["admin"]),
   res.redirect(`/bom/${bomId}?${params.toString()}`);
 }));
 
-function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = []) {
+async function getBomLineEntryAutocomplete(bomId) {
+  const [lineNoRes, itemCodeRes] = await Promise.all([
+    query(`
+      select distinct line_no
+      from bom_lines
+      where bom_id = $1
+        and coalesce(line_no, '') <> ''
+      order by line_no
+    `, [bomId]),
+    query(`
+      select item_code, description
+      from material_items
+      where coalesce(item_code, '') <> ''
+      order by item_code
+      limit 1000
+    `)
+  ]);
+  return {
+    lineNoOptions: lineNoRes.rows.map((row) => `<option value="${esc(row.line_no)}"></option>`).join(""),
+    itemCodeOptions: itemCodeRes.rows.map((row) => `<option value="${esc(row.item_code)}">${esc(row.description || "")}</option>`).join("")
+  };
+}
+
+function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], autocomplete = {}) {
+  const lineNoOptions = autocomplete.lineNoOptions || "";
+  const itemCodeOptions = autocomplete.itemCodeOptions || "";
   const normalizedRows = Array.from({ length: Math.max(rowValues.length, 8) }, (_, index) => ({
     line_no: String(rowValues[index]?.line_no || "").trim(),
     item_code: String(rowValues[index]?.item_code || "").trim(),
@@ -5485,8 +5510,8 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = []) {
   }));
   const gridRows = normalizedRows.map((row, index) => `
     <tr>
-      <td><input name="line_no_${index}" value="${esc(row.line_no)}" /></td>
-      <td><input name="item_code_${index}" value="${esc(row.item_code)}" /></td>
+      <td><input name="line_no_${index}" value="${esc(row.line_no)}" list="bom-line-no-options-${bom.id}" /></td>
+      <td><input name="item_code_${index}" value="${esc(row.item_code)}" list="bom-item-code-options-${bom.id}" /></td>
       <td><input name="description_${index}" value="${esc(row.description)}" /></td>
       <td><input name="material_type_${index}" value="${esc(row.material_type)}" /></td>
       <td><input name="uom_${index}" value="${esc(row.uom)}" /></td>
@@ -5511,6 +5536,8 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = []) {
     <div class="card">
       <p class="muted">Use this like an Excel grid. Leave blank rows blank. Each saved row needs Line No, Item Code, Description, UOM, and Qty Required.</p>
       <form id="bom-grid-form-${bom.id}" method="post" action="/bom/${bom.id}/lines/grid" class="stack">
+        <datalist id="bom-line-no-options-${bom.id}">${lineNoOptions}</datalist>
+        <datalist id="bom-item-code-options-${bom.id}">${itemCodeOptions}</datalist>
         <div class="scroll">
           <table class="data-grid">
             <thead><tr><th>Line No</th><th>Item Code</th><th>Description</th><th>Material Type</th><th>UOM</th><th>Qty Required</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>IWP</th><th>ISO</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Status</th><th>Notes</th></tr></thead>
@@ -5526,7 +5553,8 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = []) {
 app.get("/bom/:id/lines/new", requireAuth, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
   const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1", [req.params.id])).rows[0];
   if (!bom) throw new Error("BOM not found.");
-  res.send(buildBomLineGridPage(req, bom));
+  const autocomplete = await getBomLineEntryAutocomplete(bom.id);
+  res.send(buildBomLineGridPage(req, bom, [], [], autocomplete));
 }));
 
 app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
@@ -5556,8 +5584,9 @@ app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), a
   const nonBlankRows = rows
     .map((row, index) => ({ ...row, rowNumber: index + 1 }))
     .filter((row) => Object.entries(row).some(([key, value]) => key !== "rowNumber" && String(value || "").trim()));
+  const autocomplete = await getBomLineEntryAutocomplete(bom.id);
   if (!nonBlankRows.length) {
-    res.status(400).send(buildBomLineGridPage(req, bom, rows, ["Enter at least one BOM line before saving."]));
+    res.status(400).send(buildBomLineGridPage(req, bom, rows, ["Enter at least one BOM line before saving."], autocomplete));
     return;
   }
   const errors = [];
@@ -5593,7 +5622,7 @@ app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), a
   }
   const insertRows = validRows.filter((row) => !errors.some((message) => message.startsWith(`Row ${row.rowNumber}:`)));
   if (!insertRows.length) {
-    res.status(400).send(buildBomLineGridPage(req, bom, rows, errors));
+    res.status(400).send(buildBomLineGridPage(req, bom, rows, errors, autocomplete));
     return;
   }
   await withTransaction(async (client) => {
