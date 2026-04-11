@@ -7121,7 +7121,7 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
           <div><label>Due Date</label><input value="${esc(formatShortDate(rfq.due_date))}" readonly /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
-        <div class="actions"><button type="submit">Save Status</button><span class="chip">${esc(rfqStatusLabel)}</span></div>
+        <div class="actions"><button type="submit">Save Status</button><span class="chip">${esc(rfqStatusLabel)}</span><a class="btn btn-danger" href="/rfq/${rfqId}/delete">Delete RFQ</a></div>
       </form>
     </div>
     <div class="card">
@@ -7168,6 +7168,61 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
     </div>
   `, req.user));
 });
+
+app.get("/rfq/:id/delete", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const [rfqRes, poCountRes] = await Promise.all([
+    query("select id, rfq_no, project_name, status from rfqs where id = $1", [rfqId]),
+    query("select count(*) as count from purchase_orders where rfq_id = $1", [rfqId])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
+    return;
+  }
+  const poCount = Number(poCountRes.rows[0]?.count || 0);
+  res.send(layout("Delete RFQ", `
+    <h1>Delete RFQ</h1>
+    <div class="card error">
+      <h3>Confirm RFQ Deletion</h3>
+      <p><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</p>
+      <p class="muted">Status: ${esc(rfq.status)} | Issued POs: ${poCount}</p>
+      ${poCount > 0 ? `<p>This RFQ cannot be deleted because it already has purchase orders tied to it.</p>` : `<p>This will remove the RFQ, its vendor list, its items, quotes, quote history, and related import logs.</p>`}
+      <div class="actions">
+        ${poCount === 0 ? `<form method="post" action="/rfq/${rfqId}/delete" onsubmit="return confirm('Delete RFQ ${esc(String(rfq.rfq_no || ""))}? This cannot be undone.');"><button class="btn btn-danger" type="submit">Confirm Delete RFQ</button></form>` : ""}
+        <a class="btn btn-secondary" href="/rfq/${rfqId}">Back</a>
+      </div>
+    </div>
+  `, req.user));
+}));
+
+app.post("/rfq/:id/delete", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  await withTransaction(async (client) => {
+    const rfq = (await client.query("select id, rfq_no from rfqs where id = $1", [rfqId])).rows[0];
+    if (!rfq) throw new Error("RFQ not found.");
+    const poCount = Number((await client.query("select count(*) as count from purchase_orders where rfq_id = $1", [rfqId])).rows[0]?.count || 0);
+    if (poCount > 0) throw new Error("Cannot delete an RFQ that already has purchase orders.");
+    await client.query(`
+      delete from import_batch_errors
+      where batch_id in (select id from import_batches where rfq_id = $1)
+    `, [rfqId]);
+    await client.query("delete from import_batches where rfq_id = $1", [rfqId]);
+    await client.query(`
+      delete from quote_revisions
+      where rfq_item_id in (select id from rfq_items where rfq_id = $1)
+    `, [rfqId]);
+    await client.query(`
+      delete from quotes
+      where rfq_item_id in (select id from rfq_items where rfq_id = $1)
+    `, [rfqId]);
+    await client.query("delete from rfq_vendors where rfq_id = $1", [rfqId]);
+    await client.query("delete from rfq_items where rfq_id = $1", [rfqId]);
+    await client.query("delete from rfqs where id = $1", [rfqId]);
+    await auditLog(client, req.user.id, "delete", "rfq", rfqId, rfq.rfq_no || "");
+  });
+  res.redirect("/rfq");
+}));
 
 app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
