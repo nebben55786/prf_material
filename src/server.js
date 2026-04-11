@@ -1480,7 +1480,7 @@ function normalizePoImportRow(row) {
   const aliases = {
     po_no: ["po_no", "po_number", "po", "po_", "purchase_order", "purchase_order_number"],
     po_line: ["po_line", "po_line_no", "po_line_number", "line_no", "line_number", "line"],
-    vendor_name: ["vendor_name", "vendor", "supplier", "supplier_name"],
+    vendor_name: ["vendor_name", "vendor", "supplier", "supplier_name", "name"],
     item_code: ["item_code", "item", "item_no", "item_number", "material_code", "material_item"],
     description: ["description", "item_description", "material_description", "desc"],
     material_type: ["material_type", "type", "item_type"],
@@ -1491,14 +1491,14 @@ function normalizePoImportRow(row) {
     thk_2: ["thk_2", "thk2", "thickness_2", "wall_2"],
     qty_ordered: ["qty_ordered", "qty", "quantity", "ordered_qty", "order_qty"],
     unit_price: ["unit_price", "price", "unitcost", "unit_cost", "cost"],
-    vendor_contact: ["vendor_contact", "contact_name", "contact"],
-    freight_terms: ["freight_terms", "freight"],
+    vendor_contact: ["vendor_contact", "contact_name", "contact", "vendor_reference"],
+    freight_terms: ["freight_terms", "freight", "vendor_terms_conditions"],
     ship_to: ["ship_to", "shipto"],
-    bill_to: ["bill_to", "billto"],
+    bill_to: ["bill_to", "billto", "invoice_account"],
     po_description: ["po_description", "purchase_order_description", "project_name", "project"],
-    notes: ["notes", "comments", "remarks"],
+    notes: ["notes", "comments", "remarks", "purchase_type", "purchase_agreement_id", "vendor_account"],
     buyer_name: ["buyer_name", "buyer", "purchased_by"],
-    status: ["status", "po_status"]
+    status: ["status", "po_status", "approval_status"]
   };
   const normalized = {};
   for (const [target, keys] of Object.entries(aliases)) {
@@ -8009,7 +8009,7 @@ app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req,
     <h1>Import PO</h1>
     <div class="card">
       <h3>Import PO Headers</h3>
-      <p class="muted">Use this import for the PO header data only. Missing vendors are added automatically. Supported columns: po_no, vendor_name, po_description, vendor_contact, freight_terms, ship_to, bill_to, notes, buyer_name, status.</p>
+      <p class="muted">Use this import for PO header data only. It now matches the AX export layout and also accepts the app's shorter field names. Missing vendors are added automatically.</p>
       <div class="actions"><a class="btn btn-secondary" href="/po/import/headers/template">Download Header Template</a></div>
       <form method="post" enctype="multipart/form-data" action="/po/import/headers/preview" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
@@ -8032,8 +8032,8 @@ app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req,
 
 app.get("/po/import/headers/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
   const csv = [
-    "po_no,vendor_name,po_description,vendor_contact,freight_terms,ship_to,bill_to,notes,buyer_name,status",
-    "PO-00001,Example Vendor,Pipe Supports Release 1,John Smith,FOB,SITE A,OFFICE A,Legacy header import sample,Buyer One,OPEN"
+    "Purchase order,Vendor reference,Project,Vendor account,Name,Invoice account,Purchase type,Approval status,Status,Purchase agreement ID,Total amount,Invoice date,Invoice,Open Payable,Vendor terms & conditions,Date signed",
+    "507647,,8617.001.97.8200,1035894,Deep South Tool & Supply LLC,1035894,Purchase order,Finalized,Invoiced,,217417.73,2025-06-30,1007PER,0,,"
   ].join("\\n");
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="po-header-import-template.csv"');
