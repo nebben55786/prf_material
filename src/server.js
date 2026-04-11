@@ -5616,7 +5616,7 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
             <colgroup>
               <col style="width:180px" />
               <col style="width:120px" />
-              <col style="width:260px" />
+              <col style="width:360px" />
               <col style="width:120px" />
               <col style="width:80px" />
               <col style="width:110px" />
