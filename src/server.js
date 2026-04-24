@@ -7561,7 +7561,7 @@ app.get("/vendors", requireAuth, requireJobContext, requirePermission("vendors",
         <td>${(vendor.categories || "").split(",").filter(Boolean).map((value) => `<span class="chip">${esc(value)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
         <td>${esc(vendor.contact_count)}</td>
         <td>${vendor.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-        <td><div class="actions"><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit#contacts">Contacts</a>${vendor.is_active ? `<form method="post" action="/vendors/${vendor.id}/deactivate"><button class="btn btn-danger" type="submit">Deactivate</button></form>` : `<form method="post" action="/vendors/${vendor.id}/activate"><button class="btn btn-primary" type="submit">Activate</button></form>`}</div></td>
+        <td><div class="actions"><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit#contacts">Contacts</a></div></td>
       </tr>`).join("");
   const categoryOptions = [`<option value="">All Categories</option>`]
     .concat(vendorCategories.map((value) => `<option value="${esc(value)}" ${category === value ? "selected" : ""}>${esc(value)}</option>`))
@@ -7653,7 +7653,13 @@ app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("
             <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(vendor.phone || ""))}" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
           </div>
           <div><label>Categories</label><div class="check-grid">${checks}</div></div>
-          <div class="actions"><button type="submit">Save Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
+          <div class="actions">
+            <button type="submit">Save Vendor</button>
+            <a class="btn btn-secondary" href="/vendors">Back</a>
+            ${vendor.is_active
+              ? `<form method="post" action="/vendors/${vendor.id}/deactivate"><button class="btn btn-danger" type="submit">Deactivate</button></form>`
+              : `<form method="post" action="/vendors/${vendor.id}/activate"><button class="btn btn-primary" type="submit">Activate</button></form>`}
+          </div>
         </form>
       </div>
       <div class="card" id="contacts">
