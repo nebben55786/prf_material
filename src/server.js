@@ -3525,6 +3525,12 @@ function canEditRequisition(user, header) {
   return header.status === "REQUESTED" && canAccess(user, "requisitions", "edit");
 }
 
+function canSignRequisition(user, header) {
+  if (!user || !header) return false;
+  if (!canAccess(user, "requisitions", "issue")) return false;
+  return ["VERIFIED", "ISSUED"].includes(String(header.status || "").toUpperCase());
+}
+
 async function recalcRfqStatus(client, rfqId) {
   const rfq = (await client.query("select id, job_id from rfqs where id = $1", [rfqId])).rows[0];
   if (!rfq) return;
@@ -6853,7 +6859,9 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td>${esc(formatShortDateTime(row.created_at))}</td>
     <td><div class="actions">${
       row.status === "VERIFIED"
-        ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>`
+        ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">Sign</a>` : ""}`
+        : row.status === "ISSUED" && canAccess(req.user, "requisitions", "issue")
+          ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
         : row.status === "CANCELLED" && req.user?.role === "admin"
           ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
           : ""
@@ -7012,6 +7020,9 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
     }
   }
+  if (canSignRequisition(req.user, header)) {
+    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${header.signed_at || header.signed_copy_filename ? "Update Sign-Off" : "Sign Requisition"}</a>`);
+  }
   if (req.user?.role === "admin" && header.status !== "CANCELLED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/cancel" onsubmit="return confirm('Cancel this requisition? The record will be kept. If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Cancel Requisition</button></form>`);
   }
@@ -7026,9 +7037,214 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
       ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}
     </div>
+    <div class="card">
+      <h3>Warehouse Sign-Off</h3>
+      <p class="muted">Use either a signed paper copy upload or an electronic signature from an iPad. Both stay attached to this requisition.</p>
+      <p class="muted">Signed By: ${esc(header.signed_by_name || "") || `<span class="muted">Not signed yet</span>`} ${header.signed_at ? `| Signed At: ${esc(formatShortDateTime(header.signed_at))}` : ""}</p>
+      <div class="actions">
+        ${canSignRequisition(req.user, header) ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${header.signed_at || header.signed_copy_filename ? "Open Sign-Off Page" : "Capture Sign-Off"}</a>` : ""}
+        ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/signed-copy" target="_blank">Open Uploaded Signed Copy</a>` : ""}
+      </div>
+      ${header.signed_signature_data ? `<div style="margin-top:12px;"><label>Electronic Signature</label><div class="card" style="padding:12px; background:#fff;"><img src="${escAttr(header.signed_signature_data)}" alt="Electronic requisition signature" style="max-width:100%; max-height:180px; display:block;" /></div></div>` : `<p class="muted">No electronic signature saved yet.</p>`}
+      ${header.signed_copy_filename ? `<p class="muted">Uploaded signed copy: ${esc(header.signed_copy_filename)}</p>` : `<p class="muted">No signed paper copy uploaded yet.</p>`}
+    </div>
     <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th></tr>${lineRows || `<tr><td colspan="12" class="muted">No lines on this requisition.</td></tr>`}</table></div>
   `, req.user));
 });
+
+app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const header = (await query(`
+    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
+    from material_requisitions mr
+    join bom_headers bh on bh.id = mr.bom_id
+    where mr.id = $1 and mr.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
+  if (!header) throw new Error("Requisition not found.");
+  if (!canSignRequisition(req.user, header)) throw new Error("Only verified or issued requisitions can be signed.");
+  const defaultSigner = String(header.signed_by_name || req.user.username || "").trim();
+  res.send(layout(`Sign ${header.requisition_no}`, `
+    <h1>Sign Requisition ${esc(header.requisition_no)}</h1>
+    <div class="card">
+      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | Status: ${esc(header.status)} | Requested By: ${esc(header.requested_by_name)}</p>
+      <div class="actions">
+        ${header.status === "VERIFIED" ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${header.id}/pick-ticket.pdf">Open Pick Ticket PDF</a>` : ""}
+        <a class="btn btn-secondary" href="/requisitions/${header.id}">Back To Requisition</a>
+      </div>
+    </div>
+    <div class="grid" style="align-items:start;">
+      <div class="card">
+        <h3>Electronic Signature</h3>
+        <p class="muted">This works well on iPads and touch screens.</p>
+        <form method="post" action="/requisitions/${header.id}/sign" class="stack" onsubmit="return submitRequisitionSignature();">
+          <div><label>Signed By</label><input id="requisition-signed-by-name" name="signed_by_name" value="${esc(defaultSigner)}" required /></div>
+          <input type="hidden" id="requisition-signature-data" name="signature_data" />
+          <div>
+            <label>Draw Signature</label>
+            <div class="card" style="padding:12px; background:#fff;">
+              <canvas id="requisition-signature-canvas" style="width:100%; height:220px; border:1px solid #8da0b3; background:#fff; touch-action:none; display:block;"></canvas>
+            </div>
+          </div>
+          <div class="actions">
+            <button type="submit">${header.signed_signature_data ? "Update Electronic Signature" : "Save Electronic Signature"}</button>
+            <button type="button" class="btn btn-secondary" onclick="clearRequisitionSignaturePad()">Clear Signature</button>
+          </div>
+        </form>
+        ${header.signed_signature_data ? `<div style="margin-top:12px;"><label>Current Saved Signature</label><div class="card" style="padding:12px; background:#fff;"><img src="${escAttr(header.signed_signature_data)}" alt="Saved requisition signature" style="max-width:100%; max-height:180px; display:block;" /></div></div>` : ""}
+      </div>
+      <div class="card">
+        <h3>Signed Paper Copy</h3>
+        <p class="muted">Upload a photo, scan, or PDF of a physically signed pick ticket.</p>
+        <form method="post" action="/requisitions/${header.id}/signed-copy" enctype="multipart/form-data" class="stack">
+          <div><label>Signed By</label><input name="signed_by_name" value="${esc(defaultSigner)}" required /></div>
+          <div><label>Signed Copy File</label><input type="file" name="signed_copy" accept=".pdf,image/png,image/jpeg,image/jpg" required /></div>
+          <div class="actions">
+            <button type="submit">${header.signed_copy_filename ? "Replace Uploaded Copy" : "Upload Signed Copy"}</button>
+            ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/signed-copy" target="_blank">Open Current Upload</a>` : ""}
+          </div>
+        </form>
+        ${header.signed_copy_filename ? `<p class="muted" style="margin-top:12px;">Current file: ${esc(header.signed_copy_filename)}</p>` : ""}
+      </div>
+    </div>
+    <script>
+      (function () {
+        const canvas = document.getElementById("requisition-signature-canvas");
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        let drawing = false;
+        let hasSignature = false;
+        function resizeCanvas() {
+          const ratio = Math.max(window.devicePixelRatio || 1, 1);
+          const bounds = canvas.getBoundingClientRect();
+          canvas.width = Math.floor(bounds.width * ratio);
+          canvas.height = Math.floor(bounds.height * ratio);
+          ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          ctx.strokeStyle = "#17324d";
+          ctx.lineWidth = 2;
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, bounds.width, bounds.height);
+        }
+        function pointFromEvent(event) {
+          const rect = canvas.getBoundingClientRect();
+          const source = event.touches && event.touches[0] ? event.touches[0] : event;
+          return { x: source.clientX - rect.left, y: source.clientY - rect.top };
+        }
+        function start(event) {
+          event.preventDefault();
+          const point = pointFromEvent(event);
+          drawing = true;
+          hasSignature = true;
+          ctx.beginPath();
+          ctx.moveTo(point.x, point.y);
+        }
+        function move(event) {
+          if (!drawing) return;
+          event.preventDefault();
+          const point = pointFromEvent(event);
+          ctx.lineTo(point.x, point.y);
+          ctx.stroke();
+        }
+        function end(event) {
+          if (!drawing) return;
+          event.preventDefault();
+          drawing = false;
+        }
+        canvas.addEventListener("mousedown", start);
+        canvas.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", end);
+        canvas.addEventListener("touchstart", start, { passive: false });
+        canvas.addEventListener("touchmove", move, { passive: false });
+        canvas.addEventListener("touchend", end, { passive: false });
+        window.addEventListener("resize", resizeCanvas);
+        resizeCanvas();
+        window.clearRequisitionSignaturePad = function () {
+          hasSignature = false;
+          resizeCanvas();
+        };
+        window.submitRequisitionSignature = function () {
+          const signer = document.getElementById("requisition-signed-by-name");
+          const input = document.getElementById("requisition-signature-data");
+          if (!signer || !String(signer.value || "").trim()) {
+            alert("Enter the signer name first.");
+            return false;
+          }
+          if (!hasSignature) {
+            alert("Draw a signature before saving.");
+            return false;
+          }
+          input.value = canvas.toDataURL("image/png");
+          return true;
+        };
+      }());
+    </script>
+  `, req.user));
+}));
+
+app.post("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const signedByName = String(req.body.signed_by_name || "").trim();
+  const signatureData = String(req.body.signature_data || "").trim();
+  if (!signedByName) throw new Error("Signer name is required.");
+  if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signatureData)) throw new Error("A valid signature image is required.");
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (!canSignRequisition(req.user, header)) throw new Error("Only verified or issued requisitions can be signed.");
+    await client.query(`
+      update material_requisitions
+      set signed_at = now(),
+          signed_by_name = $2,
+          signed_signature_data = $3
+      where id = $1 and job_id = $4
+    `, [req.params.id, signedByName, signatureData, jobId]);
+    await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|electronic|${signedByName}`);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), upload.single("signed_copy"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const signedByName = String(req.body.signed_by_name || "").trim();
+  const file = req.file;
+  if (!signedByName) throw new Error("Signer name is required.");
+  if (!file?.buffer?.length) throw new Error("Select a signed copy file to upload.");
+  const allowedTypes = new Set(["application/pdf", "image/png", "image/jpeg"]);
+  if (!allowedTypes.has(String(file.mimetype || "").toLowerCase())) {
+    throw new Error("Signed copy must be a PDF, PNG, or JPEG file.");
+  }
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (!canSignRequisition(req.user, header)) throw new Error("Only verified or issued requisitions can be signed.");
+    await client.query(`
+      update material_requisitions
+      set signed_at = now(),
+          signed_by_name = $2,
+          signed_copy_filename = $3,
+          signed_copy_mime = $4,
+          signed_copy_data = $5
+      where id = $1 and job_id = $6
+    `, [req.params.id, signedByName, String(file.originalname || "signed-copy").slice(0, 255), file.mimetype, file.buffer, jobId]);
+    await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|upload|${signedByName}|${file.originalname || "signed-copy"}`);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.get("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const header = (await query(`
+    select requisition_no, signed_copy_filename, signed_copy_mime, signed_copy_data
+    from material_requisitions
+    where id = $1 and job_id = $2
+  `, [req.params.id, jobId])).rows[0];
+  if (!header) throw new Error("Requisition not found.");
+  if (!header.signed_copy_data) throw new Error("No signed copy has been uploaded for this requisition.");
+  res.setHeader("Content-Type", String(header.signed_copy_mime || "application/octet-stream"));
+  res.setHeader("Content-Disposition", `inline; filename="${String(header.signed_copy_filename || `${header.requisition_no}-signed-copy`).replace(/[^A-Za-z0-9._-]/g, "_")}"`);
+  res.send(header.signed_copy_data);
+}));
 
 app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);

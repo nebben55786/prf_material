@@ -150,6 +150,12 @@ create table if not exists material_requisitions (
   verified_by_user_id bigint references users(id) on delete set null,
   issued_at timestamptz,
   issued_by_user_id bigint references users(id) on delete set null,
+  signed_at timestamptz,
+  signed_by_name text,
+  signed_signature_data text,
+  signed_copy_filename text,
+  signed_copy_mime text,
+  signed_copy_data bytea,
   created_at timestamptz not null default now()
 );
 
@@ -177,6 +183,12 @@ alter table material_requisitions add column if not exists verified_at timestamp
 alter table material_requisitions add column if not exists verified_by_user_id bigint references users(id) on delete set null;
 alter table material_requisitions add column if not exists issued_at timestamptz;
 alter table material_requisitions add column if not exists issued_by_user_id bigint references users(id) on delete set null;
+alter table material_requisitions add column if not exists signed_at timestamptz;
+alter table material_requisitions add column if not exists signed_by_name text;
+alter table material_requisitions add column if not exists signed_signature_data text;
+alter table material_requisitions add column if not exists signed_copy_filename text;
+alter table material_requisitions add column if not exists signed_copy_mime text;
+alter table material_requisitions add column if not exists signed_copy_data bytea;
 alter table material_requisition_lines add column if not exists qty_issued numeric(18,4) not null default 0;
 update material_requisitions set status = 'REQUESTED' where status = 'OPEN';
 
