@@ -36,36 +36,83 @@ cross join (
 ) j
 on conflict (user_id, job_id) do nothing;
 
-alter table vendors add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table vendor_contacts add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table material_items add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table rfqs add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table bom_headers add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table bom_lines add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table material_requisitions add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table material_requisition_lines add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table material_issue_transactions add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table rfq_items add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table rfq_vendors add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table quotes add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table quote_revisions add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table material_log_lookup_values add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table warehouses add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table warehouse_locations add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table import_batches add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table purchase_orders add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table po_lines add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table receipts add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table material_receiving_logs add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table mrr_logs add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table fmr_logs add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table opi_logs add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table osd_logs add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table inventory_audit_counts add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table inventory_audit_reports add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table inventory_audit_report_lines add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table inventory_adjustment_lines add column if not exists job_id bigint references jobs(id) on delete cascade;
-alter table vendor_fmr_request_lines add column if not exists job_id bigint references jobs(id) on delete cascade;
+do $$
+declare
+  target_table text;
+  physical_column_count integer;
+  target_tables text[] := array[
+    'vendors',
+    'vendor_contacts',
+    'material_items',
+    'rfqs',
+    'bom_headers',
+    'bom_lines',
+    'material_requisitions',
+    'material_requisition_lines',
+    'material_issue_transactions',
+    'rfq_items',
+    'rfq_vendors',
+    'quotes',
+    'quote_revisions',
+    'material_log_lookup_values',
+    'warehouses',
+    'warehouse_locations',
+    'import_batches',
+    'purchase_orders',
+    'po_lines',
+    'receipts',
+    'material_receiving_logs',
+    'mrr_logs',
+    'fmr_logs',
+    'opi_logs',
+    'osd_logs',
+    'inventory_audit_counts',
+    'inventory_audit_reports',
+    'inventory_audit_report_lines',
+    'inventory_adjustment_lines',
+    'vendor_fmr_request_lines'
+  ];
+begin
+  foreach target_table in array target_tables loop
+    if exists (
+      select 1
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = target_table
+        and column_name = 'job_id'
+    ) then
+      continue;
+    end if;
+
+    select count(*)
+    into physical_column_count
+    from pg_attribute
+    where attrelid = to_regclass(format('public.%I', target_table))
+      and attnum > 0;
+
+    if physical_column_count >= 1600 then
+      raise exception
+        'Cannot add job_id to table "%": table already has % physical columns (including dropped columns).',
+        target_table,
+        physical_column_count
+        using errcode = '54011';
+    end if;
+
+    begin
+      execute format(
+        'alter table %I add column if not exists job_id bigint references jobs(id) on delete cascade',
+        target_table
+      );
+    exception
+      when others then
+        raise exception
+          'Failed adding job_id to table "%": %',
+          target_table,
+          SQLERRM
+          using errcode = SQLSTATE;
+    end;
+  end loop;
+end $$;
 
 with initial_job as (
   select id, job_number
