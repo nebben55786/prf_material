@@ -1069,8 +1069,8 @@ function renderJobSwitcher(user) {
   return `
     <form method="post" action="/jobs/select" class="job-switcher">
       <label>Current Job</label>
-      <input type="hidden" name="return_to" value="" />
-      <select name="job_id" onchange="this.form.return_to.value = window.location.pathname + window.location.search; this.form.submit();">
+      <input type="hidden" name="return_to" value="/dashboard" />
+      <select name="job_id" onchange="this.form.submit();">
         ${options}
       </select>
     </form>
