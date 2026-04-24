@@ -2199,6 +2199,14 @@ function textValue(value) {
   return String(value).trim();
 }
 
+function firstNonEmptyWorkbookValue(row, ...keys) {
+  for (const key of keys) {
+    const value = textValue(row?.[key]);
+    if (value) return value;
+  }
+  return "";
+}
+
 function numberValue(value) {
   const parsed = Number(String(value ?? "").replace(/,/g, "").trim());
   return Number.isFinite(parsed) ? parsed : 0;
@@ -10712,6 +10720,8 @@ app.get("/material-logs", requireAuth, requireJobContext, requirePermission("mat
 app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
   const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
+  const imported = Number.parseInt(String(req.query.imported || ""), 10);
+  const skipped = Number.parseInt(String(req.query.skipped || ""), 10);
   const rows = (await query(`
     select m.id, m.discipline, m.mrr_number, m.vendor_name, coalesce(po.po_no, m.po_number) as po_number,
            m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number
@@ -10737,6 +10747,11 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
   </tr>`).join("");
   res.send(layout("MRR Log", `
     <h1>MRR Log</h1>
+    ${Number.isFinite(imported) && imported >= 0 ? `
+      <div class="card success">
+        Imported ${esc(imported)} MRR row${imported === 1 ? "" : "s"}${Number.isFinite(skipped) && skipped > 0 ? ` and skipped ${esc(skipped)} row${skipped === 1 ? "" : "s"} with no MRR number.` : ""}.
+      </div>
+    ` : ""}
     <div class="card">
       <form method="get" action="/material-logs/mrr" class="stack">
         <div class="grid" style="grid-template-columns: 1fr auto auto;">
@@ -11432,6 +11447,8 @@ app.post("/material-logs/import", requireAuth, requireJobContext, requirePermiss
   const logType = String(req.body.log_type || "").trim();
   const rows = importRowsFromWorkbook(req.file.buffer, logType);
   if (rows.length === 0) throw new Error("No rows were found in that workbook.");
+  let importedCount = 0;
+  let skippedCount = 0;
 
   await withTransaction(async (client) => {
     if (logType === "receiving") {
@@ -11557,11 +11574,15 @@ app.post("/material-logs/import", requireAuth, requireJobContext, requirePermiss
           textValue(row.scope),
           textValue(row.on_off_skid)
         ]);
+        importedCount += 1;
       }
     } else if (logType === "mrr") {
       for (const row of rows) {
-        const mrrNumber = textValue(row.mrr_number);
-        if (!mrrNumber) continue;
+        const mrrNumber = firstNonEmptyWorkbookValue(row, "mrr_number", "mrr", "mrr_no");
+        if (!mrrNumber) {
+          skippedCount += 1;
+          continue;
+        }
         await client.query(`
           insert into mrr_logs (
             job_id, discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by,
@@ -11596,28 +11617,29 @@ app.post("/material-logs/import", requireAuth, requireJobContext, requirePermiss
             updated_at = now()
         `, [
           jobId,
-          textValue(row.discipline),
+          firstNonEmptyWorkbookValue(row, "discipline"),
           mrrNumber,
-          textValue(row.vendor),
-          textValue(row.po),
-          textValue(row.pick_ticket),
-          textValue(row.material_description),
-          textValue(row.received_date),
-          textValue(row.received_by),
-          textValue(row.mrr_lookup),
-          textValue(row.client_mrr),
-          textValue(row.mrr_link),
-          textValue(row.mtrs),
-          textValue(row.os_d),
-          textValue(row.notes),
-          textValue(row.blank_mrr_link),
-          textValue(row.mrr_entered),
-          textValue(row.pictures_loaded),
-          textValue(row.sent_to_matheson),
-          textValue(row.load),
-          textValue(row.opi),
-          textValue(row.opi_date)
+          firstNonEmptyWorkbookValue(row, "vendor", "vendor_name"),
+          firstNonEmptyWorkbookValue(row, "po", "po_number"),
+          firstNonEmptyWorkbookValue(row, "pick_ticket", "pick_ticket_number"),
+          firstNonEmptyWorkbookValue(row, "material_description", "description"),
+          firstNonEmptyWorkbookValue(row, "received_date", "recv_date"),
+          firstNonEmptyWorkbookValue(row, "received_by"),
+          firstNonEmptyWorkbookValue(row, "mrr_lookup"),
+          firstNonEmptyWorkbookValue(row, "client_mrr"),
+          firstNonEmptyWorkbookValue(row, "mrr_link", "mrr_link_label"),
+          firstNonEmptyWorkbookValue(row, "mtrs", "mtrs_required"),
+          firstNonEmptyWorkbookValue(row, "os_d", "osd_required"),
+          firstNonEmptyWorkbookValue(row, "notes", "comments"),
+          firstNonEmptyWorkbookValue(row, "blank_mrr_link", "blank_mrr_link_label"),
+          firstNonEmptyWorkbookValue(row, "mrr_entered"),
+          firstNonEmptyWorkbookValue(row, "pictures_loaded"),
+          firstNonEmptyWorkbookValue(row, "sent_to_matheson"),
+          firstNonEmptyWorkbookValue(row, "load", "load_number"),
+          firstNonEmptyWorkbookValue(row, "opi", "opi_number"),
+          firstNonEmptyWorkbookValue(row, "opi_date")
         ]);
+        importedCount += 1;
       }
       await syncMrrVendorsIntoVendorTable(client, jobId);
       await syncOpiLogsFromMrr(client, jobId);
@@ -11671,6 +11693,7 @@ app.post("/material-logs/import", requireAuth, requireJobContext, requirePermiss
           textValue(row.pickup_location),
           textValue(row.pickup_date)
         ]);
+        importedCount += 1;
       }
     } else {
       throw new Error("Choose a valid log type.");
@@ -11678,14 +11701,17 @@ app.post("/material-logs/import", requireAuth, requireJobContext, requirePermiss
     if (logType === "mrr") {
       for (const row of rows) {
         await saveMaterialLogLookup(client, "discipline", textValue(row.discipline), jobId);
-        await saveMaterialLogLookup(client, "vendor_name", textValue(row.vendor), jobId);
-        await saveMaterialLogLookup(client, "po_number", textValue(row.po), jobId);
+        await saveMaterialLogLookup(client, "vendor_name", firstNonEmptyWorkbookValue(row, "vendor", "vendor_name"), jobId);
+        await saveMaterialLogLookup(client, "po_number", firstNonEmptyWorkbookValue(row, "po", "po_number"), jobId);
         await saveMaterialLogLookup(client, "received_by", textValue(row.received_by), jobId);
       }
     }
     await auditLog(client, req.user.id, "import", "material_logs", logType, `rows=${rows.length}`);
   });
-
+  if (logType === "mrr") {
+    res.redirect(`/material-logs/mrr?imported=${importedCount}&skipped=${skippedCount}`);
+    return;
+  }
   res.redirect("/settings/material-log-imports");
 });
 
