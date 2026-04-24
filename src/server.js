@@ -4086,6 +4086,7 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
         <a class="btn btn-primary" href="/settings/job-setup">Job Setup</a>
         <a class="btn btn-primary" href="/settings/warehouse-setup">Warehouse Setup</a>
         <a class="btn btn-primary" href="/settings/user-management">User Management</a>
+        ${req.user.role === "admin" ? `<a class="btn btn-primary" href="/settings/audit-log">Audit Log</a>` : ""}
       </div>
       <p class="muted" style="margin-top:12px;">Use these setup pages to manage job settings, warehouse/location setup, and users without crowding the main settings screen.</p>
     </div>
@@ -4107,6 +4108,115 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
     </div>
   `, req.user));
 });
+
+app.get("/settings/audit-log", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const userFilter = String(req.query.user || "").trim();
+  const actionFilter = String(req.query.action || "").trim();
+  const entityFilter = String(req.query.entity_type || "").trim();
+  const limit = Math.max(25, Math.min(500, Number(req.query.limit || 100) || 100));
+  const whereClauses = [];
+  const params = [];
+  if (userFilter) {
+    params.push(userFilter);
+    whereClauses.push(`coalesce(u.username, '') ilike $${params.length}`);
+  }
+  if (actionFilter) {
+    params.push(actionFilter);
+    whereClauses.push(`a.action ilike $${params.length}`);
+  }
+  if (entityFilter) {
+    params.push(entityFilter);
+    whereClauses.push(`a.entity_type ilike $${params.length}`);
+  }
+  params.push(limit);
+  const whereSql = whereClauses.length ? `where ${whereClauses.join(" and ")}` : "";
+  const [entriesRes, actionOptionsRes, entityOptionsRes] = await Promise.all([
+    query(`
+      select
+        a.id,
+        a.created_at,
+        a.action,
+        a.entity_type,
+        a.entity_id,
+        a.details,
+        u.username
+      from audit_log a
+      left join users u on u.id = a.user_id
+      ${whereSql}
+      order by a.created_at desc, a.id desc
+      limit $${params.length}
+    `, params),
+    query("select distinct action from audit_log where coalesce(action, '') <> '' order by action asc"),
+    query("select distinct entity_type from audit_log where coalesce(entity_type, '') <> '' order by entity_type asc")
+  ]);
+  const actionOptions = actionOptionsRes.rows.map((row) => {
+    const value = String(row.action || "");
+    return `<option value="${esc(value)}" ${value === actionFilter ? "selected" : ""}>${esc(value)}</option>`;
+  }).join("");
+  const entityOptions = entityOptionsRes.rows.map((row) => {
+    const value = String(row.entity_type || "");
+    return `<option value="${esc(value)}" ${value === entityFilter ? "selected" : ""}>${esc(value)}</option>`;
+  }).join("");
+  const entryRows = entriesRes.rows.map((entry) => `
+    <tr>
+      <td>${esc(formatShortDateTime(entry.created_at))}</td>
+      <td>${esc(entry.username || "-")}</td>
+      <td>${esc(entry.action || "")}</td>
+      <td>${esc(entry.entity_type || "")}</td>
+      <td>${esc(entry.entity_id || "")}</td>
+      <td style="white-space:pre-wrap; word-break:break-word; min-width:280px;">${esc(entry.details || "")}</td>
+    </tr>
+  `).join("");
+  res.send(layout("Audit Log", `
+    <h1>Audit Log</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
+    </div>
+    <div class="card">
+      <form method="get" action="/settings/audit-log" class="stack">
+        <div class="grid">
+          <div>
+            <label>Username</label>
+            <input name="user" value="${esc(userFilter)}" placeholder="admin" />
+          </div>
+          <div>
+            <label>Action</label>
+            <select name="action">
+              <option value="">All actions</option>
+              ${actionOptions}
+            </select>
+          </div>
+          <div>
+            <label>Entity Type</label>
+            <select name="entity_type">
+              <option value="">All entity types</option>
+              ${entityOptions}
+            </select>
+          </div>
+          <div>
+            <label>Rows</label>
+            <select name="limit">
+              ${[50, 100, 250, 500].map((value) => `<option value="${value}" ${value === limit ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
+          </div>
+        </div>
+        <div class="actions">
+          <button type="submit">Filter Audit Log</button>
+          <a class="btn btn-secondary" href="/settings/audit-log">Clear</a>
+          <span class="muted">${entriesRes.rows.length} row(s)</span>
+        </div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Time</th><th>User</th><th>Action</th><th>Entity Type</th><th>Entity ID</th><th>Details</th></tr>
+        ${entryRows || `<tr><td colspan="6" class="muted">No audit log rows matched the current filters.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+}));
 
 app.get("/settings/reset-app", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const completedTarget = String(req.query.done || "").trim();
