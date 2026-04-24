@@ -7854,6 +7854,9 @@ app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "e
   res.send(layout("Create RFQ", `
     <h1>Create RFQ</h1>
     <div class="card">
+      <div class="actions"><a class="btn btn-secondary" href="/rfq/import/template">Download RFQ Import Template</a></div>
+    </div>
+    <div class="card">
       <form id="rfq-create-form" method="post" action="/rfq" class="stack">
         <div class="grid">
           <div><label>Job Number</label><input value="${esc(jobNumber)}" readonly /></div>
@@ -7882,6 +7885,16 @@ app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "e
       </form>
     </div>
   `, req.user));
+});
+
+app.get("/rfq/import/template", requireAuth, requirePermission("rfqs", "edit"), async (_req, res) => {
+  const csv = [
+    "item_code,po_line,description,material_type,uom,spec,commodity_code,tag_number,size_1,size_2,thk_1,thk_2,qty,notes",
+    "100001,10,Sample item,misc,EA,ASTM A106,B31.3,TAG-001,2,,SCH 40,,5,Optional notes"
+  ].join("\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="rfq-import-template.csv"');
+  res.send(csv);
 });
 
 app.post("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
