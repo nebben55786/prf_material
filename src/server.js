@@ -1902,16 +1902,16 @@ async function upsertMaterialItem(client, row, jobId) {
 async function findOrCreateVendorByName(client, vendorName, jobId) {
   const normalized = String(vendorName || "").trim();
   if (!normalized) throw new Error("Vendor name is required.");
-  const existing = (await client.query("select id from vendors where job_id = $1 and lower(name) = lower($2) limit 1", [jobId, normalized])).rows[0];
+  const existing = (await client.query("select id from vendors where lower(name) = lower($1) limit 1", [normalized])).rows[0];
   if (existing) {
     await client.query("update vendors set is_active = true where id = $1", [existing.id]);
     return existing.id;
   }
   const insert = await client.query(`
     insert into vendors (job_id, name, contact_name, website, email, phone, categories, is_active)
-    values ($1, $2, '', '', '', '', '', true)
+    values (null, $1, '', '', '', '', '', true)
     returning id
-  `, [jobId, normalized]);
+  `, [normalized]);
   return insert.rows[0].id;
 }
 
@@ -2310,7 +2310,7 @@ async function getMaterialLogLookupOptions(kind, jobId = null) {
     from (
       select value from material_log_lookup_values where kind = $1 and ($2::bigint is null or job_id = $2)
       union
-      select name as value from vendors where $1 = 'vendor_name' and coalesce(name, '') <> '' and ($2::bigint is null or job_id = $2)
+      select name as value from vendors where $1 = 'vendor_name' and coalesce(name, '') <> ''
       union
       select po_no as value from purchase_orders where $1 = 'po_number' and coalesce(po_no, '') <> '' and ($2::bigint is null or job_id = $2)
       union
@@ -3189,9 +3189,9 @@ async function createOsdLog(client, payload) {
 async function syncMrrVendorsIntoVendorTable(client, jobId = null) {
   await client.query(`
     insert into vendors (job_id, name, contact_name, website, email, phone, categories)
-    select distinct $1, trim(m.vendor_name), '', '', '', '', ''
+    select distinct null, trim(m.vendor_name), '', '', '', '', ''
     from mrr_logs m
-    left join vendors v on v.job_id = $1 and lower(v.name) = lower(trim(m.vendor_name))
+    left join vendors v on lower(v.name) = lower(trim(m.vendor_name))
     where trim(coalesce(m.vendor_name, '')) <> ''
       and ($1::bigint is null or m.job_id = $1)
       and v.id is null
@@ -3591,7 +3591,7 @@ async function getRfqVendorRows(client, rfqId) {
     select rv.vendor_id, v.name
     from rfq_vendors rv
     join vendors v on v.id = rv.vendor_id
-    where rv.rfq_id = $1 and rv.job_id = $2 and v.job_id = $2
+    where rv.rfq_id = $1 and rv.job_id = $2
     order by v.name
   `, [rfqId, rfq.job_id])).rows;
 }
@@ -3609,7 +3609,7 @@ async function syncRfqVendors(client, rfqId, vendorIds) {
     insert into rfq_vendors (job_id, rfq_id, vendor_id)
     select $3, $1, vendor_id
     from unnest($2::bigint[]) as vendor_id
-    where exists (select 1 from vendors v where v.id = vendor_id and v.job_id = $3)
+    where exists (select 1 from vendors v where v.id = vendor_id)
     on conflict (rfq_id, vendor_id) do nothing
   `, [rfqId, deduped, rfq.job_id]);
 }
@@ -3981,7 +3981,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
     query("select count(*) from rfqs where job_id = $1", [jobId]),
     query("select count(*) from purchase_orders where job_id = $1", [jobId]),
     query("select count(*) from receipts where job_id = $1", [jobId]),
-    query("select count(*) from vendors where job_id = $1", [jobId]),
+    query("select count(*) from vendors"),
     query("select count(*) from receipts where job_id = $1 and osd_status <> 'OK'", [jobId]),
     Promise.resolve(req.user.activeJob?.job_number || ""),
     req.user.role === "admin"
@@ -7511,7 +7511,6 @@ app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePerm
 }));
 
 app.get("/vendors", requireAuth, requireJobContext, requirePermission("vendors", "view"), async (req, res) => {
-  const jobId = currentJobId(req);
   const search = String(req.query.search || "").trim();
   const category = String(req.query.category || "").trim();
   const showInactive = String(req.query.show_inactive || "").trim() === "1";
@@ -7526,18 +7525,18 @@ app.get("/vendors", requireAuth, requireJobContext, requirePermission("vendors",
     categories: "categories"
   };
   const sortColumn = vendorSortColumns[sort] || "name";
-  const where = ["v.job_id = $1"];
-  const params = [jobId];
+  const where = [];
+  const params = [];
   if (!showInactive) {
     where.push("v.is_active = true");
   }
   if (search) {
     params.push(`%${search}%`);
-    where.push(`(name ilike $${params.length} or coalesce(contact_name, '') ilike $${params.length} or coalesce(website, '') ilike $${params.length} or coalesce(email, '') ilike $${params.length} or coalesce(phone, '') ilike $${params.length})`);
+    where.push(`(v.name ilike $${params.length} or coalesce(v.contact_name, '') ilike $${params.length} or coalesce(v.website, '') ilike $${params.length} or coalesce(v.email, '') ilike $${params.length} or coalesce(v.phone, '') ilike $${params.length})`);
   }
   if (category) {
     params.push(`%${category}%`);
-    where.push(`coalesce(categories, '') ilike $${params.length}`);
+    where.push(`coalesce(v.categories, '') ilike $${params.length}`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const vendors = (await query(`
@@ -7547,10 +7546,9 @@ app.get("/vendors", requireAuth, requireJobContext, requirePermission("vendors",
     left join (
       select vendor_id, count(*) as contact_count
       from vendor_contacts
-      where job_id = $1
       group by vendor_id
     ) vc on vc.vendor_id = v.id
-    ${whereSql.replaceAll("name", "v.name").replaceAll("contact_name", "v.contact_name").replaceAll("email", "v.email").replaceAll("phone", "v.phone").replaceAll("categories", "v.categories")}
+    ${whereSql}
     order by coalesce(v.${sortColumn}, '') ${dir}, v.name asc
   `, params)).rows;
   const sortLink = (column) => `/vendors?search=${encodeURIComponent(search)}&category=${encodeURIComponent(category)}&show_inactive=${showInactive ? "1" : ""}&sort=${encodeURIComponent(column)}&dir=${encodeURIComponent(nextSortDir(sort, dir, column))}`;
@@ -7607,11 +7605,10 @@ app.get("/vendors/new", requireAuth, requireJobContext, requirePermission("vendo
 });
 
 app.post("/vendors/add", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
-  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
       const result = await client.query(
-        "insert into vendors (job_id, name, contact_name, website, email, phone, categories) values ($1, $2, $3, $4, $5, $6, $7) returning id",
-      [jobId, req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+        "insert into vendors (job_id, name, contact_name, website, email, phone, categories) values (null, $1, $2, $3, $4, $5, $6) returning id",
+      [req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
       );
     await syncLegacyVendorContact(client, result.rows[0].id);
     await auditLog(client, req.user.id, "create", "vendor", result.rows[0].id, req.body.name?.trim() || "");
@@ -7621,8 +7618,8 @@ app.post("/vendors/add", requireAuth, requireJobContext, requirePermission("vend
 
 app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
   const [vendorRes, contactsRes] = await Promise.all([
-    query("select * from vendors where id = $1 and job_id = $2", [req.params.id, currentJobId(req)]),
-    query("select * from vendor_contacts where vendor_id = $1 and job_id = $2 order by is_primary desc, contact_name asc, id asc", [req.params.id, currentJobId(req)])
+    query("select * from vendors where id = $1", [req.params.id]),
+    query("select * from vendor_contacts where vendor_id = $1 order by is_primary desc, contact_name asc, id asc", [req.params.id])
   ]);
   const vendor = vendorRes.rows[0];
   if (!vendor) {
@@ -7675,11 +7672,10 @@ app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("
 });
 
 app.post("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
-  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
       await client.query(
-        "update vendors set name = $2, contact_name = $3, website = $4, email = $5, phone = $6, categories = $7 where id = $1 and job_id = $8",
-      [req.params.id, req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories), jobId]
+        "update vendors set name = $2, contact_name = $3, website = $4, email = $5, phone = $6, categories = $7 where id = $1",
+      [req.params.id, req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
       );
     await syncLegacyVendorContact(client, req.params.id);
     await auditLog(client, req.user.id, "update", "vendor", req.params.id, req.body.name?.trim() || "");
@@ -7688,68 +7684,63 @@ app.post("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission(
 });
 
 app.post("/vendors/:id/contacts/add", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
-  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const vendorId = Number(req.params.id);
-    const vendor = (await client.query("select id from vendors where id = $1 and job_id = $2", [vendorId, jobId])).rows[0];
+    const vendor = (await client.query("select id from vendors where id = $1", [vendorId])).rows[0];
     if (!vendor) throw new Error("Vendor not found.");
     const contactName = String(req.body.contact_name || "").trim();
     if (!contactName) throw new Error("Contact name is required.");
     await client.query(`
       insert into vendor_contacts (job_id, vendor_id, contact_name, email, phone, is_primary)
-      values ($1, $2, $3, $4, $5, false)
-    `, [jobId, vendorId, contactName, normalizeEmail(req.body.email), normalizePhone(req.body.phone)]);
+      values (null, $1, $2, $3, $4, false)
+    `, [vendorId, contactName, normalizeEmail(req.body.email), normalizePhone(req.body.phone)]);
     await auditLog(client, req.user.id, "create", "vendor_contact", vendorId, contactName);
   });
   res.redirect(`/vendors/${req.params.id}/edit`);
 });
 
 app.post("/vendors/:id/deactivate", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
-  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await client.query("update vendors set is_active = false where id = $1 and job_id = $2", [req.params.id, jobId]);
+    await client.query("update vendors set is_active = false where id = $1", [req.params.id]);
     await auditLog(client, req.user.id, "deactivate", "vendor", req.params.id, "");
   });
   res.redirect("/vendors");
 });
 
 app.post("/vendors/:id/activate", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
-  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await client.query("update vendors set is_active = true where id = $1 and job_id = $2", [req.params.id, jobId]);
+    await client.query("update vendors set is_active = true where id = $1", [req.params.id]);
     await auditLog(client, req.user.id, "activate", "vendor", req.params.id, "");
   });
   res.redirect("/vendors");
 });
 
 app.post("/vendors/:id/contacts/:contactId/primary", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
-  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const vendorId = Number(req.params.id);
     const contactId = Number(req.params.contactId);
-    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2 and job_id = $3", [contactId, vendorId, jobId])).rows[0];
+    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2", [contactId, vendorId])).rows[0];
     if (!contact) throw new Error("Vendor contact not found.");
-    await client.query("update vendor_contacts set is_primary = false where vendor_id = $1 and job_id = $2", [vendorId, jobId]);
-    await client.query("update vendor_contacts set is_primary = true where id = $1 and job_id = $2", [contactId, jobId]);
+    await client.query("update vendor_contacts set is_primary = false where vendor_id = $1", [vendorId]);
+    await client.query("update vendor_contacts set is_primary = true where id = $1", [contactId]);
     await client.query(`
       update vendors
       set contact_name = $2, email = $3, phone = $4
-      where id = $1 and job_id = $5
-    `, [vendorId, contact.contact_name, normalizeEmail(contact.email), normalizePhone(contact.phone), jobId]);
+      where id = $1
+    `, [vendorId, contact.contact_name, normalizeEmail(contact.email), normalizePhone(contact.phone)]);
     await auditLog(client, req.user.id, "set_primary", "vendor_contact", contactId, contact.contact_name);
   });
   res.redirect(`/vendors/${req.params.id}/edit`);
 });
 
 app.post("/vendors/:id/contacts/:contactId/delete", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
-  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const vendorId = Number(req.params.id);
     const contactId = Number(req.params.contactId);
-    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2 and job_id = $3", [contactId, vendorId, jobId])).rows[0];
+    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2", [contactId, vendorId])).rows[0];
     if (!contact) throw new Error("Vendor contact not found.");
     if (contact.is_primary) throw new Error("Set another primary contact before deleting this one.");
-    await client.query("delete from vendor_contacts where id = $1 and job_id = $2", [contactId, jobId]);
+    await client.query("delete from vendor_contacts where id = $1", [contactId]);
     await auditLog(client, req.user.id, "delete", "vendor_contact", contactId, contact.contact_name);
   });
   res.redirect(`/vendors/${req.params.id}/edit`);
@@ -7762,7 +7753,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const status = String(req.query.status || "").trim();
   const itemCode = String(req.query.item_code || "").trim();
   const vendorId = String(req.query.vendor_id || "").trim();
-  const vendors = (await query("select id, name from vendors where job_id = $1 order by name", [jobId])).rows;
+  const vendors = (await query("select id, name from vendors order by name")).rows;
   const where = ["r.job_id = $1"];
   const params = [jobId];
   if (rfqNo) {
@@ -7850,7 +7841,7 @@ app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "e
   const [nextRfqNo, jobNumber, vendorsRes] = await Promise.all([
     getNextRfqNumber(null, jobId),
     Promise.resolve(String(req.user.activeJob?.job_number || "")),
-    query("select id, name from vendors where job_id = $1 and is_active = true order by name", [jobId])
+    query("select id, name from vendors where is_active = true order by name")
   ]);
   const vendors = vendorsRes.rows;
   const rfqStatusOptions = rfqStatuses.map((status) => `<option value="${status.value}" ${status.value === "SEND_FOR_QUOTES" ? "selected" : ""}>${esc(status.label)}</option>`).join("");
@@ -7956,7 +7947,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
     `, [rfqId]),
-    query("select id, name from vendors where job_id = $1 and is_active = true order by name", [jobId]),
+    query("select id, name from vendors where is_active = true order by name"),
     query(`
       select rv.vendor_id, v.name
       from rfq_vendors rv
@@ -8428,7 +8419,7 @@ app.get("/rfq/:id/quotes/import-page", requireAuth, requireJobContext, requirePe
       select rv.vendor_id, v.name
       from rfq_vendors rv
       join vendors v on v.id = rv.vendor_id
-      where rv.rfq_id = $1 and rv.job_id = $2 and v.job_id = $2
+      where rv.rfq_id = $1 and rv.job_id = $2
       order by v.name
     `, [rfqId, jobId])
   ]);
@@ -8595,7 +8586,7 @@ app.post("/rfq/:id/quotes/import", requireAuth, requireJobContext, requirePermis
       }
       let vendorId = scopedVendorId;
       if (!vendorId) {
-        const vendorRes = await client.query("select id from vendors where job_id = $1 and name = $2", [currentJobId(req), vendorName]);
+        const vendorRes = await client.query("select id from vendors where lower(name) = lower($1)", [vendorName]);
         if (vendorRes.rows[0]) {
           vendorId = vendorRes.rows[0].id;
         } else {
@@ -8852,7 +8843,7 @@ app.get("/rfq-item/:id/award", requireAuth, requireJobContext, async (req, res) 
       select v.id as vendor_id, v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
       from quotes q
       join vendors v on v.id = q.vendor_id
-      where q.rfq_item_id = $1 and q.job_id = $2 and v.job_id = $2
+      where q.rfq_item_id = $1 and q.job_id = $2
       order by q.unit_price, q.lead_days, v.name
     `, [req.params.id, jobId])
   ]);
@@ -9033,21 +9024,21 @@ app.get("/rfq-item/:id/quotes", requireAuth, requireJobContext, async (req, res)
     select rv.vendor_id as id, v.name
     from rfq_vendors rv
     join vendors v on v.id = rv.vendor_id
-    where rv.rfq_id = $1 and rv.job_id = $2 and v.job_id = $2
+    where rv.rfq_id = $1 and rv.job_id = $2
     order by v.name
   `, [item.rfq_id, jobId])).rows;
   const quotes = (await query(`
     select v.id as vendor_id, v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
     from quotes q
     join vendors v on v.id = q.vendor_id
-    where q.rfq_item_id = $1 and q.job_id = $2 and v.job_id = $2
+    where q.rfq_item_id = $1 and q.job_id = $2
     order by q.unit_price, q.lead_days
   `, [req.params.id, jobId])).rows;
   const revisions = (await query(`
     select v.name as vendor_name, qr.unit_price, qr.lead_days, qr.source_type, qr.created_at
     from quote_revisions qr
     join vendors v on v.id = qr.vendor_id
-    where qr.rfq_item_id = $1 and qr.job_id = $2 and v.job_id = $2
+    where qr.rfq_item_id = $1 and qr.job_id = $2
     order by qr.id desc
     limit 20
   `, [req.params.id, jobId])).rows;
@@ -9207,7 +9198,7 @@ app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"),
     order by po.id desc
     limit 300
   `, params)).rows;
-  const vendors = (await query("select id, name from vendors where job_id = $1 order by name", [jobId])).rows;
+  const vendors = (await query("select id, name from vendors order by name")).rows;
   const poRows = pos.map((po) => `<tr>
     <td>${esc(po.po_no)}</td>
     <td>${esc(po.vendor)}</td>
@@ -9459,7 +9450,7 @@ app.get("/po/new", requireAuth, requireJobContext, requirePermission("pos", "edi
 
 app.get("/po/new/manual", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
-  const vendors = (await query("select id, name from vendors where job_id = $1 and is_active = true order by name", [jobId])).rows;
+  const vendors = (await query("select id, name from vendors where is_active = true order by name")).rows;
   const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
   const poHeaders = (await query(`
     select po_no, coalesce(description, '') as description
@@ -9876,7 +9867,7 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
       where po.id = $1
         and po.job_id = $2
     `, [req.params.id, jobId]),
-    query("select id, name from vendors where job_id = $1 order by name", [jobId]),
+    query("select id, name from vendors order by name"),
     query(`
       select pl.id, coalesce(pl.po_line, '') as po_line, mi.item_code, mi.description, pl.qty_ordered, pl.unit_price,
              coalesce(pl.size_1, '') as size_1, coalesce(pl.size_2, '') as size_2, coalesce(pl.thk_1, '') as thk_1, coalesce(pl.thk_2, '') as thk_2
@@ -11343,7 +11334,7 @@ app.get("/material-logs/fmr/new", requireAuth, requireJobContext, requirePermiss
   const jobId = currentJobId(req);
   const [nextFmrNumber, vendors] = await Promise.all([
     getNextFmrNumber(null, jobId),
-    query("select name from vendors where job_id = $1 and is_active = true order by name", [jobId])
+    query("select name from vendors where is_active = true order by name")
   ]);
   const vendorOptions = [`<option value="">Select vendor</option>`]
     .concat(vendors.rows.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
@@ -12046,7 +12037,7 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requireJobContext, requirePe
   const jobId = currentJobId(req);
   const [rowRes, vendors] = await Promise.all([
     query("select * from fmr_logs where id = $1 and job_id = $2", [req.params.id, jobId]),
-    query("select name from vendors where job_id = $1 and is_active = true order by name", [jobId])
+    query("select name from vendors where is_active = true order by name")
   ]);
   const row = rowRes.rows[0];
   if (!row) {
