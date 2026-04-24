@@ -6851,7 +6851,13 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
     <td><span class="chip">${esc(row.status)}</span></td>
     <td>${esc(formatShortDateTime(row.created_at))}</td>
-    <td>${row.status === "VERIFIED" ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>` : ""}</td>
+    <td><div class="actions">${
+      row.status === "VERIFIED"
+        ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>`
+        : row.status === "CANCELLED" && req.user?.role === "admin"
+          ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
+          : ""
+    }</div></td>
   </tr>`).join("");
   res.send(layout("Requisitions", `
     <h1>Material Requisitions</h1>
@@ -7008,6 +7014,9 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   }
   if (req.user?.role === "admin" && header.status !== "CANCELLED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/cancel" onsubmit="return confirm('Cancel this requisition? The record will be kept. If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Cancel Requisition</button></form>`);
+  }
+  if (req.user?.role === "admin" && header.status === "CANCELLED") {
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore Requisition</button></form>`);
   }
   res.send(layout(`Requisition ${header.requisition_no}`, `
     <h1>Requisition ${esc(header.requisition_no)}</h1>
@@ -7506,6 +7515,27 @@ app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePerm
         where id = $1 and job_id = $2
       `, [req.params.id, jobId]);
     await auditLog(client, req.user.id, "cancel", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/restore", requireAuth, requireJobContext, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
+  if (req.user?.role !== "admin") throw new Error("Only admins can restore cancelled requisitions.");
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "CANCELLED") throw new Error("Only cancelled requisitions can be restored.");
+    await client.query(`
+      update material_requisitions
+      set status = 'REQUESTED',
+          verified_at = null,
+          verified_by_user_id = null,
+          issued_at = null,
+          issued_by_user_id = null
+      where id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
+    await auditLog(client, req.user.id, "restore", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
