@@ -2226,16 +2226,41 @@ function workbookRowsFromSheet(workbook, sheetName, headerRowIndex) {
   return rows;
 }
 
+function firstWorkbookSheetName(workbook) {
+  return Array.isArray(workbook?.SheetNames) && workbook.SheetNames.length > 0
+    ? String(workbook.SheetNames[0] || "").trim()
+    : "";
+}
+
+function workbookRowsFromPreferredSheets(workbook, candidates = [], fallbackHeaderRowIndex = 0) {
+  for (const candidate of candidates) {
+    if (!candidate?.sheetName) continue;
+    const rows = workbookRowsFromSheet(workbook, candidate.sheetName, Number(candidate.headerRowIndex || 0));
+    if (rows.length > 0) return rows;
+  }
+  const fallbackSheetName = firstWorkbookSheetName(workbook);
+  if (!fallbackSheetName) return [];
+  return workbookRowsFromSheet(workbook, fallbackSheetName, fallbackHeaderRowIndex);
+}
+
 function importRowsFromWorkbook(fileBuffer, logType) {
   const workbook = XLSX.read(fileBuffer, { type: "buffer", cellDates: true });
   if (logType === "receiving") {
-    return workbookRowsFromSheet(workbook, workbook.SheetNames.includes("Table_Receiving") ? "Table_Receiving" : "Material Receiving", workbook.SheetNames.includes("Table_Receiving") ? 0 : 1);
+    return workbookRowsFromPreferredSheets(workbook, [
+      { sheetName: "Table_Receiving", headerRowIndex: 0 },
+      { sheetName: "Material Receiving", headerRowIndex: 1 }
+    ], 1);
   }
   if (logType === "mrr") {
-    return workbookRowsFromSheet(workbook, workbook.SheetNames.includes("MRR_Log_Table") ? "MRR_Log_Table" : "MRR Log", workbook.SheetNames.includes("MRR_Log_Table") ? 0 : 1);
+    return workbookRowsFromPreferredSheets(workbook, [
+      { sheetName: "MRR_Log_Table", headerRowIndex: 0 },
+      { sheetName: "MRR Log", headerRowIndex: 1 }
+    ], 1);
   }
   if (logType === "fmr") {
-    return workbookRowsFromSheet(workbook, "FMR Log", 4);
+    return workbookRowsFromPreferredSheets(workbook, [
+      { sheetName: "FMR Log", headerRowIndex: 4 }
+    ], 4);
   }
   throw new Error("Unsupported log type.");
 }
