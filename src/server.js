@@ -3844,6 +3844,11 @@ app.post("/login", asyncHandler(async (req, res) => {
     return;
   }
   const { activeJobs } = await resolveJobContextForUser(user);
+  try {
+    await auditLog(pool, user.id, "login", "auth", user.id, user.username);
+  } catch (error) {
+    console.error("Failed to write login audit log", error);
+  }
   if (user.role === "admin") {
     setSessionCookie(res, buildSessionPayload(user, null));
     res.redirect("/jobs/select");
@@ -4404,7 +4409,7 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
 });
 
 app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async (req, res) => {
-  const [usersRes, jobsRes, assignmentsRes] = await Promise.all([
+  const [usersRes, jobsRes, assignmentsRes, loginHistoryRes] = await Promise.all([
     query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username"),
     query("select id, job_number, plant_name, is_active from jobs order by job_number asc"),
     query(`
@@ -4412,6 +4417,22 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       from user_jobs uj
       join jobs j on j.id = uj.job_id
       order by j.job_number asc
+    `),
+    query(`
+      select
+        a.id,
+        a.user_id,
+        a.created_at,
+        coalesce(nullif(a.details, ''), u.username, concat('User #', a.entity_id)) as login_name,
+        u.first_name,
+        u.last_name,
+        u.role
+      from audit_log a
+      left join users u on u.id = a.user_id
+      where a.action = 'login'
+        and a.entity_type = 'auth'
+      order by a.created_at desc, a.id desc
+      limit 100
     `)
   ]);
   const jobs = jobsRes.rows;
@@ -4484,6 +4505,17 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       </td>
     </tr>
   `).join("");
+  const loginRows = loginHistoryRes.rows.map((entry) => {
+    const displayName = [String(entry.first_name || "").trim(), String(entry.last_name || "").trim()].filter(Boolean).join(" ");
+    return `
+      <tr>
+        <td>${esc(entry.login_name || "")}</td>
+        <td>${esc(displayName || "-")}</td>
+        <td>${esc(entry.role || "-")}</td>
+        <td>${esc(formatShortDateTime(entry.created_at))}</td>
+      </tr>
+    `;
+  }).join("");
   res.send(layout("User Management", `
     <h1>User Management</h1>
     <div class="card">
@@ -4536,6 +4568,14 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       <table>
         <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Jobs</th><th>Role</th><th>Status</th><th>Created</th><th>Edit / Delete</th></tr>
         ${userRows || `<tr><td colspan="10" class="muted">No users found.</td></tr>`}
+      </table>
+    </div>
+    <div class="card scroll">
+      <h3>Recent Login History</h3>
+      <div class="muted">Shows the 100 most recent successful sign-ins.</div>
+      <table>
+        <tr><th>Username</th><th>Name</th><th>Role</th><th>Login Time</th></tr>
+        ${loginRows || `<tr><td colspan="4" class="muted">No login history recorded yet.</td></tr>`}
       </table>
     </div>
   `, req.user));
