@@ -150,6 +150,29 @@ export async function initDb() {
     `
   );
 
+  const defaultPlantName = process.env.DEFAULT_PLANT_NAME || "";
+  const defaultPerformanceJobNumber = process.env.DEFAULT_PERFORMANCE_JOB_NUMBER || "";
+  const jobInsert = await pool.query(
+    `
+      insert into jobs (job_number, plant_name, performance_job_number, is_active)
+      values ($1, $2, $3, true)
+      on conflict (job_number) do update
+      set plant_name = case when coalesce(jobs.plant_name, '') = '' then excluded.plant_name else jobs.plant_name end,
+          performance_job_number = case when coalesce(jobs.performance_job_number, '') = '' then excluded.performance_job_number else jobs.performance_job_number end
+      returning id
+    `,
+    [defaultJobNumber, defaultPlantName, defaultPerformanceJobNumber]
+  );
+  const defaultJobId = Number(jobInsert.rows[0]?.id || 0);
+  if (defaultJobId > 0) {
+    await pool.query(`
+      insert into user_jobs (user_id, job_id)
+      select id, $1
+      from users
+      on conflict (user_id, job_id) do nothing
+    `, [defaultJobId]);
+  }
+
   const categorySetting = await pool.query("select value from app_settings where key = 'vendor_categories'");
   const loadedCategories = String(categorySetting.rows[0]?.value || "")
     .split(",")

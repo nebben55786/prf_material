@@ -139,12 +139,16 @@ function canEditInventoryAudit(user) {
   return user.role === "admin" || user.role === "warehouse" || canAccess(user, "inventory", "edit");
 }
 
-function getAppHeaderTitle() {
+function getAppHeaderTitle(user = null) {
+  const activeJob = user?.activeJob || null;
   const parts = [];
-  if (headerPlantName) parts.push(headerPlantName);
-  if (headerJobNumber) parts.push(headerJobNumber);
+  const plantName = String(activeJob?.plant_name || headerPlantName || "").trim();
+  const jobNumber = String(activeJob?.job_number || headerJobNumber || "").trim();
+  const performanceJobNumber = String(activeJob?.performance_job_number || headerPerformanceJobNumber || "").trim();
+  if (plantName) parts.push(plantName);
+  if (jobNumber) parts.push(jobNumber);
   parts.push("Material Control");
-  if (headerPerformanceJobNumber) parts.push(headerPerformanceJobNumber);
+  if (performanceJobNumber) parts.push(performanceJobNumber);
   return parts.filter(Boolean).join(" - ");
 }
 
@@ -1058,8 +1062,23 @@ function buildMrrFormPdf(header, lines, options = {}) {
   return buildDrawnPdf([content.join("\n")], { pageWidth, pageHeight });
 }
 
+function renderJobSwitcher(user) {
+  const jobs = Array.isArray(user?.accessibleJobs) ? user.accessibleJobs.filter((job) => job?.is_active !== false) : [];
+  if (!user || jobs.length <= 1) return "";
+  const options = jobs.map((job) => `<option value="${job.id}" ${Number(user.job_id) === Number(job.id) ? "selected" : ""}>${esc(job.job_number)}${job.plant_name ? ` - ${esc(job.plant_name)}` : ""}</option>`).join("");
+  return `
+    <form method="post" action="/jobs/select" class="job-switcher">
+      <label>Current Job</label>
+      <input type="hidden" name="return_to" value="" />
+      <select name="job_id" onchange="this.form.return_to.value = window.location.pathname + window.location.search; this.form.submit();">
+        ${options}
+      </select>
+    </form>
+  `;
+}
+
 function layout(title, body, user) {
-  const appHeaderTitle = getAppHeaderTitle();
+  const appHeaderTitle = getAppHeaderTitle(user);
   const navLinks = user
     ? permissionSections
         .filter((section) => canAccess(user, section.key, "view"))
@@ -1091,12 +1110,15 @@ function layout(title, body, user) {
       body { margin: 0; font-family: "Segoe UI", Tahoma, Verdana, sans-serif; color: var(--ink); background: var(--bg); }
       .shell { max-width: 1600px; margin: 0 auto; padding: 12px; }
       .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; padding: 10px 12px; background: linear-gradient(180deg, var(--header) 0%, var(--header-strong) 100%); border: 1px solid var(--line-strong); border-radius: 2px; box-shadow: inset 0 1px 0 rgba(255,255,255,.55); }
-      .brand-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; }
+      .brand-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; width: 100%; }
       .brand-link { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; min-width: 0; }
       .brand-logo { width: 74px; height: 46px; object-fit: contain; flex-shrink: 0; }
       .brand-copy { min-width: 0; }
       .brand { font-size: 22px; font-weight: 700; letter-spacing: .01em; }
       .userline { color: var(--muted); font-size: 12px; }
+      .job-switcher { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+      .job-switcher label { margin: 0; white-space: nowrap; }
+      .job-switcher select { min-width: 240px; }
       nav { display: flex; gap: 6px; flex-wrap: wrap; }
       nav a { color: #12324b; text-decoration: none; font-weight: 600; padding: 6px 9px; border: 1px solid transparent; border-radius: 2px; }
       nav a:hover { background: #edf1f4; border-color: var(--line); }
@@ -1530,6 +1552,7 @@ function layout(title, body, user) {
               ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
             </div>
           </a>
+          ${user ? renderJobSwitcher(user) : ""}
         </div>
         ${user ? `<nav>${navLinks}</nav>` : ""}
       </div>
@@ -1854,13 +1877,13 @@ function requestAccessPage(error = "", success = "") {
 
 const rfqItemColumns = ["po_line", "item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
 
-async function upsertMaterialItem(client, row) {
+async function upsertMaterialItem(client, row, jobId) {
   const itemCode = String(row.item_code || "").trim();
   const description = String(row.description || "").trim();
   const materialType = String(row.material_type || "").trim();
   const uom = String(row.uom || "").trim();
   if (!itemCode) throw new Error("Item code is required.");
-  const existing = await client.query("select id, description, material_type, uom from material_items where item_code = $1", [itemCode]);
+  const existing = await client.query("select id, description, material_type, uom from material_items where job_id = $1 and item_code = $2", [jobId, itemCode]);
   if (existing.rows[0]) {
     const current = existing.rows[0];
     await client.query(
@@ -1870,35 +1893,35 @@ async function upsertMaterialItem(client, row) {
     return current.id;
   }
   const insert = await client.query(
-    "insert into material_items (item_code, description, material_type, uom) values ($1, $2, $3, $4) returning id",
-    [itemCode, description || itemCode, materialType || "misc", uom || "EA"]
+    "insert into material_items (job_id, item_code, description, material_type, uom) values ($1, $2, $3, $4, $5) returning id",
+    [jobId, itemCode, description || itemCode, materialType || "misc", uom || "EA"]
   );
   return insert.rows[0].id;
 }
 
-async function findOrCreateVendorByName(client, vendorName) {
+async function findOrCreateVendorByName(client, vendorName, jobId) {
   const normalized = String(vendorName || "").trim();
   if (!normalized) throw new Error("Vendor name is required.");
-  const existing = (await client.query("select id from vendors where lower(name) = lower($1) limit 1", [normalized])).rows[0];
+  const existing = (await client.query("select id from vendors where job_id = $1 and lower(name) = lower($2) limit 1", [jobId, normalized])).rows[0];
   if (existing) {
     await client.query("update vendors set is_active = true where id = $1", [existing.id]);
     return existing.id;
   }
   const insert = await client.query(`
-    insert into vendors (name, contact_name, website, email, phone, categories, is_active)
-    values ($1, '', '', '', '', '', true)
+    insert into vendors (job_id, name, contact_name, website, email, phone, categories, is_active)
+    values ($1, $2, '', '', '', '', '', true)
     returning id
-  `, [normalized]);
+  `, [jobId, normalized]);
   return insert.rows[0].id;
 }
 
-async function upsertRfqItemRow(client, rfqId, row) {
+async function upsertRfqItemRow(client, rfqId, row, jobId) {
   const itemCode = String(row.item_code || "").trim();
   const requestedLine = String(row.po_line || row.line_no || row.line || "").trim();
   const qty = parseQtyValue(row.qty);
   if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
   if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
-  const materialItemId = await upsertMaterialItem(client, row);
+  const materialItemId = await upsertMaterialItem(client, row, jobId);
   const existingItem = await client.query(`
     select id, coalesce(po_line, '') as po_line
     from rfq_items
@@ -1917,13 +1940,13 @@ async function upsertRfqItemRow(client, rfqId, row) {
   }
   const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
   await client.query(`
-    insert into rfq_items (rfq_id, material_item_id, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
-    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
-  `, [rfqId, materialItemId, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
+    insert into rfq_items (job_id, rfq_id, material_item_id, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+  `, [jobId, rfqId, materialItemId, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
   return { status: "inserted" };
 }
 
-async function upsertPurchaseOrderRow(client, row) {
+async function upsertPurchaseOrderRow(client, row, jobId) {
   const poNo = String(row.po_no || row.po_number || "").trim();
   const vendorName = String(row.vendor_name || row.vendor || "").trim();
   const itemCode = String(row.item_code || "").trim();
@@ -1936,15 +1959,15 @@ async function upsertPurchaseOrderRow(client, row) {
   if (qtyOrdered <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty ordered must be greater than zero." };
   if (unitPrice < 0) return { status: "skipped", errorCode: "invalid_unit_price", message: "Unit price cannot be negative." };
 
-  const vendorId = await findOrCreateVendorByName(client, vendorName);
+  const vendorId = await findOrCreateVendorByName(client, vendorName, jobId);
   const materialItemId = await upsertMaterialItem(client, {
     item_code: itemCode,
     description: row.description || row.item_description || itemCode,
     material_type: row.material_type || row.type || "misc",
     uom: row.uom || row.unit || "EA"
-  });
+  }, jobId);
 
-  const poRow = (await client.query("select id from purchase_orders where po_no = $1", [poNo])).rows[0];
+  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2", [jobId, poNo])).rows[0];
   let poId;
   let headerStatus = "updated";
   if (poRow) {
@@ -1976,10 +1999,11 @@ async function upsertPurchaseOrderRow(client, row) {
     ]);
   } else {
     const insertPo = await client.query(`
-      insert into purchase_orders (po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, description, notes, buyer_name, status, updated_at)
-      values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
+      insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, description, notes, buyer_name, status, updated_at)
+      values ($1, $2, $3, null, $4, $5, $6, $7, $8, $9, $10, $11, now())
       returning id
     `, [
+      jobId,
       poNo,
       vendorId,
       String(row.vendor_contact || row.contact_name || "").trim(),
@@ -2017,20 +2041,20 @@ async function upsertPurchaseOrderRow(client, row) {
   }
 
   await client.query(`
-    insert into po_lines (po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
-    values ($1, null, $2, $3, $4, $5, $6, $7, $8, $9, now())
-  `, [poId, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
+    insert into po_lines (job_id, po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
+    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
+  `, [jobId, poId, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
   return { status: "inserted" };
 }
 
-async function upsertPurchaseOrderHeaderRow(client, row) {
+async function upsertPurchaseOrderHeaderRow(client, row, jobId) {
   const poNo = String(row.po_no || row.po_number || "").trim();
   const vendorName = String(row.vendor_name || row.vendor || "").trim();
   if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
   if (!vendorName) return { status: "skipped", errorCode: "missing_vendor", message: "Vendor name is required." };
 
-  const vendorId = await findOrCreateVendorByName(client, vendorName);
-  const poRow = (await client.query("select id from purchase_orders where po_no = $1", [poNo])).rows[0];
+  const vendorId = await findOrCreateVendorByName(client, vendorName, jobId);
+  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2", [jobId, poNo])).rows[0];
   if (poRow) {
     await client.query(`
       update purchase_orders
@@ -2061,9 +2085,10 @@ async function upsertPurchaseOrderHeaderRow(client, row) {
   }
 
   await client.query(`
-    insert into purchase_orders (po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, description, notes, buyer_name, status, updated_at)
-    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
+    insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, description, notes, buyer_name, status, updated_at)
+    values ($1, $2, $3, null, $4, $5, $6, $7, $8, $9, $10, $11, now())
   `, [
+    jobId,
     poNo,
     vendorId,
     String(row.vendor_contact || row.contact_name || "").trim(),
@@ -2078,7 +2103,7 @@ async function upsertPurchaseOrderHeaderRow(client, row) {
   return { status: "inserted" };
 }
 
-async function upsertPurchaseOrderLineRow(client, row) {
+async function upsertPurchaseOrderLineRow(client, row, jobId) {
   const poNo = String(row.po_no || row.po_number || "").trim();
   const itemCode = String(row.item_code || "").trim();
   const qtyOrdered = parseQtyValue(row.qty_ordered || row.qty || row.quantity);
@@ -2090,7 +2115,7 @@ async function upsertPurchaseOrderLineRow(client, row) {
   if (qtyOrdered <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty ordered must be greater than zero." };
   if (unitPrice < 0) return { status: "skipped", errorCode: "invalid_unit_price", message: "Unit price cannot be negative." };
 
-  const poRow = (await client.query("select id from purchase_orders where po_no = $1", [poNo])).rows[0];
+  const poRow = (await client.query("select id, job_id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
   if (!poRow) return { status: "skipped", errorCode: "missing_po_header", message: "PO header not found. Import or create the PO header first." };
 
   const materialItemId = await upsertMaterialItem(client, {
@@ -2098,7 +2123,7 @@ async function upsertPurchaseOrderLineRow(client, row) {
     description: row.description || row.item_description || itemCode,
     material_type: row.material_type || row.type || "misc",
     uom: row.uom || row.unit || "EA"
-  });
+  }, poRow.job_id);
 
   const size1 = String(row.size_1 || "").trim();
   const size2 = String(row.size_2 || "").trim();
@@ -2122,25 +2147,25 @@ async function upsertPurchaseOrderLineRow(client, row) {
   }
 
   await client.query(`
-    insert into po_lines (po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
-    values ($1, null, $2, $3, $4, $5, $6, $7, $8, $9, now())
-  `, [poRow.id, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
+    insert into po_lines (job_id, po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
+    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
+  `, [poRow.job_id, poRow.id, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
   return { status: "inserted" };
 }
 
-async function writeQuoteRevision(client, { rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId = null, createdBy = null }) {
+async function writeQuoteRevision(client, { rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId = null, createdBy = null, jobId = null }) {
   await client.query(`
-    insert into quote_revisions (rfq_item_id, vendor_id, unit_price, lead_days, source_type, source_batch_id, created_by)
-    values ($1, $2, $3, $4, $5, $6, $7)
-  `, [rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId, createdBy]);
+    insert into quote_revisions (job_id, rfq_item_id, vendor_id, unit_price, lead_days, source_type, source_batch_id, created_by)
+    values ($1, $2, $3, $4, $5, $6, $7, $8)
+  `, [jobId, rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId, createdBy]);
 }
 
-async function createImportBatch(client, { entityType, rfqId = null, uploadedBy, filename }) {
+async function createImportBatch(client, { entityType, rfqId = null, uploadedBy, filename, jobId = null }) {
   const result = await client.query(`
-    insert into import_batches (entity_type, rfq_id, uploaded_by, filename, status)
-    values ($1, $2, $3, $4, 'COMPLETED')
+    insert into import_batches (job_id, entity_type, rfq_id, uploaded_by, filename, status)
+    values ($1, $2, $3, $4, $5, 'COMPLETED')
     returning id
-  `, [entityType, rfqId, uploadedBy || null, filename || ""]);
+  `, [jobId, entityType, rfqId, uploadedBy || null, filename || ""]);
   return result.rows[0].id;
 }
 
@@ -2236,60 +2261,62 @@ function normalizeWarehouseLocationValues(warehouseName, locationName) {
   };
 }
 
-async function saveMaterialLogLookup(client, kind, value) {
+async function saveMaterialLogLookup(client, kind, value, jobId = null) {
   const normalized = String(value || "").trim();
   if (!normalized) return;
   await client.query(`
-    insert into material_log_lookup_values (kind, value)
-    values ($1, $2)
-    on conflict (kind, value) do nothing
-  `, [kind, normalized]);
+    insert into material_log_lookup_values (job_id, kind, value)
+    values ($1, $2, $3)
+    on conflict (job_id, kind, value) do nothing
+  `, [jobId, kind, normalized]);
 }
 
-async function getMaterialLogLookupOptions(kind) {
+async function getMaterialLogLookupOptions(kind, jobId = null) {
   const result = await query(`
     select value
     from (
-      select value from material_log_lookup_values where kind = $1
+      select value from material_log_lookup_values where kind = $1 and ($2::bigint is null or job_id = $2)
       union
-      select name as value from vendors where $1 = 'vendor_name' and coalesce(name, '') <> ''
+      select name as value from vendors where $1 = 'vendor_name' and coalesce(name, '') <> '' and ($2::bigint is null or job_id = $2)
       union
-      select po_no as value from purchase_orders where $1 = 'po_number' and coalesce(po_no, '') <> ''
+      select po_no as value from purchase_orders where $1 = 'po_number' and coalesce(po_no, '') <> '' and ($2::bigint is null or job_id = $2)
       union
-      select discipline as value from mrr_logs where $1 = 'discipline' and coalesce(discipline, '') <> ''
+      select discipline as value from mrr_logs where $1 = 'discipline' and coalesce(discipline, '') <> '' and ($2::bigint is null or job_id = $2)
       union
-      select discipline as value from material_receiving_logs where $1 = 'discipline' and coalesce(discipline, '') <> ''
+      select discipline as value from material_receiving_logs where $1 = 'discipline' and coalesce(discipline, '') <> '' and ($2::bigint is null or job_id = $2)
       union
-      select received_by as value from mrr_logs where $1 = 'received_by' and coalesce(received_by, '') <> ''
+      select received_by as value from mrr_logs where $1 = 'received_by' and coalesce(received_by, '') <> '' and ($2::bigint is null or job_id = $2)
       union
-      select received_by as value from material_receiving_logs where $1 = 'received_by' and coalesce(received_by, '') <> ''
+      select received_by as value from material_receiving_logs where $1 = 'received_by' and coalesce(received_by, '') <> '' and ($2::bigint is null or job_id = $2)
       union
-      select vendor_name as value from mrr_logs where $1 = 'vendor_name' and coalesce(vendor_name, '') <> ''
+      select vendor_name as value from mrr_logs where $1 = 'vendor_name' and coalesce(vendor_name, '') <> '' and ($2::bigint is null or job_id = $2)
     ) options
     where coalesce(value, '') <> ''
     order by value
-  `, [kind]);
+  `, [kind, jobId]);
   return result.rows.map((row) => row.value);
 }
 
-async function getAppPurchaseOrderOptions() {
+async function getAppPurchaseOrderOptions(jobId = null) {
   const result = await query(`
     select po.id, po.po_no, coalesce(po.description, '') as description, coalesce(v.name, '') as vendor_name
     from purchase_orders po
     left join vendors v on v.id = po.vendor_id
     where coalesce(po.po_no, '') <> ''
+      and ($1::bigint is null or po.job_id = $1)
     order by po.id desc
-  `);
+  `, [jobId]);
   return result.rows;
 }
 
-async function getWarehouseOptions() {
+async function getWarehouseOptions(jobId = null) {
   const result = await query(`
     select id, name
     from warehouses
     where is_active = true
+      and ($1::bigint is null or job_id = $1)
     order by name
-  `);
+  `, [jobId]);
   const seen = new Set();
   return result.rows
     .map((row) => ({ ...row, name: normalizeWarehouseName(row.name) }))
@@ -2301,14 +2328,15 @@ async function getWarehouseOptions() {
     });
 }
 
-async function getWarehouseLocationOptions() {
+async function getWarehouseLocationOptions(jobId = null) {
   const result = await query(`
     select wl.id, wl.name, wl.warehouse_id, w.name as warehouse_name
     from warehouse_locations wl
     join warehouses w on w.id = wl.warehouse_id
     where wl.is_active = true and w.is_active = true
+      and ($1::bigint is null or wl.job_id = $1)
     order by w.name, wl.name
-  `);
+  `, [jobId]);
   const seen = new Set();
   return result.rows
     .map((row) => {
@@ -2327,8 +2355,8 @@ async function getWarehouseLocationOptions() {
     });
 }
 
-async function getWarehouseLocationMap() {
-  const rows = await getWarehouseLocationOptions();
+async function getWarehouseLocationMap(jobId = null) {
+  const rows = await getWarehouseLocationOptions(jobId);
   const map = {};
   for (const row of rows) {
     if (!map[row.warehouse_name]) map[row.warehouse_name] = [];
@@ -2337,7 +2365,9 @@ async function getWarehouseLocationMap() {
   return map;
 }
 
-function getInventoryByLocationSubquery() {
+function getInventoryByLocationSubquery(jobId = null) {
+  const jobFilterSql = Number.isFinite(Number(jobId)) ? `and r.job_id = ${Number(jobId)}` : "";
+  const adjustmentJobFilterSql = Number.isFinite(Number(jobId)) ? `where job_id = ${Number(jobId)}` : "";
   return `
     select
       coalesce(receipt_inventory.item_code, adjustment_inventory.item_code) as item_code,
@@ -2365,6 +2395,7 @@ function getInventoryByLocationSubquery() {
       from receipts r
       join po_lines pl on pl.id = r.po_line_id
       join material_items mi on mi.id = pl.material_item_id
+      ${jobFilterSql}
       group by
         mi.item_code,
         mi.description,
@@ -2387,6 +2418,7 @@ function getInventoryByLocationSubquery() {
         upper(coalesce(location, '')) as location,
         sum(qty_adjustment) as qty_adjustment
       from inventory_adjustment_lines
+      ${adjustmentJobFilterSql}
       group by
         item_code,
         description,
@@ -2407,7 +2439,7 @@ function getInventoryByLocationSubquery() {
   `;
 }
 
-function getInventoryTotalsSubquery() {
+function getInventoryTotalsSubquery(jobId = null) {
   return `
     select
       item_code,
@@ -2416,7 +2448,7 @@ function getInventoryTotalsSubquery() {
       coalesce(thk_1, '') as thk_1,
       coalesce(thk_2, '') as thk_2,
       sum(qty_on_hand) as qty_on_hand
-    from (${getInventoryByLocationSubquery()}) inventory_by_location
+    from (${getInventoryByLocationSubquery(jobId)}) inventory_by_location
       group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
   `;
 }
@@ -2431,7 +2463,7 @@ function buildInventoryIssueKey(parts) {
   });
 }
 
-async function getIssuedInventoryTotals(runner = { query }) {
+async function getIssuedInventoryTotals(runner = { query }, jobId = null) {
   return (await runner.query(`
     select *
     from (
@@ -2450,6 +2482,7 @@ async function getIssuedInventoryTotals(runner = { query }) {
       join bom_lines bl on bl.id = mrl.bom_line_id
       where coalesce(mit.qty_issued, 0) > 0
         and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
       group by
         bl.item_code,
         coalesce(bl.size_1, ''),
@@ -2475,6 +2508,7 @@ async function getIssuedInventoryTotals(runner = { query }) {
       join bom_lines bl on bl.id = mrl.bom_line_id
       where coalesce(mrl.qty_issued, 0) > 0
         and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
         and not exists (
           select 1
           from material_issue_transactions mit
@@ -2487,10 +2521,10 @@ async function getIssuedInventoryTotals(runner = { query }) {
         coalesce(bl.thk_1, ''),
         coalesce(bl.thk_2, '')
     ) issued_inventory
-  `)).rows;
+  `, [jobId])).rows;
 }
 
-async function getVerifiedAllocatedInventoryTotals(runner = { query }) {
+async function getVerifiedAllocatedInventoryTotals(runner = { query }, jobId = null) {
   return (await runner.query(`
     select
       bl.item_code,
@@ -2503,16 +2537,42 @@ async function getVerifiedAllocatedInventoryTotals(runner = { query }) {
     join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
     where mr.status = 'VERIFIED'
+      and ($1::bigint is null or mr.job_id = $1)
     group by
       bl.item_code,
       coalesce(bl.size_1, ''),
       coalesce(bl.size_2, ''),
       coalesce(bl.thk_1, ''),
       coalesce(bl.thk_2, '')
-  `)).rows;
+  `, [jobId])).rows;
 }
 
-async function markBomLinesReceivedFromInventory(client, bomId, userId = null) {
+async function getAvailableInventoryTotalsMap(runner = { query }, jobId = null, { allocatedOffsetMap = null } = {}) {
+  const [inventoryRes, issuedRows, allocatedRows] = await Promise.all([
+    runner.query(getInventoryTotalsSubquery(jobId)),
+    getIssuedInventoryTotals(runner, jobId),
+    getVerifiedAllocatedInventoryTotals(runner, jobId)
+  ]);
+  const availableMap = new Map(
+    inventoryRes.rows.map((row) => [buildInventoryIssueKey(row), parseQtyValue(row.qty_on_hand || 0)])
+  );
+  for (const row of issuedRows) {
+    const key = buildInventoryIssueKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_issued_total || 0), 0));
+  }
+  for (const row of allocatedRows) {
+    const key = buildInventoryIssueKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_allocated_total || 0), 0));
+  }
+  if (allocatedOffsetMap instanceof Map) {
+    for (const [key, qty] of allocatedOffsetMap.entries()) {
+      availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) + parseQtyValue(qty || 0), 0));
+    }
+  }
+  return availableMap;
+}
+
+async function markBomLinesReceivedFromInventory(client, bomId, jobId = null, userId = null) {
   const [linesRes, inventoryRes, issuedRes, allocatedRes] = await Promise.all([
     client.query(`
       select id, line_no, item_code, coalesce(size_1, '') as size_1, coalesce(size_2, '') as size_2,
@@ -2522,9 +2582,9 @@ async function markBomLinesReceivedFromInventory(client, bomId, userId = null) {
       where bom_id = $1
       order by line_no, id
     `, [bomId]),
-    client.query(getInventoryTotalsSubquery()),
-    getIssuedInventoryTotals(client),
-    getVerifiedAllocatedInventoryTotals(client)
+    client.query(getInventoryTotalsSubquery(jobId)),
+    getIssuedInventoryTotals(client, jobId),
+    getVerifiedAllocatedInventoryTotals(client, jobId)
   ]);
 
   const availableMap = new Map(
@@ -2631,18 +2691,19 @@ function applyIssuedInventoryToRows(rows, issuedRows = []) {
   return clonedRows;
 }
 
-async function getCurrentOnHandRows(runner = { query }, { whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
+async function getCurrentOnHandRows(runner = { query }, { jobId = null, whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
   const baseRows = (await runner.query(`
     select inventory_by_location.*
-    from (${getInventoryByLocationSubquery()}) inventory_by_location
+    from (${getInventoryByLocationSubquery(jobId)}) inventory_by_location
     ${whereSql}
     order by ${orderSql}
   `, params)).rows;
-  const issuedRows = await getIssuedInventoryTotals(runner);
+  const issuedRows = await getIssuedInventoryTotals(runner, jobId);
   return applyIssuedInventoryToRows(baseRows, issuedRows);
 }
 
-async function getInventoryAuditVisibleRows(runner = { query }, { whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
+async function getInventoryAuditVisibleRows(runner = { query }, { jobId = null, whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
+  const offsetWhereSql = String(whereSql || "").replace(/\$(\d+)/g, (_, value) => `$${Number(value) + 1}`);
   const baseRows = (await runner.query(`
     select inventory_by_location.*
     from (
@@ -2657,7 +2718,7 @@ async function getInventoryAuditVisibleRows(runner = { query }, { whereSql = "",
         coalesce(current_rows.location, counted_rows.location) as location,
         coalesce(current_rows.qty_on_hand, 0) as qty_on_hand,
         coalesce(current_rows.qty_osd, 0) as qty_osd
-      from (${getInventoryByLocationSubquery()}) current_rows
+      from (${getInventoryByLocationSubquery(jobId)}) current_rows
       full outer join (
         select
           item_code,
@@ -2669,6 +2730,7 @@ async function getInventoryAuditVisibleRows(runner = { query }, { whereSql = "",
           initcap(lower(coalesce(warehouse, ''))) as warehouse,
           upper(coalesce(location, '')) as location
         from inventory_audit_counts
+        where ($1::bigint is null or job_id = $1)
       ) counted_rows
         on counted_rows.item_code = current_rows.item_code
        and counted_rows.size_1 = current_rows.size_1
@@ -2678,10 +2740,10 @@ async function getInventoryAuditVisibleRows(runner = { query }, { whereSql = "",
        and counted_rows.warehouse = current_rows.warehouse
        and counted_rows.location = current_rows.location
     ) inventory_by_location
-    ${whereSql}
+    ${offsetWhereSql}
     order by ${orderSql}
-  `, params)).rows;
-  const issuedRows = await getIssuedInventoryTotals(runner);
+  `, [jobId, ...params])).rows;
+  const issuedRows = await getIssuedInventoryTotals(runner, jobId);
   return applyIssuedInventoryToRows(baseRows, issuedRows);
 }
 
@@ -2812,7 +2874,7 @@ function parseImportActiveFlag(value, fallback = true) {
   return fallback;
 }
 
-async function assertValidWarehouseLocation(client, warehouseName, locationName) {
+async function assertValidWarehouseLocation(client, warehouseName, locationName, jobId = null) {
   const normalizedNames = normalizeWarehouseLocationValues(warehouseName, locationName);
   const warehouse = normalizedNames.warehouse;
   const location = normalizedNames.location;
@@ -2824,14 +2886,15 @@ async function assertValidWarehouseLocation(client, warehouseName, locationName)
     join warehouses w on w.id = wl.warehouse_id
     where w.is_active = true
       and wl.is_active = true
+      and ($3::bigint is null or wl.job_id = $3)
       and lower(w.name) = lower($1)
       and lower(wl.name) = lower($2)
     limit 1
-  `, [warehouse, location])).rows[0];
+  `, [warehouse, location, jobId])).rows[0];
   if (!match) throw new Error("Select a valid location for the chosen warehouse.");
 }
 
-async function ensureWarehouseLocationExists(client, warehouseName, locationName) {
+async function ensureWarehouseLocationExists(client, warehouseName, locationName, jobId = null) {
   const normalizedNames = normalizeWarehouseLocationValues(warehouseName, locationName);
   const warehouse = normalizedNames.warehouse;
   const location = normalizedNames.location;
@@ -2840,14 +2903,15 @@ async function ensureWarehouseLocationExists(client, warehouseName, locationName
     select id
     from warehouses
     where lower(name) = lower($1)
+      and ($2::bigint is null or job_id = $2)
     limit 1
-  `, [warehouse])).rows[0];
+  `, [warehouse, jobId])).rows[0];
   if (!warehouseRow) {
     warehouseRow = (await client.query(`
-      insert into warehouses (name, is_active)
-      values ($1, true)
+      insert into warehouses (job_id, name, is_active)
+      values ($1, $2, true)
       returning id
-    `, [warehouse])).rows[0];
+    `, [jobId, warehouse])).rows[0];
   } else {
     await client.query("update warehouses set is_active = true where id = $1", [warehouseRow.id]);
   }
@@ -2860,23 +2924,24 @@ async function ensureWarehouseLocationExists(client, warehouseName, locationName
   `, [warehouseRow.id, location])).rows[0];
   if (!locationRow) {
     await client.query(`
-      insert into warehouse_locations (warehouse_id, name, is_active)
-      values ($1, $2, true)
-    `, [warehouseRow.id, location]);
+      insert into warehouse_locations (job_id, warehouse_id, name, is_active)
+      values ($1, $2, $3, true)
+    `, [jobId, warehouseRow.id, location]);
   } else {
     await client.query("update warehouse_locations set is_active = true where id = $1", [locationRow.id]);
   }
 }
 
-async function getNextMrrNumber(client = null) {
+async function getNextMrrNumber(client = null, jobId = null) {
   const runner = client || { query };
   const latest = (await runner.query(`
     select mrr_number
     from mrr_logs
     where coalesce(mrr_number, '') <> '' and mrr_number ~ '\\d+$'
+      ${jobId ? "and job_id = $1" : ""}
     order by ((regexp_match(mrr_number, '(\\d+)$'))[1])::bigint desc, id desc
     limit 1
-  `)).rows[0];
+  `, jobId ? [jobId] : [])).rows[0];
   const current = String(latest?.mrr_number || "").trim();
   if (!current) return "MRR-000001";
   const match = current.match(/^(.*?)(\d+)$/);
@@ -2886,15 +2951,16 @@ async function getNextMrrNumber(client = null) {
   return `${prefix}${nextValue}`;
 }
 
-async function getNextFmrNumber(client = null) {
+async function getNextFmrNumber(client = null, jobId = null) {
   const runner = client || { query };
   const latest = (await runner.query(`
     select fmr_number
     from fmr_logs
     where coalesce(fmr_number, '') <> '' and fmr_number ~ '\\d+$'
+      ${jobId ? "and job_id = $1" : ""}
     order by ((regexp_match(fmr_number, '(\\d+)$'))[1])::bigint desc, id desc
     limit 1
-  `)).rows[0];
+  `, jobId ? [jobId] : [])).rows[0];
   const current = String(latest?.fmr_number || "").trim();
   if (!current) return "FMR-000001";
   const match = current.match(/^(.*?)(\d+)$/);
@@ -2904,15 +2970,16 @@ async function getNextFmrNumber(client = null) {
   return `${prefix}${nextValue}`;
 }
 
-async function getNextOpiNumber(client = null) {
+async function getNextOpiNumber(client = null, jobId = null) {
   const runner = client || { query };
   const latest = (await runner.query(`
     select opi_number
     from mrr_logs
     where coalesce(opi_number, '') <> '' and opi_number ~ '\\d+$'
+      ${jobId ? "and job_id = $1" : ""}
     order by ((regexp_match(opi_number, '(\\d+)$'))[1])::bigint desc, id desc
     limit 1
-  `)).rows[0];
+  `, jobId ? [jobId] : [])).rows[0];
   const current = String(latest?.opi_number || "").trim();
   if (!current) return "OPI-000001";
   const match = current.match(/^(.*?)(\d+)$/);
@@ -2949,7 +3016,7 @@ async function getPoNumberForVendorCrate(client, vendorName, containerNo) {
   return String(row?.po_number || "").trim();
 }
 
-async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, vendorName = "", containerNo = "", mrrNumber = "", poNumber = "" } = {}) {
+async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, vendorName = "", containerNo = "", mrrNumber = "", poNumber = "", jobId = null } = {}) {
   const vendor = String(vendorName || "").trim();
   const crate = String(containerNo || "").trim();
   if (!vendor || !crate) {
@@ -2958,7 +3025,7 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
   const description = `${vendor} pkg: ${crate}`;
   const effectivePoNumber = String(poNumber || "").trim() || await getPoNumberForVendorCrate(client, vendor, crate);
   const linkedPo = effectivePoNumber
-    ? (await client.query("select id, po_no from purchase_orders where po_no = $1 order by id desc limit 1", [effectivePoNumber])).rows[0]
+    ? (await client.query("select id, po_no from purchase_orders where po_no = $1 and ($2::bigint is null or job_id = $2) order by id desc limit 1", [effectivePoNumber, jobId])).rows[0]
     : null;
   const saveLinkedFmr = async (resolvedMrrNumber) => {
     if (!fmrId) return;
@@ -2982,7 +3049,7 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
       updates.push(`app_po_id = $${params.length}`);
     }
     if (!resolvedOpiNumber) {
-      resolvedOpiNumber = await getNextOpiNumber(client);
+      resolvedOpiNumber = await getNextOpiNumber(client, jobId);
       params.push(resolvedOpiNumber);
       updates.push(`opi_number = $${params.length}`);
     }
@@ -2990,9 +3057,9 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
       await client.query(`
         update mrr_logs
         set ${updates.join(", ")}, updated_at = now()
-        where id = $1
-      `, params);
-      await syncOpiLogsFromMrr(client);
+        where id = $1 and ($${params.length + 1}::bigint is null or job_id = $${params.length + 1})
+      `, [...params, jobId]);
+      await syncOpiLogsFromMrr(client, jobId);
     }
     await saveLinkedFmr(row.mrr_number);
     return { mrrNumber: row.mrr_number, opiNumber: resolvedOpiNumber, poNumber: effectivePoNumber, created: false };
@@ -3002,11 +3069,12 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
     const exactMatch = (await client.query(`
       select id, mrr_number, opi_number, po_number, app_po_id
       from mrr_logs
-      where mrr_number = $1
+      where ($4::bigint is null or job_id = $4)
+        and mrr_number = $1
         and lower(trim(coalesce(vendor_name, ''))) = lower($2)
         and lower(trim(coalesce(material_description, ''))) = lower($3)
       limit 1
-    `, [requestedMrrNumber, vendor, description])).rows[0];
+    `, [requestedMrrNumber, vendor, description, jobId])).rows[0];
     if (exactMatch) {
       return syncExistingMrr(exactMatch);
     }
@@ -3014,23 +3082,25 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
   const existing = (await client.query(`
     select id, mrr_number, opi_number, po_number, app_po_id
     from mrr_logs
-    where lower(trim(coalesce(vendor_name, ''))) = lower($1)
+    where ($3::bigint is null or job_id = $3)
+      and lower(trim(coalesce(vendor_name, ''))) = lower($1)
       and lower(trim(coalesce(material_description, ''))) = lower($2)
     order by id desc
     limit 1
-  `, [vendor, description])).rows[0];
+  `, [vendor, description, jobId])).rows[0];
   if (existing) {
     return syncExistingMrr(existing);
   }
-  const nextMrrNumber = await getNextMrrNumber(client);
-  const nextOpiNumber = await getNextOpiNumber(client);
+  const nextMrrNumber = await getNextMrrNumber(client, jobId);
+  const nextOpiNumber = await getNextOpiNumber(client, jobId);
   const insert = (await client.query(`
     insert into mrr_logs (
-      discipline, mrr_number, vendor_name, app_po_id, po_number, pick_ticket, material_description,
+      job_id, discipline, mrr_number, vendor_name, app_po_id, po_number, pick_ticket, material_description,
       received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
-    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
     returning id
   `, [
+    jobId,
     "",
     nextMrrNumber,
     vendor,
@@ -3045,10 +3115,10 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
     nextOpiNumber,
     ""
   ])).rows[0];
-  await saveMaterialLogLookup(client, "vendor_name", vendor);
-  await saveMaterialLogLookup(client, "po_number", effectivePoNumber);
-  await syncMrrVendorsIntoVendorTable(client);
-  await syncOpiLogsFromMrr(client);
+  await saveMaterialLogLookup(client, "vendor_name", vendor, jobId);
+  await saveMaterialLogLookup(client, "po_number", effectivePoNumber, jobId);
+  await syncMrrVendorsIntoVendorTable(client, jobId);
+  await syncOpiLogsFromMrr(client, jobId);
   await saveLinkedFmr(nextMrrNumber);
   if (userId) {
     await auditLog(client, userId, "create", "mrr_log", insert.id, nextMrrNumber);
@@ -3059,11 +3129,12 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
 async function createOsdLog(client, payload) {
   await client.query(`
     insert into osd_logs (
-      mrr_log_id, receipt_id, po_id, po_line_id, mrr_number, po_number, item_code, description,
+      job_id, mrr_log_id, receipt_id, po_id, po_line_id, mrr_number, po_number, item_code, description,
       warehouse, location, expected_qty, received_qty, osd_qty, osd_status, notes, updated_at
     )
-    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
   `, [
+    payload.job_id || null,
     payload.mrr_log_id || null,
     payload.receipt_id || null,
     payload.po_id || null,
@@ -3082,18 +3153,19 @@ async function createOsdLog(client, payload) {
   ]);
 }
 
-async function syncMrrVendorsIntoVendorTable(client) {
+async function syncMrrVendorsIntoVendorTable(client, jobId = null) {
   await client.query(`
-    insert into vendors (name, contact_name, website, email, phone, categories)
-    select distinct trim(m.vendor_name), '', '', '', '', ''
+    insert into vendors (job_id, name, contact_name, website, email, phone, categories)
+    select distinct $1, trim(m.vendor_name), '', '', '', '', ''
     from mrr_logs m
-    left join vendors v on lower(v.name) = lower(trim(m.vendor_name))
+    left join vendors v on v.job_id = $1 and lower(v.name) = lower(trim(m.vendor_name))
     where trim(coalesce(m.vendor_name, '')) <> ''
+      and ($1::bigint is null or m.job_id = $1)
       and v.id is null
-  `);
+  `, [jobId]);
 }
 
-async function syncOpiLogsFromMrr(client) {
+async function syncOpiLogsFromMrr(client, jobId = null) {
   await client.query(`
     delete from opi_logs o
     where not exists (
@@ -3101,11 +3173,14 @@ async function syncOpiLogsFromMrr(client) {
       from mrr_logs m
       where trim(coalesce(m.opi_number, '')) <> ''
         and trim(m.opi_number) = o.opi_number
+        and ($1::bigint is null or m.job_id = $1)
     )
-  `);
+      and ($1::bigint is null or o.job_id = $1)
+  `, [jobId]);
   await client.query(`
-    insert into opi_logs (opi_number, vendor_name, material_description, load_number, mrr_number, updated_at)
+    insert into opi_logs (job_id, opi_number, vendor_name, material_description, load_number, mrr_number, updated_at)
     select distinct on (trim(m.opi_number))
+           $1,
            trim(m.opi_number),
            coalesce(m.vendor_name, ''),
            coalesce(m.material_description, ''),
@@ -3114,30 +3189,32 @@ async function syncOpiLogsFromMrr(client) {
            now()
     from mrr_logs m
     where trim(coalesce(m.opi_number, '')) <> ''
+      and ($1::bigint is null or m.job_id = $1)
     order by trim(m.opi_number), m.id desc
-    on conflict (opi_number) do update set
+    on conflict (job_id, opi_number) do update set
       vendor_name = excluded.vendor_name,
       material_description = excluded.material_description,
       load_number = excluded.load_number,
       mrr_number = excluded.mrr_number,
       updated_at = now()
-  `);
+  `, [jobId]);
 }
 
-async function ensureUniqueFmrContainer(client, vendorName, containerNo, excludeId = null) {
+async function ensureUniqueFmrContainer(client, vendorName, containerNo, excludeId = null, jobId = null) {
   const vendor = String(vendorName || "").trim().toLowerCase();
   const normalized = String(containerNo || "").trim();
   if (!vendor || !normalized) return;
-  const params = [vendor, normalized.toLowerCase()];
+  const params = [jobId, vendor, normalized.toLowerCase()];
   let sql = `
     select id
     from fmr_logs
-    where lower(trim(coalesce(vendor_name, ''))) = $1
-      and lower(trim(coalesce(container_no, ''))) = $2
+    where ($1::bigint is null or job_id = $1)
+      and lower(trim(coalesce(vendor_name, ''))) = $2
+      and lower(trim(coalesce(container_no, ''))) = $3
   `;
   if (excludeId) {
     params.push(excludeId);
-    sql += " and id <> $3";
+    sql += " and id <> $4";
   }
   sql += " limit 1";
   const existing = (await client.query(sql, params)).rows[0];
@@ -3146,15 +3223,16 @@ async function ensureUniqueFmrContainer(client, vendorName, containerNo, exclude
   }
 }
 
-async function getRequestedVendorCrateSet(client = null) {
+async function getRequestedVendorCrateSet(client = null, jobId = null) {
   const runner = client || { query };
   const rows = (await runner.query(`
     select lower(trim(coalesce(vendor_name, ''))) as vendor_key,
            lower(trim(coalesce(container_no, ''))) as crate_key
     from fmr_logs
-    where trim(coalesce(vendor_name, '')) <> ''
+    where ($1::bigint is null or job_id = $1)
+      and trim(coalesce(vendor_name, '')) <> ''
       and trim(coalesce(container_no, '')) <> ''
-  `)).rows;
+  `, [jobId])).rows;
   return new Set(rows.map((row) => `${row.vendor_key}|${row.crate_key}`));
 }
 
@@ -3168,14 +3246,15 @@ function getVendorFmrRequestBuilderQuery(source = {}) {
   }).toString();
 }
 
-async function buildVendorFmrPreviewData(client) {
-  const requestedSet = await getRequestedVendorCrateSet(client);
+async function buildVendorFmrPreviewData(client, jobId = null) {
+  const requestedSet = await getRequestedVendorCrateSet(client, jobId);
   const stagedRows = (await client.query(`
     select *
     from vendor_fmr_request_lines
     where selected_for_request = true
+      and ($1::bigint is null or job_id = $1)
     order by id
-  `)).rows;
+  `, [jobId])).rows;
   const requestGroups = new Map();
   const invalidRows = [];
   const skippedRows = [];
@@ -3263,19 +3342,121 @@ function readSession(token) {
   }
 }
 
+async function getJobRecord(jobId, client = null) {
+  const normalizedJobId = Number(jobId || 0);
+  if (!Number.isFinite(normalizedJobId) || normalizedJobId <= 0) return null;
+  const runner = client || { query };
+  return (await runner.query(`
+    select id, job_number, plant_name, performance_job_number, is_active, created_at, updated_at
+    from jobs
+    where id = $1
+  `, [normalizedJobId])).rows[0] || null;
+}
+
+async function getAccessibleJobsForUser(userId, role, client = null) {
+  const runner = client || { query };
+  if (role === "admin") {
+    return (await runner.query(`
+      select id, job_number, plant_name, performance_job_number, is_active, created_at, updated_at
+      from jobs
+      order by is_active desc, job_number asc, id asc
+    `)).rows;
+  }
+  return (await runner.query(`
+    select j.id, j.job_number, j.plant_name, j.performance_job_number, j.is_active, j.created_at, j.updated_at
+    from user_jobs uj
+    join jobs j on j.id = uj.job_id
+    where uj.user_id = $1
+    order by j.is_active desc, j.job_number asc, j.id asc
+  `, [userId])).rows;
+}
+
+function setSessionCookie(res, payload) {
+  const token = signSession(payload);
+  res.cookie("session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
+}
+
+function buildSessionPayload(user, jobId = null) {
+  return {
+    id: Number(user.id),
+    username: String(user.username || ""),
+    role: String(user.role || ""),
+    job_id: jobId ? Number(jobId) : null
+  };
+}
+
+async function resolveJobContextForUser(user, client = null, requestedJobId = null) {
+  const jobs = await getAccessibleJobsForUser(user.id, user.role, client);
+  const activeJobs = jobs.filter((job) => job.is_active);
+  let activeJob = null;
+  const normalizedRequestedJobId = Number(requestedJobId || 0);
+  if (normalizedRequestedJobId > 0) {
+    activeJob = activeJobs.find((job) => Number(job.id) === normalizedRequestedJobId) || null;
+  }
+  if (!activeJob && user.role !== "admin" && activeJobs.length === 1) {
+    activeJob = activeJobs[0];
+  }
+  return {
+    jobs,
+    activeJobs,
+    activeJob
+  };
+}
+
 function currentUser(req) {
   const sessionToken = req?.cookies?.session_token;
   return sessionToken ? readSession(sessionToken) : null;
 }
 
-function requireAuth(req, res, next) {
-  const user = currentUser(req);
-  if (!user) {
+const requireAuth = asyncHandler(async (req, res, next) => {
+  const sessionUser = currentUser(req);
+  if (!sessionUser) {
     res.redirect("/login");
     return;
   }
-  req.user = user;
+  const user = (await query(`
+    select id, username, role, is_active
+    from users
+    where id = $1
+  `, [sessionUser.id])).rows[0];
+  if (!user || !user.is_active) {
+    res.clearCookie("session_token", { path: "/" });
+    res.redirect("/login");
+    return;
+  }
+  const { jobs, activeJobs, activeJob } = await resolveJobContextForUser(user, null, sessionUser.job_id);
+  req.user = {
+    ...user,
+    job_id: activeJob ? Number(activeJob.id) : null,
+    activeJob: activeJob || null,
+    accessibleJobs: jobs,
+    activeJobs
+  };
   next();
+});
+
+const requireJobContext = asyncHandler(async (req, res, next) => {
+  if (req.user?.activeJob) {
+    next();
+    return;
+  }
+  if (req.user?.role === "admin" || (req.user?.activeJobs || []).length > 1) {
+    res.redirect("/jobs/select");
+    return;
+  }
+  if ((req.user?.activeJobs || []).length === 1) {
+    const onlyJob = req.user.activeJobs[0];
+    req.user.job_id = Number(onlyJob.id);
+    req.user.activeJob = onlyJob;
+    setSessionCookie(res, buildSessionPayload(req.user, onlyJob.id));
+    next();
+    return;
+  }
+  res.redirect("/jobs/no-access");
+});
+
+function currentJobId(req) {
+  return Number(req.user?.job_id || 0);
 }
 
 function requireRole(roles) {
@@ -3312,14 +3493,16 @@ function canEditRequisition(user, header) {
 }
 
 async function recalcRfqStatus(client, rfqId) {
-  const total = Number((await client.query("select count(*) from rfq_items where rfq_id = $1", [rfqId])).rows[0].count);
-  const awardedCount = Number((await client.query("select count(*) from rfq_items where rfq_id = $1 and award_status = 'AWARDED' and awarded_vendor_id is not null", [rfqId])).rows[0]?.count || 0);
+  const rfq = (await client.query("select id, job_id from rfqs where id = $1", [rfqId])).rows[0];
+  if (!rfq) return;
+  const total = Number((await client.query("select count(*) from rfq_items where rfq_id = $1 and job_id = $2", [rfqId, rfq.job_id])).rows[0].count);
+  const awardedCount = Number((await client.query("select count(*) from rfq_items where rfq_id = $1 and job_id = $2 and award_status = 'AWARDED' and awarded_vendor_id is not null", [rfqId, rfq.job_id])).rows[0]?.count || 0);
   const quotedCount = Number((await client.query(`
     select count(distinct ri.id) as quoted_count
     from rfq_items ri
     join quotes q on q.rfq_item_id = ri.id
-    where ri.rfq_id = $1
-  `, [rfqId])).rows[0]?.quoted_count || 0);
+    where ri.rfq_id = $1 and ri.job_id = $2 and q.job_id = $2
+  `, [rfqId, rfq.job_id])).rows[0]?.quoted_count || 0);
   const totals = (await client.query(`
     select count(distinct pl.rfq_item_id)
       filter (where pl.rfq_item_id is not null) as issued_count,
@@ -3330,65 +3513,72 @@ async function recalcRfqStatus(client, rfqId) {
       ) as fully_received_count
     from purchase_orders po
     join po_lines pl on pl.po_id = po.id
-    where po.rfq_id = $1
-  `, [rfqId])).rows[0];
+    where po.rfq_id = $1 and po.job_id = $2 and pl.job_id = $2
+  `, [rfqId, rfq.job_id])).rows[0];
   const issued = Number(totals?.issued_count || 0);
   const fullyReceived = Number(totals?.fully_received_count || 0);
   if (total > 0 && fullyReceived >= total) {
-    await client.query("update rfqs set status = 'RECEIVED' where id = $1", [rfqId]);
+    await client.query("update rfqs set status = 'RECEIVED' where id = $1 and job_id = $2", [rfqId, rfq.job_id]);
   } else if (issued > 0) {
-    await client.query("update rfqs set status = 'PURCHASED' where id = $1 and status <> 'RECEIVED'", [rfqId]);
+    await client.query("update rfqs set status = 'PURCHASED' where id = $1 and job_id = $2 and status <> 'RECEIVED'", [rfqId, rfq.job_id]);
   } else if (total > 0 && awardedCount >= total) {
-    await client.query("update rfqs set status = 'AWARDED' where id = $1 and status not in ('PURCHASED', 'RECEIVED')", [rfqId]);
+    await client.query("update rfqs set status = 'AWARDED' where id = $1 and job_id = $2 and status not in ('PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
   } else if (quotedCount > 0) {
-    await client.query("update rfqs set status = 'WAITING_ON_QUOTES' where id = $1 and status not in ('AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId]);
+    await client.query("update rfqs set status = 'WAITING_ON_QUOTES' where id = $1 and job_id = $2 and status not in ('AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
   } else {
-    await client.query("update rfqs set status = 'SEND_FOR_QUOTES' where id = $1 and status not in ('AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId]);
+    await client.query("update rfqs set status = 'SEND_FOR_QUOTES' where id = $1 and job_id = $2 and status not in ('AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
   }
 }
 
 async function backfillRfqVendors(client, rfqId) {
+  const rfq = (await client.query("select job_id from rfqs where id = $1", [rfqId])).rows[0];
+  if (!rfq) return;
   await client.query(`
-    insert into rfq_vendors (rfq_id, vendor_id)
-    select distinct ri.rfq_id, q.vendor_id
+    insert into rfq_vendors (job_id, rfq_id, vendor_id)
+    select distinct $2, ri.rfq_id, q.vendor_id
     from rfq_items ri
     join quotes q on q.rfq_item_id = ri.id
-    where ri.rfq_id = $1
+    where ri.rfq_id = $1 and ri.job_id = $2 and q.job_id = $2
     on conflict (rfq_id, vendor_id) do nothing
-  `, [rfqId]);
+  `, [rfqId, rfq.job_id]);
   await client.query(`
-    insert into rfq_vendors (rfq_id, vendor_id)
-    select distinct rfq_id, awarded_vendor_id
+    insert into rfq_vendors (job_id, rfq_id, vendor_id)
+    select distinct $2, rfq_id, awarded_vendor_id
     from rfq_items
-    where rfq_id = $1 and awarded_vendor_id is not null
+    where rfq_id = $1 and job_id = $2 and awarded_vendor_id is not null
     on conflict (rfq_id, vendor_id) do nothing
-  `, [rfqId]);
+  `, [rfqId, rfq.job_id]);
 }
 
 async function getRfqVendorRows(client, rfqId) {
   await backfillRfqVendors(client, rfqId);
+  const rfq = (await client.query("select job_id from rfqs where id = $1", [rfqId])).rows[0];
+  if (!rfq) return [];
   return (await client.query(`
     select rv.vendor_id, v.name
     from rfq_vendors rv
     join vendors v on v.id = rv.vendor_id
-    where rv.rfq_id = $1
+    where rv.rfq_id = $1 and rv.job_id = $2 and v.job_id = $2
     order by v.name
-  `, [rfqId])).rows;
+  `, [rfqId, rfq.job_id])).rows;
 }
 
 async function syncRfqVendors(client, rfqId, vendorIds) {
+  const rfq = (await client.query("select job_id from rfqs where id = $1", [rfqId])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
   const deduped = Array.from(new Set(vendorIds.map((vendorId) => Number(vendorId)).filter((vendorId) => Number.isFinite(vendorId) && vendorId > 0)));
-  await client.query("delete from rfq_vendors where rfq_id = $1 and not (vendor_id = any($2::bigint[]))", [rfqId, deduped]);
+  await client.query("delete from rfq_vendors where rfq_id = $1 and job_id = $3 and not (vendor_id = any($2::bigint[]))", [rfqId, deduped, rfq.job_id]);
   if (deduped.length === 0) {
-    await client.query("delete from rfq_vendors where rfq_id = $1", [rfqId]);
+    await client.query("delete from rfq_vendors where rfq_id = $1 and job_id = $2", [rfqId, rfq.job_id]);
     return;
   }
   await client.query(`
-    insert into rfq_vendors (rfq_id, vendor_id)
-    select $1, vendor_id
+    insert into rfq_vendors (job_id, rfq_id, vendor_id)
+    select $3, $1, vendor_id
     from unnest($2::bigint[]) as vendor_id
+    where exists (select 1 from vendors v where v.id = vendor_id and v.job_id = $3)
     on conflict (rfq_id, vendor_id) do nothing
-  `, [rfqId, deduped]);
+  `, [rfqId, deduped, rfq.job_id]);
 }
 
 async function recalcPoStatus(client, poId) {
@@ -3428,6 +3618,33 @@ async function getJobNumber(client = null) {
   return String(result.rows[0]?.value || "0000").trim() || "0000";
 }
 
+async function getJobSettings(jobId, client = null) {
+  const runner = client || { query };
+  const normalizedJobId = Number(jobId || 0);
+  if (!Number.isFinite(normalizedJobId) || normalizedJobId <= 0) {
+    return {
+      job_number: await getJobNumber(client),
+      plant_name: await getAppSettingValue("plant_name", "", client),
+      performance_job_number: await getAppSettingValue("performance_job_number", "", client),
+      is_active: true
+    };
+  }
+  const row = (await runner.query(`
+    select job_number, plant_name, performance_job_number, is_active
+    from jobs
+    where id = $1
+  `, [normalizedJobId])).rows[0];
+  if (!row) {
+    return {
+      job_number: await getJobNumber(client),
+      plant_name: await getAppSettingValue("plant_name", "", client),
+      performance_job_number: await getAppSettingValue("performance_job_number", "", client),
+      is_active: true
+    };
+  }
+  return row;
+}
+
 async function getAppSettingValue(key, fallback = "", client = null) {
   const runner = client || { query };
   const result = await runner.query("select value from app_settings where key = $1", [key]);
@@ -3440,32 +3657,34 @@ async function refreshHeaderSettings(client = null) {
   headerPerformanceJobNumber = await getAppSettingValue("performance_job_number", "", client);
 }
 
-async function getNextInventoryAuditReportNumber(client = null) {
+async function getNextInventoryAuditReportNumber(client = null, jobId = null) {
   const runner = client || { query };
-  const jobNumber = await getJobNumber(client);
+  const jobSettings = await getJobSettings(jobId, client);
+  const jobNumber = String(jobSettings.job_number || "0000").trim() || "0000";
   const result = await runner.query(`
     select coalesce(max(cast(right(report_no, 5) as integer)), 0) as max_no
     from inventory_audit_reports
     where report_no ~ '-INV-[0-9]{5}$'
-  `);
+      ${jobId ? "and job_id = $1" : ""}
+  `, jobId ? [jobId] : []);
   const nextNumber = num(result.rows[0]?.max_no) + 1;
   return `${jobNumber}-INV-${String(nextNumber).padStart(5, "0")}`;
 }
 
-async function saveInventoryAuditReport(client, { userId, warehouseFilter = "", locationFilter = "", identFilter = "", desiredRows = [] }) {
+async function saveInventoryAuditReport(client, { userId, jobId = null, warehouseFilter = "", locationFilter = "", identFilter = "", desiredRows = [] }) {
   if (!desiredRows.length) throw new Error("No inventory rows were provided for this audit.");
-  const currentRows = await getCurrentOnHandRows(client);
+  const currentRows = await getCurrentOnHandRows(client, { jobId });
   const currentMap = new Map(currentRows.map((row) => [buildInventoryEntryKey(row), row]));
-  const reportNo = await getNextInventoryAuditReportNumber(client);
+  const reportNo = await getNextInventoryAuditReportNumber(client, jobId);
   const reportInsert = await client.query(`
     insert into inventory_audit_reports (
-      report_no, created_by, warehouse_filter, location_filter, ident_filter
-    ) values ($1,$2,$3,$4,$5)
+      job_id, report_no, created_by, warehouse_filter, location_filter, ident_filter
+    ) values ($1,$2,$3,$4,$5,$6)
     returning id
-  `, [reportNo, userId || null, String(warehouseFilter || ""), String(locationFilter || ""), String(identFilter || "")]);
+  `, [jobId, reportNo, userId || null, String(warehouseFilter || ""), String(locationFilter || ""), String(identFilter || "")]);
   const reportId = Number(reportInsert.rows[0]?.id || 0);
   for (const desiredRow of desiredRows) {
-    await assertValidWarehouseLocation(client, desiredRow.warehouse, desiredRow.location);
+    await assertValidWarehouseLocation(client, desiredRow.warehouse, desiredRow.location, jobId);
     const key = buildInventoryEntryKey(desiredRow);
     const currentRow = currentMap.get(key);
     const bookQty = parseQtyValue(currentRow?.qty_on_hand || 0);
@@ -3473,10 +3692,11 @@ async function saveInventoryAuditReport(client, { userId, warehouseFilter = "", 
     const adjustmentQty = parseQtyValue(actualQty - bookQty);
     const lineInsert = await client.query(`
       insert into inventory_audit_report_lines (
-        report_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, book_qty, actual_qty, adjustment_qty
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        job_id, report_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, book_qty, actual_qty, adjustment_qty
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       returning id
     `, [
+      jobId,
       reportId,
       String(desiredRow.item_code || ""),
       String(desiredRow.description || currentRow?.description || ""),
@@ -3493,9 +3713,10 @@ async function saveInventoryAuditReport(client, { userId, warehouseFilter = "", 
     if (adjustmentQty !== 0) {
       await client.query(`
         insert into inventory_adjustment_lines (
-          report_id, report_line_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, qty_adjustment, created_by
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          job_id, report_id, report_line_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, qty_adjustment, created_by
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       `, [
+        jobId,
         reportId,
         Number(lineInsert.rows[0]?.id || 0),
         String(desiredRow.item_code || ""),
@@ -3512,15 +3733,16 @@ async function saveInventoryAuditReport(client, { userId, warehouseFilter = "", 
     }
     await client.query(`
       insert into inventory_audit_counts (
-        item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, actual_qty, updated_by, updated_at
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
-      on conflict (item_code, size_1, size_2, thk_1, thk_2, warehouse, location)
+        job_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, actual_qty, updated_by, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+      on conflict (job_id, item_code, size_1, size_2, thk_1, thk_2, warehouse, location)
       do update set
         description = excluded.description,
         actual_qty = excluded.actual_qty,
         updated_by = excluded.updated_by,
         updated_at = now()
     `, [
+      jobId,
       String(desiredRow.item_code || ""),
       String(desiredRow.description || currentRow?.description || ""),
       String(desiredRow.size_1 || ""),
@@ -3537,38 +3759,44 @@ async function saveInventoryAuditReport(client, { userId, warehouseFilter = "", 
   return { reportId, reportNo };
 }
 
-async function getNextRfqNumber(client = null) {
+async function getNextRfqNumber(client = null, jobId = null) {
   const runner = client || { query };
-  const jobNumber = await getJobNumber(client);
+  const jobSettings = await getJobSettings(jobId, client);
+  const jobNumber = String(jobSettings.job_number || "0000").trim() || "0000";
   const result = await runner.query(`
     select coalesce(max(cast(right(rfq_no, 5) as integer)), 0) as max_no
     from rfqs
     where rfq_no ~ '-RFQ-[0-9]{5}$'
-  `);
+      ${jobId ? "and job_id = $1" : ""}
+  `, jobId ? [jobId] : []);
   const nextNumber = num(result.rows[0]?.max_no) + 1;
   return `${jobNumber}-RFQ-${String(nextNumber).padStart(5, "0")}`;
 }
 
-async function getNextRequisitionNumber(client = null) {
+async function getNextRequisitionNumber(client = null, jobId = null) {
   const runner = client || { query };
-  const jobNumber = await getJobNumber(client);
+  const jobSettings = await getJobSettings(jobId, client);
+  const jobNumber = String(jobSettings.job_number || "0000").trim() || "0000";
   const result = await runner.query(`
     select coalesce(max(cast(right(requisition_no, 5) as integer)), 0) as max_no
     from material_requisitions
     where requisition_no ~ '-MR-[0-9]{5}$'
-  `);
+      ${jobId ? "and job_id = $1" : ""}
+  `, jobId ? [jobId] : []);
   const nextNumber = num(result.rows[0]?.max_no) + 1;
   return `${jobNumber}-MR-${String(nextNumber).padStart(5, "0")}`;
 }
 
-async function getNextBomNumber(client = null) {
+async function getNextBomNumber(client = null, jobId = null) {
   const runner = client || { query };
-  const jobNumber = await getJobNumber(client);
+  const jobSettings = await getJobSettings(jobId, client);
+  const jobNumber = String(jobSettings.job_number || "0000").trim() || "0000";
   const result = await runner.query(`
     select coalesce(max(cast(right(bom_no, 5) as integer)), 0) as max_no
     from bom_headers
     where bom_no ~ '-BOM-[0-9]{5}$'
-  `);
+      ${jobId ? "and job_id = $1" : ""}
+  `, jobId ? [jobId] : []);
   const nextNumber = num(result.rows[0]?.max_no) + 1;
   return `${jobNumber}-BOM-${String(nextNumber).padStart(5, "0")}`;
 }
@@ -3615,9 +3843,19 @@ app.post("/login", asyncHandler(async (req, res) => {
     res.redirect("/login?error=invalid");
     return;
   }
-  const token = signSession({ id: user.id, username: user.username, role: user.role });
-  res.cookie("session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
-  res.redirect("/dashboard");
+  const { activeJobs } = await resolveJobContextForUser(user);
+  if (user.role === "admin") {
+    setSessionCookie(res, buildSessionPayload(user, null));
+    res.redirect("/jobs/select");
+    return;
+  }
+  if (activeJobs.length === 1) {
+    setSessionCookie(res, buildSessionPayload(user, activeJobs[0].id));
+    res.redirect("/dashboard");
+    return;
+  }
+  setSessionCookie(res, buildSessionPayload(user, null));
+  res.redirect(activeJobs.length > 1 ? "/jobs/select" : "/jobs/no-access");
 }));
 
 app.get("/logout", (req, res) => {
@@ -3633,14 +3871,81 @@ app.get("/", async (req, res) => {
   res.send(landingPage());
 });
 
-app.get("/dashboard", requireAuth, requirePermission("dashboard", "view"), async (req, res) => {
+app.get("/jobs/no-access", requireAuth, (req, res) => {
+  res.status(403).send(layout("No Job Access", `
+    <div class="card error">
+      <h3>No Job Access Assigned</h3>
+      <p>Your user account does not currently have any active job numbers assigned. Contact an administrator to assign job access.</p>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/logout">Logout</a>
+      </div>
+    </div>
+  `, req.user));
+});
+
+app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
+  const jobs = req.user.role === "admin"
+    ? req.user.accessibleJobs
+    : req.user.activeJobs;
+  if (req.user.role !== "admin" && jobs.length === 0) {
+    res.redirect("/jobs/no-access");
+    return;
+  }
+  if (req.user.role !== "admin" && jobs.length === 1) {
+    setSessionCookie(res, buildSessionPayload(req.user, jobs[0].id));
+    res.redirect("/dashboard");
+    return;
+  }
+  const rows = jobs.map((job) => `
+    <tr>
+      <td>${esc(job.job_number)}</td>
+      <td>${esc(job.plant_name || "")}</td>
+      <td>${esc(job.performance_job_number || "")}</td>
+      <td>${job.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>
+        ${job.is_active ? `
+          <form method="post" action="/jobs/select">
+            <input type="hidden" name="job_id" value="${job.id}" />
+            <button type="submit">Open Job</button>
+          </form>
+        ` : `<span class="muted">Inactive job</span>`}
+      </td>
+    </tr>
+  `).join("");
+  res.send(layout("Select Job", `
+    <h1>Select Job</h1>
+    <div class="card">
+      <p>${req.user.role === "admin" ? "Choose the job you want to work in." : "Choose one of your assigned jobs to continue."}</p>
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Job Number</th><th>Plant</th><th>Performance #</th><th>Status</th><th>Action</th></tr>
+        ${rows || `<tr><td colspan="5" class="muted">No jobs available.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+}));
+
+app.post("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
+  const requestedJobId = Number(req.body.job_id || 0);
+  const availableJobs = req.user.role === "admin" ? req.user.accessibleJobs : req.user.activeJobs;
+  const selectedJob = availableJobs.find((job) => Number(job.id) === requestedJobId && job.is_active);
+  if (!selectedJob) {
+    throw new Error("Choose a valid active job.");
+  }
+  setSessionCookie(res, buildSessionPayload(req.user, selectedJob.id));
+  res.redirect(getSafeReturnPath(req, "/dashboard"));
+}));
+
+app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboard", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const [rfqs, pos, receipts, vendors, osd, jobNumber, pendingAccessRequests, rfqStatusCounts] = await Promise.all([
-    query("select count(*) from rfqs"),
-    query("select count(*) from purchase_orders"),
-    query("select count(*) from receipts"),
-    query("select count(*) from vendors"),
-    query("select count(*) from receipts where osd_status <> 'OK'"),
-    getJobNumber(),
+    query("select count(*) from rfqs where job_id = $1", [jobId]),
+    query("select count(*) from purchase_orders where job_id = $1", [jobId]),
+    query("select count(*) from receipts where job_id = $1", [jobId]),
+    query("select count(*) from vendors where job_id = $1", [jobId]),
+    query("select count(*) from receipts where job_id = $1 and osd_status <> 'OK'", [jobId]),
+    Promise.resolve(req.user.activeJob?.job_number || ""),
     req.user.role === "admin"
       ? query("select count(*) from access_requests where status = 'PENDING'").catch(() => ({ rows: [{ count: 0 }] }))
       : Promise.resolve({ rows: [{ count: 0 }] }),
@@ -3648,8 +3953,9 @@ app.get("/dashboard", requireAuth, requirePermission("dashboard", "view"), async
       ? query(`
           select status, count(*)::int as count
           from rfqs
+          where job_id = $1
           group by status
-        `)
+        `, [jobId])
       : Promise.resolve({ rows: [] })
   ]);
   const rfqStatusMap = Object.fromEntries(rfqStatusCounts.rows.map((row) => [row.status, Number(row.count || 0)]));
@@ -3676,10 +3982,11 @@ app.get("/dashboard", requireAuth, requirePermission("dashboard", "view"), async
   `, req.user));
 });
 
-app.get("/yard", requireAuth, requirePermission("yard", "view"), async (req, res) => {
+app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const [unverifiedRes, verifiedRes] = await Promise.all([
-    query("select count(*) from material_requisitions where status = 'REQUESTED'"),
-    query("select count(*) from material_requisitions where status = 'VERIFIED'")
+    query("select count(*) from material_requisitions where job_id = $1 and status = 'REQUESTED'", [jobId]),
+    query("select count(*) from material_requisitions where job_id = $1 and status = 'VERIFIED'", [jobId])
   ]);
   const unverifiedCount = Number(unverifiedRes.rows[0]?.count || 0);
   const verifiedCount = Number(verifiedRes.rows[0]?.count || 0);
@@ -3722,7 +4029,11 @@ function getSafeReturnPath(req, fallback = "/settings") {
 
 app.get("/settings", requireAuth, requirePermission("settings", "view"), async (req, res) => {
   const resetComplete = String(req.query.reset || "").trim() === "1";
-  const accessRequestsRes = await query("select * from access_requests where status = 'PENDING' order by created_at asc");
+  const [accessRequestsRes, jobsRes] = await Promise.all([
+    query("select * from access_requests where status = 'PENDING' order by created_at asc"),
+    query("select id, job_number, plant_name, is_active from jobs where is_active = true order by job_number asc")
+  ]);
+  const jobChecks = jobsRes.rows.map((job) => `<label class="check-option"><input type="checkbox" name="job_ids" value="${job.id}" /><span>${esc(job.job_number)}${job.plant_name ? ` - ${esc(job.plant_name)}` : ""}</span></label>`).join("");
   const accessRequestRows = accessRequestsRes.rows.map((record) => `
     <tr>
       <td>${esc(record.email)}</td>
@@ -3748,6 +4059,10 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
                 <option value="admin">admin</option>
               </select>
             </div>
+          </div>
+          <div>
+            <label>Assigned Jobs</label>
+            <div class="check-grid">${jobChecks || `<span class="muted">No active jobs available.</span>`}</div>
           </div>
           <div class="actions">
             <button type="submit">Approve</button>
@@ -3876,9 +4191,13 @@ app.post("/settings/reset-app/:target", requireAuth, requireRole(["admin"]), req
 }));
 
 app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"), async (req, res) => {
-  const jobNumber = await getJobNumber();
-  const plantName = await getAppSettingValue("plant_name", "");
-  const performanceJobNumber = await getAppSettingValue("performance_job_number", "");
+  const jobsRes = await query(`
+    select id, job_number, plant_name, performance_job_number, is_active, created_at
+    from jobs
+    order by job_number asc, id asc
+  `);
+  const jobs = jobsRes.rows;
+  const currentJob = req.user.activeJob || jobs[0] || null;
   const vendorCategoryText = vendorCategories.join("\n");
   const permissionRows = permissionSections.map((section) => {
     const cells = permissionRoles.map((role) => {
@@ -3909,6 +4228,31 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
     }).join("");
     return `<tr><td><strong>${esc(section.label)}</strong></td>${cells}</tr>`;
   }).join("");
+  const jobRows = jobs.map((job) => `
+    <tr>
+      <td>${esc(job.job_number)}</td>
+      <td>${esc(job.plant_name || "")}</td>
+      <td>${esc(job.performance_job_number || "")}</td>
+      <td>${job.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>${esc(formatShortDateTime(job.created_at))}</td>
+      <td>
+        ${req.user.role === "admin" ? `
+          <form method="post" action="/settings/jobs/${job.id}/edit" class="stack">
+            <input type="hidden" name="return_to" value="/settings/job-setup" />
+            <div class="grid">
+              <div><input name="job_number" value="${esc(job.job_number)}" required /></div>
+              <div><input name="plant_name" value="${esc(job.plant_name || "")}" placeholder="Plant name" /></div>
+              <div><input name="performance_job_number" value="${esc(job.performance_job_number || "")}" placeholder="Performance #" /></div>
+            </div>
+            <div class="actions">
+              <button type="submit">Save Job</button>
+              <button class="${job.is_active ? "btn btn-danger" : "btn btn-primary"}" type="submit" formaction="/settings/jobs/${job.id}/toggle">${job.is_active ? "Deactivate" : "Activate"}</button>
+            </div>
+          </form>
+        ` : `${currentJob && Number(currentJob.id) === Number(job.id) ? `<span class="chip">Current</span>` : `<span class="muted">Assigned by admin</span>`}`}
+      </td>
+    </tr>
+  `).join("");
   res.send(layout("Job Setup", `
     <h1>Job Setup</h1>
     <div class="card">
@@ -3917,17 +4261,26 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
       </div>
     </div>
     <div class="card">
-      <form method="post" action="/settings/job-number" class="stack">
-        <input type="hidden" name="return_to" value="/settings/job-setup" />
-        <div class="grid">
-          <div><label>Job Number</label><input name="job_number" value="${esc(jobNumber)}" required /></div>
-          <div><label>Plant Name</label><input name="plant_name" value="${esc(plantName)}" placeholder="Novelis" /></div>
-          <div><label>Performance Job Number</label><input name="performance_job_number" value="${esc(performanceJobNumber)}" placeholder="8613" /></div>
-        </div>
-        <p class="muted">Header preview: <strong>${esc([plantName, jobNumber, "Material Control", performanceJobNumber].filter(Boolean).join(" - "))}</strong></p>
-        <p class="muted">Future RFQs will use this format: <strong>${esc(jobNumber)}-RFQ-00001</strong></p>
-        <div class="actions"><button type="submit">Save Job Number</button></div>
-      </form>
+      <h3>Jobs</h3>
+      <div class="muted">Each job now runs as its own working area. Users can be assigned to one or more jobs, and admins can switch between them after login.</div>
+      ${req.user.role === "admin" ? `
+        <form method="post" action="/settings/jobs/add" class="stack" style="margin-top:12px;">
+          <input type="hidden" name="return_to" value="/settings/job-setup" />
+          <div class="grid">
+            <div><label>Job Number</label><input name="job_number" required placeholder="KEQ3" /></div>
+            <div><label>Plant Name</label><input name="plant_name" placeholder="Novelis" /></div>
+            <div><label>Performance Job Number</label><input name="performance_job_number" placeholder="8613" /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Job</button></div>
+        </form>
+      ` : ""}
+      <div class="card scroll" style="margin-top:12px;">
+        <table>
+          <tr><th>Job Number</th><th>Plant</th><th>Performance #</th><th>Status</th><th>Created</th><th>Action</th></tr>
+          ${jobRows || `<tr><td colspan="6" class="muted">No jobs configured yet.</td></tr>`}
+        </table>
+      </div>
+      ${currentJob ? `<p class="muted">Current header preview: <strong>${esc([currentJob.plant_name, currentJob.job_number, "Material Control", currentJob.performance_job_number].filter(Boolean).join(" - "))}</strong></p>` : ""}
     </div>
     <div class="card">
       <h3>Vendor Categories</h3>
@@ -3959,17 +4312,19 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
   `, req.user));
 });
 
-app.get("/settings/warehouse-setup", requireAuth, requirePermission("settings", "view"), async (req, res) => {
+app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePermission("settings", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const warehousesRes = req.user.role === "admin"
-    ? await query("select id, name, is_active from warehouses order by name")
+    ? await query("select id, name, is_active from warehouses where job_id = $1 order by name", [jobId])
     : { rows: [] };
   const warehouseLocationsRes = req.user.role === "admin"
     ? await query(`
         select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
         from warehouse_locations wl
         join warehouses w on w.id = wl.warehouse_id
+        where wl.job_id = $1
         order by w.name, wl.name
-      `)
+      `, [jobId])
     : { rows: [] };
   const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
   const warehouseRows = warehousesRes.rows.map((row) => `
@@ -4049,7 +4404,29 @@ app.get("/settings/warehouse-setup", requireAuth, requirePermission("settings", 
 });
 
 app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async (req, res) => {
-  const usersRes = await query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username");
+  const [usersRes, jobsRes, assignmentsRes] = await Promise.all([
+    query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username"),
+    query("select id, job_number, plant_name, is_active from jobs order by job_number asc"),
+    query(`
+      select uj.user_id, uj.job_id, j.job_number, j.plant_name
+      from user_jobs uj
+      join jobs j on j.id = uj.job_id
+      order by j.job_number asc
+    `)
+  ]);
+  const jobs = jobsRes.rows;
+  const assignmentsByUser = new Map();
+  for (const row of assignmentsRes.rows) {
+    const list = assignmentsByUser.get(Number(row.user_id)) || [];
+    list.push(row);
+    assignmentsByUser.set(Number(row.user_id), list);
+  }
+  const renderJobChecks = (selectedJobIds = [], fieldName = "job_ids") => jobs.map((job) => `
+    <label class="check-option">
+      <input type="checkbox" name="${fieldName}" value="${job.id}" ${selectedJobIds.includes(Number(job.id)) ? "checked" : ""} ${!job.is_active ? "disabled" : ""} />
+      <span>${esc(job.job_number)}${job.plant_name ? ` - ${esc(job.plant_name)}` : ""}${!job.is_active ? " (inactive)" : ""}</span>
+    </label>
+  `).join("");
   const userRows = usersRes.rows.map((record) => `
     <tr>
       <td>${esc(record.username)}</td>
@@ -4057,6 +4434,7 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       <td>${esc(record.last_name || "")}</td>
       <td>${esc(normalizeEmail(record.email || ""))}</td>
       <td>${esc(normalizePhone(record.phone || ""))}</td>
+      <td>${(assignmentsByUser.get(Number(record.id)) || []).map((job) => `<span class="chip">${esc(job.job_number)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
       <td>${esc(record.role)}</td>
       <td>${record.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>${esc(formatShortDateTime(record.created_at))}</td>
@@ -4087,6 +4465,10 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
                   <option value="false" ${!record.is_active ? "selected" : ""}>inactive</option>
                 </select>
               </div>
+            </div>
+            <div>
+              <label>Assigned Jobs</label>
+              <div class="check-grid">${renderJobChecks((assignmentsByUser.get(Number(record.id)) || []).map((job) => Number(job.job_id)))}</div>
             </div>
             <div class="actions">
               <input type="password" name="password" placeholder="Enter a new password to reset it" />
@@ -4131,6 +4513,10 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
             </select>
           </div>
         </div>
+        <div>
+          <label>Assigned Jobs</label>
+          <div class="check-grid">${renderJobChecks([], "job_ids")}</div>
+        </div>
         <div class="grid">
           <div>
             <label>Password</label>
@@ -4148,14 +4534,15 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
     <div class="card scroll">
       <h3>Existing Users</h3>
       <table>
-        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Role</th><th>Status</th><th>Created</th><th>Edit / Delete</th></tr>
-        ${userRows || `<tr><td colspan="9" class="muted">No users found.</td></tr>`}
+        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Jobs</th><th>Role</th><th>Status</th><th>Created</th><th>Edit / Delete</th></tr>
+        ${userRows || `<tr><td colspan="10" class="muted">No users found.</td></tr>`}
       </table>
     </div>
   `, req.user));
 });
 
-app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermission("yard", "view"), asyncHandler(async (req, res) => {
+app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("yard", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const itemFilter = String(req.query.item || "").trim();
   const historyRows = itemFilter ? (await query(`
     select *
@@ -4182,7 +4569,7 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
       join material_items mi on mi.id = pl.material_item_id
       left join purchase_orders po on po.id = pl.po_id
       left join mrr_logs m on m.id = r.mrr_log_id
-      where mi.item_code ilike $1 or mi.description ilike $1
+      where r.job_id = $2 and (mi.item_code ilike $1 or mi.description ilike $1)
 
       union all
 
@@ -4204,7 +4591,7 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
       from inventory_adjustment_lines ial
       left join inventory_audit_reports r on r.id = ial.report_id
       left join users u on u.id = ial.created_by
-      where ial.item_code ilike $1 or ial.description ilike $1
+      where ial.job_id = $2 and (ial.item_code ilike $1 or ial.description ilike $1)
 
       union all
 
@@ -4226,9 +4613,10 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
         )) as details
       from material_receiving_logs mrl
       where (
+        mrl.job_id = $2 and (
         coalesce(nullif(mrl.item_code, ''), nullif(mrl.ident_code, ''), nullif(mrl.fluor_item_code, '')) ilike $1
         or coalesce(mrl.description, '') ilike $1
-      )
+      ))
 
       union all
 
@@ -4255,6 +4643,7 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
       left join users u on u.id = mr.issued_by_user_id
       where coalesce(mit.qty_issued, 0) > 0
         and coalesce(mr.status, '') <> 'CANCELLED'
+        and mr.job_id = $2
         and (bl.item_code ilike $1 or bl.description ilike $1)
 
       union all
@@ -4281,6 +4670,7 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
       left join users u on u.id = mr.issued_by_user_id
       where mrl.qty_issued > 0
         and coalesce(mr.status, '') <> 'CANCELLED'
+        and mr.job_id = $2
         and not exists (
           select 1
           from material_issue_transactions mit
@@ -4289,8 +4679,9 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
         and (bl.item_code ilike $1 or bl.description ilike $1)
       ) item_history
     order by transaction_date desc nulls last, source_type, warehouse, location
-  `, [`%${itemFilter}%`])).rows : [];
+  `, [`%${itemFilter}%`, jobId])).rows : [];
   const currentRows = itemFilter ? await getCurrentOnHandRows({ query }, {
+    jobId,
     whereSql: "where coalesce(item_code, '') ilike $1 or coalesce(description, '') ilike $1",
     params: [`%${itemFilter}%`],
     orderSql: "inventory_by_location.warehouse, inventory_by_location.location, inventory_by_location.item_code"
@@ -4348,14 +4739,16 @@ app.get("/yard/item-history", requireAuth, requireRole(["admin"]), requirePermis
   `, req.user));
 }));
 
-app.get("/yard/locations", requireAuth, requirePermission("yard", "view"), async (req, res) => {
-  const warehousesRes = await query("select id, name, is_active from warehouses order by name");
+app.get("/yard/locations", requireAuth, requireJobContext, requirePermission("yard", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const warehousesRes = await query("select id, name, is_active from warehouses where job_id = $1 order by name", [jobId]);
   const warehouseLocationsRes = await query(`
     select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
     from warehouse_locations wl
     join warehouses w on w.id = wl.warehouse_id
+    where wl.job_id = $1 and w.job_id = $1
     order by w.name, wl.name
-  `);
+  `, [jobId]);
   const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
   const canManageLocations = req.user.role === "admin" || canAccess(req.user, "settings", "edit");
   const warehouseRows = warehousesRes.rows.map((row) => `
@@ -4445,37 +4838,74 @@ app.post("/request-access", async (req, res) => {
   res.send(requestAccessPage("", "Request submitted. An administrator will review it."));
 });
 
-app.post("/settings/job-number", requireAuth, requirePermission("settings", "edit"), async (req, res) => {
+app.post("/settings/job-number", requireAuth, requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  if (!req.user.activeJob) throw new Error("Choose a job before saving job settings.");
   const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
   const plantName = String(req.body.plant_name || "").trim();
   const performanceJobNumber = String(req.body.performance_job_number || "").trim();
   if (!jobNumber) throw new Error("Job number is required.");
   await withTransaction(async (client) => {
     await client.query(`
-      insert into app_settings (key, value, updated_at)
-      values ('job_number', $1, now())
-      on conflict (key) do update
-      set value = excluded.value, updated_at = now()
-    `, [jobNumber]);
-    await client.query(`
-      insert into app_settings (key, value, updated_at)
-      values ('plant_name', $1, now())
-      on conflict (key) do update
-      set value = excluded.value, updated_at = now()
-    `, [plantName]);
-    await client.query(`
-      insert into app_settings (key, value, updated_at)
-      values ('performance_job_number', $1, now())
-      on conflict (key) do update
-      set value = excluded.value, updated_at = now()
-    `, [performanceJobNumber]);
-    await auditLog(client, req.user.id, "update", "app_setting", "job_number", jobNumber);
-    await auditLog(client, req.user.id, "update", "app_setting", "plant_name", plantName);
-    await auditLog(client, req.user.id, "update", "app_setting", "performance_job_number", performanceJobNumber);
-    await refreshHeaderSettings(client);
+      update jobs
+      set job_number = $2,
+          plant_name = $3,
+          performance_job_number = $4,
+          updated_at = now()
+      where id = $1
+    `, [req.user.activeJob.id, jobNumber, plantName, performanceJobNumber]);
+    await auditLog(client, req.user.id, "update", "job", req.user.activeJob.id, `${jobNumber}|${plantName}|${performanceJobNumber}`);
   });
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
-});
+}));
+
+app.post("/settings/jobs/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
+  const plantName = String(req.body.plant_name || "").trim();
+  const performanceJobNumber = String(req.body.performance_job_number || "").trim();
+  if (!jobNumber) throw new Error("Job number is required.");
+  await withTransaction(async (client) => {
+    const insert = await client.query(`
+      insert into jobs (job_number, plant_name, performance_job_number, is_active, updated_at)
+      values ($1, $2, $3, true, now())
+      returning id
+    `, [jobNumber, plantName, performanceJobNumber]);
+    await auditLog(client, req.user.id, "create", "job", insert.rows[0].id, `${jobNumber}|${plantName}|${performanceJobNumber}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+}));
+
+app.post("/settings/jobs/:id/edit", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = Number(req.params.id || 0);
+  const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
+  const plantName = String(req.body.plant_name || "").trim();
+  const performanceJobNumber = String(req.body.performance_job_number || "").trim();
+  if (!jobId) throw new Error("Job not found.");
+  if (!jobNumber) throw new Error("Job number is required.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      update jobs
+      set job_number = $2,
+          plant_name = $3,
+          performance_job_number = $4,
+          updated_at = now()
+      where id = $1
+    `, [jobId, jobNumber, plantName, performanceJobNumber]);
+    await auditLog(client, req.user.id, "update", "job", jobId, `${jobNumber}|${plantName}|${performanceJobNumber}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+}));
+
+app.post("/settings/jobs/:id/toggle", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = Number(req.params.id || 0);
+  if (!jobId) throw new Error("Job not found.");
+  await withTransaction(async (client) => {
+    const current = (await client.query("select id, job_number, is_active from jobs where id = $1", [jobId])).rows[0];
+    if (!current) throw new Error("Job not found.");
+    await client.query("update jobs set is_active = $2, updated_at = now() where id = $1", [jobId, !current.is_active]);
+    await auditLog(client, req.user.id, !current.is_active ? "activate" : "deactivate", "job", jobId, current.job_number);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+}));
 
 app.post("/settings/vendor-categories", requireAuth, requirePermission("settings", "edit"), async (req, res) => {
   const categories = normalizeCategoryList(req.body.vendor_categories);
@@ -4493,25 +4923,27 @@ app.post("/settings/vendor-categories", requireAuth, requirePermission("settings
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 });
 
-app.post("/settings/warehouses/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouses/add", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const name = normalizeWarehouseName(req.body.name);
   if (!name) throw new Error("Warehouse name is required.");
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const insert = await client.query(`
-      insert into warehouses (name, is_active)
-      values ($1, true)
-      on conflict (name) do update
+      insert into warehouses (job_id, name, is_active)
+      values ($1, $2, true)
+      on conflict (job_id, name) do update
       set is_active = true
       returning id
-    `, [name]);
+    `, [jobId, name]);
     await auditLog(client, req.user.id, "create", "warehouse", insert.rows[0].id, name);
   });
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouses/:id/toggle", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const current = (await client.query("select * from warehouses where id = $1", [req.params.id])).rows[0];
+    const current = (await client.query("select * from warehouses where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!current) throw new Error("Warehouse not found.");
     const nextState = !current.is_active;
     await client.query("update warehouses set is_active = $2 where id = $1", [req.params.id, nextState]);
@@ -4520,34 +4952,36 @@ app.post("/settings/warehouses/:id/toggle", requireAuth, requireRole(["admin"]),
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouse-locations/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const warehouseId = Number(req.body.warehouse_id);
   const name = normalizeLocationName(req.body.name);
+  const jobId = currentJobId(req);
   if (!warehouseId) throw new Error("Warehouse is required.");
   if (!name) throw new Error("Location name is required.");
   await withTransaction(async (client) => {
-    const warehouse = (await client.query("select name from warehouses where id = $1", [warehouseId])).rows[0];
+    const warehouse = (await client.query("select name from warehouses where id = $1 and job_id = $2", [warehouseId, jobId])).rows[0];
     if (!warehouse) throw new Error("Warehouse not found.");
     const insert = await client.query(`
-      insert into warehouse_locations (warehouse_id, name, is_active)
-      values ($1, $2, true)
+      insert into warehouse_locations (job_id, warehouse_id, name, is_active)
+      values ($1, $2, $3, true)
       on conflict (warehouse_id, name) do update
       set is_active = true
       returning id
-    `, [warehouseId, name]);
+    `, [jobId, warehouseId, name]);
     await auditLog(client, req.user.id, "create", "warehouse_location", insert.rows[0].id, `${warehouse.name}:${name}`);
   });
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const current = (await client.query(`
       select wl.id, wl.name, wl.is_active, w.name as warehouse_name
       from warehouse_locations wl
       join warehouses w on w.id = wl.warehouse_id
-      where wl.id = $1
-    `, [req.params.id])).rows[0];
+      where wl.id = $1 and wl.job_id = $2
+    `, [req.params.id, jobId])).rows[0];
     if (!current) throw new Error("Warehouse location not found.");
     const nextState = !current.is_active;
     await client.query("update warehouse_locations set is_active = $2 where id = $1", [req.params.id, nextState]);
@@ -4556,9 +4990,10 @@ app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireRole(["
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouse-locations/import", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
   const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeWarehouseLocationImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     let importedCount = 0;
     for (const row of rows) {
@@ -4573,18 +5008,18 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireRole(["admi
         warehouse = (await client.query(`
           update warehouses
           set name = coalesce(nullif($2, ''), name), is_active = $3
-          where id = $1
+          where id = $1 and job_id = $4
           returning id, name
-        `, [warehouseId, warehouseName, isActive])).rows[0];
+        `, [warehouseId, warehouseName, isActive, jobId])).rows[0];
         if (!warehouse) throw new Error(`Warehouse id ${warehouseId} was not found in the import file.`);
       } else {
         warehouse = (await client.query(`
-          insert into warehouses (name, is_active)
-          values ($1, $2)
-          on conflict (name) do update
+          insert into warehouses (job_id, name, is_active)
+          values ($1, $2, $3)
+          on conflict (job_id, name) do update
           set is_active = excluded.is_active
           returning id, name
-        `, [warehouseName, isActive])).rows[0];
+        `, [jobId, warehouseName, isActive])).rows[0];
       }
       if (!locationId && !locationName) {
         importedCount += 1;
@@ -4594,16 +5029,16 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireRole(["admi
         const updated = await client.query(`
           update warehouse_locations
           set warehouse_id = $2, name = coalesce(nullif($3, ''), name), is_active = $4
-          where id = $1
-        `, [locationId, warehouse.id, locationName, isActive]);
+          where id = $1 and job_id = $5
+        `, [locationId, warehouse.id, locationName, isActive, jobId]);
         if (!updated.rowCount) throw new Error(`Location id ${locationId} was not found in the import file.`);
       } else {
         await client.query(`
-          insert into warehouse_locations (warehouse_id, name, is_active)
-          values ($1, $2, $3)
+          insert into warehouse_locations (job_id, warehouse_id, name, is_active)
+          values ($1, $2, $3, $4)
           on conflict (warehouse_id, name) do update
           set is_active = excluded.is_active
-        `, [warehouse.id, locationName, isActive]);
+        `, [jobId, warehouse.id, locationName, isActive]);
       }
       importedCount += 1;
     }
@@ -4613,7 +5048,8 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireRole(["admi
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const rows = (await query(`
     select
       w.id as warehouse_id,
@@ -4623,8 +5059,9 @@ app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireRole(["
       case when w.is_active and coalesce(wl.is_active, true) then 'active' else 'inactive' end as is_active
     from warehouses w
     left join warehouse_locations wl on wl.warehouse_id = w.id
+    where w.job_id = $1
     order by w.name, wl.name
-  `)).rows;
+  `, [jobId])).rows;
   const worksheetRows = rows.length ? rows : [{
     warehouse_id: "",
     warehouse: "",
@@ -4684,7 +5121,7 @@ app.post("/settings/permissions", requireAuth, requireRole(["admin"]), requirePe
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 }));
 
-app.get("/settings/material-log-imports", requireAuth, requirePermission("settings", "view"), async (req, res) => {
+app.get("/settings/material-log-imports", requireAuth, requireJobContext, requirePermission("settings", "view"), async (req, res) => {
   res.send(layout("Material Log Imports", `
     <h1>Material Log Imports</h1>
     <div class="card">
@@ -4709,6 +5146,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
   const lastName = String(req.body.last_name || "").trim();
   const email = normalizeEmail(req.body.email);
   const phone = normalizePhone(req.body.phone);
+  const assignedJobIds = parseSelectedIdList(req.body.job_ids);
   if (!username) throw new Error("Username is required.");
   if (!tempPassword) throw new Error("Temporary password is required.");
   if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
@@ -4718,10 +5156,15 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
   await withTransaction(async (client) => {
     const requestRecord = (await client.query("select * from access_requests where id = $1 and status = 'PENDING'", [requestId])).rows[0];
     if (!requestRecord) throw new Error("Access request not found.");
-    await client.query(
-      "insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true)",
+    const insert = await client.query(
+      "insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true) returning id",
       [username, passwordHash, role, firstName, lastName, email || normalizeEmail(requestRecord.email), phone]
     );
+    if (role !== "admin") {
+      for (const jobId of assignedJobIds) {
+        await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [insert.rows[0].id, jobId]);
+      }
+    }
     await client.query(`
       update access_requests
       set status = 'APPROVED',
@@ -4730,7 +5173,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
           approved_at = now()
       where id = $1
     `, [requestId, req.user.id, username]);
-    await auditLog(client, req.user.id, "approve", "access_request", requestId, `${requestRecord.email}|${username}|${role}`);
+    await auditLog(client, req.user.id, "approve", "access_request", requestId, `${requestRecord.email}|${username}|${role}|jobs=${assignedJobIds.join(",")}`);
   });
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 }));
@@ -4760,6 +5203,7 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandle
   const lastName = String(req.body.last_name || "").trim();
   const email = normalizeEmail(req.body.email);
   const phone = normalizePhone(req.body.phone);
+  const assignedJobIds = parseSelectedIdList(req.body.job_ids);
   if (!username) throw new Error("Username is required.");
   if (!password) throw new Error("Password is required.");
   if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
@@ -4767,8 +5211,13 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandle
   if (passwordError) throw new Error(passwordError);
   const passwordHash = await bcrypt.hash(password, 8);
   await withTransaction(async (client) => {
-    await client.query("insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true)", [username, passwordHash, role, firstName, lastName, email, phone]);
-    await auditLog(client, req.user.id, "create", "user", username, `${role}|${firstName}|${lastName}|${email}|${phone}`);
+    const insert = await client.query("insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true) returning id", [username, passwordHash, role, firstName, lastName, email, phone]);
+    if (role !== "admin") {
+      for (const jobId of assignedJobIds) {
+        await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [insert.rows[0].id, jobId]);
+      }
+    }
+    await auditLog(client, req.user.id, "create", "user", username, `${role}|${firstName}|${lastName}|${email}|${phone}|jobs=${assignedJobIds.join(",")}`);
   });
   res.redirect(getSafeReturnPath(req, "/settings"));
 }));
@@ -4783,6 +5232,7 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
   const email = normalizeEmail(req.body.email);
   const phone = normalizePhone(req.body.phone);
   const isActive = String(req.body.is_active || "true") === "true";
+  const assignedJobIds = parseSelectedIdList(req.body.job_ids);
   if (!username) throw new Error("Username is required.");
   if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
   let passwordHash = "";
@@ -4808,7 +5258,13 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
     } else {
       await client.query("update users set username = $2, role = $3, is_active = $4, first_name = $5, last_name = $6, email = $7, phone = $8 where id = $1", [userId, username, role, isActive, firstName, lastName, email, phone]);
     }
-    await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}|${isActive ? "active" : "inactive"}|${firstName}|${lastName}|${email}|${phone}`);
+    await client.query("delete from user_jobs where user_id = $1", [userId]);
+    if (role !== "admin") {
+      for (const jobId of assignedJobIds) {
+        await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [userId, jobId]);
+      }
+    }
+    await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}|${isActive ? "active" : "inactive"}|${firstName}|${lastName}|${email}|${phone}|jobs=${assignedJobIds.join(",")}`);
   });
   res.redirect(getSafeReturnPath(req, "/settings/user-management"));
 }));
@@ -4852,17 +5308,19 @@ app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyn
   res.redirect(getSafeReturnPath(req, "/settings/user-management"));
 }));
 
-app.get("/bom", requireAuth, requirePermission("bom", "view"), async (req, res) => {
+app.get("/bom", requireAuth, requireJobContext, requirePermission("bom", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const bomNo = String(req.query.bom_no || "").trim();
   const bomName = String(req.query.bom_name || "").trim();
   const bomType = String(req.query.bom_type || "").trim();
   const area = String(req.query.area || "").trim();
   const systemName = String(req.query.system || req.query.system_name || "").trim();
   const status = String(req.query.status || "").trim();
-  const jobNumber = await getJobNumber();
-  const nextBomNumber = await getNextBomNumber();
-  const where = [];
-  const params = [];
+  const jobSettings = await getJobSettings(jobId);
+  const jobNumber = String(jobSettings.job_number || "").trim();
+  const nextBomNumber = await getNextBomNumber(null, jobId);
+  const where = ["bh.job_id = $1"];
+  const params = [jobId];
   if (bomNo) { params.push(`%${bomNo}%`); where.push(`bh.bom_no ilike $${params.length}`); }
   if (bomName) { params.push(`%${bomName}%`); where.push(`coalesce(bh.bom_name, bh.description, '') ilike $${params.length}`); }
   if (bomType) { params.push(bomType); where.push(`bh.bom_type = $${params.length}`); }
@@ -4936,17 +5394,20 @@ app.get("/bom", requireAuth, requirePermission("bom", "view"), async (req, res) 
   `, req.user));
 });
 
-app.post("/bom", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
+app.post("/bom", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   const bomId = await withTransaction(async (client) => {
-    const jobNumber = String((req.body.job_number || await getJobNumber(client))).trim().toUpperCase();
-    const bomNo = String(req.body.bom_no || "").trim() || await getNextBomNumber(client);
+    const jobSettings = await getJobSettings(jobId, client);
+    const jobNumber = String((req.body.job_number || jobSettings.job_number || "")).trim().toUpperCase();
+    const bomNo = String(req.body.bom_no || "").trim() || await getNextBomNumber(client, jobId);
     const bomName = String(req.body.bom_name || "").trim();
     if (!bomName) throw new Error("BOM name is required.");
     const insert = await client.query(`
-      insert into bom_headers (job_number, bom_no, bom_name, bom_type, area, system_name, revision, status, description, notes, updated_at)
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+      insert into bom_headers (job_id, job_number, bom_no, bom_name, bom_type, area, system_name, revision, status, description, notes, updated_at)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
       returning id
     `, [
+      jobId,
       jobNumber,
       bomNo,
       bomName,
@@ -4964,8 +5425,8 @@ app.post("/bom", requireAuth, requirePermission("bom", "edit"), async (req, res)
   res.redirect(`/bom/${bomId}`);
 });
 
-app.get("/bom/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
-  const bom = (await query("select * from bom_headers where id = $1", [req.params.id])).rows[0];
+app.get("/bom/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
   if (!bom) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
     return;
@@ -4996,12 +5457,13 @@ app.get("/bom/:id/edit", requireAuth, requirePermission("bom", "edit"), async (r
   `, req.user));
 });
 
-app.post("/bom/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
+app.post("/bom/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     await client.query(`
       update bom_headers
       set job_number = $2, bom_no = $3, bom_name = $4, bom_type = $5, area = $6, system_name = $7, revision = $8, status = $9, description = $10, notes = $11, updated_at = now()
-      where id = $1
+      where id = $1 and job_id = $12
     `, [
       req.params.id,
       String(req.body.job_number || "").trim().toUpperCase(),
@@ -5013,15 +5475,17 @@ app.post("/bom/:id/edit", requireAuth, requirePermission("bom", "edit"), async (
       req.body.revision || "0",
       req.body.status || "DRAFT",
       req.body.description || "",
-      req.body.notes || ""
+      req.body.notes || "",
+      jobId
     ]);
     await auditLog(client, req.user.id, "update", "bom_header", req.params.id, req.body.bom_no || "");
   });
   res.redirect(`/bom/${req.params.id}`);
 });
 
-app.get("/bom/:id", requireAuth, async (req, res) => {
-  const bom = (await query("select * from bom_headers where id = $1", [req.params.id])).rows[0];
+app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
+  const jobId = currentJobId(req);
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!bom) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
     return;
@@ -5035,10 +5499,10 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
       select ib.id, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
              coalesce((select count(*) from import_batch_errors ibe where ibe.batch_id = ib.id), 0) as error_count
       from import_batches ib
-      where ib.entity_type = 'bom_lines' and ib.rfq_id = $1
+      where ib.entity_type = 'bom_lines' and ib.rfq_id = $1 and ib.job_id = $2
       order by ib.id desc
       limit 5
-    `, [req.params.id]),
+    `, [req.params.id, jobId]),
     query(`
       select
         count(*) as line_count,
@@ -5054,8 +5518,8 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
       select count(*) as requisition_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
       from material_requisitions mr
       join material_requisition_lines mrl on mrl.requisition_id = mr.id
-      where mr.bom_id = $1
-    `, [req.params.id])
+      where mr.bom_id = $1 and mr.job_id = $2 and mrl.job_id = $2
+    `, [req.params.id, jobId])
   ]);
   const coverage = coverageRes.rows[0];
   const requisitionSummary = requisitionSummaryRes.rows[0];
@@ -5124,28 +5588,29 @@ app.get("/bom/:id", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/bom/:id/to-rfq", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
+app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
   const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
-    const bom = (await client.query("select * from bom_headers where id = $1", [bomId])).rows[0];
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
     if (!bom) throw new Error("BOM not found.");
     const lines = (await client.query(`
       select *
       from bom_lines
-      where bom_id = $1 and planning_status = 'PLANNED'
+      where bom_id = $1 and job_id = $2 and planning_status = 'PLANNED'
       order by line_no, id
-    `, [bomId])).rows;
+    `, [bomId, jobId])).rows;
     if (lines.length === 0) throw new Error("No BOM lines are available to move onto an RFQ.");
-    const rfqNo = await getNextRfqNumber(client);
+    const rfqNo = await getNextRfqNumber(client, jobId);
     const rfqInsert = await client.query(`
-      insert into rfqs (rfq_no, project_name, due_date, status)
-      values ($1, $2, $3, 'OPEN')
+      insert into rfqs (job_id, rfq_no, project_name, due_date, status)
+      values ($1, $2, $3, $4, 'OPEN')
       returning id
-    `, [rfqNo, req.body.project_name?.trim() || bom.bom_name || bom.description || bom.bom_no, req.body.due_date || null]);
+    `, [jobId, rfqNo, req.body.project_name?.trim() || bom.bom_name || bom.description || bom.bom_no, req.body.due_date || null]);
     const newRfqId = rfqInsert.rows[0].id;
     for (const line of lines) {
       let materialItemId;
-      const existingItem = await client.query("select id from material_items where item_code = $1", [line.item_code]);
+      const existingItem = await client.query("select id from material_items where job_id = $1 and item_code = $2", [jobId, line.item_code]);
       if (existingItem.rows[0]) {
         materialItemId = existingItem.rows[0].id;
         await client.query(
@@ -5154,26 +5619,26 @@ app.post("/bom/:id/to-rfq", requireAuth, requirePermission("bom", "edit"), async
         );
       } else {
         const inserted = await client.query(
-          "insert into material_items (item_code, description, material_type, uom) values ($1, $2, $3, $4) returning id",
-          [line.item_code, line.description, line.material_type || "misc", line.uom || "EA"]
+          "insert into material_items (job_id, item_code, description, material_type, uom) values ($1, $2, $3, $4, $5) returning id",
+          [jobId, line.item_code, line.description, line.material_type || "misc", line.uom || "EA"]
         );
         materialItemId = inserted.rows[0].id;
       }
       await client.query(`
-        insert into rfq_items (rfq_id, bom_line_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
-      `, [newRfqId, line.id, materialItemId, line.spec || "", line.commodity_code || "", line.tag_number || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty_required, line.notes || ""]);
+        insert into rfq_items (job_id, rfq_id, bom_line_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+      `, [jobId, newRfqId, line.id, materialItemId, line.spec || "", line.commodity_code || "", line.tag_number || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty_required, line.notes || ""]);
       await client.query(`
         update bom_lines
         set planning_status = 'ON_RFQ', qty_quoted = qty_required, updated_at = now()
-        where id = $1
-      `, [line.id]);
+        where id = $1 and job_id = $2
+      `, [line.id, jobId]);
     }
     await client.query(`
       update bom_headers
       set status = case when status = 'DRAFT' then 'ISSUED_FOR_RFQ' else status end, updated_at = now()
-      where id = $1
-    `, [bomId]);
+      where id = $1 and job_id = $2
+    `, [bomId, jobId]);
     await auditLog(client, req.user.id, "create", "rfq", newRfqId, rfqNo);
     await auditLog(client, req.user.id, "generate_rfq", "bom_header", bomId, rfqNo);
     return newRfqId;
@@ -5181,8 +5646,9 @@ app.post("/bom/:id/to-rfq", requireAuth, requirePermission("bom", "edit"), async
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
+app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const selectedLineQtys = new Map();
   try {
     const stagedSelection = JSON.parse(String(req.body.staged_selection || "{}"));
@@ -5208,14 +5674,14 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
   const selectedLineIds = Array.from(selectedLineQtys.keys());
   if (selectedLineIds.length === 0) throw new Error("Select at least one BOM line for the requisition.");
   const requisitionId = await withTransaction(async (client) => {
-    const bom = (await client.query("select * from bom_headers where id = $1", [bomId])).rows[0];
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
     if (!bom) throw new Error("BOM not found.");
-    const requisitionNo = await getNextRequisitionNumber(client);
+    const requisitionNo = await getNextRequisitionNumber(client, jobId);
       const insertReq = await client.query(`
-        insert into material_requisitions (requisition_no, bom_id, requested_by_user_id, requested_by_name, iwp_no, iso_no, status, notes)
-        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, iwp_no, iso_no, status, notes)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         returning id
-    `, [requisitionNo, bomId, req.user.id, String(req.body.requested_by_name || req.user.username).trim(), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
+    `, [jobId, requisitionNo, bomId, req.user.id, String(req.body.requested_by_name || req.user.username).trim(), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
       let createdLineCount = 0;
     for (const lineId of selectedLineIds) {
       const qtyRequested = selectedLineQtys.get(lineId);
@@ -5228,7 +5694,7 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
           greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
         from bom_lines bl
         left join (
-          ${getInventoryTotalsSubquery()}
+          ${getInventoryTotalsSubquery(jobId)}
         ) inv
           on inv.item_code = bl.item_code
          and inv.size_1 = coalesce(bl.size_1, '')
@@ -5244,6 +5710,7 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
             coalesce(thk_2, '') as thk_2,
             sum(qty_issued) as qty_issued_total
           from bom_lines
+          where job_id = $3
           group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
         ) issued
           on issued.item_code = bl.item_code
@@ -5263,6 +5730,7 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
           join material_requisitions mr2 on mr2.id = mrl2.requisition_id
           join bom_lines bl2 on bl2.id = mrl2.bom_line_id
           where mr2.status = 'VERIFIED'
+            and mr2.job_id = $3
           group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
         ) alloc
           on alloc.item_code = bl.item_code
@@ -5270,8 +5738,8 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
          and alloc.size_2 = coalesce(bl.size_2, '')
          and alloc.thk_1 = coalesce(bl.thk_1, '')
          and alloc.thk_2 = coalesce(bl.thk_2, '')
-        where bl.id = $1 and bl.bom_id = $2
-      `, [lineId, bomId])).rows[0];
+        where bl.id = $1 and bl.bom_id = $2 and bl.job_id = $3
+      `, [lineId, bomId, jobId])).rows[0];
       if (!line) continue;
       const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
       if (qtyRequested <= 0 || qtyRequested > remaining) {
@@ -5281,9 +5749,9 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
         throw new Error(`Requested qty for ${line.item_code} exceeds available received stock.`);
       }
         await client.query(`
-          insert into material_requisition_lines (requisition_id, bom_line_id, qty_requested)
-          values ($1, $2, $3)
-        `, [insertReq.rows[0].id, lineId, qtyRequested]);
+          insert into material_requisition_lines (job_id, requisition_id, bom_line_id, qty_requested)
+          values ($1, $2, $3, $4)
+        `, [jobId, insertReq.rows[0].id, lineId, qtyRequested]);
         createdLineCount += 1;
       }
     if (createdLineCount === 0) throw new Error("No valid requisition lines were created.");
@@ -5293,7 +5761,7 @@ app.post("/bom/:id/requisitions", requireAuth, requirePermission("requisitions",
   res.redirect(`/requisitions/${requisitionId}`);
 }));
 
-app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"), upload.single("sheet"), async (req, res) => {
+app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermission("bom", "edit"), upload.single("sheet"), async (req, res) => {
   const bomId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeBomImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
@@ -5301,7 +5769,8 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
     const batchId = await createImportBatch(client, {
       entityType: "bom_lines",
       uploadedBy: req.user.id,
-      filename: req.file?.originalname || ""
+      filename: req.file?.originalname || "",
+      jobId: currentJobId(req)
     });
     let insertedCount = 0;
     let updatedCount = 0;
@@ -5345,8 +5814,8 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
     const validRows = Array.from(validRowsBySourceUid.values());
     if (validRows.length) {
       const existingSourceUids = new Set((await client.query(
-        "select source_uid from bom_lines where bom_id = $1 and source_uid = any($2::text[])",
-        [bomId, validRows.map((row) => `${row.lineNo}|${row.itemCode}`)]
+        "select source_uid from bom_lines where bom_id = $1 and job_id = $2 and source_uid = any($3::text[])",
+        [bomId, currentJobId(req), validRows.map((row) => `${row.lineNo}|${row.itemCode}`)]
       )).rows.map((row) => String(row.source_uid || "")));
       const existingCount = validRows.filter((row) => existingSourceUids.has(`${row.lineNo}|${row.itemCode}`)).length;
       updatedCount += existingCount;
@@ -5356,11 +5825,12 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
         const chunk = validRows.slice(index, index + chunkSize);
         await client.query(`
           insert into bom_lines (
-            bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
+            job_id, bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
             iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes, updated_at
           )
           select
             $1,
+            $2,
             data.line_no,
             data.item_code,
             data.description,
@@ -5379,8 +5849,8 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
             data.notes,
             now()
           from unnest(
-            $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[],
-            $10::text[], $11::text[], $12::text[], $13::text[], $14::text[], $15::text[], $16::numeric[], $17::text[]
+            $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[],
+            $11::text[], $12::text[], $13::text[], $14::text[], $15::text[], $16::text[], $17::numeric[], $18::text[]
           ) as data(
             line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
             iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes
@@ -5402,6 +5872,7 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
               notes = excluded.notes,
               updated_at = now()
         `, [
+          currentJobId(req),
           bomId,
           chunk.map((row) => row.lineNo),
           chunk.map((row) => row.itemCode),
@@ -5429,8 +5900,8 @@ app.post("/bom/:id/lines/import", requireAuth, requirePermission("bom", "edit"),
   res.redirect(`/imports/${batchId}`);
 });
 
-app.get("/bom/:id/receive-from-inventory", requireAuth, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
-  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1", [req.params.id])).rows[0];
+app.get("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1 and job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
   if (!bom) throw new Error("BOM not found.");
   res.send(layout("Confirm One-Time Receive", `
     <h1>One-Time BOM Receive From Inventory</h1>
@@ -5447,12 +5918,13 @@ app.get("/bom/:id/receive-from-inventory", requireAuth, requireRole(["admin"]), 
   `, req.user));
 }));
 
-app.post("/bom/:id/receive-from-inventory", requireAuth, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+app.post("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const result = await withTransaction(async (client) => {
-    const bom = (await client.query("select id from bom_headers where id = $1", [bomId])).rows[0];
+    const bom = (await client.query("select id from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
     if (!bom) throw new Error("BOM not found.");
-    return markBomLinesReceivedFromInventory(client, bomId, req.user.id || null);
+    return markBomLinesReceivedFromInventory(client, bomId, jobId, req.user.id || null);
   });
   const params = new URLSearchParams({
     inventory_marked: String(result.updatedCount || 0),
@@ -5463,7 +5935,7 @@ app.post("/bom/:id/receive-from-inventory", requireAuth, requireRole(["admin"]),
   res.redirect(`/bom/${bomId}?${params.toString()}`);
 }));
 
-async function getBomLineEntryAutocomplete(bomId) {
+async function getBomLineEntryAutocomplete(bomId, jobId) {
   const [lineNoRes, materialItemRes, bomItemDetailRes] = await Promise.all([
     query(`
       select distinct line_no
@@ -5475,10 +5947,11 @@ async function getBomLineEntryAutocomplete(bomId) {
     query(`
       select item_code, description, material_type, uom
       from material_items
-      where coalesce(item_code, '') <> ''
+      where job_id = $1
+        and coalesce(item_code, '') <> ''
       order by item_code
       limit 1000
-    `),
+    `, [jobId]),
     query(`
       select distinct on (item_code)
         item_code,
@@ -5491,9 +5964,10 @@ async function getBomLineEntryAutocomplete(bomId) {
         coalesce(thk_1, '') as thk_1,
         coalesce(thk_2, '') as thk_2
       from bom_lines
-      where coalesce(item_code, '') <> ''
+      where job_id = $1
+        and coalesce(item_code, '') <> ''
       order by item_code, updated_at desc, id desc
-    `)
+    `, [jobId])
   ]);
   const itemDetails = {};
   for (const row of materialItemRes.rows) {
@@ -5672,16 +6146,18 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
   `, req.user);
 }
 
-app.get("/bom/:id/lines/new", requireAuth, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
-  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1", [req.params.id])).rows[0];
+app.get("/bom/:id/lines/new", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!bom) throw new Error("BOM not found.");
-  const autocomplete = await getBomLineEntryAutocomplete(bom.id);
+  const autocomplete = await getBomLineEntryAutocomplete(bom.id, jobId);
   res.send(buildBomLineGridPage(req, bom, [], [], autocomplete));
 }));
 
-app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
-  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1", [bomId])).rows[0];
+  const jobId = currentJobId(req);
+  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
   if (!bom) throw new Error("BOM not found.");
   const rowCount = 8;
   const rows = Array.from({ length: rowCount }, (_, index) => ({
@@ -5705,7 +6181,7 @@ app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), a
   const nonBlankRows = rows
     .map((row, index) => ({ ...row, rowNumber: index + 1 }))
     .filter((row) => String(row.line_no || "").trim());
-  const autocomplete = await getBomLineEntryAutocomplete(bom.id);
+  const autocomplete = await getBomLineEntryAutocomplete(bom.id, jobId);
   if (!nonBlankRows.length) {
     res.status(400).send(buildBomLineGridPage(req, bom, rows, ["Enter at least one BOM line before saving."], autocomplete));
     return;
@@ -5733,7 +6209,7 @@ app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), a
     validRows.push({ ...row, qtyRequired, sourceUid });
   }
   if (validRows.length) {
-    const existingRows = (await query("select source_uid from bom_lines where bom_id = $1 and source_uid = any($2::text[])", [bomId, validRows.map((row) => row.sourceUid)])).rows;
+    const existingRows = (await query("select source_uid from bom_lines where bom_id = $1 and job_id = $2 and source_uid = any($3::text[])", [bomId, jobId, validRows.map((row) => row.sourceUid)])).rows;
     const existingSet = new Set(existingRows.map((row) => String(row.source_uid || "")));
     validRows.forEach((row) => {
       if (existingSet.has(row.sourceUid)) {
@@ -5750,15 +6226,16 @@ app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), a
     for (const row of insertRows) {
       await client.query(`
         insert into bom_lines (
-          bom_id, line_no, item_code, description, material_type, uom, qty_required,
+          job_id, bom_id, line_no, item_code, description, material_type, uom, qty_required,
           spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2,
           planning_status, notes, updated_at
         ) values (
-          $1, $2, $3, $4, $5, $6, $7,
-          $8, $9, $10, $11, $12, $13, $14, $15, $16,
-          $17, $18, now()
+          $1, $2, $3, $4, $5, $6, $7, $8,
+          $9, $10, $11, $12, $13, $14, $15, $16, $17,
+          $18, $19, now()
         )
       `, [
+        jobId,
         bomId,
         row.line_no,
         row.item_code,
@@ -5789,8 +6266,8 @@ app.post("/bom/:id/lines/grid", requireAuth, requirePermission("bom", "edit"), a
   res.redirect(`/bom/${bomId}/lines?${params.toString()}`);
 }));
 
-app.get("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
-  const line = (await query("select bl.*, bh.bom_no from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1", [req.params.id])).rows[0];
+app.get("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const line = (await query("select bl.*, bh.bom_no from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bl.job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
   if (!line) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM line not found.</h3></div>`, req.user));
     return;
@@ -5824,43 +6301,47 @@ app.get("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), asy
   `, req.user));
 });
 
-app.post("/bom-line/:id/edit", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
+app.post("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
   const lineId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const bomId = await withTransaction(async (client) => {
-    const current = (await client.query("select bom_id, planning_status from bom_lines where id = $1", [lineId])).rows[0];
+    const current = (await client.query("select bom_id, planning_status from bom_lines where id = $1 and job_id = $2", [lineId, jobId])).rows[0];
     if (!current) throw new Error("BOM line not found.");
     await client.query(`
       update bom_lines
       set line_no = $2, item_code = $3, description = $4, material_type = $5, uom = $6, qty_required = $7,
           spec = $8, commodity_code = $9, tag_number = $10, iwp_no = $11, iso_no = $12, size_1 = $13, size_2 = $14, thk_1 = $15, thk_2 = $16,
           planning_status = $17, notes = $18, updated_at = now()
-      where id = $1
-    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", current.planning_status || "PLANNED", req.body.notes || ""]);
+      where id = $1 and job_id = $19
+    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", current.planning_status || "PLANNED", req.body.notes || "", jobId]);
     await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
     return current.bom_id;
   });
   res.redirect(`/bom/${bomId}`);
 });
 
-app.post("/bom-line/:id/delete", requireAuth, requirePermission("bom", "edit"), async (req, res) => {
+app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
   const lineId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const bomId = await withTransaction(async (client) => {
-    const current = (await client.query("select bom_id from bom_lines where id = $1", [lineId])).rows[0];
+    const current = (await client.query("select bom_id from bom_lines where id = $1 and job_id = $2", [lineId, jobId])).rows[0];
     if (!current) throw new Error("BOM line not found.");
-    await client.query("delete from bom_lines where id = $1", [lineId]);
+    await client.query("delete from bom_lines where id = $1 and job_id = $2", [lineId, jobId]);
     await auditLog(client, req.user.id, "delete", "bom_line", lineId, "");
     return current.bom_id;
   });
   res.redirect(`/bom/${bomId}`);
 });
 
-app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "create"), async (req, res) => {
+app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("requisitions", "create"), async (req, res) => {
+  const jobId = currentJobId(req);
   const availableBoms = (await query(`
     select id, bom_no, bom_name, description, status
     from bom_headers
     where bom_type = 'pipe'
+      and job_id = $1
     order by id desc
-  `)).rows;
+  `, [jobId])).rows;
   const selectedBomId = Number(req.query.bom_id || 0);
   const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
   const clearFilters = String(req.query.clear_filters || "") === "1";
@@ -5902,7 +6383,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
           greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
         from bom_lines bl
         left join (
-          ${getInventoryTotalsSubquery()}
+          ${getInventoryTotalsSubquery(jobId)}
         ) inv
           on inv.item_code = bl.item_code
          and inv.size_1 = coalesce(bl.size_1, '')
@@ -5937,6 +6418,7 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
           join material_requisitions mr2 on mr2.id = mrl2.requisition_id
           join bom_lines bl2 on bl2.id = mrl2.bom_line_id
           where mr2.status = 'VERIFIED'
+            and mr2.job_id = ${jobId}
           group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
         ) alloc
           on alloc.item_code = bl.item_code
@@ -6156,11 +6638,12 @@ app.get("/requisitions/new", requireAuth, requirePermission("requisitions", "cre
   `, req.user));
 });
 
-app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"), async (req, res) => {
+app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const iwp = String(req.query.iwp || "").trim();
   const status = String(req.query.status || "").trim();
-  const where = [];
-  const params = [];
+  const where = ["mr.job_id = $1"];
+  const params = [jobId];
   if (iwp) { params.push(`%${iwp}%`); where.push(`coalesce(mr.iwp_no, '') ilike $${params.length}`); }
   if (status) { params.push(status); where.push(`mr.status = $${params.length}`); }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
@@ -6204,8 +6687,9 @@ app.get("/requisitions", requireAuth, requirePermission("requisitions", "view"),
   `, req.user));
 });
 
-app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHandler(async (req, res) => {
-  const bom = (await query("select * from bom_headers where id = $1", [req.params.id])).rows[0];
+app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!bom) throw new Error("BOM not found.");
   const addedLines = Number(req.query.added_lines || 0);
   const skippedLines = Number(req.query.skipped_lines || 0);
@@ -6213,8 +6697,8 @@ app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHa
   const search = String(req.query.search || "").trim();
   const iwp = String(req.query.iwp || "").trim();
   const lineNo = String(req.query.line_no || "").trim();
-  const where = ["bl.bom_id = $1"];
-  const params = [req.params.id];
+  const where = ["bl.bom_id = $1", "bl.job_id = $2"];
+  const params = [req.params.id, jobId];
   if (search) {
     params.push(`%${search}%`);
     where.push(`(bl.item_code ilike $${params.length} or coalesce(bl.description, '') ilike $${params.length})`);
@@ -6235,12 +6719,13 @@ app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHa
     from bom_lines bl
     left join (
       select item_code, sum(qty_on_hand) as qty_on_hand
-      from (${getInventoryTotalsSubquery()}) inventory_totals
+      from (${getInventoryTotalsSubquery(jobId)}) inventory_totals
       group by item_code
     ) inv on inv.item_code = bl.item_code
     left join (
       select item_code, sum(greatest(qty_required - qty_issued, 0)) as qty_needed
       from bom_lines
+      where job_id = ${jobId}
       group by item_code
     ) need on need.item_code = bl.item_code
     where ${where.join(" and ")}
@@ -6287,13 +6772,14 @@ app.get("/bom/:id/lines", requireAuth, requirePermission("bom", "view"), asyncHa
   `, req.user));
 }));
 
-app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "view"), async (req, res) => {
+app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("requisitions", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const header = (await query(`
     select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
     from material_requisitions mr
     join bom_headers bh on bh.id = mr.bom_id
-    where mr.id = $1
-  `, [req.params.id])).rows[0];
+    where mr.id = $1 and mr.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
   if (!header) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Requisition not found.</h3></div>`, req.user));
     return;
@@ -6302,9 +6788,9 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
     select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
     from material_requisition_lines mrl
     join bom_lines bl on bl.id = mrl.bom_line_id
-    where mrl.requisition_id = $1
+    where mrl.requisition_id = $1 and mrl.job_id = $2
     order by bl.line_no, bl.id
-  `, [req.params.id])).rows;
+  `, [req.params.id, jobId])).rows;
   const lineRows = lines.map((line) => `<tr>
     <td>${esc(line.line_no)}</td>
     <td>${esc(line.iwp_no || "")}</td>
@@ -6350,13 +6836,14 @@ app.get("/requisitions/:id", requireAuth, requirePermission("requisitions", "vie
   `, req.user));
 });
 
-app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const header = (await query(`
     select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
     from material_requisitions mr
     join bom_headers bh on bh.id = mr.bom_id
-    where mr.id = $1
-  `, [req.params.id])).rows[0];
+    where mr.id = $1 and mr.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
   if (!header) throw new Error("Requisition not found.");
   if (header.status !== "VERIFIED") throw new Error("Pick tickets are only available for verified requisitions.");
   const lines = (await query(`
@@ -6365,9 +6852,9 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("req
            coalesce(bl.thk_1, '') as thk_1, coalesce(bl.thk_2, '') as thk_2
     from material_requisition_lines mrl
     join bom_lines bl on bl.id = mrl.bom_line_id
-    where mrl.requisition_id = $1
+    where mrl.requisition_id = $1 and mrl.job_id = $2
     order by bl.line_no, bl.id
-  `, [req.params.id])).rows;
+  `, [req.params.id, jobId])).rows;
 
   const inventoryRows = (await query(`
     select
@@ -6379,7 +6866,7 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("req
       warehouse,
       location,
       qty_on_hand
-    from (${getInventoryByLocationSubquery()}) inventory_by_location
+    from (${getInventoryByLocationSubquery(jobId)}) inventory_by_location
     order by warehouse, location
   `)).rows;
   const issuedRows = (await query(`
@@ -6391,8 +6878,9 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("req
       coalesce(thk_2, '') as thk_2,
       sum(qty_issued) as qty_issued_total
     from bom_lines
+    where job_id = $1
     group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
-  `)).rows;
+  `, [jobId])).rows;
 
   const inventoryMap = new Map();
   for (const row of inventoryRows) {
@@ -6439,8 +6927,9 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requirePermission("req
   res.send(pdfBuffer);
 }));
 
-app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
-  const [headerRes, poReceiptLines, manualLines, linkedFmrRes, jobNumber] = await Promise.all([
+app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requireJobContext, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const [headerRes, poReceiptLines, manualLines, linkedFmrRes] = await Promise.all([
     query(`
       select
         m.*,
@@ -6448,7 +6937,8 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("mater
       from mrr_logs m
       left join purchase_orders po on po.id = m.app_po_id
       where m.id = $1
-    `, [req.params.id]),
+        and m.job_id = $2
+    `, [req.params.id, jobId]),
     query(`
       select
         r.id,
@@ -6465,8 +6955,9 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("mater
       join po_lines pl on pl.id = r.po_line_id
       join material_items mi on mi.id = pl.material_item_id
       where r.mrr_log_id = $1
+        and r.job_id = $2
       order by r.id
-    `, [req.params.id]),
+    `, [req.params.id, jobId]),
     query(`
       select
         mrl.id,
@@ -6481,20 +6972,21 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("mater
         coalesce(mrl.comments, '') as notes
       from material_receiving_logs mrl
       where coalesce(mrl.mrr_number, '') = (
-        select coalesce(mrr_number, '') from mrr_logs where id = $1
+        select coalesce(mrr_number, '') from mrr_logs where id = $1 and job_id = $2
       )
+        and mrl.job_id = $2
       order by coalesce(mrl.legacy_row_id, mrl.id)
-    `, [req.params.id]),
+    `, [req.params.id, jobId]),
     query(`
       select fmr_number, container_no
       from fmr_logs
-      where coalesce(mrr_number, '') = (
-        select coalesce(mrr_number, '') from mrr_logs where id = $1
+      where job_id = $2
+        and coalesce(mrr_number, '') = (
+        select coalesce(mrr_number, '') from mrr_logs where id = $1 and job_id = $2
       )
       order by id
       limit 1
-    `, [req.params.id]),
-    getJobNumber()
+    `, [req.params.id, jobId])
   ]);
   const header = headerRes.rows[0];
   if (!header) throw new Error("MRR log row not found.");
@@ -6524,7 +7016,7 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("mater
     container_type: "",
     material_description: header.material_description || ""
   }, printableLines, {
-    jobNumber,
+    jobNumber: req.user.activeJob?.job_number || "",
     deliveryLocation: deliveryMatch?.[1] || "KEQ3",
     fmrNumber: linkedFmr.fmr_number || ""
   });
@@ -6533,9 +7025,10 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requirePermission("mater
   res.send(pdfBuffer);
 }));
 
-app.post("/requisitions/:id/verify", requireAuth, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (header.status !== "REQUESTED") throw new Error("Only requested requisitions can be verified.");
     await client.query(`
@@ -6543,22 +7036,24 @@ app.post("/requisitions/:id/verify", requireAuth, requirePermission("requisition
       set status = 'VERIFIED',
           verified_at = now(),
           verified_by_user_id = $2
-      where id = $1
-    `, [req.params.id, req.user.id]);
+      where id = $1 and job_id = $3
+    `, [req.params.id, req.user.id, jobId]);
     await auditLog(client, req.user.id, "verify", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.get("/requisitions/:id/edit", requireAuth, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
+app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const header = (await query(`
     select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
     from material_requisitions mr
     join bom_headers bh on bh.id = mr.bom_id
-    where mr.id = $1
-  `, [req.params.id])).rows[0];
+    where mr.id = $1 and mr.job_id = $2 and bh.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
   if (!header) throw new Error("Requisition not found.");
   if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
+  const availableMap = await getAvailableInventoryTotalsMap({ query }, jobId);
   const lines = (await query(`
     select
       mrl.id as requisition_line_id,
@@ -6569,57 +7064,20 @@ app.get("/requisitions/:id/edit", requireAuth, requirePermission("requisitions",
       bl.item_code,
       bl.description,
       bl.uom,
+      coalesce(bl.size_1, '') as size_1,
+      coalesce(bl.size_2, '') as size_2,
+      coalesce(bl.thk_1, '') as thk_1,
+      coalesce(bl.thk_2, '') as thk_2,
       bl.qty_required,
-      bl.qty_issued,
-      greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+      bl.qty_issued
     from material_requisition_lines mrl
     join bom_lines bl on bl.id = mrl.bom_line_id
-    left join (
-      ${getInventoryTotalsSubquery()}
-    ) inv
-      on inv.item_code = bl.item_code
-     and inv.size_1 = coalesce(bl.size_1, '')
-     and inv.size_2 = coalesce(bl.size_2, '')
-     and inv.thk_1 = coalesce(bl.thk_1, '')
-     and inv.thk_2 = coalesce(bl.thk_2, '')
-    left join (
-      select
-        item_code,
-        coalesce(size_1, '') as size_1,
-        coalesce(size_2, '') as size_2,
-        coalesce(thk_1, '') as thk_1,
-        coalesce(thk_2, '') as thk_2,
-        sum(qty_issued) as qty_issued_total
-      from bom_lines
-      group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
-    ) issued
-      on issued.item_code = bl.item_code
-     and issued.size_1 = coalesce(bl.size_1, '')
-     and issued.size_2 = coalesce(bl.size_2, '')
-     and issued.thk_1 = coalesce(bl.thk_1, '')
-     and issued.thk_2 = coalesce(bl.thk_2, '')
-    left join (
-      select
-        bl2.item_code,
-        coalesce(bl2.size_1, '') as size_1,
-        coalesce(bl2.size_2, '') as size_2,
-        coalesce(bl2.thk_1, '') as thk_1,
-        coalesce(bl2.thk_2, '') as thk_2,
-        sum(mrl2.qty_requested) as qty_allocated_total
-      from material_requisition_lines mrl2
-      join material_requisitions mr2 on mr2.id = mrl2.requisition_id
-      join bom_lines bl2 on bl2.id = mrl2.bom_line_id
-      where mr2.status = 'VERIFIED'
-      group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
-    ) alloc
-      on alloc.item_code = bl.item_code
-     and alloc.size_1 = coalesce(bl.size_1, '')
-     and alloc.size_2 = coalesce(bl.size_2, '')
-     and alloc.thk_1 = coalesce(bl.thk_1, '')
-     and alloc.thk_2 = coalesce(bl.thk_2, '')
-    where mrl.requisition_id = $1
+    where mrl.requisition_id = $1 and mrl.job_id = $2 and bl.job_id = $2
     order by bl.line_no, bl.id
-  `, [req.params.id])).rows;
+  `, [req.params.id, jobId])).rows.map((line) => ({
+    ...line,
+    qty_available: parseQtyValue(availableMap.get(buildInventoryIssueKey(line)) || 0, 0)
+  }));
   const lineRows = lines.map((line) => {
     const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_available) + num(line.qty_requested));
     return `<tr>
@@ -6653,94 +7111,58 @@ app.get("/requisitions/:id/edit", requireAuth, requirePermission("requisitions",
   `, req.user));
 }));
 
-app.post("/requisitions/:id/edit", requireAuth, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
+    const availableMap = await getAvailableInventoryTotalsMap(client, jobId);
     await client.query(`
       update material_requisitions
       set requested_by_name = $2, iwp_no = $3, notes = $4
-      where id = $1
-    `, [req.params.id, String(req.body.requested_by_name || "").trim(), req.body.iwp_no || "", req.body.notes || ""]);
+      where id = $1 and job_id = $5
+    `, [req.params.id, String(req.body.requested_by_name || "").trim(), req.body.iwp_no || "", req.body.notes || "", jobId]);
     const lines = (await client.query(`
       select
         mrl.id as requisition_line_id,
         mrl.qty_requested,
         bl.id as bom_line_id,
         bl.item_code,
+        coalesce(bl.size_1, '') as size_1,
+        coalesce(bl.size_2, '') as size_2,
+        coalesce(bl.thk_1, '') as thk_1,
+        coalesce(bl.thk_2, '') as thk_2,
         bl.qty_required,
-        bl.qty_issued,
-        greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+        bl.qty_issued
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
-      left join (
-        ${getInventoryTotalsSubquery()}
-      ) inv
-        on inv.item_code = bl.item_code
-       and inv.size_1 = coalesce(bl.size_1, '')
-       and inv.size_2 = coalesce(bl.size_2, '')
-       and inv.thk_1 = coalesce(bl.thk_1, '')
-       and inv.thk_2 = coalesce(bl.thk_2, '')
-      left join (
-        select
-          item_code,
-          coalesce(size_1, '') as size_1,
-          coalesce(size_2, '') as size_2,
-          coalesce(thk_1, '') as thk_1,
-          coalesce(thk_2, '') as thk_2,
-          sum(qty_issued) as qty_issued_total
-        from bom_lines
-        group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
-      ) issued
-        on issued.item_code = bl.item_code
-       and issued.size_1 = coalesce(bl.size_1, '')
-       and issued.size_2 = coalesce(bl.size_2, '')
-       and issued.thk_1 = coalesce(bl.thk_1, '')
-       and issued.thk_2 = coalesce(bl.thk_2, '')
-      left join (
-        select
-          bl2.item_code,
-          coalesce(bl2.size_1, '') as size_1,
-          coalesce(bl2.size_2, '') as size_2,
-          coalesce(bl2.thk_1, '') as thk_1,
-          coalesce(bl2.thk_2, '') as thk_2,
-          sum(mrl2.qty_requested) as qty_allocated_total
-        from material_requisition_lines mrl2
-        join material_requisitions mr2 on mr2.id = mrl2.requisition_id
-        join bom_lines bl2 on bl2.id = mrl2.bom_line_id
-        where mr2.status = 'VERIFIED'
-        group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
-      ) alloc
-        on alloc.item_code = bl.item_code
-       and alloc.size_1 = coalesce(bl.size_1, '')
-       and alloc.size_2 = coalesce(bl.size_2, '')
-       and alloc.thk_1 = coalesce(bl.thk_1, '')
-       and alloc.thk_2 = coalesce(bl.thk_2, '')
-      where mrl.requisition_id = $1
-    `, [req.params.id])).rows;
+      where mrl.requisition_id = $1 and mrl.job_id = $2 and bl.job_id = $2
+    `, [req.params.id, jobId])).rows;
     const removeLineId = Number(req.body.remove_line_id || 0);
     for (const line of lines) {
       if (removeLineId && line.requisition_line_id === removeLineId) {
-        await client.query("delete from material_requisition_lines where id = $1", [removeLineId]);
+        await client.query("delete from material_requisition_lines where id = $1 and job_id = $2", [removeLineId, jobId]);
         continue;
       }
       const requestedQty = parseQtyValue(req.body[`qty_requested_${line.requisition_line_id}`]);
       if (requestedQty <= 0) throw new Error(`Requested qty for ${line.item_code} must be greater than zero.`);
-      const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_available) + num(line.qty_requested));
+      const qtyAvailable = parseQtyValue(availableMap.get(buildInventoryIssueKey(line)) || 0, 0);
+      const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), qtyAvailable + num(line.qty_requested));
       if (requestedQty > maxQty) throw new Error(`Requested qty for ${line.item_code} exceeds available stock.`);
-      await client.query("update material_requisition_lines set qty_requested = $2 where id = $1", [line.requisition_line_id, requestedQty]);
+      await client.query("update material_requisition_lines set qty_requested = $2 where id = $1 and job_id = $3", [line.requisition_line_id, requestedQty, jobId]);
     }
-    const remainingCount = Number((await client.query("select count(*) from material_requisition_lines where requisition_id = $1", [req.params.id])).rows[0].count);
+    const remainingCount = Number((await client.query("select count(*) from material_requisition_lines where requisition_id = $1 and job_id = $2", [req.params.id, jobId])).rows[0].count);
     if (remainingCount <= 0) throw new Error("At least one line is required on the requisition.");
     await auditLog(client, req.user.id, "update", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.post("/requisitions/:id/unverify", requireAuth, requirePermission("requisitions", "unverify"), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/unverify", requireAuth, requireJobContext, requirePermission("requisitions", "unverify"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (header.status !== "VERIFIED") throw new Error("Only verified requisitions can be set to un-verified.");
     await client.query(`
@@ -6748,19 +7170,20 @@ app.post("/requisitions/:id/unverify", requireAuth, requirePermission("requisiti
       set status = 'REQUESTED',
           verified_at = null,
           verified_by_user_id = null
-      where id = $1
-    `, [req.params.id]);
+      where id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
     await auditLog(client, req.user.id, "unverify", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/issue", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (header.status !== "VERIFIED") throw new Error("Requisition must be verified before issue.");
-    const currentRows = await getCurrentOnHandRows(client);
+    const currentRows = await getCurrentOnHandRows(client, { jobId });
     const inventoryMap = new Map();
     for (const row of currentRows) {
       const key = buildInventoryIssueKey(row);
@@ -6782,60 +7205,23 @@ app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions
         coalesce(bl.thk_1, '') as thk_1,
         coalesce(bl.thk_2, '') as thk_2,
         bl.qty_required,
-        bl.qty_issued,
-        greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+        bl.qty_issued
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
-      left join (
-        ${getInventoryTotalsSubquery()}
-      ) inv
-        on inv.item_code = bl.item_code
-       and inv.size_1 = coalesce(bl.size_1, '')
-       and inv.size_2 = coalesce(bl.size_2, '')
-       and inv.thk_1 = coalesce(bl.thk_1, '')
-       and inv.thk_2 = coalesce(bl.thk_2, '')
-      left join (
-        select
-          item_code,
-          coalesce(size_1, '') as size_1,
-          coalesce(size_2, '') as size_2,
-          coalesce(thk_1, '') as thk_1,
-          coalesce(thk_2, '') as thk_2,
-          sum(qty_issued) as qty_issued_total
-        from bom_lines
-        group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
-      ) issued
-        on issued.item_code = bl.item_code
-       and issued.size_1 = coalesce(bl.size_1, '')
-       and issued.size_2 = coalesce(bl.size_2, '')
-       and issued.thk_1 = coalesce(bl.thk_1, '')
-       and issued.thk_2 = coalesce(bl.thk_2, '')
-      left join (
-        select
-          bl2.item_code,
-          coalesce(bl2.size_1, '') as size_1,
-          coalesce(bl2.size_2, '') as size_2,
-          coalesce(bl2.thk_1, '') as thk_1,
-          coalesce(bl2.thk_2, '') as thk_2,
-          sum(mrl2.qty_requested) as qty_allocated_total
-        from material_requisition_lines mrl2
-        join material_requisitions mr2 on mr2.id = mrl2.requisition_id
-        join bom_lines bl2 on bl2.id = mrl2.bom_line_id
-        where mr2.status = 'VERIFIED' and mr2.id <> $2
-        group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
-      ) alloc
-        on alloc.item_code = bl.item_code
-       and alloc.size_1 = coalesce(bl.size_1, '')
-       and alloc.size_2 = coalesce(bl.size_2, '')
-       and alloc.thk_1 = coalesce(bl.thk_1, '')
-       and alloc.thk_2 = coalesce(bl.thk_2, '')
-      where mrl.requisition_id = $1
+      where mrl.requisition_id = $1 and mrl.job_id = $2 and bl.job_id = $2
       order by bl.line_no, bl.id
-    `, [req.params.id, req.params.id])).rows;
+    `, [req.params.id, jobId])).rows;
+    const currentReqAllocMap = new Map();
+    for (const line of lines) {
+      const key = buildInventoryIssueKey(line);
+      currentReqAllocMap.set(key, parseQtyValue(currentReqAllocMap.get(key) || 0) + parseQtyValue(line.qty_requested || 0));
+    }
+    const availableTotalsMap = await getAvailableInventoryTotalsMap(client, jobId, { allocatedOffsetMap: currentReqAllocMap });
     if (lines.length === 0) throw new Error("No requisition lines found.");
     const lineAllocations = new Map();
     for (const line of lines) {
-      if (num(line.qty_requested) > num(line.qty_available)) {
+      const qtyAvailable = parseQtyValue(availableTotalsMap.get(buildInventoryIssueKey(line)) || 0, 0);
+      if (num(line.qty_requested) > qtyAvailable) {
         throw new Error(`Cannot issue ${line.item_code}; requested qty exceeds available stock.`);
       }
       const locationRows = (inventoryMap.get(buildInventoryIssueKey(line)) || []).map((row) => ({ ...row }));
@@ -6856,7 +7242,7 @@ app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions
         qtyToReserve = parseQtyValue(qtyToReserve - consumed, 0);
       }
     }
-    await client.query("delete from material_issue_transactions where requisition_id = $1", [req.params.id]);
+    await client.query("delete from material_issue_transactions where requisition_id = $1 and job_id = $2", [req.params.id, jobId]);
     for (const line of lines) {
       await client.query(`
         update bom_lines
@@ -6866,19 +7252,19 @@ app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions
               else planning_status
             end,
             updated_at = now()
-        where id = $1
-      `, [line.bom_line_id, line.qty_requested]);
+        where id = $1 and job_id = $3
+      `, [line.bom_line_id, line.qty_requested, jobId]);
       await client.query(`
         update material_requisition_lines
         set qty_issued = qty_requested
-        where id = $1
-      `, [line.requisition_line_id]);
+        where id = $1 and job_id = $2
+      `, [line.requisition_line_id, jobId]);
       const allocations = lineAllocations.get(Number(line.requisition_line_id)) || [];
       for (const allocation of allocations) {
         await client.query(`
-          insert into material_issue_transactions (requisition_id, requisition_line_id, warehouse, location, qty_issued, created_by)
-          values ($1, $2, $3, $4, $5, $6)
-        `, [req.params.id, line.requisition_line_id, allocation.warehouse, allocation.location, allocation.qty_issued, req.user.id || null]);
+          insert into material_issue_transactions (job_id, requisition_id, requisition_line_id, warehouse, location, qty_issued, created_by)
+          values ($1, $2, $3, $4, $5, $6, $7)
+        `, [jobId, req.params.id, line.requisition_line_id, allocation.warehouse, allocation.location, allocation.qty_issued, req.user.id || null]);
       }
     }
     await client.query(`
@@ -6886,25 +7272,26 @@ app.post("/requisitions/:id/issue", requireAuth, requirePermission("requisitions
       set status = 'ISSUED',
           issued_at = now(),
           issued_by_user_id = $2
-      where id = $1
-    `, [req.params.id, req.user.id]);
+      where id = $1 and job_id = $3
+    `, [req.params.id, req.user.id, jobId]);
     await auditLog(client, req.user.id, "issue", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.post("/requisitions/:id/cancel", requireAuth, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
+app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
   if (req.user?.role !== "admin") throw new Error("Only admins can cancel requisitions.");
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1", [req.params.id])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (header.status === "CANCELLED") return;
     const lines = (await client.query(`
       select mrl.bom_line_id, mrl.qty_issued, bl.planning_status, bl.qty_required, bl.qty_issued as bom_qty_issued
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
-      where mrl.requisition_id = $1
-    `, [req.params.id])).rows;
+      where mrl.requisition_id = $1 and mrl.job_id = $2 and bl.job_id = $2
+    `, [req.params.id, jobId])).rows;
     for (const line of lines) {
       const issuedRollback = num(line.qty_issued);
       if (issuedRollback <= 0) continue;
@@ -6918,26 +7305,27 @@ app.post("/requisitions/:id/cancel", requireAuth, requirePermission("requisition
         set qty_issued = $2,
             planning_status = $3,
             updated_at = now()
-        where id = $1
-      `, [line.bom_line_id, nextIssued, nextStatus]);
+        where id = $1 and job_id = $4
+      `, [line.bom_line_id, nextIssued, nextStatus, jobId]);
     }
-      await client.query(`delete from material_issue_transactions where requisition_id = $1`, [req.params.id]);
+      await client.query(`delete from material_issue_transactions where requisition_id = $1 and job_id = $2`, [req.params.id, jobId]);
       await client.query(`
         update material_requisition_lines
         set qty_issued = 0
-        where requisition_id = $1
-      `, [req.params.id]);
+        where requisition_id = $1 and job_id = $2
+      `, [req.params.id, jobId]);
       await client.query(`
         update material_requisitions
         set status = 'CANCELLED'
-        where id = $1
-      `, [req.params.id]);
+        where id = $1 and job_id = $2
+      `, [req.params.id, jobId]);
     await auditLog(client, req.user.id, "cancel", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-app.get("/vendors", requireAuth, requirePermission("vendors", "view"), async (req, res) => {
+app.get("/vendors", requireAuth, requireJobContext, requirePermission("vendors", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const search = String(req.query.search || "").trim();
   const category = String(req.query.category || "").trim();
   const showInactive = String(req.query.show_inactive || "").trim() === "1";
@@ -6952,8 +7340,8 @@ app.get("/vendors", requireAuth, requirePermission("vendors", "view"), async (re
     categories: "categories"
   };
   const sortColumn = vendorSortColumns[sort] || "name";
-  const where = [];
-  const params = [];
+  const where = ["v.job_id = $1"];
+  const params = [jobId];
   if (!showInactive) {
     where.push("v.is_active = true");
   }
@@ -6973,6 +7361,7 @@ app.get("/vendors", requireAuth, requirePermission("vendors", "view"), async (re
     left join (
       select vendor_id, count(*) as contact_count
       from vendor_contacts
+      where job_id = $1
       group by vendor_id
     ) vc on vc.vendor_id = v.id
     ${whereSql.replaceAll("name", "v.name").replaceAll("contact_name", "v.contact_name").replaceAll("email", "v.email").replaceAll("phone", "v.phone").replaceAll("categories", "v.categories")}
@@ -7011,7 +7400,7 @@ app.get("/vendors", requireAuth, requirePermission("vendors", "view"), async (re
       `, req.user));
 });
 
-app.get("/vendors/new", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
+app.get("/vendors/new", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
   const checks = vendorCategories.map((category) => `<label class="check-option"><input type="checkbox" name="categories" value="${esc(category)}" /><span>${esc(category)}</span></label>`).join("");
   res.send(layout("Add Vendor", `
     <h1>Add Vendor</h1>
@@ -7031,11 +7420,12 @@ app.get("/vendors/new", requireAuth, requirePermission("vendors", "edit"), async
   `, req.user));
 });
 
-app.post("/vendors/add", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
+app.post("/vendors/add", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
       const result = await client.query(
-        "insert into vendors (name, contact_name, website, email, phone, categories) values ($1, $2, $3, $4, $5, $6) returning id",
-      [req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+        "insert into vendors (job_id, name, contact_name, website, email, phone, categories) values ($1, $2, $3, $4, $5, $6, $7) returning id",
+      [jobId, req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
       );
     await syncLegacyVendorContact(client, result.rows[0].id);
     await auditLog(client, req.user.id, "create", "vendor", result.rows[0].id, req.body.name?.trim() || "");
@@ -7043,10 +7433,10 @@ app.post("/vendors/add", requireAuth, requirePermission("vendors", "edit"), asyn
   res.redirect("/vendors");
 });
 
-app.get("/vendors/:id/edit", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
+app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
   const [vendorRes, contactsRes] = await Promise.all([
-    query("select * from vendors where id = $1", [req.params.id]),
-    query("select * from vendor_contacts where vendor_id = $1 order by is_primary desc, contact_name asc, id asc", [req.params.id])
+    query("select * from vendors where id = $1 and job_id = $2", [req.params.id, currentJobId(req)]),
+    query("select * from vendor_contacts where vendor_id = $1 and job_id = $2 order by is_primary desc, contact_name asc, id asc", [req.params.id, currentJobId(req)])
   ]);
   const vendor = vendorRes.rows[0];
   if (!vendor) {
@@ -7098,11 +7488,12 @@ app.get("/vendors/:id/edit", requireAuth, requirePermission("vendors", "edit"), 
     `, req.user));
 });
 
-app.post("/vendors/:id/edit", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
+app.post("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
       await client.query(
-        "update vendors set name = $2, contact_name = $3, website = $4, email = $5, phone = $6, categories = $7 where id = $1",
-      [req.params.id, req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+        "update vendors set name = $2, contact_name = $3, website = $4, email = $5, phone = $6, categories = $7 where id = $1 and job_id = $8",
+      [req.params.id, req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories), jobId]
       );
     await syncLegacyVendorContact(client, req.params.id);
     await auditLog(client, req.user.id, "update", "vendor", req.params.id, req.body.name?.trim() || "");
@@ -7110,78 +7501,84 @@ app.post("/vendors/:id/edit", requireAuth, requirePermission("vendors", "edit"),
   res.redirect("/vendors");
 });
 
-app.post("/vendors/:id/contacts/add", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
+app.post("/vendors/:id/contacts/add", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const vendorId = Number(req.params.id);
-    const vendor = (await client.query("select id from vendors where id = $1", [vendorId])).rows[0];
+    const vendor = (await client.query("select id from vendors where id = $1 and job_id = $2", [vendorId, jobId])).rows[0];
     if (!vendor) throw new Error("Vendor not found.");
     const contactName = String(req.body.contact_name || "").trim();
     if (!contactName) throw new Error("Contact name is required.");
     await client.query(`
-      insert into vendor_contacts (vendor_id, contact_name, email, phone, is_primary)
-      values ($1, $2, $3, $4, false)
-    `, [vendorId, contactName, normalizeEmail(req.body.email), normalizePhone(req.body.phone)]);
+      insert into vendor_contacts (job_id, vendor_id, contact_name, email, phone, is_primary)
+      values ($1, $2, $3, $4, $5, false)
+    `, [jobId, vendorId, contactName, normalizeEmail(req.body.email), normalizePhone(req.body.phone)]);
     await auditLog(client, req.user.id, "create", "vendor_contact", vendorId, contactName);
   });
   res.redirect(`/vendors/${req.params.id}/edit`);
 });
 
-app.post("/vendors/:id/deactivate", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
+app.post("/vendors/:id/deactivate", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await client.query("update vendors set is_active = false where id = $1", [req.params.id]);
+    await client.query("update vendors set is_active = false where id = $1 and job_id = $2", [req.params.id, jobId]);
     await auditLog(client, req.user.id, "deactivate", "vendor", req.params.id, "");
   });
   res.redirect("/vendors");
 });
 
-app.post("/vendors/:id/activate", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
+app.post("/vendors/:id/activate", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await client.query("update vendors set is_active = true where id = $1", [req.params.id]);
+    await client.query("update vendors set is_active = true where id = $1 and job_id = $2", [req.params.id, jobId]);
     await auditLog(client, req.user.id, "activate", "vendor", req.params.id, "");
   });
   res.redirect("/vendors");
 });
 
-app.post("/vendors/:id/contacts/:contactId/primary", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
+app.post("/vendors/:id/contacts/:contactId/primary", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const vendorId = Number(req.params.id);
     const contactId = Number(req.params.contactId);
-    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2", [contactId, vendorId])).rows[0];
+    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2 and job_id = $3", [contactId, vendorId, jobId])).rows[0];
     if (!contact) throw new Error("Vendor contact not found.");
-    await client.query("update vendor_contacts set is_primary = false where vendor_id = $1", [vendorId]);
-    await client.query("update vendor_contacts set is_primary = true where id = $1", [contactId]);
+    await client.query("update vendor_contacts set is_primary = false where vendor_id = $1 and job_id = $2", [vendorId, jobId]);
+    await client.query("update vendor_contacts set is_primary = true where id = $1 and job_id = $2", [contactId, jobId]);
     await client.query(`
       update vendors
       set contact_name = $2, email = $3, phone = $4
-      where id = $1
-    `, [vendorId, contact.contact_name, normalizeEmail(contact.email), normalizePhone(contact.phone)]);
+      where id = $1 and job_id = $5
+    `, [vendorId, contact.contact_name, normalizeEmail(contact.email), normalizePhone(contact.phone), jobId]);
     await auditLog(client, req.user.id, "set_primary", "vendor_contact", contactId, contact.contact_name);
   });
   res.redirect(`/vendors/${req.params.id}/edit`);
 });
 
-app.post("/vendors/:id/contacts/:contactId/delete", requireAuth, requirePermission("vendors", "edit"), async (req, res) => {
+app.post("/vendors/:id/contacts/:contactId/delete", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const vendorId = Number(req.params.id);
     const contactId = Number(req.params.contactId);
-    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2", [contactId, vendorId])).rows[0];
+    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2 and job_id = $3", [contactId, vendorId, jobId])).rows[0];
     if (!contact) throw new Error("Vendor contact not found.");
     if (contact.is_primary) throw new Error("Set another primary contact before deleting this one.");
-    await client.query("delete from vendor_contacts where id = $1", [contactId]);
+    await client.query("delete from vendor_contacts where id = $1 and job_id = $2", [contactId, jobId]);
     await auditLog(client, req.user.id, "delete", "vendor_contact", contactId, contact.contact_name);
   });
   res.redirect(`/vendors/${req.params.id}/edit`);
 });
 
-app.get("/rfq", requireAuth, requirePermission("rfqs", "view"), async (req, res) => {
+app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const rfqNo = String(req.query.rfq_no || "").trim();
   const project = String(req.query.project || "").trim();
   const status = String(req.query.status || "").trim();
   const itemCode = String(req.query.item_code || "").trim();
   const vendorId = String(req.query.vendor_id || "").trim();
-  const vendors = (await query("select id, name from vendors order by name")).rows;
-  const where = [];
-  const params = [];
+  const vendors = (await query("select id, name from vendors where job_id = $1 order by name", [jobId])).rows;
+  const where = ["r.job_id = $1"];
+  const params = [jobId];
   if (rfqNo) {
     params.push(`%${rfqNo}%`);
     where.push(`r.rfq_no ilike $${params.length}`);
@@ -7200,7 +7597,7 @@ app.get("/rfq", requireAuth, requirePermission("rfqs", "view"), async (req, res)
       select 1
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
-      where ri.rfq_id = r.id and mi.item_code ilike $${params.length}
+      where ri.rfq_id = r.id and ri.job_id = r.job_id and mi.item_code ilike $${params.length}
     )`);
   }
   if (vendorId) {
@@ -7209,7 +7606,7 @@ app.get("/rfq", requireAuth, requirePermission("rfqs", "view"), async (req, res)
       select 1
       from rfq_items ri
       join quotes q on q.rfq_item_id = ri.id
-      where ri.rfq_id = r.id and q.vendor_id = $${params.length}
+      where ri.rfq_id = r.id and ri.job_id = r.job_id and q.vendor_id = $${params.length}
     )`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
@@ -7262,11 +7659,12 @@ app.get("/rfq", requireAuth, requirePermission("rfqs", "view"), async (req, res)
   `, req.user));
 });
 
-app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   const [nextRfqNo, jobNumber, vendorsRes] = await Promise.all([
-    getNextRfqNumber(),
-    getJobNumber(),
-    query("select id, name from vendors where is_active = true order by name")
+    getNextRfqNumber(null, jobId),
+    Promise.resolve(String(req.user.activeJob?.job_number || "")),
+    query("select id, name from vendors where job_id = $1 and is_active = true order by name", [jobId])
   ]);
   const vendors = vendorsRes.rows;
   const rfqStatusOptions = rfqStatuses.map((status) => `<option value="${status.value}" ${status.value === "SEND_FOR_QUOTES" ? "selected" : ""}>${esc(status.label)}</option>`).join("");
@@ -7303,15 +7701,16 @@ app.get("/rfq/new", requireAuth, requirePermission("rfqs", "edit"), async (req, 
   `, req.user));
 });
 
-app.post("/rfq", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   const id = await withTransaction(async (client) => {
-    const rfqNo = await getNextRfqNumber(client);
+    const rfqNo = await getNextRfqNumber(client, jobId);
     const requestedStatus = String(req.body.status || "SEND_FOR_QUOTES").trim();
     const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "SEND_FOR_QUOTES";
     const selectedVendorIds = parseSelectedIdList(req.body.vendor_ids);
     const insert = await client.query(
-      "insert into rfqs (rfq_no, project_name, due_date, status) values ($1, $2, $3, $4) returning id",
-      [rfqNo, req.body.project_name?.trim(), req.body.due_date || null, status]
+      "insert into rfqs (job_id, rfq_no, project_name, due_date, status) values ($1, $2, $3, $4, $5) returning id",
+      [jobId, rfqNo, req.body.project_name?.trim(), req.body.due_date || null, status]
     );
     await syncRfqVendors(client, insert.rows[0].id, selectedVendorIds);
     await auditLog(client, req.user.id, "create", "rfq", insert.rows[0].id, rfqNo);
@@ -7320,25 +7719,27 @@ app.post("/rfq", requireAuth, requirePermission("rfqs", "edit"), async (req, res
   res.redirect(`/rfq/${id}`);
 });
 
-app.post("/rfq/:id/status", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq/:id/status", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const requestedStatus = String(req.body.status || "").trim();
   const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "";
   if (!status) throw new Error("Choose a valid RFQ status.");
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select rfq_no from rfqs where id = $1", [rfqId])).rows[0];
+    const rfq = (await client.query("select rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
-    await client.query("update rfqs set status = $2 where id = $1", [rfqId, status]);
+    await client.query("update rfqs set status = $2 where id = $1 and job_id = $3", [rfqId, status, jobId]);
     await auditLog(client, req.user.id, "update_status", "rfq", rfqId, `${rfq.rfq_no}:${status}`);
   });
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/rfq/:id/vendors", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+app.post("/rfq/:id/vendors", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const selectedVendorIds = parseSelectedIdList(req.body.vendor_ids);
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select rfq_no from rfqs where id = $1", [rfqId])).rows[0];
+    const rfq = (await client.query("select rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
     await syncRfqVendors(client, rfqId, selectedVendorIds);
     await auditLog(client, req.user.id, "update", "rfq_vendors", rfqId, `count=${selectedVendorIds.length}`);
@@ -7346,11 +7747,12 @@ app.post("/rfq/:id/vendors", requireAuth, requirePermission("rfqs", "edit"), asy
   res.redirect(`/rfq/${rfqId}`);
 }));
 
-app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, res) => {
+app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "view"), async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
   await backfillRfqVendors(pool, rfqId);
   const selectedVendorId = String(req.query.vendor_tab_id || "").trim();
-  const rfq = (await query("select * from rfqs where id = $1", [rfqId])).rows[0];
+  const rfq = (await query("select * from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
   if (!rfq) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
     return;
@@ -7368,38 +7770,38 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
     `, [rfqId]),
-    query("select id, name from vendors where is_active = true order by name"),
+    query("select id, name from vendors where job_id = $1 and is_active = true order by name", [jobId]),
     query(`
       select rv.vendor_id, v.name
       from rfq_vendors rv
       join vendors v on v.id = rv.vendor_id
-      where rv.rfq_id = $1
+      where rv.rfq_id = $1 and rv.job_id = $2
       order by v.name
-    `, [rfqId]),
-    query("select count(*) from purchase_orders where rfq_id = $1", [rfqId]),
+    `, [rfqId, jobId]),
+    query("select count(*) from purchase_orders where rfq_id = $1 and job_id = $2", [rfqId, jobId]),
     query(`
       select ib.id, ib.entity_type, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
              coalesce((select count(*) from import_batch_errors ibe where ibe.batch_id = ib.id), 0) as error_count
       from import_batches ib
-      where ib.rfq_id = $1
+      where ib.rfq_id = $1 and ib.job_id = $2
       order by ib.id desc
       limit 5
-    `, [rfqId]),
-    query("select item_code, description, material_type, uom from material_items order by item_code limit 500"),
+    `, [rfqId, jobId]),
+    query("select item_code, description, material_type, uom from material_items where job_id = $1 order by item_code limit 500", [jobId]),
     query(`
       select q.rfq_item_id, q.vendor_id, q.unit_price, q.lead_days, q.quoted_at, v.name as vendor_name
       from quotes q
       join rfq_items ri on ri.id = q.rfq_item_id
       join vendors v on v.id = q.vendor_id
-      where ri.rfq_id = $1
-    `, [rfqId]),
+      where ri.rfq_id = $1 and ri.job_id = $2
+    `, [rfqId, jobId]),
     query(`
       select pl.rfq_item_id, string_agg(distinct po.po_no, ', ' order by po.po_no) as po_refs
       from po_lines pl
       join purchase_orders po on po.id = pl.po_id
-      where po.rfq_id = $1 and pl.rfq_item_id is not null
+      where po.rfq_id = $1 and po.job_id = $2 and pl.rfq_item_id is not null
       group by pl.rfq_item_id
-    `, [rfqId])
+    `, [rfqId, jobId])
   ]);
 
   const items = itemsRes.rows;
@@ -7613,11 +8015,12 @@ app.get("/rfq/:id", requireAuth, requirePermission("rfqs", "view"), async (req, 
   `, req.user));
 });
 
-app.get("/rfq/:id/delete", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+app.get("/rfq/:id/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const [rfqRes, poCountRes] = await Promise.all([
-    query("select id, rfq_no, project_name, status from rfqs where id = $1", [rfqId]),
-    query("select count(*) as count from purchase_orders where rfq_id = $1", [rfqId])
+    query("select id, rfq_no, project_name, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
+    query("select count(*) as count from purchase_orders where rfq_id = $1 and job_id = $2", [rfqId, jobId])
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) {
@@ -7640,38 +8043,42 @@ app.get("/rfq/:id/delete", requireAuth, requirePermission("rfqs", "edit"), async
   `, req.user));
 }));
 
-app.post("/rfq/:id/delete", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+app.post("/rfq/:id/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select id, rfq_no from rfqs where id = $1", [rfqId])).rows[0];
+    const rfq = (await client.query("select id, rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
-    const poCount = Number((await client.query("select count(*) as count from purchase_orders where rfq_id = $1", [rfqId])).rows[0]?.count || 0);
+    const poCount = Number((await client.query("select count(*) as count from purchase_orders where rfq_id = $1 and job_id = $2", [rfqId, jobId])).rows[0]?.count || 0);
     if (poCount > 0) throw new Error("Cannot delete an RFQ that already has purchase orders.");
     await client.query(`
       delete from import_batch_errors
-      where batch_id in (select id from import_batches where rfq_id = $1)
-    `, [rfqId]);
-    await client.query("delete from import_batches where rfq_id = $1", [rfqId]);
+      where batch_id in (select id from import_batches where rfq_id = $1 and job_id = $2)
+    `, [rfqId, jobId]);
+    await client.query("delete from import_batches where rfq_id = $1 and job_id = $2", [rfqId, jobId]);
     await client.query(`
       delete from quote_revisions
-      where rfq_item_id in (select id from rfq_items where rfq_id = $1)
-    `, [rfqId]);
+      where job_id = $2
+        and rfq_item_id in (select id from rfq_items where rfq_id = $1 and job_id = $2)
+    `, [rfqId, jobId]);
     await client.query(`
       delete from quotes
-      where rfq_item_id in (select id from rfq_items where rfq_id = $1)
-    `, [rfqId]);
-    await client.query("delete from rfq_vendors where rfq_id = $1", [rfqId]);
-    await client.query("delete from rfq_items where rfq_id = $1", [rfqId]);
-    await client.query("delete from rfqs where id = $1", [rfqId]);
+      where job_id = $2
+        and rfq_item_id in (select id from rfq_items where rfq_id = $1 and job_id = $2)
+    `, [rfqId, jobId]);
+    await client.query("delete from rfq_vendors where rfq_id = $1 and job_id = $2", [rfqId, jobId]);
+    await client.query("delete from rfq_items where rfq_id = $1 and job_id = $2", [rfqId, jobId]);
+    await client.query("delete from rfqs where id = $1 and job_id = $2", [rfqId, jobId]);
     await auditLog(client, req.user.id, "delete", "rfq", rfqId, rfq.rfq_no || "");
   });
   res.redirect("/rfq");
 }));
 
-app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
+app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const [rfqRes, itemsRes] = await Promise.all([
-    query("select * from rfqs where id = $1", [rfqId]),
+    query("select * from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
     query(`
       select
         ri.po_line,
@@ -7687,12 +8094,12 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), as
         mi.uom
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
-      where ri.rfq_id = $1
+      where ri.rfq_id = $1 and ri.job_id = $2 and mi.job_id = $2
       order by
         case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
-    `, [rfqId])
+    `, [rfqId, jobId])
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
@@ -7702,10 +8109,11 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requirePermission("rfqs", "view"), as
   res.send(pdfBuffer);
 }));
 
-app.get("/rfq/:id/items/existing", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const [rfqRes, materialItemsRes] = await Promise.all([
-    query("select id, rfq_no, project_name from rfqs where id = $1", [rfqId]),
+    query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
     query(`
       select
         mi.item_code,
@@ -7724,8 +8132,9 @@ app.get("/rfq/:id/items/existing", requireAuth, requirePermission("rfqs", "edit"
           coalesce(bl.thk_1, '') as thk_1,
           coalesce(bl.thk_2, '') as thk_2
         from bom_lines bl
-        where bl.item_code = mi.item_code
+        where bl.job_id = $1 and bl.item_code = mi.item_code
       ) dimensions on true
+      where mi.job_id = $1
       order by
         mi.item_code,
         coalesce(dimensions.size_1, ''),
@@ -7733,7 +8142,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requirePermission("rfqs", "edit"
         coalesce(dimensions.thk_1, ''),
         coalesce(dimensions.thk_2, '')
       limit 500
-    `, [])
+    `, [jobId])
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
@@ -7782,9 +8191,9 @@ app.get("/rfq/:id/items/existing", requireAuth, requirePermission("rfqs", "edit"
   `, req.user));
 }));
 
-app.get("/rfq/:id/items/new", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
-  const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1", [rfqId])).rows[0];
+  const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, currentJobId(req)])).rows[0];
   if (!rfq) throw new Error("RFQ not found.");
   const newItemRows = Array.from({ length: 8 }, (_, index) => `
     <tr>
@@ -7821,19 +8230,20 @@ app.get("/rfq/:id/items/new", requireAuth, requirePermission("rfqs", "edit"), as
   `, req.user));
 }));
 
-app.get("/rfq/:id/quotes/import-page", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+app.get("/rfq/:id/quotes/import-page", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
   await backfillRfqVendors(pool, rfqId);
   const selectedVendorId = String(req.query.vendor_tab_id || "").trim();
   const [rfqRes, selectedVendorsRes] = await Promise.all([
-    query("select id, rfq_no, project_name from rfqs where id = $1", [rfqId]),
+    query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
     query(`
       select rv.vendor_id, v.name
       from rfq_vendors rv
       join vendors v on v.id = rv.vendor_id
-      where rv.rfq_id = $1
+      where rv.rfq_id = $1 and rv.job_id = $2 and v.job_id = $2
       order by v.name
-    `, [rfqId])
+    `, [rfqId, jobId])
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
@@ -7863,7 +8273,7 @@ app.get("/rfq/:id/quotes/import-page", requireAuth, requirePermission("rfqs", "e
   `, req.user));
 }));
 
-app.post("/rfq/:id/items/import", requireAuth, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
+app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (rows.length === 0) throw new Error("No rows found.");
@@ -7872,7 +8282,8 @@ app.post("/rfq/:id/items/import", requireAuth, requirePermission("rfqs", "edit")
       entityType: "rfq_items",
       rfqId,
       uploadedBy: req.user.id,
-      filename: req.file?.originalname || ""
+      filename: req.file?.originalname || "",
+      jobId: currentJobId(req)
     });
     let insertedCount = 0;
     let updatedCount = 0;
@@ -7880,7 +8291,7 @@ app.post("/rfq/:id/items/import", requireAuth, requirePermission("rfqs", "edit")
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const rowNumber = index + 2;
-      const result = await upsertRfqItemRow(client, rfqId, row);
+      const result = await upsertRfqItemRow(client, rfqId, row, currentJobId(req));
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
@@ -7895,17 +8306,17 @@ app.post("/rfq/:id/items/import", requireAuth, requirePermission("rfqs", "edit")
   res.redirect(`/imports/${batchId}`);
 });
 
-app.post("/rfq/:id/items/add", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
   await withTransaction(async (client) => {
-    const result = await upsertRfqItemRow(client, rfqId, req.body);
+    const result = await upsertRfqItemRow(client, rfqId, req.body, currentJobId(req));
     if (result.status === "skipped") throw new Error(result.message);
     await auditLog(client, req.user.id, "upsert", "rfq_item", rfqId, `item=${req.body.item_code || ""}`);
   });
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/rfq/:id/items/grid", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const usedItemCodes = new Set();
   const rows = Array.from({ length: 8 }, (_, index) => ({
@@ -7940,13 +8351,14 @@ app.post("/rfq/:id/items/grid", requireAuth, requirePermission("rfqs", "edit"), 
       entityType: "rfq_items",
       rfqId,
       uploadedBy: req.user.id,
-      filename: "manual-grid"
+      filename: "manual-grid",
+      jobId: currentJobId(req)
     });
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
     for (let index = 0; index < rows.length; index += 1) {
-      const result = await upsertRfqItemRow(client, rfqId, rows[index]);
+      const result = await upsertRfqItemRow(client, rfqId, rows[index], currentJobId(req));
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
@@ -7961,7 +8373,7 @@ app.post("/rfq/:id/items/grid", requireAuth, requirePermission("rfqs", "edit"), 
   res.redirect(`/imports/${batchId}`);
 });
 
-app.post("/rfq/:id/quotes/import", requireAuth, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
+app.post("/rfq/:id/quotes/import", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (rows.length === 0) throw new Error("No rows found.");
@@ -7972,9 +8384,10 @@ app.post("/rfq/:id/quotes/import", requireAuth, requirePermission("rfqs", "edit"
       entityType: "quotes",
       rfqId,
       uploadedBy: req.user.id,
-      filename: req.file?.originalname || ""
+      filename: req.file?.originalname || "",
+      jobId: currentJobId(req)
     });
-    const selectedVendorIds = new Set((await client.query("select vendor_id from rfq_vendors where rfq_id = $1", [rfqId])).rows.map((row) => Number(row.vendor_id)));
+    const selectedVendorIds = new Set((await client.query("select vendor_id from rfq_vendors where rfq_id = $1 and job_id = $2", [rfqId, currentJobId(req)])).rows.map((row) => Number(row.vendor_id)));
     if (scopedVendorId && !selectedVendorIds.has(scopedVendorId)) {
       throw new Error("Choose a vendor from the RFQ vendor tabs before importing.");
     }
@@ -7995,7 +8408,7 @@ app.post("/rfq/:id/quotes/import", requireAuth, requirePermission("rfqs", "edit"
       }
       let vendorId = scopedVendorId;
       if (!vendorId) {
-        const vendorRes = await client.query("select id from vendors where name = $1", [vendorName]);
+        const vendorRes = await client.query("select id from vendors where job_id = $1 and name = $2", [currentJobId(req), vendorName]);
         if (vendorRes.rows[0]) {
           vendorId = vendorRes.rows[0].id;
         } else {
@@ -8013,8 +8426,8 @@ app.post("/rfq/:id/quotes/import", requireAuth, requirePermission("rfqs", "edit"
         select ri.id
         from rfq_items ri
         join material_items mi on mi.id = ri.material_item_id
-        where ri.rfq_id = $1 and mi.item_code = $2
-      `, [rfqId, itemCode]);
+        where ri.rfq_id = $1 and ri.job_id = $3 and mi.job_id = $3 and mi.item_code = $2
+      `, [rfqId, itemCode, currentJobId(req)]);
       if (!rfqItemRes.rows[0]) {
         skippedCount += 1;
         await addImportBatchError(client, batchId, rowNumber, "rfq_item_not_found", "Item code does not exist on this RFQ.", row);
@@ -8022,20 +8435,20 @@ app.post("/rfq/:id/quotes/import", requireAuth, requirePermission("rfqs", "edit"
       }
       const rfqItemId = rfqItemRes.rows[0].id;
       const existingQuote = await client.query(
-        "select id from quotes where rfq_item_id = $1 and vendor_id = $2",
-        [rfqItemId, vendorId]
+        "select id from quotes where rfq_item_id = $1 and vendor_id = $2 and job_id = $3",
+        [rfqItemId, vendorId, currentJobId(req)]
       );
       await client.query(`
-        insert into quotes (rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
-        values ($1, $2, $3, $4, now())
+        insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+        values ($1, $2, $3, $4, $5, now())
         on conflict (rfq_item_id, vendor_id)
         do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-      `, [rfqItemId, vendorId, unitPrice, leadDays]);
+      `, [currentJobId(req), rfqItemId, vendorId, unitPrice, leadDays]);
       await client.query(`
         update rfq_items
         set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
-        where id = $1 and award_status = 'AWARDED' and awarded_vendor_id = $2
-      `, [rfqItemId, vendorId, unitPrice, leadDays]);
+        where id = $1 and job_id = $5 and award_status = 'AWARDED' and awarded_vendor_id = $2
+      `, [rfqItemId, vendorId, unitPrice, leadDays, currentJobId(req)]);
       await writeQuoteRevision(client, {
         rfqItemId,
         vendorId,
@@ -8043,7 +8456,8 @@ app.post("/rfq/:id/quotes/import", requireAuth, requirePermission("rfqs", "edit"
         leadDays,
         sourceType: "import",
         sourceBatchId: batchId,
-        createdBy: req.user.id
+        createdBy: req.user.id,
+        jobId: currentJobId(req)
       });
       if (existingQuote.rows[0]) updatedCount += 1;
       else insertedCount += 1;
@@ -8056,13 +8470,14 @@ app.post("/rfq/:id/quotes/import", requireAuth, requirePermission("rfqs", "edit"
   res.redirect(`/imports/${batchId}`);
 });
 
-app.get("/imports/:id", requireAuth, async (req, res) => {
+app.get("/imports/:id", requireAuth, requireJobContext, async (req, res) => {
+  const jobId = currentJobId(req);
   const batch = (await query(`
     select ib.*, r.rfq_no
     from import_batches ib
     left join rfqs r on r.id = ib.rfq_id
-    where ib.id = $1
-  `, [req.params.id])).rows[0];
+    where ib.id = $1 and ib.job_id = $2 and (r.id is null or r.job_id = $2)
+  `, [req.params.id, jobId])).rows[0];
   if (!batch) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Import batch not found.</h3></div>`, req.user));
     return;
@@ -8070,9 +8485,9 @@ app.get("/imports/:id", requireAuth, async (req, res) => {
   const errors = (await query(`
     select row_number, error_code, message, raw_payload
     from import_batch_errors
-    where batch_id = $1
+    where batch_id = $1 and job_id = $2
     order by row_number, id
-  `, [req.params.id])).rows;
+  `, [req.params.id, jobId])).rows;
   const errorRows = errors.length > 0
     ? errors.map((error) => `<tr><td>${error.row_number}</td><td>${esc(error.error_code)}</td><td>${esc(error.message)}</td><td><code>${esc(JSON.stringify(error.raw_payload))}</code></td></tr>`).join("")
     : `<tr><td colspan="4" class="muted">No row-level errors.</td></tr>`;
@@ -8102,21 +8517,22 @@ app.get("/imports/:id", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/rfq/:id/award", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+app.post("/rfq/:id/award", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
   const vendorId = Number(req.body.vendor_id);
+  const jobId = currentJobId(req);
   if (!vendorId) throw new Error("Select a participating vendor to award this RFQ.");
   await withTransaction(async (client) => {
-    const isSelectedVendor = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2", [rfqId, vendorId])).rows[0];
+    const isSelectedVendor = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2 and job_id = $3", [rfqId, vendorId, jobId])).rows[0];
     if (!isSelectedVendor) throw new Error("Choose a vendor from the RFQ vendor list.");
     const items = (await client.query(`
       select ri.id, mi.item_code, mi.description, q.unit_price, q.lead_days
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       left join quotes q on q.rfq_item_id = ri.id and q.vendor_id = $2
-      where ri.rfq_id = $1
+      where ri.rfq_id = $1 and ri.job_id = $3 and mi.job_id = $3
       order by ri.id
-    `, [rfqId, vendorId])).rows;
+    `, [rfqId, vendorId, jobId])).rows;
     if (items.length === 0) throw new Error("Add RFQ items before awarding.");
     const missingItems = items.filter((item) => !Number.isFinite(Number(item.unit_price)) || Number(item.unit_price) <= 0);
     if (missingItems.length > 0) {
@@ -8133,8 +8549,8 @@ app.post("/rfq/:id/award", requireAuth, requirePermission("rfqs", "edit"), async
           awarded_by = null,
           award_notes = null,
           updated_at = now()
-      where rfq_id = $1
-    `, [rfqId]);
+      where rfq_id = $1 and job_id = $2
+    `, [rfqId, jobId]);
     for (const item of items) {
       await client.query(`
         update rfq_items
@@ -8146,26 +8562,27 @@ app.post("/rfq/:id/award", requireAuth, requirePermission("rfqs", "edit"), async
             awarded_by = $5,
             award_notes = $6,
             updated_at = now()
-        where id = $1
-      `, [item.id, vendorId, item.unit_price, item.lead_days, req.user.id, String(req.body.award_notes || "").trim()]);
+        where id = $1 and job_id = $7
+      `, [item.id, vendorId, item.unit_price, item.lead_days, req.user.id, String(req.body.award_notes || "").trim(), jobId]);
       await auditLog(client, req.user.id, "award", "rfq_item", item.id, `vendor=${vendorId};rfq=${rfqId}`);
     }
-    await client.query("update rfqs set status = 'AWARDED' where id = $1", [rfqId]);
+    await client.query("update rfqs set status = 'AWARDED' where id = $1 and job_id = $2", [rfqId, jobId]);
     await auditLog(client, req.user.id, "award", "rfq", rfqId, `vendor=${vendorId}`);
   });
   res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(vendorId))}`);
 }));
 
-app.post("/rfq/:id/award/clear", requireAuth, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+app.post("/rfq/:id/award/clear", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const issued = await client.query(`
       select 1
       from po_lines pl
       join purchase_orders po on po.id = pl.po_id
-      where po.rfq_id = $1
+      where po.rfq_id = $1 and po.job_id = $2 and pl.job_id = $2
       limit 1
-    `, [rfqId]);
+    `, [rfqId, jobId]);
     if (issued.rows[0]) throw new Error("Cannot clear the RFQ award after a PO has been created.");
     await client.query(`
       update rfq_items
@@ -8177,55 +8594,56 @@ app.post("/rfq/:id/award/clear", requireAuth, requirePermission("rfqs", "edit"),
           awarded_by = null,
           award_notes = null,
           updated_at = now()
-      where rfq_id = $1
-    `, [rfqId]);
+      where rfq_id = $1 and job_id = $2
+    `, [rfqId, jobId]);
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "clear_award", "rfq", rfqId, "");
   });
   res.redirect(`/rfq/${rfqId}`);
 }));
 
-app.post("/po/create", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   const rfqId = Number(req.body.rfq_id);
   const vendorId = Number(req.body.vendor_id);
   const poNo = String(req.body.po_no || "").trim();
+  const jobId = currentJobId(req);
   if (!vendorId) throw new Error("Select a vendor with awarded RFQ lines.");
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select project_name from rfqs where id = $1", [rfqId])).rows[0];
+    const rfq = (await client.query("select project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     const awardTotals = (await client.query(`
       select
         count(*) as total_count,
         count(*) filter (where award_status = 'AWARDED' and awarded_vendor_id = $2) as vendor_awarded_count
       from rfq_items
-      where rfq_id = $1
-    `, [rfqId, vendorId])).rows[0];
+      where rfq_id = $1 and job_id = $3
+    `, [rfqId, vendorId, jobId])).rows[0];
     const totalCount = Number(awardTotals?.total_count || 0);
     const vendorAwardedCount = Number(awardTotals?.vendor_awarded_count || 0);
     if (totalCount === 0) throw new Error("Add RFQ items before creating a PO.");
     if (vendorAwardedCount !== totalCount) throw new Error("Award the whole RFQ to one vendor before creating the draft PO.");
     const poInsert = await client.query(
-      "insert into purchase_orders (po_no, vendor_id, rfq_id, description, status, updated_at) values ($1, $2, $3, $4, 'OPEN', now()) returning id",
-      [poNo, vendorId, rfqId, rfq?.project_name || ""]
+      "insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, description, status, updated_at) values ($1, $2, $3, $4, $5, 'OPEN', now()) returning id",
+      [jobId, poNo, vendorId, rfqId, rfq?.project_name || ""]
     );
     const poId = poInsert.rows[0].id;
     const lines = await client.query(`
       select ri.id as rfq_item_id, ri.material_item_id, ri.po_line, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.qty,
              ri.awarded_unit_price as unit_price, ri.awarded_lead_days as lead_days
       from rfq_items ri
-      where ri.rfq_id = $1 and ri.award_status = 'AWARDED' and ri.awarded_vendor_id = $2
+      where ri.rfq_id = $1 and ri.job_id = $3 and ri.award_status = 'AWARDED' and ri.awarded_vendor_id = $2
         and not exists (
           select 1
           from po_lines pl
           join purchase_orders po on po.id = pl.po_id
-          where po.rfq_id = ri.rfq_id and pl.rfq_item_id = ri.id
+          where po.rfq_id = ri.rfq_id and po.job_id = $3 and pl.job_id = $3 and pl.rfq_item_id = ri.id
         )
-    `, [rfqId, vendorId]);
+    `, [rfqId, vendorId, jobId]);
     if (lines.rows.length === 0) throw new Error("Selected vendor has no unissued awarded lines on this RFQ.");
     for (const line of lines.rows) {
       await client.query(`
-        insert into po_lines (po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, lead_days, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
-      `, [poId, line.rfq_item_id, line.material_item_id, line.po_line || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price, num(line.lead_days)]);
+        insert into po_lines (job_id, po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, lead_days, updated_at)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+      `, [jobId, poId, line.rfq_item_id, line.material_item_id, line.po_line || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price, num(line.lead_days)]);
     }
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
@@ -8233,22 +8651,23 @@ app.post("/po/create", requireAuth, requirePermission("pos", "edit"), async (req
   res.redirect("/po");
 });
 
-app.get("/rfq-item/:id/award", requireAuth, async (req, res) => {
+app.get("/rfq-item/:id/award", requireAuth, requireJobContext, async (req, res) => {
+  const jobId = currentJobId(req);
   const [itemRes, quotesRes] = await Promise.all([
     query(`
       select ri.id, ri.rfq_id, ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
              mi.item_code, mi.description
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
-      where ri.id = $1
-    `, [req.params.id]),
+      where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
+    `, [req.params.id, jobId]),
     query(`
       select v.id as vendor_id, v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
       from quotes q
       join vendors v on v.id = q.vendor_id
-      where q.rfq_item_id = $1
+      where q.rfq_item_id = $1 and q.job_id = $2 and v.job_id = $2
       order by q.unit_price, q.lead_days, v.name
-    `, [req.params.id])
+    `, [req.params.id, jobId])
   ]);
   const item = itemRes.rows[0];
   if (!item) {
@@ -8275,15 +8694,16 @@ app.get("/rfq-item/:id/award", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/rfq-item/:id/award", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
     const quote = (await client.query(`
       select ri.rfq_id, q.vendor_id, q.unit_price, q.lead_days
       from rfq_items ri
       join quotes q on q.rfq_item_id = ri.id
-      where ri.id = $1 and q.vendor_id = $2
-    `, [itemId, Number(req.body.vendor_id)])).rows[0];
+      where ri.id = $1 and q.vendor_id = $2 and ri.job_id = $3 and q.job_id = $3
+    `, [itemId, Number(req.body.vendor_id), jobId])).rows[0];
     if (!quote) throw new Error("Select a quoted vendor before awarding.");
     await client.query(`
       update rfq_items
@@ -8295,26 +8715,27 @@ app.post("/rfq-item/:id/award", requireAuth, requirePermission("rfqs", "edit"), 
           awarded_by = $5,
           award_notes = $6,
           updated_at = now()
-      where id = $1
-    `, [itemId, quote.vendor_id, quote.unit_price, quote.lead_days, req.user.id, req.body.award_notes || ""]);
+      where id = $1 and job_id = $7
+    `, [itemId, quote.vendor_id, quote.unit_price, quote.lead_days, req.user.id, req.body.award_notes || "", jobId]);
     await auditLog(client, req.user.id, "award", "rfq_item", itemId, `vendor=${quote.vendor_id}`);
     return quote.rfq_id;
   });
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/rfq-item/:id/award/clear", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq-item/:id/award/clear", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
-    const current = (await client.query("select rfq_id from rfq_items where id = $1", [itemId])).rows[0];
+    const current = (await client.query("select rfq_id from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
     if (!current) throw new Error("RFQ item not found.");
     const issued = await client.query(`
       select 1
       from po_lines pl
       join purchase_orders po on po.id = pl.po_id
-      where pl.rfq_item_id = $1
+      where pl.rfq_item_id = $1 and pl.job_id = $2 and po.job_id = $2
       limit 1
-    `, [itemId]);
+    `, [itemId, jobId]);
     if (issued.rows[0]) throw new Error("Cannot clear an award after a PO line has been issued.");
     await client.query(`
       update rfq_items
@@ -8326,22 +8747,22 @@ app.post("/rfq-item/:id/award/clear", requireAuth, requirePermission("rfqs", "ed
           awarded_by = null,
           award_notes = null,
           updated_at = now()
-      where id = $1
-    `, [itemId]);
+      where id = $1 and job_id = $2
+    `, [itemId, jobId]);
     await auditLog(client, req.user.id, "clear_award", "rfq_item", itemId, "");
     return current.rfq_id;
   });
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.get("/rfq-item/:id/edit", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const item = (await query(`
     select ri.id, ri.rfq_id, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
            mi.item_code, mi.description, mi.material_type, mi.uom
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
-    where ri.id = $1
-  `, [req.params.id])).rows[0];
+    where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
+  `, [req.params.id, currentJobId(req)])).rows[0];
   if (!item) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ item not found.</h3></div>`, req.user));
     return;
@@ -8372,20 +8793,21 @@ app.get("/rfq-item/:id/edit", requireAuth, requirePermission("rfqs", "edit"), as
   `, req.user));
 });
 
-app.post("/rfq-item/:id/edit", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
-    const current = (await client.query("select rfq_id, material_item_id from rfq_items where id = $1", [itemId])).rows[0];
+    const current = (await client.query("select rfq_id, material_item_id from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
     if (!current) throw new Error("RFQ item not found.");
     await client.query(
-      "update material_items set item_code = $2, description = $3, material_type = $4, uom = $5 where id = $1",
-      [current.material_item_id, req.body.item_code?.trim(), req.body.description?.trim() || req.body.item_code?.trim(), req.body.material_type?.trim() || "misc", req.body.uom?.trim() || "EA"]
+      "update material_items set item_code = $2, description = $3, material_type = $4, uom = $5 where id = $1 and job_id = $6",
+      [current.material_item_id, req.body.item_code?.trim(), req.body.description?.trim() || req.body.item_code?.trim(), req.body.material_type?.trim() || "misc", req.body.uom?.trim() || "EA", jobId]
     );
     const update = await client.query(`
       update rfq_items
       set spec = $2, commodity_code = $3, tag_number = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, qty = $9, notes = $10, updated_at = now()
-      where id = $1 and extract(epoch from updated_at)::text = $11
-    `, [itemId, req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", parseQtyValue(req.body.qty || 0), req.body.notes || "", req.body.updated_token || ""]);
+      where id = $1 and job_id = $11 and extract(epoch from updated_at)::text = $12
+    `, [itemId, req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", parseQtyValue(req.body.qty || 0), req.body.notes || "", jobId, req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This RFQ item was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "rfq_item", itemId, req.body.item_code?.trim() || "");
     return current.rfq_id;
@@ -8393,26 +8815,28 @@ app.post("/rfq-item/:id/edit", requireAuth, requirePermission("rfqs", "edit"), a
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/rfq-item/:id/delete", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq-item/:id/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
-    const current = (await client.query("select rfq_id from rfq_items where id = $1", [itemId])).rows[0];
+    const current = (await client.query("select rfq_id from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
     if (!current) throw new Error("RFQ item not found.");
-    await client.query("delete from rfq_items where id = $1", [itemId]);
+    await client.query("delete from rfq_items where id = $1 and job_id = $2", [itemId, jobId]);
     await auditLog(client, req.user.id, "delete", "rfq_item", itemId, "");
     return current.rfq_id;
   });
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.get("/rfq-item/:id/quotes", requireAuth, async (req, res) => {
+app.get("/rfq-item/:id/quotes", requireAuth, requireJobContext, async (req, res) => {
+  const jobId = currentJobId(req);
   const item = (await query(`
     select ri.id, ri.rfq_id, ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days,
            mi.item_code, mi.description
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
-    where ri.id = $1
-  `, [req.params.id])).rows[0];
+    where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
   if (!item) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ item not found.</h3></div>`, req.user));
     return;
@@ -8422,24 +8846,24 @@ app.get("/rfq-item/:id/quotes", requireAuth, async (req, res) => {
     select rv.vendor_id as id, v.name
     from rfq_vendors rv
     join vendors v on v.id = rv.vendor_id
-    where rv.rfq_id = $1
+    where rv.rfq_id = $1 and rv.job_id = $2 and v.job_id = $2
     order by v.name
-  `, [item.rfq_id])).rows;
+  `, [item.rfq_id, jobId])).rows;
   const quotes = (await query(`
     select v.id as vendor_id, v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
     from quotes q
     join vendors v on v.id = q.vendor_id
-    where q.rfq_item_id = $1
+    where q.rfq_item_id = $1 and q.job_id = $2 and v.job_id = $2
     order by q.unit_price, q.lead_days
-  `, [req.params.id])).rows;
+  `, [req.params.id, jobId])).rows;
   const revisions = (await query(`
     select v.name as vendor_name, qr.unit_price, qr.lead_days, qr.source_type, qr.created_at
     from quote_revisions qr
     join vendors v on v.id = qr.vendor_id
-    where qr.rfq_item_id = $1
+    where qr.rfq_item_id = $1 and qr.job_id = $2 and v.job_id = $2
     order by qr.id desc
     limit 20
-  `, [req.params.id])).rows;
+  `, [req.params.id, jobId])).rows;
   const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
   const quoteRows = quotes.length > 0
     ? quotes.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(formatShortDateTime(quote.quoted_at))}</td>${item.awarded_vendor_id === quote.vendor_id ? `<td><span class="chip">Awarded</span></td>` : `<td></td>`}</tr>`).join("")
@@ -8467,50 +8891,53 @@ app.get("/rfq-item/:id/quotes", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/quotes", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/quotes", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const rfqItemId = Number(req.body.rfq_item_id);
     const vendorId = Number(req.body.vendor_id);
     const unitPrice = num(req.body.unit_price, NaN);
     const leadDays = num(req.body.lead_days);
     if (!Number.isFinite(unitPrice) || unitPrice <= 0) throw new Error("Unit price must be greater than zero.");
-    const item = (await client.query("select rfq_id from rfq_items where id = $1", [rfqItemId])).rows[0];
+    const item = (await client.query("select rfq_id from rfq_items where id = $1 and job_id = $2", [rfqItemId, jobId])).rows[0];
     if (!item) throw new Error("RFQ item not found.");
-    const vendorRow = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2", [item.rfq_id, vendorId])).rows[0];
+    const vendorRow = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2 and job_id = $3", [item.rfq_id, vendorId, jobId])).rows[0];
     if (!vendorRow) throw new Error("Select a vendor from the RFQ vendor list.");
     await client.query(`
-      insert into quotes (rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
-      values ($1, $2, $3, $4, now())
+      insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+      values ($1, $2, $3, $4, $5, now())
       on conflict (rfq_item_id, vendor_id)
       do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-    `, [rfqItemId, vendorId, unitPrice, leadDays]);
+    `, [jobId, rfqItemId, vendorId, unitPrice, leadDays]);
     await client.query(`
       update rfq_items
       set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
-      where id = $1 and award_status = 'AWARDED' and awarded_vendor_id = $2
-    `, [rfqItemId, vendorId, unitPrice, leadDays]);
-    await writeQuoteRevision(client, {
-      rfqItemId,
-      vendorId,
-      unitPrice,
-      leadDays,
-      sourceType: "manual",
-      createdBy: req.user.id
-    });
+      where id = $1 and job_id = $5 and award_status = 'AWARDED' and awarded_vendor_id = $2
+    `, [rfqItemId, vendorId, unitPrice, leadDays, jobId]);
+      await writeQuoteRevision(client, {
+        rfqItemId,
+        vendorId,
+        unitPrice,
+        leadDays,
+        sourceType: "manual",
+        createdBy: req.user.id,
+        jobId
+      });
     await auditLog(client, req.user.id, "upsert", "quote", req.body.rfq_item_id, `vendor=${req.body.vendor_id}`);
     await recalcRfqStatus(client, item.rfq_id);
   });
   res.redirect(`/rfq/${req.body.rfq_id}?vendor_tab_id=${encodeURIComponent(String(req.body.vendor_id || ""))}`);
 });
 
-app.post("/rfq/:id/quotes/grid", requireAuth, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const vendorId = Number(req.body.vendor_id);
   if (!vendorId) throw new Error("Select a vendor tab first.");
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const vendorRow = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2", [rfqId, vendorId])).rows[0];
+    const vendorRow = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2 and job_id = $3", [rfqId, vendorId, jobId])).rows[0];
     if (!vendorRow) throw new Error("Choose a vendor from the RFQ vendor list.");
-    const items = (await client.query("select id, awarded_vendor_id, award_status from rfq_items where rfq_id = $1", [rfqId])).rows;
+    const items = (await client.query("select id, awarded_vendor_id, award_status from rfq_items where rfq_id = $1 and job_id = $2", [rfqId, jobId])).rows;
     for (const item of items) {
       const unitPriceRaw = String(req.body[`unit_price_${item.id}`] || "").trim();
       const leadDaysRaw = String(req.body[`lead_days_${item.id}`] || "").trim();
@@ -8521,23 +8948,24 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requirePermission("rfqs", "edit"),
       }
       const leadDays = leadDaysRaw ? num(leadDaysRaw) : 0;
       await client.query(`
-        insert into quotes (rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
-        values ($1, $2, $3, $4, now())
+        insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+        values ($1, $2, $3, $4, $5, now())
         on conflict (rfq_item_id, vendor_id)
         do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-      `, [item.id, vendorId, unitPrice, leadDays]);
+      `, [jobId, item.id, vendorId, unitPrice, leadDays]);
       await client.query(`
         update rfq_items
         set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
-        where id = $1 and award_status = 'AWARDED' and awarded_vendor_id = $2
-      `, [item.id, vendorId, unitPrice, leadDays]);
+        where id = $1 and job_id = $5 and award_status = 'AWARDED' and awarded_vendor_id = $2
+      `, [item.id, vendorId, unitPrice, leadDays, jobId]);
       await writeQuoteRevision(client, {
         rfqItemId: item.id,
         vendorId,
         unitPrice,
         leadDays,
         sourceType: "manual",
-        createdBy: req.user.id
+        createdBy: req.user.id,
+        jobId
       });
       await auditLog(client, req.user.id, "upsert", "quote", item.id, `vendor=${vendorId}`);
     }
@@ -8546,13 +8974,14 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requirePermission("rfqs", "edit"),
   res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(vendorId))}`);
 });
 
-app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) => {
+app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const poNo = String(req.query.po_no || "").trim();
   const rfqNo = String(req.query.rfq_no || "").trim();
   const vendorId = String(req.query.vendor_id || "").trim();
   const status = String(req.query.status || "").trim();
-  const where = [];
-  const params = [];
+  const where = ["po.job_id = $1"];
+  const params = [jobId];
   if (poNo) { params.push(`%${poNo}%`); where.push(`po.po_no ilike $${params.length}`); }
   if (rfqNo) { params.push(`%${rfqNo}%`); where.push(`r.rfq_no ilike $${params.length}`); }
   if (vendorId) { params.push(Number(vendorId)); where.push(`po.vendor_id = $${params.length}`); }
@@ -8591,7 +9020,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
     order by po.id desc
     limit 300
   `, params)).rows;
-  const vendors = (await query("select id, name from vendors order by name")).rows;
+  const vendors = (await query("select id, name from vendors where job_id = $1 order by name", [jobId])).rows;
   const poRows = pos.map((po) => `<tr>
     <td>${esc(po.po_no)}</td>
     <td>${esc(po.vendor)}</td>
@@ -8636,7 +9065,7 @@ app.get("/po", requireAuth, requirePermission("pos", "view"), async (req, res) =
   `, req.user));
 });
 
-app.get("/po/import", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.get("/po/import", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   res.send(layout("Import PO", `
     <h1>Import PO</h1>
     <div class="card">
@@ -8682,7 +9111,7 @@ app.get("/po/import/lines/template", requireAuth, requirePermission("pos", "edit
   res.send(csv);
 });
 
-app.post("/po/import/headers/preview", requireAuth, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
+app.post("/po/import/headers/preview", requireAuth, requireJobContext, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
   const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizePoImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
   const previewRows = rows.slice(0, 100).map((row) => `<tr>
@@ -8708,7 +9137,7 @@ app.post("/po/import/headers/preview", requireAuth, requirePermission("pos", "ed
   `, req.user));
 });
 
-app.post("/po/import/lines/preview", requireAuth, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
+app.post("/po/import/lines/preview", requireAuth, requireJobContext, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
   const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizePoImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
   const previewRows = rows.slice(0, 100).map((row) => `<tr>
@@ -8735,7 +9164,7 @@ app.post("/po/import/lines/preview", requireAuth, requirePermission("pos", "edit
   `, req.user));
 });
 
-app.post("/po/import/headers/commit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po/import/headers/commit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   const rows = JSON.parse(String(req.body.rows_json || "[]"));
   if (!Array.isArray(rows) || rows.length === 0) throw new Error("No rows found.");
   const batchId = await withTransaction(async (client) => {
@@ -8743,13 +9172,14 @@ app.post("/po/import/headers/commit", requireAuth, requirePermission("pos", "edi
       entityType: "purchase_order_headers",
       rfqId: null,
       uploadedBy: req.user.id,
-      filename: "PO Header Import"
+      filename: "PO Header Import",
+      jobId: currentJobId(req)
     });
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
     for (let index = 0; index < rows.length; index += 1) {
-      const result = await upsertPurchaseOrderHeaderRow(client, rows[index]);
+      const result = await upsertPurchaseOrderHeaderRow(client, rows[index], currentJobId(req));
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
@@ -8764,7 +9194,7 @@ app.post("/po/import/headers/commit", requireAuth, requirePermission("pos", "edi
   res.redirect(`/imports/${batchId}`);
 });
 
-app.post("/po/import/lines/commit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po/import/lines/commit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   const rows = JSON.parse(String(req.body.rows_json || "[]"));
   if (!Array.isArray(rows) || rows.length === 0) throw new Error("No rows found.");
   const batchId = await withTransaction(async (client) => {
@@ -8772,13 +9202,14 @@ app.post("/po/import/lines/commit", requireAuth, requirePermission("pos", "edit"
       entityType: "purchase_order_lines",
       rfqId: null,
       uploadedBy: req.user.id,
-      filename: "PO Line Import"
+      filename: "PO Line Import",
+      jobId: currentJobId(req)
     });
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
     for (let index = 0; index < rows.length; index += 1) {
-      const result = await upsertPurchaseOrderLineRow(client, rows[index]);
+      const result = await upsertPurchaseOrderLineRow(client, rows[index], currentJobId(req));
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
@@ -8793,7 +9224,7 @@ app.post("/po/import/lines/commit", requireAuth, requirePermission("pos", "edit"
   res.redirect(`/imports/${batchId}`);
 });
 
-app.post("/po/import/lines/manual", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po/import/lines/manual", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   const poNo = String(req.body.po_no || "").trim();
   if (!poNo) throw new Error("Choose a PO header before adding manual lines.");
   const rows = parseManualPoLineRows(req.body, poNo);
@@ -8803,13 +9234,14 @@ app.post("/po/import/lines/manual", requireAuth, requirePermission("pos", "edit"
       entityType: "purchase_order_lines",
       rfqId: null,
       uploadedBy: req.user.id,
-      filename: `Manual PO Lines - ${poNo}`
+      filename: `Manual PO Lines - ${poNo}`,
+      jobId: currentJobId(req)
     });
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
     for (let index = 0; index < rows.length; index += 1) {
-      const result = await upsertPurchaseOrderLineRow(client, rows[index]);
+      const result = await upsertPurchaseOrderLineRow(client, rows[index], currentJobId(req));
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
@@ -8824,7 +9256,7 @@ app.post("/po/import/lines/manual", requireAuth, requirePermission("pos", "edit"
   res.redirect(`/imports/${batchId}`);
 });
 
-app.get("/po/new", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.get("/po/new", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   res.send(layout("Add PO", `
     <h1>Add PO</h1>
     <div class="card">
@@ -8838,14 +9270,16 @@ app.get("/po/new", requireAuth, requirePermission("pos", "edit"), async (req, re
   `, req.user));
 });
 
-app.get("/po/new/manual", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
-  const vendors = (await query("select id, name from vendors where is_active = true order by name")).rows;
+app.get("/po/new/manual", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const vendors = (await query("select id, name from vendors where job_id = $1 and is_active = true order by name", [jobId])).rows;
   const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
   const poHeaders = (await query(`
     select po_no, coalesce(description, '') as description
     from purchase_orders
+    where job_id = $1
     order by po_no
-  `)).rows;
+  `, [jobId])).rows;
   const poOptions = poHeaders.length > 0
     ? poHeaders.map((po) => `<option value="${esc(po.po_no)}">${esc(po.po_no)}${po.description ? ` | ${esc(po.description)}` : ""}</option>`).join("")
     : `<option value="">No PO headers available</option>`;
@@ -8898,31 +9332,33 @@ app.get("/po/new/manual", requireAuth, requirePermission("pos", "edit"), async (
   `, req.user));
 });
 
-app.post("/po/add", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po/add", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const result = await client.query(`
-      insert into purchase_orders (po_no, vendor_id, rfq_id, description, status, updated_at)
-      values ($1, $2, null, $3, $4, now())
+      insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, description, status, updated_at)
+      values ($1, $2, $3, null, $4, $5, now())
       returning id
-    `, [String(req.body.po_no || "").trim(), Number(req.body.vendor_id), String(req.body.description || "").trim(), req.body.status || "OPEN"]);
+    `, [jobId, String(req.body.po_no || "").trim(), Number(req.body.vendor_id), String(req.body.description || "").trim(), req.body.status || "OPEN"]);
     await auditLog(client, req.user.id, "create", "purchase_order", result.rows[0].id, String(req.body.po_no || "").trim());
   });
   res.redirect("/po");
 });
 
-app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
+app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
   const poId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const [po, warehouseOptions, locationMap, nextMrrNumber, receivedByOptions] = await Promise.all([
     query(`
       select po.id, po.po_no, coalesce(po.description, '') as description, v.name as vendor_name
       from purchase_orders po
       join vendors v on v.id = po.vendor_id
-      where po.id = $1
-    `, [poId]),
-    getWarehouseOptions(),
-    getWarehouseLocationMap(),
-    getNextMrrNumber(),
-    getMaterialLogLookupOptions("received_by")
+      where po.id = $1 and po.job_id = $2
+    `, [poId, jobId]),
+    getWarehouseOptions(jobId),
+    getWarehouseLocationMap(jobId),
+    getNextMrrNumber(null, jobId),
+    getMaterialLogLookupOptions("received_by", jobId)
   ]);
   const record = po.rows[0];
   if (!record) {
@@ -9111,15 +9547,17 @@ app.get("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), 
   `, req.user));
 });
 
-app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
+app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
   const poId = Number(req.params.id);
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const po = (await client.query(`
       select po.id, po.po_no, po.rfq_id, coalesce(po.description, '') as description, coalesce(v.name, '') as vendor_name
       from purchase_orders po
       left join vendors v on v.id = po.vendor_id
       where po.id = $1
-    `, [poId])).rows[0];
+        and po.job_id = $2
+    `, [poId, jobId])).rows[0];
     if (!po) throw new Error("PO not found.");
     const mrrNumber = String(req.body.mrr_number || "").trim();
     const receivedBy = String(req.body.received_by_manual || req.body.received_by || "").trim();
@@ -9132,12 +9570,13 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
     const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
     const mrrInsert = (await client.query(`
       insert into mrr_logs (
-        discipline, mrr_number, vendor_name, app_po_id, po_number, material_description,
+        job_id, discipline, mrr_number, vendor_name, app_po_id, po_number, material_description,
         received_date, received_by, notes, load_number, updated_at
       )
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
       returning id
     `, [
+      jobId,
       "",
       mrrNumber,
       po.vendor_name || "",
@@ -9149,9 +9588,9 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
       mrrNotes,
       loadNumber
     ])).rows[0];
-    await saveMaterialLogLookup(client, "received_by", receivedBy);
-    await saveMaterialLogLookup(client, "vendor_name", po.vendor_name || "");
-    await saveMaterialLogLookup(client, "po_number", po.po_no || "");
+    await saveMaterialLogLookup(client, "received_by", receivedBy, jobId);
+    await saveMaterialLogLookup(client, "vendor_name", po.vendor_name || "", jobId);
+    await saveMaterialLogLookup(client, "po_number", po.po_no || "", jobId);
     await auditLog(client, req.user.id, "create", "mrr_log", mrrInsert.id, mrrNumber);
     let postedCount = 0;
     for (const rawLineId of lineIds) {
@@ -9171,20 +9610,21 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
       if (remainingQty <= 0) throw new Error("Fully received PO lines cannot be edited.");
       const warehouse = normalizeWarehouseName(req.body[`warehouse_${lineId}`]);
       const location = normalizeLocationName(req.body[`location_${lineId}`]);
-      await assertValidWarehouseLocation(client, warehouse, location);
+      await assertValidWarehouseLocation(client, warehouse, location, jobId);
       const enteredStatus = String(req.body.osd_status || "OK").trim() || "OK";
       const enteredNotes = String(req.body.osd_notes || "").trim();
       const baseQty = Math.min(qtyReceived, remainingQty);
       const overageQty = Math.max(qtyReceived - remainingQty, 0);
       if (baseQty > 0) {
         const receipt = (await client.query(`
-          insert into receipts (po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
-          values ($1, $2, $3, $4, $5, $6, $7)
+          insert into receipts (job_id, po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
+          values ($1, $2, $3, $4, $5, $6, $7, $8)
           returning id
-        `, [lineId, mrrInsert.id, baseQty, warehouse, location, enteredStatus, enteredNotes])).rows[0];
+        `, [jobId, lineId, mrrInsert.id, baseQty, warehouse, location, enteredStatus, enteredNotes])).rows[0];
         postedCount += 1;
         if (enteredStatus !== "OK") {
           await createOsdLog(client, {
+            job_id: jobId,
             mrr_log_id: mrrInsert.id,
             receipt_id: receipt.id,
             po_id: po.id,
@@ -9205,12 +9645,13 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
       }
       if (overageQty > 0) {
         const overReceipt = (await client.query(`
-          insert into receipts (po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
-          values ($1, $2, $3, $4, $5, 'OVERAGE', $6)
+          insert into receipts (job_id, po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
+          values ($1, $2, $3, $4, $5, $6, 'OVERAGE', $7)
           returning id
-        `, [lineId, mrrInsert.id, overageQty, warehouse, location, enteredNotes ? `Auto-created overage from PO receipt. ${enteredNotes}` : "Auto-created overage from PO receipt."])).rows[0];
+        `, [jobId, lineId, mrrInsert.id, overageQty, warehouse, location, enteredNotes ? `Auto-created overage from PO receipt. ${enteredNotes}` : "Auto-created overage from PO receipt."])).rows[0];
         postedCount += 1;
         await createOsdLog(client, {
+          job_id: jobId,
           mrr_log_id: mrrInsert.id,
           receipt_id: overReceipt.id,
           po_id: po.id,
@@ -9237,7 +9678,8 @@ app.post("/po/:id/receive", requireAuth, requirePermission("receiving", "edit"),
   res.redirect("/dashboard");
 });
 
-app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   const [po, vendors, poLines] = await Promise.all([
     query(`
       select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
@@ -9245,19 +9687,21 @@ app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (re
       from purchase_orders po
       left join rfqs r on r.id = po.rfq_id
       where po.id = $1
-    `, [req.params.id]),
-    query("select id, name from vendors order by name"),
+        and po.job_id = $2
+    `, [req.params.id, jobId]),
+    query("select id, name from vendors where job_id = $1 order by name", [jobId]),
     query(`
       select pl.id, coalesce(pl.po_line, '') as po_line, mi.item_code, mi.description, pl.qty_ordered, pl.unit_price,
              coalesce(pl.size_1, '') as size_1, coalesce(pl.size_2, '') as size_2, coalesce(pl.thk_1, '') as thk_1, coalesce(pl.thk_2, '') as thk_2
       from po_lines pl
       join material_items mi on mi.id = pl.material_item_id
       where pl.po_id = $1
+        and pl.job_id = $2
       order by
         case when coalesce(pl.po_line, '') = '' then 1 else 0 end,
         case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
         pl.id
-    `, [req.params.id])
+    `, [req.params.id, jobId])
   ]);
   const record = po.rows[0];
   const vendorOptions = vendors.rows.map((vendor) => `<option value="${vendor.id}" ${vendor.id === record.vendor_id ? "selected" : ""}>${esc(vendor.name)}</option>`).join("");
@@ -9303,30 +9747,33 @@ app.get("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (re
   `, req.user));
 });
 
-app.post("/po/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const update = await client.query(`
       update purchase_orders
       set po_no = $2, vendor_id = $3, status = $4, description = $5, updated_at = now()
-      where id = $1 and extract(epoch from updated_at)::text = $6
-    `, [req.params.id, req.body.po_no?.trim(), Number(req.body.vendor_id), req.body.status || "OPEN", String(req.body.description || "").trim(), req.body.updated_token || ""]);
+      where id = $1 and job_id = $6 and extract(epoch from updated_at)::text = $7
+    `, [req.params.id, req.body.po_no?.trim(), Number(req.body.vendor_id), req.body.status || "OPEN", String(req.body.description || "").trim(), jobId, req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This PO was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "purchase_order", req.params.id, req.body.po_no?.trim() || "");
   });
   res.redirect("/po");
 });
 
-app.post("/po/:id/delete", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po/:id/delete", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const po = (await client.query("select rfq_id from purchase_orders where id = $1", [req.params.id])).rows[0];
-    await client.query("delete from purchase_orders where id = $1", [req.params.id]);
+    const po = (await client.query("select rfq_id from purchase_orders where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    await client.query("delete from purchase_orders where id = $1 and job_id = $2", [req.params.id, jobId]);
     if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
     await auditLog(client, req.user.id, "delete", "purchase_order", req.params.id, "");
   });
   res.redirect("/po");
 });
 
-app.get("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.get("/po-line/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   const line = (await query(`
     select pl.id, coalesce(pl.po_line, '') as po_line, pl.qty_ordered, pl.unit_price, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, extract(epoch from pl.updated_at)::text as updated_token,
            mi.item_code, mi.description, po.po_no
@@ -9334,7 +9781,8 @@ app.get("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), asyn
     join material_items mi on mi.id = pl.material_item_id
     join purchase_orders po on po.id = pl.po_id
     where pl.id = $1
-  `, [req.params.id])).rows[0];
+      and pl.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
   res.send(layout("Edit PO Line", `
     <h1>Edit PO Line</h1>
     <div class="card"><strong>PO:</strong> ${esc(line.po_no)} | <strong>Item:</strong> ${esc(line.item_code)} - ${esc(line.description)}</div>
@@ -9356,20 +9804,21 @@ app.get("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), asyn
   `, req.user));
 });
 
-app.post("/po-line/:id/edit", requireAuth, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po-line/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const update = await client.query(`
       update po_lines
       set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
-      where id = $1 and extract(epoch from updated_at)::text = $9
-    `, [req.params.id, req.body.po_line || "", parseQtyValue(req.body.qty_ordered), Number(req.body.unit_price), req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.updated_token || ""]);
+      where id = $1 and job_id = $9 and extract(epoch from updated_at)::text = $10
+    `, [req.params.id, req.body.po_line || "", parseQtyValue(req.body.qty_ordered), Number(req.body.unit_price), req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", jobId, req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This PO line was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "po_line", req.params.id, "");
   });
   res.redirect("/po");
 });
 
-app.get("/receive", requireAuth, requirePermission("receiving", "view"), async (req, res) => {
+app.get("/receive", requireAuth, requireJobContext, requirePermission("receiving", "view"), async (req, res) => {
   res.send(layout("Receiving", `
     <h1>Receiving</h1>
     <div class="card">
@@ -9381,13 +9830,14 @@ app.get("/receive", requireAuth, requirePermission("receiving", "view"), async (
   `, req.user));
 });
 
-app.get("/receive/by-po", requireAuth, requirePermission("receiving", "view"), async (req, res) => {
+app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("receiving", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
-  const params = [];
-  const where = [];
+  const params = [jobId];
+  const where = ["po.job_id = $1"];
   if (q) {
     params.push(`%${q}%`);
-    where.push(`(po.po_no ilike $1 or coalesce(po.description, '') ilike $1)`);
+    where.push(`(po.po_no ilike $2 or coalesce(po.description, '') ilike $2)`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const rows = (await query(`
@@ -9435,19 +9885,20 @@ app.get("/receive/by-po", requireAuth, requirePermission("receiving", "view"), a
   `, req.user));
 });
 
-app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
+app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   const mrrId = Number(req.params.mrrId);
   const backHref = typeof req.query.back === "string" && req.query.back.startsWith("/") ? req.query.back : "/receive";
-  const mrr = (await query("select * from mrr_logs where id = $1", [mrrId])).rows[0];
+  const mrr = (await query("select * from mrr_logs where id = $1 and job_id = $2", [mrrId, jobId])).rows[0];
   if (!mrr) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR not found.</h3></div>`, req.user));
     return;
   }
   const po = mrr.app_po_id
-    ? (await query("select id, po_no from purchase_orders where id = $1", [mrr.app_po_id])).rows[0]
-    : (mrr.po_number ? (await query("select id, po_no from purchase_orders where po_no = $1", [mrr.po_number])).rows[0] : null);
-  const warehouseOptions = await getWarehouseOptions();
-  const locationMap = await getWarehouseLocationMap();
+    ? (await query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [mrr.app_po_id, jobId])).rows[0]
+    : (mrr.po_number ? (await query("select id, po_no from purchase_orders where po_no = $1 and job_id = $2", [mrr.po_number, jobId])).rows[0] : null);
+  const warehouseOptions = await getWarehouseOptions(jobId);
+  const locationMap = await getWarehouseLocationMap(jobId);
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
     .join("");
@@ -9517,14 +9968,15 @@ app.get("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), 
   `, req.user));
 });
 
-app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"), async (req, res) => {
+app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
   const mrrId = Number(req.params.mrrId);
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const mrr = (await client.query("select * from mrr_logs where id = $1", [mrrId])).rows[0];
+    const mrr = (await client.query("select * from mrr_logs where id = $1 and job_id = $2", [mrrId, jobId])).rows[0];
     if (!mrr) throw new Error("MRR not found.");
     const qtyReceived = parseQtyValue(req.body.qty_received || 0);
     if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
-    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
     const normalizedNames = normalizeWarehouseLocationValues(req.body.warehouse, req.body.location);
     if (String(req.body.mode || "") === "po") {
       const poLine = (await client.query(`
@@ -9533,14 +9985,16 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
         join purchase_orders po on po.id = pl.po_id
         join material_items mi on mi.id = pl.material_item_id
         where pl.id = $1
-      `, [Number(req.body.po_line_id)])).rows[0];
+          and po.job_id = $2
+      `, [Number(req.body.po_line_id), jobId])).rows[0];
       const insert = await client.query(`
-        insert into receipts (mrr_log_id, po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
-        values ($1, $2, $3, $4, $5, $6, $7)
+        insert into receipts (job_id, mrr_log_id, po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
         returning id
-      `, [mrrId, Number(req.body.po_line_id), qtyReceived, normalizedNames.warehouse, normalizedNames.location, req.body.osd_status || "OK", req.body.osd_notes || ""]);
+      `, [jobId, mrrId, Number(req.body.po_line_id), qtyReceived, normalizedNames.warehouse, normalizedNames.location, req.body.osd_status || "OK", req.body.osd_notes || ""]);
       if ((req.body.osd_status || "OK") !== "OK") {
         await createOsdLog(client, {
+          job_id: jobId,
           mrr_log_id: mrrId,
           receipt_id: insert.rows[0].id,
           po_id: poLine?.po_id || null,
@@ -9564,10 +10018,11 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
     } else {
       const result = await client.query(`
         insert into material_receiving_logs (
-          discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, warehouse, location, recv_date, comments, updated_at
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+          job_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, warehouse, location, recv_date, comments, updated_at
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
         returning id
       `, [
+        jobId,
         mrr.discipline || "",
         mrr.vendor_name || "",
         mrr.po_number || "",
@@ -9587,7 +10042,8 @@ app.post("/receive/:mrrId", requireAuth, requirePermission("receiving", "edit"),
   res.redirect("/receive");
 });
 
-app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async (req, res) => {
+app.get("/inventory", requireAuth, requireJobContext, requirePermission("inventory", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const warehouseFilter = String(req.query.warehouse_filter || "").trim();
   const locationFilter = String(req.query.location_filter || "").trim();
   const identFilter = String(req.query.ident_filter || "").trim();
@@ -9607,8 +10063,8 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
   const dir = String(req.query.dir || "asc").trim().toLowerCase() === "desc" ? "desc" : "asc";
   const sortSql = allowedSorts[sort] || allowedSorts.item_code;
   const [warehouseOptions, locationMap] = await Promise.all([
-    getWarehouseOptions(),
-    getWarehouseLocationMap()
+    getWarehouseOptions(jobId),
+    getWarehouseLocationMap(jobId)
   ]);
   const params = [];
   const where = [];
@@ -9633,6 +10089,7 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
     dir: String(source.dir || dir)
   }).toString();
   const rows = await getCurrentOnHandRows({ query }, {
+    jobId,
     whereSql,
     params,
     orderSql: `${sortSql} ${dir}, inventory_by_location.item_code asc, inventory_by_location.warehouse asc, inventory_by_location.location asc`
@@ -9693,7 +10150,8 @@ app.get("/inventory", requireAuth, requirePermission("inventory", "view"), async
   `, req.user));
 });
 
-app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+app.get("/inventory-audit", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const createdReportNo = String(req.query.created_report_no || "").trim();
   const recentReports = await query(`
     select
@@ -9703,9 +10161,10 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
       u.username as created_by_name
     from inventory_audit_reports r
     left join users u on u.id = r.created_by
+    where r.job_id = $1
     order by r.id desc
     limit 50
-  `);
+  `, [jobId]);
   const recentReportRows = recentReports.rows.map((row) => `<tr>
     <td>${esc(row.report_no)}</td>
     <td>${esc(formatShortDateTime(row.created_at))}</td>
@@ -9738,13 +10197,14 @@ app.get("/inventory-audit", requireAuth, requirePermission("inventory", "view"),
   `, req.user));
 }));
 
-app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHandler(async (req, res) => {
+app.get("/inventory-audit/new", requireAuth, requireJobContext, requireInventoryAuditEdit, asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const warehouseFilter = String(req.query.warehouse_filter || "").trim();
   const locationFilter = String(req.query.location_filter || "").trim();
   const identFilter = String(req.query.ident_filter || "").trim();
   const [warehouseOptions, locationMap] = await Promise.all([
-    getWarehouseOptions(),
-    getWarehouseLocationMap()
+    getWarehouseOptions(jobId),
+    getWarehouseLocationMap(jobId)
   ]);
   const params = [];
   const where = [];
@@ -9765,6 +10225,7 @@ app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHan
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const rows = await getInventoryAuditVisibleRows({ query }, {
+    jobId,
     whereSql,
     params,
     orderSql: "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location"
@@ -9906,7 +10367,7 @@ app.get("/inventory-audit/new", requireAuth, requireInventoryAuditEdit, asyncHan
   `, req.user));
 }));
 
-app.post("/inventory-audit/commit", requireAuth, requireInventoryAuditEdit, asyncHandler(async (req, res) => {
+app.post("/inventory-audit/commit", requireAuth, requireJobContext, requireInventoryAuditEdit, asyncHandler(async (req, res) => {
   const rowCount = Math.max(0, num(req.body.row_count, 0));
   const desiredRows = new Map();
   for (let index = 0; index < rowCount; index += 1) {
@@ -9947,6 +10408,7 @@ app.post("/inventory-audit/commit", requireAuth, requireInventoryAuditEdit, asyn
   await withTransaction(async (client) => {
     const result = await saveInventoryAuditReport(client, {
       userId: req.user.id || null,
+      jobId: currentJobId(req),
       warehouseFilter: String(req.body.warehouse_filter || ""),
       locationFilter: String(req.body.location_filter || ""),
       identFilter: String(req.body.ident_filter || ""),
@@ -9957,13 +10419,14 @@ app.post("/inventory-audit/commit", requireAuth, requireInventoryAuditEdit, asyn
   res.redirect(`/inventory-audit?created_report_no=${encodeURIComponent(createdReportNo)}`);
 }));
 
-app.post("/inventory-audit/import", requireAuth, requireInventoryAuditEdit, upload.single("sheet"), asyncHandler(async (req, res) => {
+app.post("/inventory-audit/import", requireAuth, requireJobContext, requireInventoryAuditEdit, upload.single("sheet"), asyncHandler(async (req, res) => {
   if (!req.file?.buffer) throw new Error("Choose an inventory workbook to import.");
   const importedRows = importInventoryTrueUpRows(req.file.buffer);
   if (!importedRows.length) throw new Error("No inventory rows were found in the workbook.");
   let createdReportNo = "";
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-      const currentRows = await getCurrentOnHandRows(client);
+      const currentRows = await getCurrentOnHandRows(client, { jobId });
       const desiredRows = new Map();
     for (const currentRow of currentRows) {
       setDesiredInventoryRow(desiredRows, {
@@ -9992,11 +10455,12 @@ app.post("/inventory-audit/import", requireAuth, requireInventoryAuditEdit, uplo
       if (!warehouse || !location) continue;
       const pairKey = `${warehouse.toLowerCase()}|${location.toLowerCase()}`;
       if (ensuredPairs.has(pairKey)) continue;
-      await ensureWarehouseLocationExists(client, warehouse, location);
+      await ensureWarehouseLocationExists(client, warehouse, location, jobId);
       ensuredPairs.add(pairKey);
     }
     const result = await saveInventoryAuditReport(client, {
       userId: req.user.id || null,
+      jobId,
       identFilter: `FULL RESET IMPORT | ${req.file.originalname || "inventory workbook"}`,
       desiredRows: Array.from(desiredRows.values())
     });
@@ -10006,20 +10470,21 @@ app.post("/inventory-audit/import", requireAuth, requireInventoryAuditEdit, uplo
   res.redirect(`/inventory-audit?created_report_no=${encodeURIComponent(createdReportNo)}`);
 }));
 
-app.get("/inventory-audit/reports/:id", requireAuth, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+app.get("/inventory-audit/reports/:id", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const report = (await query(`
     select r.*, u.username as created_by_name
     from inventory_audit_reports r
     left join users u on u.id = r.created_by
-    where r.id = $1
-  `, [req.params.id])).rows[0];
+    where r.id = $1 and r.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
   if (!report) throw new Error("Inventory audit report not found.");
   const lines = (await query(`
     select *
     from inventory_audit_report_lines
-    where report_id = $1
+    where report_id = $1 and job_id = $2
     order by id
-  `, [req.params.id])).rows;
+  `, [req.params.id, jobId])).rows;
   const lineRows = lines.map((row) => `<tr>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
@@ -10051,7 +10516,7 @@ app.get("/inventory-audit/reports/:id", requireAuth, requirePermission("inventor
   `, req.user));
 }));
 
-app.get("/material-logs", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
+app.get("/material-logs", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
   res.send(layout("Material Logs", `
     <h1>Material Logs</h1>
     <div class="card">
@@ -10065,17 +10530,19 @@ app.get("/material-logs", requireAuth, requirePermission("material_logs", "view"
   `, req.user));
 });
 
-app.get("/material-logs/mrr", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
+app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
   const rows = (await query(`
     select m.id, m.discipline, m.mrr_number, m.vendor_name, coalesce(po.po_no, m.po_number) as po_number,
            m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number
     from mrr_logs m
     left join purchase_orders po on po.id = m.app_po_id
-    ${q ? "where (coalesce(m.mrr_number, '') ilike $1 or coalesce(m.vendor_name, '') ilike $1 or coalesce(po.po_no, m.po_number, '') ilike $1 or coalesce(m.material_description, '') ilike $1 or coalesce(m.received_by, '') ilike $1)" : ""}
+    where m.job_id = $1
+      ${q ? "and (coalesce(m.mrr_number, '') ilike $2 or coalesce(m.vendor_name, '') ilike $2 or coalesce(po.po_no, m.po_number, '') ilike $2 or coalesce(m.material_description, '') ilike $2 or coalesce(m.received_by, '') ilike $2)" : ""}
     order by m.id desc
     limit 200
-  `, q ? [`%${q}%`] : [])).rows;
+  `, q ? [jobId, `%${q}%`] : [jobId])).rows;
   const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.mrr_number)}</td>
     <td>${esc(row.discipline)}</td>
@@ -10106,17 +10573,18 @@ app.get("/material-logs/mrr", requireAuth, requirePermission("material_logs", "v
   `, req.user));
 });
 
-app.get("/material-logs/mrr/new", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.get("/material-logs/mrr/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await syncMrrVendorsIntoVendorTable(client);
+    await syncMrrVendorsIntoVendorTable(client, jobId);
   });
   const [disciplines, vendors, pos, receivers, nextMrrNumber, appPos] = await Promise.all([
-    getMaterialLogLookupOptions("discipline"),
-    getMaterialLogLookupOptions("vendor_name"),
-    getMaterialLogLookupOptions("po_number"),
-    getMaterialLogLookupOptions("received_by"),
-    getNextMrrNumber(),
-    getAppPurchaseOrderOptions()
+    getMaterialLogLookupOptions("discipline", jobId),
+    getMaterialLogLookupOptions("vendor_name", jobId),
+    getMaterialLogLookupOptions("po_number", jobId),
+    getMaterialLogLookupOptions("received_by", jobId),
+    getNextMrrNumber(null, jobId),
+    getAppPurchaseOrderOptions(jobId)
   ]);
   const optionList = (values, placeholder) => [`<option value="">${esc(placeholder)}</option>`]
     .concat(values.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`))
@@ -10149,7 +10617,8 @@ app.get("/material-logs/mrr/new", requireAuth, requirePermission("material_logs"
   `, req.user));
 });
 
-app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
+app.get("/material-logs/fmr", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
   const createdCount = Number(req.query.created || 0);
   const createdLineCount = Number(req.query.lines || 0);
@@ -10157,10 +10626,11 @@ app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "v
   const rows = (await query(`
     select id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, mrr_number, request_date, need_date, pickup_location, pickup_date
     from fmr_logs
-    ${q ? "where (coalesce(fmr_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(container_no, '') ilike $1 or coalesce(fluor_id, '') ilike $1 or coalesce(mrr_number, '') ilike $1)" : ""}
+    where job_id = $1
+    ${q ? "and (coalesce(fmr_number, '') ilike $2 or coalesce(vendor_name, '') ilike $2 or coalesce(container_no, '') ilike $2 or coalesce(fluor_id, '') ilike $2 or coalesce(mrr_number, '') ilike $2)" : ""}
     order by id desc
     limit 200
-  `, q ? [`%${q}%`] : [])).rows;
+  `, q ? [jobId, `%${q}%`] : [jobId])).rows;
   const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.fmr_number)}</td>
     <td>${esc(row.vendor_name)}</td>
@@ -10193,13 +10663,14 @@ app.get("/material-logs/fmr", requireAuth, requirePermission("material_logs", "v
     `, req.user));
   });
 
-app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+app.get("/material-logs/fmr/request-lines", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const poNumber = String(req.query.po_number || "").trim();
   const itemCode = String(req.query.item_code || "").trim();
   const abbrevDescription = String(req.query.abbrev_description || "").trim();
   const currentCrateNumber = String(req.query.current_crate_number || "").trim() || itemCode || abbrevDescription;
   const showRequested = String(req.query.show_requested || "").trim() === "1";
-  const params = [];
+  const params = [jobId];
   const where = [];
   if (poNumber) {
     params.push(`%${poNumber}%`);
@@ -10219,19 +10690,20 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
       and exists (
         select 1
         from fmr_logs f
-        where lower(trim(coalesce(f.vendor_name, ''))) = lower(trim(coalesce(vl.vendor_name, '')))
+        where f.job_id = $1
+          and lower(trim(coalesce(f.vendor_name, ''))) = lower(trim(coalesce(vl.vendor_name, '')))
           and lower(trim(coalesce(f.container_no, ''))) = lower(trim(coalesce(vl.crate_number, '')))
       )
     )`);
   }
-  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const stagedRows = (await query(`
     select *
     from vendor_fmr_request_lines
     where selected_for_request = true
+      and job_id = $1
     order by updated_at desc, id desc
     limit 100
-  `)).rows;
+  `, [jobId])).rows;
   const stagedCount = stagedRows.length;
   const rows = (await query(`
     select
@@ -10239,12 +10711,14 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
       exists (
         select 1
         from fmr_logs f
-        where trim(coalesce(vl.crate_number, '')) <> ''
+        where f.job_id = $1
+          and trim(coalesce(vl.crate_number, '')) <> ''
           and lower(trim(coalesce(f.vendor_name, ''))) = lower(trim(coalesce(vl.vendor_name, '')))
           and lower(trim(coalesce(f.container_no, ''))) = lower(trim(coalesce(vl.crate_number, '')))
       ) as already_requested
     from vendor_fmr_request_lines vl
-    ${whereSql}
+    where vl.job_id = $1
+      ${where.length ? `and ${where.join(" and ")}` : ""}
     order by coalesce(vl.po_number, ''), coalesce(vl.item_code, ''), coalesce(vl.abbrev_description, ''), vl.id
     limit 300
   `, params)).rows;
@@ -10352,7 +10826,8 @@ app.get("/material-logs/fmr/request-lines", requireAuth, requirePermission("mate
   `, req.user));
 }));
 
-app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermission("material_logs", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+app.post("/material-logs/fmr/request-lines/import", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   if (!req.file?.buffer?.length) throw new Error("Choose a PO receiving status report file to import.");
   const rows = parseVendorFmrRequestWorkbook(req.file.buffer);
   if (rows.length === 0) throw new Error("No matching line items were found in that report.");
@@ -10360,6 +10835,7 @@ app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermissi
     const batchId = await createImportBatch(client, {
       entityType: "vendor_fmr_request_lines",
       rfqId: null,
+      jobId,
       uploadedBy: req.user.id,
       filename: req.file?.originalname || ""
     });
@@ -10372,8 +10848,8 @@ app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermissi
       const existing = (await client.query(`
         select id
         from vendor_fmr_request_lines
-        where po_number = $1 and item_code = $2 and abbrev_description = $3
-      `, [row.po_number, row.item_code, row.abbrev_description])).rows[0];
+        where job_id = $1 and po_number = $2 and item_code = $3 and abbrev_description = $4
+      `, [jobId, row.po_number, row.item_code, row.abbrev_description])).rows[0];
       if (existing) {
         await client.query(`
           update vendor_fmr_request_lines
@@ -10393,10 +10869,10 @@ app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermissi
       } else {
         await client.query(`
           insert into vendor_fmr_request_lines (
-            vendor_name, po_number, item_code, abbrev_description, po_line, sub_line,
+            job_id, vendor_name, po_number, item_code, abbrev_description, po_line, sub_line,
             qty_ordered, qty_received, mrr_number, issued_date, received_date, srn_number, crate_number, source_filename, updated_at
-          ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
-        `, [row.vendor_name, row.po_number, row.item_code, row.abbrev_description, row.po_line, row.sub_line, parseQtyValue(row.qty_ordered), parseQtyValue(row.qty_received), row.mrr_number, row.issued_date, row.received_date, row.srn_number || "", row.crate_number || "", req.file?.originalname || ""]);
+          ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
+        `, [jobId, row.vendor_name, row.po_number, row.item_code, row.abbrev_description, row.po_line, row.sub_line, parseQtyValue(row.qty_ordered), parseQtyValue(row.qty_received), row.mrr_number, row.issued_date, row.received_date, row.srn_number || "", row.crate_number || "", req.file?.originalname || ""]);
         insertedCount += 1;
       }
     }
@@ -10407,7 +10883,8 @@ app.post("/material-logs/fmr/request-lines/import", requireAuth, requirePermissi
   res.redirect(`/imports/${batchId}`);
 }));
 
-app.post("/material-logs/fmr/request-lines/staged/:id/delete", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+app.post("/material-logs/fmr/request-lines/staged/:id/delete", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) throw new Error("Invalid staged request line.");
   await withTransaction(async (client) => {
@@ -10415,14 +10892,15 @@ app.post("/material-logs/fmr/request-lines/staged/:id/delete", requireAuth, requ
       update vendor_fmr_request_lines
       set selected_for_request = false,
           updated_at = now()
-      where id = $1
-    `, [id]);
+      where id = $1 and job_id = $2
+    `, [id, jobId]);
     await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", id, "unstaged");
   });
   res.redirect(`/material-logs/fmr/request-lines?${getVendorFmrRequestBuilderQuery(req.body)}`);
 }));
 
-app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const action = String(req.body.action || "save").trim();
   const currentCrateNumber = String(req.body.current_crate_number || "").trim();
   const fieldIds = Object.keys(req.body)
@@ -10453,14 +10931,14 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
             srn_number = $3,
             selected_for_request = $4,
             updated_at = now()
-        where id = $1
-      `, [id, savedCrateNumber, String(req.body[`srn_number_${id}`] || "").trim(), selectedIdSet.has(id)]);
+        where id = $1 and job_id = $5
+      `, [id, savedCrateNumber, String(req.body[`srn_number_${id}`] || "").trim(), selectedIdSet.has(id), jobId]);
     }
     if (action !== "generate") {
       await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", fieldIds.join(","), `count=${fieldIds.length}`);
       return;
     }
-    const preview = await buildVendorFmrPreviewData(client);
+    const preview = await buildVendorFmrPreviewData(client, jobId);
     if (preview.stagedRows.length === 0) throw new Error("Save at least one staged line before generating Vendor FMRs.");
   });
   if (action === "generate") {
@@ -10470,9 +10948,10 @@ app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requirePermission
   res.redirect(`/material-logs/fmr/request-lines?${redirectQuery}`);
 }));
 
-app.get("/material-logs/fmr/request-lines/preview", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+app.get("/material-logs/fmr/request-lines/preview", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const queryString = getVendorFmrRequestBuilderQuery(req.query);
-  const preview = await withTransaction(async (client) => buildVendorFmrPreviewData(client));
+  const preview = await withTransaction(async (client) => buildVendorFmrPreviewData(client, jobId));
   if (preview.stagedRows.length === 0) {
     res.redirect(`/material-logs/fmr/request-lines?${queryString}`);
     return;
@@ -10541,7 +11020,8 @@ app.get("/material-logs/fmr/request-lines/preview", requireAuth, requirePermissi
   `, req.user));
 }));
 
-app.post("/material-logs/fmr/request-lines/preview/remove", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+app.post("/material-logs/fmr/request-lines/preview/remove", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   const vendorName = String(req.body.vendor_name || "").trim();
   const crateNumber = String(req.body.crate_number || "").trim();
   const srnNumber = String(req.body.srn_number || "").trim();
@@ -10552,28 +11032,30 @@ app.post("/material-logs/fmr/request-lines/preview/remove", requireAuth, require
       set selected_for_request = false,
           updated_at = now()
       where selected_for_request = true
+        and job_id = $4
         and lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))
         and lower(trim(coalesce(crate_number, ''))) = lower(trim($2))
         and lower(trim(coalesce(srn_number, ''))) = lower(trim($3))
-    `, [vendorName, crateNumber, srnNumber]);
+    `, [vendorName, crateNumber, srnNumber, jobId]);
     await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", crateNumber, `preview-remove ${vendorName}`);
   });
   res.redirect(`/material-logs/fmr/request-lines/preview?${getVendorFmrRequestBuilderQuery(req.body)}`);
 }));
 
-app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const preview = await buildVendorFmrPreviewData(client);
+    const preview = await buildVendorFmrPreviewData(client, jobId);
     if (preview.stagedRows.length === 0) throw new Error("There are no staged lines ready to create.");
     if (preview.invalidRows.length > 0) throw new Error("Fix the staged lines that are missing crate numbers before creating Vendor FMRs.");
     if (preview.previewGroups.length === 0) throw new Error("All staged crates have already been requested.");
     let createdCount = 0;
     let createdLineCount = 0;
     for (const group of preview.previewGroups) {
-      const fmrNumber = await getNextFmrNumber(client);
+      const fmrNumber = await getNextFmrNumber(client, jobId);
       createdCount += 1;
       for (const { row, crateNumber, srnNumber } of group.crates) {
-        await ensureUniqueFmrContainer(client, row.vendor_name, crateNumber);
+        await ensureUniqueFmrContainer(client, row.vendor_name, crateNumber, null, jobId);
         const requestDescription = [
           row.po_number ? `PO ${row.po_number}` : "",
           row.item_code || "",
@@ -10582,10 +11064,11 @@ app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, require
         ].filter(Boolean).join(" | ");
         const insert = await client.query(`
           insert into fmr_logs (
-            fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, request_date, updated_at
-          ) values ($1,$2,$3,$4,$5,$6,$7, now())
+            job_id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, request_date, updated_at
+          ) values ($1,$2,$3,$4,$5,$6,$7,$8, now())
           returning id
         `, [
+          jobId,
           fmrNumber,
           row.vendor_name || "",
           crateNumber,
@@ -10595,6 +11078,7 @@ app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, require
           new Date().toISOString().slice(0, 10)
         ]);
         await ensureMrrForVendorCrate(client, {
+          jobId,
           userId: req.user.id,
           fmrId: insert.rows[0].id,
           vendorName: row.vendor_name || "",
@@ -10610,7 +11094,8 @@ app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, require
       set selected_for_request = false,
           updated_at = now()
       where selected_for_request = true
-    `);
+        and job_id = $1
+    `, [jobId]);
     req._vendorFmrGenerateResult = {
       createdCount,
       createdLineCount,
@@ -10623,18 +11108,20 @@ app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, require
   res.redirect(`/material-logs/fmr?created=${createdCount}&lines=${createdLineCount}&skipped=${skippedRequestedCount}`);
 }));
 
-app.get("/material-logs/opi", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
+app.get("/material-logs/opi", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await syncOpiLogsFromMrr(client);
+    await syncOpiLogsFromMrr(client, jobId);
   });
   const q = String(req.query.q || "").trim();
   const rows = (await query(`
     select id, opi_number, vendor_name, material_description, load_number, mrr_number
     from opi_logs
-    ${q ? "where (coalesce(opi_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(material_description, '') ilike $1 or coalesce(load_number, '') ilike $1 or coalesce(mrr_number, '') ilike $1)" : ""}
+    where job_id = $1
+    ${q ? "and (coalesce(opi_number, '') ilike $2 or coalesce(vendor_name, '') ilike $2 or coalesce(material_description, '') ilike $2 or coalesce(load_number, '') ilike $2 or coalesce(mrr_number, '') ilike $2)" : ""}
     order by id desc
     limit 300
-  `, q ? [`%${q}%`] : [])).rows;
+  `, q ? [jobId, `%${q}%`] : [jobId])).rows;
   const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.opi_number)}</td>
     <td>${esc(row.vendor_name)}</td>
@@ -10658,10 +11145,11 @@ app.get("/material-logs/opi", requireAuth, requirePermission("material_logs", "v
   `, req.user));
 });
 
-app.get("/material-logs/fmr/new", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.get("/material-logs/fmr/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   const [nextFmrNumber, vendors] = await Promise.all([
-    getNextFmrNumber(),
-    query("select name from vendors where is_active = true order by name")
+    getNextFmrNumber(null, jobId),
+    query("select name from vendors where job_id = $1 and is_active = true order by name", [jobId])
   ]);
   const vendorOptions = [`<option value="">Select vendor</option>`]
     .concat(vendors.rows.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
@@ -10690,8 +11178,8 @@ app.get("/material-logs/fmr/new", requireAuth, requirePermission("material_logs"
   `, req.user));
 });
 
-app.get("/material-logs/received-by/new", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
-  const values = await getMaterialLogLookupOptions("received_by");
+app.get("/material-logs/received-by/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const values = await getMaterialLogLookupOptions("received_by", currentJobId(req));
   const rows = values.map((value) => `<tr><td>${esc(value)}</td></tr>`).join("");
   res.send(layout("Add Received By", `
     <h1>Add Received By</h1>
@@ -10707,21 +11195,23 @@ app.get("/material-logs/received-by/new", requireAuth, requirePermission("materi
   `, req.user));
 });
 
-app.post("/material-logs/received-by/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.post("/material-logs/received-by/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
-    await saveMaterialLogLookup(client, "received_by", req.body.value);
+    await saveMaterialLogLookup(client, "received_by", req.body.value, currentJobId(req));
     await auditLog(client, req.user.id, "create", "material_log_lookup", "received_by", String(req.body.value || "").trim());
   });
   res.redirect("/material-logs/mrr/new");
 });
 
-app.get("/material-logs/issue-report", requireAuth, requirePermission("material_logs", "view"), async (req, res) => {
+app.get("/material-logs/issue-report", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
-  const params = q ? [`%${q}%`] : [];
+  const params = q ? [jobId, `%${q}%`] : [jobId];
   const rows = (await query(`
     select id, legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date
     from material_receiving_logs
-    ${q ? "where (coalesce(discipline, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(po_number, '') ilike $1 or coalesce(item_code, '') ilike $1 or coalesce(description, '') ilike $1 or coalesce(mrr_number, '') ilike $1 or coalesce(fmr_number, '') ilike $1)" : ""}
+    where job_id = $1
+    ${q ? "and (coalesce(discipline, '') ilike $2 or coalesce(vendor_name, '') ilike $2 or coalesce(po_number, '') ilike $2 or coalesce(item_code, '') ilike $2 or coalesce(description, '') ilike $2 or coalesce(mrr_number, '') ilike $2 or coalesce(fmr_number, '') ilike $2)" : ""}
     order by coalesce(legacy_row_id, id) desc
     limit 200
   `, params)).rows;
@@ -10757,7 +11247,8 @@ app.get("/material-logs/issue-report", requireAuth, requirePermission("material_
   `, req.user));
 });
 
-app.post("/material-logs/import", requireAuth, requirePermission("material_logs", "edit"), upload.single("sheet"), async (req, res) => {
+app.post("/material-logs/import", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), upload.single("sheet"), async (req, res) => {
+  const jobId = currentJobId(req);
   if (!req.file?.buffer?.length) throw new Error("Upload a workbook file first.");
   const logType = String(req.body.log_type || "").trim();
   const rows = importRowsFromWorkbook(req.file.buffer, logType);
@@ -10769,19 +11260,19 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
         const legacyId = numberValue(row.id);
         await client.query(`
           insert into material_receiving_logs (
-            legacy_row_id, discipline, vendor_name, po_number, po_position, purchased_by, delivery_to, eta_to_site, company, slid,
+            job_id, legacy_row_id, discipline, vendor_name, po_number, po_position, purchased_by, delivery_to, eta_to_site, company, slid,
             fluor_item_code, item_code, ident_code, commodity_code, description, size_1, size_2, thk_1, thk_2, bom_qty, ship_qty,
             received_qty, qty_unit, fmr_number, mrr_number, picking_ticket, opi, osd_number, load_no, container_no, load_date, mir_no,
             mir_date, cwa, area, drawing, sheet_no, iso, pipe_class, item_type, short_code, received_by, warehouse, location, recv_date,
             received_status, comments, iwp, package_number, scope, on_off_skid, updated_at
           ) values (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
-            $22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,
-            $33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,
-            $46,$47,$48,$49,$50,$51, now()
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+            $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
+            $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,
+            $34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,
+            $47,$48,$49,$50,$51,$52, now()
           )
-          on conflict (legacy_row_id) do update set
+          on conflict (job_id, legacy_row_id) do update set
             discipline = excluded.discipline,
             vendor_name = excluded.vendor_name,
             po_number = excluded.po_number,
@@ -10834,6 +11325,7 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
             on_off_skid = excluded.on_off_skid,
             updated_at = now()
         `, [
+          jobId,
           legacyId || null,
           textValue(row.discipline),
           textValue(row.vendor),
@@ -10893,15 +11385,15 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
         if (!mrrNumber) continue;
         await client.query(`
           insert into mrr_logs (
-            discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by,
+            job_id, discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by,
             mrr_lookup, client_mrr, mrr_link_label, mtrs_required, osd_required, notes, blank_mrr_link_label, mrr_entered,
             pictures_loaded, sent_to_matheson, load_number, opi_number, opi_date, updated_at
           ) values (
-            $1,$2,$3,$4,$5,$6,$7,$8,
-            $9,$10,$11,$12,$13,$14,$15,$16,
-            $17,$18,$19,$20,$21, now()
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,
+            $10,$11,$12,$13,$14,$15,$16,$17,
+            $18,$19,$20,$21,$22, now()
           )
-          on conflict (mrr_number) do update set
+          on conflict (job_id, mrr_number) do update set
             discipline = excluded.discipline,
             vendor_name = excluded.vendor_name,
             po_number = excluded.po_number,
@@ -10924,6 +11416,7 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
             opi_date = excluded.opi_date,
             updated_at = now()
         `, [
+          jobId,
           textValue(row.discipline),
           mrrNumber,
           textValue(row.vendor),
@@ -10947,8 +11440,8 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
           textValue(row.opi_date)
         ]);
       }
-      await syncMrrVendorsIntoVendorTable(client);
-      await syncOpiLogsFromMrr(client);
+      await syncMrrVendorsIntoVendorTable(client, jobId);
+      await syncOpiLogsFromMrr(client, jobId);
     } else if (logType === "fmr") {
       for (const row of rows) {
         const fmrNumber = textValue(row.fmr);
@@ -10957,13 +11450,13 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
         if (!fmrNumber && !containerNo && !fluorId) continue;
         await client.query(`
           insert into fmr_logs (
-            fmr_number, vendor_name, container_no, fmr_lookup, request_description, fluor_id, fluor_desc, mrr_number,
+            job_id, fmr_number, vendor_name, container_no, fmr_lookup, request_description, fluor_id, fluor_desc, mrr_number,
             mr_fmr, mr_opi, requestor, request_date, need_date, pick_ticket, ready_to_pickup, pickup_location, pickup_date, updated_at
           ) values (
-            $1,$2,$3,$4,$5,$6,$7,$8,
-            $9,$10,$11,$12,$13,$14,$15,$16,$17, now()
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,
+            $10,$11,$12,$13,$14,$15,$16,$17,$18, now()
           )
-          on conflict (fmr_number, container_no, fluor_id) do update set
+          on conflict (job_id, fmr_number, container_no, fluor_id) do update set
             vendor_name = excluded.vendor_name,
             fmr_lookup = excluded.fmr_lookup,
             request_description = excluded.request_description,
@@ -10980,6 +11473,7 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
             pickup_date = excluded.pickup_date,
             updated_at = now()
         `, [
+          jobId,
           fmrNumber,
           textValue(row.vendor),
           containerNo,
@@ -11004,10 +11498,10 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
     }
     if (logType === "mrr") {
       for (const row of rows) {
-        await saveMaterialLogLookup(client, "discipline", textValue(row.discipline));
-        await saveMaterialLogLookup(client, "vendor_name", textValue(row.vendor));
-        await saveMaterialLogLookup(client, "po_number", textValue(row.po));
-        await saveMaterialLogLookup(client, "received_by", textValue(row.received_by));
+        await saveMaterialLogLookup(client, "discipline", textValue(row.discipline), jobId);
+        await saveMaterialLogLookup(client, "vendor_name", textValue(row.vendor), jobId);
+        await saveMaterialLogLookup(client, "po_number", textValue(row.po), jobId);
+        await saveMaterialLogLookup(client, "received_by", textValue(row.received_by), jobId);
       }
     }
     await auditLog(client, req.user.id, "import", "material_logs", logType, `rows=${rows.length}`);
@@ -11016,15 +11510,17 @@ app.post("/material-logs/import", requireAuth, requirePermission("material_logs"
   res.redirect("/settings/material-log-imports");
 });
 
-app.post("/material-logs/receiving/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.post("/material-logs/receiving/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
     const result = await client.query(`
       insert into material_receiving_logs (
-        legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date, updated_at
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+        job_id, legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
       returning id
     `, [
+      jobId,
       req.body.legacy_row_id ? Number(req.body.legacy_row_id) : null,
       req.body.discipline?.trim() || "",
       req.body.vendor_name?.trim() || "",
@@ -11044,20 +11540,22 @@ app.post("/material-logs/receiving/add", requireAuth, requirePermission("materia
   res.redirect("/material-logs");
 });
 
-app.post("/material-logs/mrr/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.post("/material-logs/mrr/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const mrrNumber = await getNextMrrNumber();
+    const mrrNumber = await getNextMrrNumber(client, jobId);
     const appPoId = req.body.app_po_id ? Number(req.body.app_po_id) : null;
     const linkedPo = appPoId
-      ? (await client.query("select id, po_no from purchase_orders where id = $1", [appPoId])).rows[0]
+      ? (await client.query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [appPoId, jobId])).rows[0]
       : null;
     const effectivePoNumber = linkedPo?.po_no || req.body.po_number?.trim() || "";
     const result = await client.query(`
       insert into mrr_logs (
-        discipline, mrr_number, vendor_name, app_po_id, po_number, pick_ticket, material_description, received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+        job_id, discipline, mrr_number, vendor_name, app_po_id, po_number, pick_ticket, material_description, received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
       returning id
     `, [
+      jobId,
       req.body.discipline?.trim() || "",
       mrrNumber,
       req.body.vendor_name?.trim() || "",
@@ -11072,27 +11570,29 @@ app.post("/material-logs/mrr/add", requireAuth, requirePermission("material_logs
       req.body.opi_number?.trim() || "",
       req.body.opi_date?.trim() || ""
     ]);
-    await saveMaterialLogLookup(client, "discipline", req.body.discipline);
-    await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name);
-    await saveMaterialLogLookup(client, "po_number", effectivePoNumber);
-    await saveMaterialLogLookup(client, "received_by", req.body.received_by);
-    await syncMrrVendorsIntoVendorTable(client);
-    await syncOpiLogsFromMrr(client);
+    await saveMaterialLogLookup(client, "discipline", req.body.discipline, jobId);
+    await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name, jobId);
+    await saveMaterialLogLookup(client, "po_number", effectivePoNumber, jobId);
+    await saveMaterialLogLookup(client, "received_by", req.body.received_by, jobId);
+    await syncMrrVendorsIntoVendorTable(client, jobId);
+    await syncOpiLogsFromMrr(client, jobId);
     await auditLog(client, req.user.id, "create", "mrr_log", result.rows[0].id, mrrNumber);
   });
   res.redirect("/material-logs/mrr");
 });
 
-app.post("/material-logs/fmr/add", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.post("/material-logs/fmr/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const fmrNumber = await getNextFmrNumber(client);
-    await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no);
+    const fmrNumber = await getNextFmrNumber(client, jobId);
+    await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no, null, jobId);
     const result = await client.query(`
       insert into fmr_logs (
-        fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, mrr_number, request_date, need_date, pick_ticket, pickup_location, pickup_date, updated_at
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+        job_id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, mrr_number, request_date, need_date, pick_ticket, pickup_location, pickup_date, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
       returning id
     `, [
+      jobId,
       fmrNumber,
       req.body.vendor_name?.trim() || "",
       req.body.container_no?.trim() || "",
@@ -11107,6 +11607,7 @@ app.post("/material-logs/fmr/add", requireAuth, requirePermission("material_logs
       req.body.pickup_date?.trim() || ""
     ]);
     await ensureMrrForVendorCrate(client, {
+      jobId,
       userId: req.user.id,
       fmrId: result.rows[0].id,
       vendorName: req.body.vendor_name?.trim() || "",
@@ -11118,16 +11619,17 @@ app.post("/material-logs/fmr/add", requireAuth, requirePermission("material_logs
   res.redirect("/material-logs/fmr");
 });
 
-app.get("/material-logs/receiving/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
-  const row = (await query("select * from material_receiving_logs where id = $1", [req.params.id])).rows[0];
+app.get("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const row = (await query("select * from material_receiving_logs where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!row) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Receiving log row not found.</h3></div>`, req.user));
     return;
   }
   const normalizedRowWarehouse = normalizeWarehouseName(row.warehouse);
   const normalizedRowLocation = normalizeLocationName(row.location);
-  const warehouseOptions = await getWarehouseOptions();
-  const locationMap = await getWarehouseLocationMap();
+  const warehouseOptions = await getWarehouseOptions(jobId);
+  const locationMap = await getWarehouseLocationMap(jobId);
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
     .concat(warehouseOptions.map((warehouse) => `<option value="${esc(warehouse.name)}" ${warehouse.name === normalizedRowWarehouse ? "selected" : ""}>${esc(warehouse.name)}</option>`))
     .join("");
@@ -11158,14 +11660,15 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requirePermission("mat
   `, req.user));
 });
 
-app.post("/material-logs/receiving/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.post("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location);
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
     await client.query(`
       update material_receiving_logs
       set legacy_row_id = $2, discipline = $3, vendor_name = $4, po_number = $5, item_code = $6, description = $7, received_qty = $8,
           qty_unit = $9, mrr_number = $10, fmr_number = $11, warehouse = $12, location = $13, recv_date = $14, comments = $15, updated_at = now()
-      where id = $1
+      where id = $1 and job_id = $16
     `, [
       req.params.id,
       req.body.legacy_row_id ? Number(req.body.legacy_row_id) : null,
@@ -11181,28 +11684,30 @@ app.post("/material-logs/receiving/:id/edit", requireAuth, requirePermission("ma
       normalizeWarehouseName(req.body.warehouse),
       normalizeLocationName(req.body.location),
       req.body.recv_date?.trim() || "",
-      req.body.comments?.trim() || ""
+      req.body.comments?.trim() || "",
+      jobId
     ]);
     await auditLog(client, req.user.id, "update", "material_receiving_log", req.params.id, req.body.item_code?.trim() || "");
   });
   res.redirect("/material-logs");
 });
 
-app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await syncMrrVendorsIntoVendorTable(client);
+    await syncMrrVendorsIntoVendorTable(client, jobId);
   });
-  const row = (await query("select * from mrr_logs where id = $1", [req.params.id])).rows[0];
+  const row = (await query("select * from mrr_logs where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!row) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR log row not found.</h3></div>`, req.user));
     return;
   }
   const [disciplines, vendors, pos, receivers, appPos, poReceiptLines, manualLines] = await Promise.all([
-      getMaterialLogLookupOptions("discipline"),
-      getMaterialLogLookupOptions("vendor_name"),
-      getMaterialLogLookupOptions("po_number"),
-      getMaterialLogLookupOptions("received_by"),
-      getAppPurchaseOrderOptions(),
+      getMaterialLogLookupOptions("discipline", jobId),
+      getMaterialLogLookupOptions("vendor_name", jobId),
+      getMaterialLogLookupOptions("po_number", jobId),
+      getMaterialLogLookupOptions("received_by", jobId),
+      getAppPurchaseOrderOptions(jobId),
       query(`
         select
           r.id,
@@ -11220,8 +11725,9 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_
         join po_lines pl on pl.id = r.po_line_id
         join material_items mi on mi.id = pl.material_item_id
         where r.mrr_log_id = $1
+          and r.job_id = $2
         order by r.id desc
-      `, [req.params.id]),
+      `, [req.params.id, jobId]),
       query(`
         select
           mrl.id,
@@ -11237,8 +11743,9 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_
           coalesce(mrl.recv_date, '') as line_date
         from material_receiving_logs mrl
         where coalesce(mrl.mrr_number, '') = $1
+          and mrl.job_id = $2
         order by coalesce(mrl.legacy_row_id, mrl.id) desc
-      `, [row.mrr_number])
+      `, [row.mrr_number, jobId])
     ]);
   const optionList = (values, selectedValue, placeholder) => [`<option value="">${esc(placeholder)}</option>`]
     .concat(values.map((value) => `<option value="${esc(value)}" ${value === selectedValue ? "selected" : ""}>${esc(value)}</option>`))
@@ -11289,18 +11796,19 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_
     `, req.user));
   });
 
-app.post("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const appPoId = req.body.app_po_id ? Number(req.body.app_po_id) : null;
     const linkedPo = appPoId
-      ? (await client.query("select id, po_no from purchase_orders where id = $1", [appPoId])).rows[0]
+      ? (await client.query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [appPoId, jobId])).rows[0]
       : null;
     const effectivePoNumber = linkedPo?.po_no || req.body.po_number?.trim() || "";
     await client.query(`
       update mrr_logs
       set mrr_number = $2, discipline = $3, vendor_name = $4, app_po_id = $5, po_number = $6, pick_ticket = $7, material_description = $8,
           received_date = $9, received_by = $10, notes = $11, load_number = $12, opi_number = $13, opi_date = $14, updated_at = now()
-      where id = $1
+      where id = $1 and job_id = $15
     `, [
       req.params.id,
       req.body.mrr_number?.trim(),
@@ -11315,23 +11823,25 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requirePermission("material
       req.body.notes?.trim() || "",
       req.body.load_number?.trim() || "",
       req.body.opi_number?.trim() || "",
-      req.body.opi_date?.trim() || ""
+      req.body.opi_date?.trim() || "",
+      jobId
     ]);
-    await saveMaterialLogLookup(client, "discipline", req.body.discipline);
-    await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name);
-    await saveMaterialLogLookup(client, "po_number", effectivePoNumber);
-    await saveMaterialLogLookup(client, "received_by", req.body.received_by);
-    await syncMrrVendorsIntoVendorTable(client);
-    await syncOpiLogsFromMrr(client);
+    await saveMaterialLogLookup(client, "discipline", req.body.discipline, jobId);
+    await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name, jobId);
+    await saveMaterialLogLookup(client, "po_number", effectivePoNumber, jobId);
+    await saveMaterialLogLookup(client, "received_by", req.body.received_by, jobId);
+    await syncMrrVendorsIntoVendorTable(client, jobId);
+    await syncOpiLogsFromMrr(client, jobId);
     await auditLog(client, req.user.id, "update", "mrr_log", req.params.id, req.body.mrr_number?.trim() || "");
   });
   res.redirect("/material-logs/mrr");
 });
 
-app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+app.get("/material-logs/fmr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   const [rowRes, vendors] = await Promise.all([
-    query("select * from fmr_logs where id = $1", [req.params.id]),
-    query("select name from vendors where is_active = true order by name")
+    query("select * from fmr_logs where id = $1 and job_id = $2", [req.params.id, jobId]),
+    query("select name from vendors where job_id = $1 and is_active = true order by name", [jobId])
   ]);
   const row = rowRes.rows[0];
   if (!row) {
@@ -11375,14 +11885,15 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
     `, req.user));
   });
 
-  app.post("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+  app.post("/material-logs/fmr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+    const jobId = currentJobId(req);
     await withTransaction(async (client) => {
-      await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no, req.params.id);
+      await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no, req.params.id, jobId);
     await client.query(`
       update fmr_logs
       set fmr_number = $2, vendor_name = $3, container_no = $4, fluor_id = $5, fluor_desc = $6, request_description = $7,
           mrr_number = $8, request_date = $9, need_date = $10, pick_ticket = $11, pickup_location = $12, pickup_date = $13, updated_at = now()
-      where id = $1
+      where id = $1 and job_id = $14
     `, [
       req.params.id,
       req.body.fmr_number?.trim(),
@@ -11396,9 +11907,11 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
       req.body.need_date?.trim() || "",
       req.body.pick_ticket?.trim() || "",
       req.body.pickup_location?.trim() || "",
-      req.body.pickup_date?.trim() || ""
+      req.body.pickup_date?.trim() || "",
+      jobId
     ]);
     await ensureMrrForVendorCrate(client, {
+      jobId,
       userId: req.user.id,
       fmrId: req.params.id,
       vendorName: req.body.vendor_name?.trim() || "",
@@ -11410,11 +11923,12 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requirePermission("material_
     res.redirect("/material-logs/fmr");
   });
 
-  app.post("/material-logs/fmr/:id/delete", requireAuth, requirePermission("material_logs", "edit"), async (req, res) => {
+  app.post("/material-logs/fmr/:id/delete", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+    const jobId = currentJobId(req);
     await withTransaction(async (client) => {
-      const current = (await client.query("select fmr_number from fmr_logs where id = $1", [req.params.id])).rows[0];
+      const current = (await client.query("select fmr_number from fmr_logs where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
       if (!current) throw new Error("Vendor FMR log row not found.");
-      await client.query("delete from fmr_logs where id = $1", [req.params.id]);
+      await client.query("delete from fmr_logs where id = $1 and job_id = $2", [req.params.id, jobId]);
       await auditLog(client, req.user.id, "delete", "fmr_log", req.params.id, current.fmr_number || "");
     });
     res.redirect("/material-logs/fmr");
