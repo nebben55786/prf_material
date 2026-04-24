@@ -46,7 +46,6 @@ declare
     'material_items',
     'rfqs',
     'bom_headers',
-    'bom_lines',
     'material_requisitions',
     'material_requisition_lines',
     'material_issue_transactions',
@@ -135,11 +134,6 @@ set job_id = v.job_id
 from vendors v
 where vc.vendor_id = v.id
   and vc.job_id is null;
-update bom_lines bl
-set job_id = bh.job_id
-from bom_headers bh
-where bl.bom_id = bh.id
-  and bl.job_id is null;
 with initial_job as (select id from jobs order by id asc limit 1)
 update rfqs set job_id = (select id from initial_job) where job_id is null;
 update material_requisitions mr
@@ -249,7 +243,6 @@ alter table vendor_contacts alter column job_id set not null;
 alter table material_items alter column job_id set not null;
 alter table rfqs alter column job_id set not null;
 alter table bom_headers alter column job_id set not null;
-alter table bom_lines alter column job_id set not null;
 alter table material_requisitions alter column job_id set not null;
 alter table material_requisition_lines alter column job_id set not null;
 alter table material_issue_transactions alter column job_id set not null;

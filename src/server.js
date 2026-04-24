@@ -5597,9 +5597,9 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
     const lines = (await client.query(`
       select *
       from bom_lines
-      where bom_id = $1 and job_id = $2 and planning_status = 'PLANNED'
+      where bom_id = $1 and planning_status = 'PLANNED'
       order by line_no, id
-    `, [bomId, jobId])).rows;
+    `, [bomId])).rows;
     if (lines.length === 0) throw new Error("No BOM lines are available to move onto an RFQ.");
     const rfqNo = await getNextRfqNumber(client, jobId);
     const rfqInsert = await client.query(`
@@ -5631,8 +5631,8 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
       await client.query(`
         update bom_lines
         set planning_status = 'ON_RFQ', qty_quoted = qty_required, updated_at = now()
-        where id = $1 and job_id = $2
-      `, [line.id, jobId]);
+        where id = $1
+      `, [line.id]);
     }
     await client.query(`
       update bom_headers
@@ -5703,15 +5703,16 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
          and inv.thk_2 = coalesce(bl.thk_2, '')
         left join (
           select
-            item_code,
-            coalesce(size_1, '') as size_1,
-            coalesce(size_2, '') as size_2,
-            coalesce(thk_1, '') as thk_1,
-            coalesce(thk_2, '') as thk_2,
-            sum(qty_issued) as qty_issued_total
-          from bom_lines
-          where job_id = $3
-          group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+            bl_issued.item_code,
+            coalesce(bl_issued.size_1, '') as size_1,
+            coalesce(bl_issued.size_2, '') as size_2,
+            coalesce(bl_issued.thk_1, '') as thk_1,
+            coalesce(bl_issued.thk_2, '') as thk_2,
+            sum(bl_issued.qty_issued) as qty_issued_total
+          from bom_lines bl_issued
+          join bom_headers bh_issued on bh_issued.id = bl_issued.bom_id
+          where bh_issued.job_id = $3
+          group by bl_issued.item_code, coalesce(bl_issued.size_1, ''), coalesce(bl_issued.size_2, ''), coalesce(bl_issued.thk_1, ''), coalesce(bl_issued.thk_2, '')
         ) issued
           on issued.item_code = bl.item_code
          and issued.size_1 = coalesce(bl.size_1, '')
@@ -5738,8 +5739,8 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
          and alloc.size_2 = coalesce(bl.size_2, '')
          and alloc.thk_1 = coalesce(bl.thk_1, '')
          and alloc.thk_2 = coalesce(bl.thk_2, '')
-        where bl.id = $1 and bl.bom_id = $2 and bl.job_id = $3
-      `, [lineId, bomId, jobId])).rows[0];
+        where bl.id = $1 and bl.bom_id = $2
+      `, [lineId, bomId])).rows[0];
       if (!line) continue;
       const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
       if (qtyRequested <= 0 || qtyRequested > remaining) {
@@ -5814,8 +5815,8 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
     const validRows = Array.from(validRowsBySourceUid.values());
     if (validRows.length) {
       const existingSourceUids = new Set((await client.query(
-        "select source_uid from bom_lines where bom_id = $1 and job_id = $2 and source_uid = any($3::text[])",
-        [bomId, currentJobId(req), validRows.map((row) => `${row.lineNo}|${row.itemCode}`)]
+        "select source_uid from bom_lines where bom_id = $1 and source_uid = any($2::text[])",
+        [bomId, validRows.map((row) => `${row.lineNo}|${row.itemCode}`)]
       )).rows.map((row) => String(row.source_uid || "")));
       const existingCount = validRows.filter((row) => existingSourceUids.has(`${row.lineNo}|${row.itemCode}`)).length;
       updatedCount += existingCount;
@@ -5825,12 +5826,11 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
         const chunk = validRows.slice(index, index + chunkSize);
         await client.query(`
           insert into bom_lines (
-            job_id, bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
+            bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
             iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes, updated_at
           )
           select
             $1,
-            $2,
             data.line_no,
             data.item_code,
             data.description,
@@ -5849,8 +5849,8 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
             data.notes,
             now()
           from unnest(
-            $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[],
-            $11::text[], $12::text[], $13::text[], $14::text[], $15::text[], $16::text[], $17::numeric[], $18::text[]
+            $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[],
+            $10::text[], $11::text[], $12::text[], $13::text[], $14::text[], $15::text[], $16::numeric[], $17::text[]
           ) as data(
             line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
             iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes
@@ -5872,7 +5872,6 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
               notes = excluded.notes,
               updated_at = now()
         `, [
-          currentJobId(req),
           bomId,
           chunk.map((row) => row.lineNo),
           chunk.map((row) => row.itemCode),
@@ -5963,8 +5962,9 @@ async function getBomLineEntryAutocomplete(bomId, jobId) {
         coalesce(size_2, '') as size_2,
         coalesce(thk_1, '') as thk_1,
         coalesce(thk_2, '') as thk_2
-      from bom_lines
-      where job_id = $1
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bh.job_id = $1
         and coalesce(item_code, '') <> ''
       order by item_code, updated_at desc, id desc
     `, [jobId])
@@ -6209,7 +6209,7 @@ app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermissio
     validRows.push({ ...row, qtyRequired, sourceUid });
   }
   if (validRows.length) {
-    const existingRows = (await query("select source_uid from bom_lines where bom_id = $1 and job_id = $2 and source_uid = any($3::text[])", [bomId, jobId, validRows.map((row) => row.sourceUid)])).rows;
+    const existingRows = (await query("select source_uid from bom_lines where bom_id = $1 and source_uid = any($2::text[])", [bomId, validRows.map((row) => row.sourceUid)])).rows;
     const existingSet = new Set(existingRows.map((row) => String(row.source_uid || "")));
     validRows.forEach((row) => {
       if (existingSet.has(row.sourceUid)) {
@@ -6226,16 +6226,15 @@ app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermissio
     for (const row of insertRows) {
       await client.query(`
         insert into bom_lines (
-          job_id, bom_id, line_no, item_code, description, material_type, uom, qty_required,
+          bom_id, line_no, item_code, description, material_type, uom, qty_required,
           spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2,
           planning_status, notes, updated_at
         ) values (
-          $1, $2, $3, $4, $5, $6, $7, $8,
-          $9, $10, $11, $12, $13, $14, $15, $16, $17,
-          $18, $19, now()
+          $1, $2, $3, $4, $5, $6, $7,
+          $8, $9, $10, $11, $12, $13, $14, $15, $16,
+          $17, $18, now()
         )
       `, [
-        jobId,
         bomId,
         row.line_no,
         row.item_code,
@@ -6267,7 +6266,7 @@ app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermissio
 }));
 
 app.get("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
-  const line = (await query("select bl.*, bh.bom_no from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bl.job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
+  const line = (await query("select bl.*, bh.bom_no from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
   if (!line) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM line not found.</h3></div>`, req.user));
     return;
@@ -6305,15 +6304,15 @@ app.post("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission
   const lineId = Number(req.params.id);
   const jobId = currentJobId(req);
   const bomId = await withTransaction(async (client) => {
-    const current = (await client.query("select bom_id, planning_status from bom_lines where id = $1 and job_id = $2", [lineId, jobId])).rows[0];
+    const current = (await client.query("select bl.bom_id, bl.planning_status from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
     if (!current) throw new Error("BOM line not found.");
     await client.query(`
       update bom_lines
       set line_no = $2, item_code = $3, description = $4, material_type = $5, uom = $6, qty_required = $7,
           spec = $8, commodity_code = $9, tag_number = $10, iwp_no = $11, iso_no = $12, size_1 = $13, size_2 = $14, thk_1 = $15, thk_2 = $16,
           planning_status = $17, notes = $18, updated_at = now()
-      where id = $1 and job_id = $19
-    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", current.planning_status || "PLANNED", req.body.notes || "", jobId]);
+      where id = $1
+    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", current.planning_status || "PLANNED", req.body.notes || ""]);
     await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
     return current.bom_id;
   });
@@ -6324,9 +6323,9 @@ app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermissi
   const lineId = Number(req.params.id);
   const jobId = currentJobId(req);
   const bomId = await withTransaction(async (client) => {
-    const current = (await client.query("select bom_id from bom_lines where id = $1 and job_id = $2", [lineId, jobId])).rows[0];
+    const current = (await client.query("select bl.bom_id from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
     if (!current) throw new Error("BOM line not found.");
-    await client.query("delete from bom_lines where id = $1 and job_id = $2", [lineId, jobId]);
+    await client.query("delete from bom_lines where id = $1", [lineId]);
     await auditLog(client, req.user.id, "delete", "bom_line", lineId, "");
     return current.bom_id;
   });
@@ -6398,7 +6397,9 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
             coalesce(thk_1, '') as thk_1,
             coalesce(thk_2, '') as thk_2,
             sum(qty_issued) as qty_issued_total
-          from bom_lines
+          from bom_lines bl_issued
+          join bom_headers bh_issued on bh_issued.id = bl_issued.bom_id
+          where bh_issued.job_id = ${jobId}
           group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
         ) issued
           on issued.item_code = bl.item_code
@@ -6697,8 +6698,8 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
   const search = String(req.query.search || "").trim();
   const iwp = String(req.query.iwp || "").trim();
   const lineNo = String(req.query.line_no || "").trim();
-  const where = ["bl.bom_id = $1", "bl.job_id = $2"];
-  const params = [req.params.id, jobId];
+  const where = ["bl.bom_id = $1"];
+  const params = [req.params.id];
   if (search) {
     params.push(`%${search}%`);
     where.push(`(bl.item_code ilike $${params.length} or coalesce(bl.description, '') ilike $${params.length})`);
@@ -6723,10 +6724,11 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
       group by item_code
     ) inv on inv.item_code = bl.item_code
     left join (
-      select item_code, sum(greatest(qty_required - qty_issued, 0)) as qty_needed
-      from bom_lines
-      where job_id = ${jobId}
-      group by item_code
+      select bl2.item_code, sum(greatest(bl2.qty_required - bl2.qty_issued, 0)) as qty_needed
+      from bom_lines bl2
+      join bom_headers bh2 on bh2.id = bl2.bom_id
+      where bh2.job_id = ${jobId}
+      group by bl2.item_code
     ) need on need.item_code = bl.item_code
     where ${where.join(" and ")}
     order by coalesce(bl.iwp_no, ''), coalesce(bl.line_no, ''), bl.id
@@ -6877,9 +6879,10 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, req
       coalesce(thk_1, '') as thk_1,
       coalesce(thk_2, '') as thk_2,
       sum(qty_issued) as qty_issued_total
-    from bom_lines
-    where job_id = $1
-    group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+    from bom_lines bl
+    join bom_headers bh on bh.id = bl.bom_id
+    where bh.job_id = $1
+    group by bl.item_code, coalesce(bl.size_1, ''), coalesce(bl.size_2, ''), coalesce(bl.thk_1, ''), coalesce(bl.thk_2, '')
   `, [jobId])).rows;
 
   const inventoryMap = new Map();
@@ -7072,7 +7075,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
       bl.qty_issued
     from material_requisition_lines mrl
     join bom_lines bl on bl.id = mrl.bom_line_id
-    where mrl.requisition_id = $1 and mrl.job_id = $2 and bl.job_id = $2
+    where mrl.requisition_id = $1 and mrl.job_id = $2
     order by bl.line_no, bl.id
   `, [req.params.id, jobId])).rows.map((line) => ({
     ...line,
@@ -7137,7 +7140,7 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
         bl.qty_issued
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
-      where mrl.requisition_id = $1 and mrl.job_id = $2 and bl.job_id = $2
+      where mrl.requisition_id = $1 and mrl.job_id = $2
     `, [req.params.id, jobId])).rows;
     const removeLineId = Number(req.body.remove_line_id || 0);
     for (const line of lines) {
@@ -7208,7 +7211,7 @@ app.post("/requisitions/:id/issue", requireAuth, requireJobContext, requirePermi
         bl.qty_issued
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
-      where mrl.requisition_id = $1 and mrl.job_id = $2 and bl.job_id = $2
+      where mrl.requisition_id = $1 and mrl.job_id = $2
       order by bl.line_no, bl.id
     `, [req.params.id, jobId])).rows;
     const currentReqAllocMap = new Map();
@@ -7290,7 +7293,7 @@ app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePerm
       select mrl.bom_line_id, mrl.qty_issued, bl.planning_status, bl.qty_required, bl.qty_issued as bom_qty_issued
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
-      where mrl.requisition_id = $1 and mrl.job_id = $2 and bl.job_id = $2
+      where mrl.requisition_id = $1 and mrl.job_id = $2
     `, [req.params.id, jobId])).rows;
     for (const line of lines) {
       const issuedRollback = num(line.qty_issued);
@@ -8132,7 +8135,8 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
           coalesce(bl.thk_1, '') as thk_1,
           coalesce(bl.thk_2, '') as thk_2
         from bom_lines bl
-        where bl.job_id = $1 and bl.item_code = mi.item_code
+        join bom_headers bh on bh.id = bl.bom_id
+        where bh.job_id = $1 and bl.item_code = mi.item_code
       ) dimensions on true
       where mi.job_id = $1
       order by
