@@ -224,6 +224,13 @@ function formatQtyDisplay(value) {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
+function formatCombinedSize(size1, size2) {
+  const primary = String(size1 || "").trim();
+  const secondary = String(size2 || "").trim();
+  if (primary && secondary) return `${primary} x ${secondary}`;
+  return primary || secondary;
+}
+
 function formatShortDate(value) {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -6957,10 +6964,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
     <td>${esc(formatQtyDisplay(line.qty_needed))}</td>
     <td>${esc(line.uom || "")}</td>
     <td>${esc(line.spec || "")}</td>
-    <td>${esc(line.size_1 || "")}</td>
-    <td>${esc(line.size_2 || "")}</td>
-    <td>${esc(line.thk_1 || "")}</td>
-    <td>${esc(line.thk_2 || "")}</td>
+    <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
     <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a></div></td>
   </tr>`).join("");
   res.send(layout(`BOM Lines ${bom.bom_name || bom.description || bom.bom_no}`, `
@@ -6982,7 +6986,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
         <div class="actions"><button type="submit">Filter Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Clear</a><span class="muted">${lines.length} line(s)</span></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Needed Qty</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="16" class="muted">No BOM lines found.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Needed Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="13" class="muted">No BOM lines found.</td></tr>`}</table></div>
   `, req.user));
 }));
 
@@ -7014,10 +7018,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
     <td>${esc(line.uom)}</td>
     <td>${esc(line.spec || "")}</td>
-    <td>${esc(line.size_1 || "")}</td>
-    <td>${esc(line.size_2 || "")}</td>
-    <td>${esc(line.thk_1 || "")}</td>
-    <td>${esc(line.thk_2 || "")}</td>
+    <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
   </tr>`).join("");
   const headerActions = [];
   if (canEditRequisition(req.user, header)) {
@@ -7063,7 +7064,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       ${header.signed_signature_data ? `<div style="margin-top:12px;"><label>Electronic Signature</label><div class="card" style="padding:12px; background:#fff;"><img src="${escAttr(header.signed_signature_data)}" alt="Electronic requisition signature" style="max-width:100%; max-height:180px; display:block;" /></div></div>` : `<p class="muted">No electronic signature saved yet.</p>`}
       ${header.signed_copy_filename ? `<p class="muted">Uploaded signed copy: ${esc(header.signed_copy_filename)}</p>` : `<p class="muted">No signed paper copy uploaded yet.</p>`}
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th></tr>${lineRows || `<tr><td colspan="12" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="9" class="muted">No lines on this requisition.</td></tr>`}</table></div>
   `, req.user));
 });
 
