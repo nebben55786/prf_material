@@ -3531,10 +3531,17 @@ function getUserDisplayName(user) {
   return [first, last].filter(Boolean).join(" ").trim() || String(user?.username || "").trim();
 }
 
+function hasLoggedRequisitionSignature(header) {
+  if (!header) return false;
+  return Boolean(header.signed_at || header.signed_signature_data || header.signed_copy_filename);
+}
+
 function canSignRequisition(user, header) {
   if (!user || !header) return false;
   if (!canAccess(user, "requisitions", "issue")) return false;
-  return ["VERIFIED", "ISSUED"].includes(String(header.status || "").toUpperCase());
+  if (user.role === "admin") return ["VERIFIED", "ISSUED"].includes(String(header.status || "").toUpperCase());
+  if (hasLoggedRequisitionSignature(header)) return false;
+  return String(header.status || "").toUpperCase() === "VERIFIED";
 }
 
 async function recalcRfqStatus(client, rfqId) {
@@ -6864,9 +6871,11 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td><span class="chip">${esc(row.status)}</span></td>
     <td>${esc(formatShortDateTime(row.created_at))}</td>
     <td><div class="actions">${
-      row.status === "VERIFIED"
+      hasLoggedRequisitionSignature(row)
+        ? `<a class="btn btn-secondary" href="/requisitions/${row.id}#warehouse-sign-off">Issued</a>`
+        : row.status === "VERIFIED"
         ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">Sign</a>` : ""}`
-        : row.status === "ISSUED" && canAccess(req.user, "requisitions", "issue")
+        : row.status === "ISSUED" && canSignRequisition(req.user, row)
           ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
         : row.status === "CANCELLED" && req.user?.role === "admin"
           ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
@@ -7027,7 +7036,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     }
   }
   if (canSignRequisition(req.user, header)) {
-    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${header.signed_at || header.signed_copy_filename ? "Update Sign-Off" : "Sign Requisition"}</a>`);
+    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${hasLoggedRequisitionSignature(header) ? "Update Sign-Off" : "Sign Requisition"}</a>`);
   }
   if (req.user?.role === "admin" && header.status !== "CANCELLED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/cancel" onsubmit="return confirm('Cancel this requisition? The record will be kept. If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Cancel Requisition</button></form>`);
@@ -7043,12 +7052,12 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
       ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}
     </div>
-    <div class="card">
+    <div class="card" id="warehouse-sign-off">
       <h3>Warehouse Sign-Off</h3>
       <p class="muted">Use either a signed paper copy upload or an electronic signature from an iPad. Both stay attached to this requisition.</p>
       <p class="muted">Signed By: ${esc(header.signed_by_name || "") || `<span class="muted">Not signed yet</span>`} ${header.signed_at ? `| Signed At: ${esc(formatShortDateTime(header.signed_at))}` : ""}</p>
       <div class="actions">
-        ${canSignRequisition(req.user, header) ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${header.signed_at || header.signed_copy_filename ? "Open Sign-Off Page" : "Capture Sign-Off"}</a>` : ""}
+        ${canSignRequisition(req.user, header) ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${hasLoggedRequisitionSignature(header) ? "Open Sign-Off Page" : "Capture Sign-Off"}</a>` : ""}
         ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/signed-copy" target="_blank">Open Uploaded Signed Copy</a>` : ""}
       </div>
       ${header.signed_signature_data ? `<div style="margin-top:12px;"><label>Electronic Signature</label><div class="card" style="padding:12px; background:#fff;"><img src="${escAttr(header.signed_signature_data)}" alt="Electronic requisition signature" style="max-width:100%; max-height:180px; display:block;" /></div></div>` : `<p class="muted">No electronic signature saved yet.</p>`}
