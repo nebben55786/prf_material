@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import express from "express";
 import cookieParser from "cookie-parser";
 import multer from "multer";
@@ -40,6 +42,13 @@ const defaultJobNumberValue = String(process.env.DEFAULT_JOB_NUMBER || "0000").t
 let headerJobNumber = defaultJobNumberValue;
 let headerPlantName = "";
 let headerPerformanceJobNumber = "";
+const pickTicketLogoPath = path.join(process.cwd(), "public", "prf-logo.png");
+let pickTicketLogoBuffer = null;
+try {
+  pickTicketLogoBuffer = fs.readFileSync(pickTicketLogoPath);
+} catch {
+  pickTicketLogoBuffer = null;
+}
 
 const defaultPermissionMatrix = {
   admin: {
@@ -683,29 +692,142 @@ function buildDrawnPdf(pages, options = {}) {
   };
   const fontRegularId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
   const fontBoldId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
+
+  function paethPredictor(left, up, upLeft) {
+    const estimate = left + up - upLeft;
+    const deltaLeft = Math.abs(estimate - left);
+    const deltaUp = Math.abs(estimate - up);
+    const deltaUpLeft = Math.abs(estimate - upLeft);
+    if (deltaLeft <= deltaUp && deltaLeft <= deltaUpLeft) return left;
+    if (deltaUp <= deltaUpLeft) return up;
+    return upLeft;
+  }
+
+  function parsePngImage(buffer) {
+    const signature = buffer.subarray(0, 8);
+    if (!signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      throw new Error("Unsupported PNG image.");
+    }
+    let width = 0;
+    let height = 0;
+    let bitDepth = 0;
+    let colorType = 0;
+    const idatChunks = [];
+    let cursor = 8;
+    while (cursor < buffer.length) {
+      const length = buffer.readUInt32BE(cursor);
+      const type = buffer.subarray(cursor + 4, cursor + 8).toString("ascii");
+      const data = buffer.subarray(cursor + 8, cursor + 8 + length);
+      cursor += 12 + length;
+      if (type === "IHDR") {
+        width = data.readUInt32BE(0);
+        height = data.readUInt32BE(4);
+        bitDepth = data[8];
+        colorType = data[9];
+      } else if (type === "IDAT") {
+        idatChunks.push(data);
+      } else if (type === "IEND") {
+        break;
+      }
+    }
+    if (!width || !height) throw new Error("PNG dimensions are missing.");
+    if (bitDepth !== 8 || ![2, 6].includes(colorType)) {
+      throw new Error("Only 8-bit RGB/RGBA PNG logos are supported.");
+    }
+    const channels = colorType === 6 ? 4 : 3;
+    const bytesPerPixel = channels;
+    const stride = width * bytesPerPixel;
+    const inflated = zlib.inflateSync(Buffer.concat(idatChunks));
+    const raw = Buffer.alloc(height * stride);
+    let inOffset = 0;
+    let outOffset = 0;
+    for (let row = 0; row < height; row += 1) {
+      const filterType = inflated[inOffset];
+      inOffset += 1;
+      for (let column = 0; column < stride; column += 1) {
+        const source = inflated[inOffset++];
+        const left = column >= bytesPerPixel ? raw[outOffset + column - bytesPerPixel] : 0;
+        const up = row > 0 ? raw[outOffset - stride + column] : 0;
+        const upLeft = row > 0 && column >= bytesPerPixel ? raw[outOffset - stride + column - bytesPerPixel] : 0;
+        let value = source;
+        if (filterType === 1) value = (source + left) & 255;
+        else if (filterType === 2) value = (source + up) & 255;
+        else if (filterType === 3) value = (source + Math.floor((left + up) / 2)) & 255;
+        else if (filterType === 4) value = (source + paethPredictor(left, up, upLeft)) & 255;
+        raw[outOffset + column] = value;
+      }
+      outOffset += stride;
+    }
+    if (colorType === 2) {
+      return { width, height, rgb: raw, alpha: null };
+    }
+    const rgb = Buffer.alloc(width * height * 3);
+    const alpha = Buffer.alloc(width * height);
+    for (let pixel = 0, source = 0, rgbOffset = 0; pixel < width * height; pixel += 1, source += 4, rgbOffset += 3) {
+      rgb[rgbOffset] = raw[source];
+      rgb[rgbOffset + 1] = raw[source + 1];
+      rgb[rgbOffset + 2] = raw[source + 2];
+      alpha[pixel] = raw[source + 3];
+    }
+    return { width, height, rgb, alpha };
+  }
+
+  function buildPdfImageObject(buffer) {
+    const image = parsePngImage(buffer);
+    let softMaskId = null;
+    if (image.alpha) {
+      const alphaStream = zlib.deflateSync(image.alpha);
+      softMaskId = addObject(Buffer.concat([
+        Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length ${alphaStream.length} >>\nstream\n`, "utf8"),
+        alphaStream,
+        Buffer.from("\nendstream", "utf8")
+      ]));
+    }
+    const rgbStream = zlib.deflateSync(image.rgb);
+    return addObject(Buffer.concat([
+      Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode${softMaskId ? ` /SMask ${softMaskId} 0 R` : ""} /Length ${rgbStream.length} >>\nstream\n`, "utf8"),
+      rgbStream,
+      Buffer.from("\nendstream", "utf8")
+    ]));
+  }
+
   const pageIds = [];
-  for (const contentStream of pages) {
-    const contentId = addObject(`<< /Length ${Buffer.byteLength(contentStream, "utf8")} >>\nstream\n${contentStream}\nendstream`);
-    pageIds.push(addObject(`<< /Type /Page /Parent PAGES_REF /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontRegularId} 0 R /F2 ${fontBoldId} 0 R >> >> /Contents ${contentId} 0 R >>`));
+  for (const pageEntry of pages) {
+    const page = typeof pageEntry === "string" ? { content: pageEntry, images: [] } : pageEntry;
+    const contentBuffer = Buffer.from(String(page.content || ""), "utf8");
+    const contentId = addObject(Buffer.concat([
+      Buffer.from(`<< /Length ${contentBuffer.length} >>\nstream\n`, "utf8"),
+      contentBuffer,
+      Buffer.from("\nendstream", "utf8")
+    ]));
+    const imageEntries = (page.images || []).map((image) => `/${image.name} ${buildPdfImageObject(image.buffer)} 0 R`);
+    const xObjectSection = imageEntries.length ? ` /XObject << ${imageEntries.join(" ")} >>` : "";
+    pageIds.push(addObject(`<< /Type /Page /Parent PAGES_REF /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontRegularId} 0 R /F2 ${fontBoldId} 0 R >>${xObjectSection} >> /Contents ${contentId} 0 R >>`));
   }
   const pagesId = addObject(`<< /Type /Pages /Count ${pageIds.length} /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] >>`);
   for (const pageId of pageIds) {
     objects[pageId - 1] = objects[pageId - 1].replace("PAGES_REF", `${pagesId} 0 R`);
   }
   const catalogId = addObject(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
-  let pdf = "%PDF-1.4\n";
   const offsets = [0];
+  const pdfChunks = [Buffer.from("%PDF-1.4\n", "utf8")];
+  let pdfLength = pdfChunks[0].length;
   for (let i = 0; i < objects.length; i += 1) {
-    offsets.push(Buffer.byteLength(pdf, "utf8"));
-    pdf += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`;
+    const body = Buffer.isBuffer(objects[i]) ? objects[i] : Buffer.from(String(objects[i]), "utf8");
+    const objectHeader = Buffer.from(`${i + 1} 0 obj\n`, "utf8");
+    const objectFooter = Buffer.from("\nendobj\n", "utf8");
+    offsets.push(pdfLength);
+    pdfChunks.push(objectHeader, body, objectFooter);
+    pdfLength += objectHeader.length + body.length + objectFooter.length;
   }
-  const xrefOffset = Buffer.byteLength(pdf, "utf8");
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  const xrefOffset = pdfLength;
+  let trailer = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
   for (let i = 1; i < offsets.length; i += 1) {
-    pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+    trailer += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
   }
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
-  return Buffer.from(pdf, "utf8");
+  trailer += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  pdfChunks.push(Buffer.from(trailer, "utf8"));
+  return Buffer.concat(pdfChunks);
 }
 
 function buildPickLocationPlan(locationRows, qtyRequested) {
@@ -768,8 +890,10 @@ function buildPickTicketPdf(header, lines) {
     content.push("0.2 w");
     content.push("0 0 0 RG");
     content.push(rect(left, top - 40, right - left, 40));
-    content.push(makeText(left + 12, top - 18, "PICK TICKET", "F2", 17));
-    content.push(makeText(left + 12, top - 32, "Laydown Yard Material Pick Copy", "F1", 8));
+    if (pickTicketLogoBuffer) {
+      content.push(`q 44 0 0 28 ${left + 12} ${top - 34} cm /Logo Do Q`);
+    }
+    content.push(makeText(left + (pickTicketLogoBuffer ? 64 : 12), top - 23, "PICK TICKET", "F2", 17));
     content.push(makeText(right - 170, top - 18, `REQ # ${header.requisition_no || ""}`, "F2", 12));
     content.push(makeText(right - 170, top - 32, `Page ${pageIndex + 1} of ${chunks.length}`, "F1", 8));
 
@@ -855,7 +979,10 @@ function buildPickTicketPdf(header, lines) {
     content.push(makeText(left + 12, signTop + 18, "Received by (SIGN):", "F1", 8));
     content.push(makeText(left + 522, signTop + 18, "Date:", "F1", 8));
 
-    return content.join("\n");
+    return {
+      content: content.join("\n"),
+      images: pickTicketLogoBuffer ? [{ name: "Logo", buffer: pickTicketLogoBuffer }] : []
+    };
   }), { pageWidth, pageHeight });
 }
 
