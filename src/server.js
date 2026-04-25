@@ -7222,6 +7222,9 @@ app.post("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermis
       where id = $1 and job_id = $4
     `, [req.params.id, signedByName, signatureData, jobId]);
     await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|electronic|${signedByName}`);
+    if (header.status === "VERIFIED") {
+      await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+    }
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
@@ -7250,6 +7253,9 @@ app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requir
       where id = $1 and job_id = $6
     `, [req.params.id, signedByName, String(file.originalname || "signed-copy").slice(0, 255), file.mimetype, file.buffer, jobId]);
     await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|upload|${signedByName}|${file.originalname || "signed-copy"}`);
+    if (header.status === "VERIFIED") {
+      await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+    }
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
@@ -7610,104 +7616,109 @@ app.post("/requisitions/:id/unverify", requireAuth, requireJobContext, requirePe
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
+async function issueRequisitionToField(client, requisitionId, jobId, userId) {
+  const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [requisitionId, jobId])).rows[0];
+  if (!header) throw new Error("Requisition not found.");
+  if (header.status !== "VERIFIED") throw new Error("Requisition must be verified before issue.");
+  const currentRows = await getCurrentOnHandRows(client, { jobId });
+  const inventoryMap = new Map();
+  for (const row of currentRows) {
+    const key = buildInventoryIssueKey(row);
+    if (!inventoryMap.has(key)) inventoryMap.set(key, []);
+    inventoryMap.get(key).push({
+      warehouse: row.warehouse,
+      location: row.location,
+      qty_available: parseQtyValue(row.qty_on_hand || 0)
+    });
+  }
+  const lines = (await client.query(`
+    select
+      mrl.id as requisition_line_id,
+      mrl.qty_requested,
+      bl.id as bom_line_id,
+      bl.item_code,
+      coalesce(bl.size_1, '') as size_1,
+      coalesce(bl.size_2, '') as size_2,
+      coalesce(bl.thk_1, '') as thk_1,
+      coalesce(bl.thk_2, '') as thk_2,
+      bl.qty_required,
+      bl.qty_issued
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mrl.requisition_id = $1 and mrl.job_id = $2
+    order by bl.line_no, bl.id
+  `, [requisitionId, jobId])).rows;
+  const currentReqAllocMap = new Map();
+  for (const line of lines) {
+    const key = buildInventoryIssueKey(line);
+    currentReqAllocMap.set(key, parseQtyValue(currentReqAllocMap.get(key) || 0) + parseQtyValue(line.qty_requested || 0));
+  }
+  const availableTotalsMap = await getAvailableInventoryTotalsMap(client, jobId, { allocatedOffsetMap: currentReqAllocMap });
+  if (lines.length === 0) throw new Error("No requisition lines found.");
+  const lineAllocations = new Map();
+  for (const line of lines) {
+    const qtyAvailable = parseQtyValue(availableTotalsMap.get(buildInventoryIssueKey(line)) || 0, 0);
+    if (num(line.qty_requested) > qtyAvailable) {
+      throw new Error(`Cannot issue ${line.item_code}; requested qty exceeds available stock.`);
+    }
+    const locationRows = (inventoryMap.get(buildInventoryIssueKey(line)) || []).map((row) => ({ ...row }));
+    const allocations = buildPickLocationAllocations(locationRows, line.qty_requested);
+    const allocatedQty = allocations.reduce((sum, row) => parseQtyValue(sum + parseQtyValue(row.qty_issued || 0), 0), 0);
+    if (allocatedQty < num(line.qty_requested)) {
+      throw new Error(`Cannot issue ${line.item_code}; not enough warehouse/location inventory is available.`);
+    }
+    lineAllocations.set(Number(line.requisition_line_id), allocations);
+    let qtyToReserve = parseQtyValue(line.qty_requested || 0);
+    const currentLocationRows = inventoryMap.get(buildInventoryIssueKey(line)) || [];
+    for (const location of currentLocationRows) {
+      if (qtyToReserve <= 0) break;
+      const availableQty = parseQtyValue(location.qty_available || 0);
+      if (availableQty <= 0) continue;
+      const consumed = Math.min(availableQty, qtyToReserve);
+      location.qty_available = parseQtyValue(availableQty - consumed, 0);
+      qtyToReserve = parseQtyValue(qtyToReserve - consumed, 0);
+    }
+  }
+  await client.query("delete from material_issue_transactions where requisition_id = $1 and job_id = $2", [requisitionId, jobId]);
+  for (const line of lines) {
+    await client.query(`
+      update bom_lines
+      set qty_issued = qty_issued + $2,
+          planning_status = case
+            when qty_issued + $2 >= qty_required then 'ISSUED_TO_FIELD'
+            else planning_status
+          end,
+          updated_at = now()
+      where id = $1 and job_id = $3
+    `, [line.bom_line_id, line.qty_requested, jobId]);
+    await client.query(`
+      update material_requisition_lines
+      set qty_issued = qty_requested
+      where id = $1 and job_id = $2
+    `, [line.requisition_line_id, jobId]);
+    const allocations = lineAllocations.get(Number(line.requisition_line_id)) || [];
+    for (const allocation of allocations) {
+      await client.query(`
+        insert into material_issue_transactions (job_id, requisition_id, requisition_line_id, warehouse, location, qty_issued, created_by)
+        values ($1, $2, $3, $4, $5, $6, $7)
+      `, [jobId, requisitionId, line.requisition_line_id, allocation.warehouse, allocation.location, allocation.qty_issued, userId || null]);
+    }
+  }
+  await client.query(`
+    update material_requisitions
+    set status = 'ISSUED',
+        issued_at = now(),
+        issued_by_user_id = $2
+    where id = $1 and job_id = $3
+  `, [requisitionId, userId, jobId]);
+  await auditLog(client, userId, "issue", "material_requisition", requisitionId, header.requisition_no);
+  return header;
+}
+
 app.post("/requisitions/:id/issue", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
-    if (!header) throw new Error("Requisition not found.");
-    if (header.status !== "VERIFIED") throw new Error("Requisition must be verified before issue.");
-    const currentRows = await getCurrentOnHandRows(client, { jobId });
-    const inventoryMap = new Map();
-    for (const row of currentRows) {
-      const key = buildInventoryIssueKey(row);
-      if (!inventoryMap.has(key)) inventoryMap.set(key, []);
-      inventoryMap.get(key).push({
-        warehouse: row.warehouse,
-        location: row.location,
-        qty_available: parseQtyValue(row.qty_on_hand || 0)
-      });
-    }
-    const lines = (await client.query(`
-      select
-        mrl.id as requisition_line_id,
-        mrl.qty_requested,
-        bl.id as bom_line_id,
-        bl.item_code,
-        coalesce(bl.size_1, '') as size_1,
-        coalesce(bl.size_2, '') as size_2,
-        coalesce(bl.thk_1, '') as thk_1,
-        coalesce(bl.thk_2, '') as thk_2,
-        bl.qty_required,
-        bl.qty_issued
-      from material_requisition_lines mrl
-      join bom_lines bl on bl.id = mrl.bom_line_id
-      where mrl.requisition_id = $1 and mrl.job_id = $2
-      order by bl.line_no, bl.id
-    `, [req.params.id, jobId])).rows;
-    const currentReqAllocMap = new Map();
-    for (const line of lines) {
-      const key = buildInventoryIssueKey(line);
-      currentReqAllocMap.set(key, parseQtyValue(currentReqAllocMap.get(key) || 0) + parseQtyValue(line.qty_requested || 0));
-    }
-    const availableTotalsMap = await getAvailableInventoryTotalsMap(client, jobId, { allocatedOffsetMap: currentReqAllocMap });
-    if (lines.length === 0) throw new Error("No requisition lines found.");
-    const lineAllocations = new Map();
-    for (const line of lines) {
-      const qtyAvailable = parseQtyValue(availableTotalsMap.get(buildInventoryIssueKey(line)) || 0, 0);
-      if (num(line.qty_requested) > qtyAvailable) {
-        throw new Error(`Cannot issue ${line.item_code}; requested qty exceeds available stock.`);
-      }
-      const locationRows = (inventoryMap.get(buildInventoryIssueKey(line)) || []).map((row) => ({ ...row }));
-      const allocations = buildPickLocationAllocations(locationRows, line.qty_requested);
-      const allocatedQty = allocations.reduce((sum, row) => parseQtyValue(sum + parseQtyValue(row.qty_issued || 0), 0), 0);
-      if (allocatedQty < num(line.qty_requested)) {
-        throw new Error(`Cannot issue ${line.item_code}; not enough warehouse/location inventory is available.`);
-      }
-      lineAllocations.set(Number(line.requisition_line_id), allocations);
-      let qtyToReserve = parseQtyValue(line.qty_requested || 0);
-      const currentLocationRows = inventoryMap.get(buildInventoryIssueKey(line)) || [];
-      for (const location of currentLocationRows) {
-        if (qtyToReserve <= 0) break;
-        const availableQty = parseQtyValue(location.qty_available || 0);
-        if (availableQty <= 0) continue;
-        const consumed = Math.min(availableQty, qtyToReserve);
-        location.qty_available = parseQtyValue(availableQty - consumed, 0);
-        qtyToReserve = parseQtyValue(qtyToReserve - consumed, 0);
-      }
-    }
-    await client.query("delete from material_issue_transactions where requisition_id = $1 and job_id = $2", [req.params.id, jobId]);
-    for (const line of lines) {
-      await client.query(`
-        update bom_lines
-        set qty_issued = qty_issued + $2,
-            planning_status = case
-              when qty_issued + $2 >= qty_required then 'ISSUED_TO_FIELD'
-              else planning_status
-            end,
-            updated_at = now()
-        where id = $1 and job_id = $3
-      `, [line.bom_line_id, line.qty_requested, jobId]);
-      await client.query(`
-        update material_requisition_lines
-        set qty_issued = qty_requested
-        where id = $1 and job_id = $2
-      `, [line.requisition_line_id, jobId]);
-      const allocations = lineAllocations.get(Number(line.requisition_line_id)) || [];
-      for (const allocation of allocations) {
-        await client.query(`
-          insert into material_issue_transactions (job_id, requisition_id, requisition_line_id, warehouse, location, qty_issued, created_by)
-          values ($1, $2, $3, $4, $5, $6, $7)
-        `, [jobId, req.params.id, line.requisition_line_id, allocation.warehouse, allocation.location, allocation.qty_issued, req.user.id || null]);
-      }
-    }
-    await client.query(`
-      update material_requisitions
-      set status = 'ISSUED',
-          issued_at = now(),
-          issued_by_user_id = $2
-      where id = $1 and job_id = $3
-    `, [req.params.id, req.user.id, jobId]);
-    await auditLog(client, req.user.id, "issue", "material_requisition", req.params.id, header.requisition_no);
+    await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
