@@ -6084,7 +6084,7 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
          and alloc.thk_1 = coalesce(bl.thk_1, '')
          and alloc.thk_2 = coalesce(bl.thk_2, '')
         where bl.id = $1 and bl.bom_id = $2
-      `, [lineId, bomId])).rows[0];
+      `, [lineId, bomId, jobId])).rows[0];
       if (!line) continue;
       const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
       if (qtyRequested <= 0 || qtyRequested > remaining) {
