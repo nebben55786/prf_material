@@ -7718,7 +7718,13 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
             else planning_status
           end,
           updated_at = now()
-      where id = $1 and job_id = $3
+      where id = $1
+        and exists (
+          select 1
+          from bom_headers bh
+          where bh.id = bom_lines.bom_id
+            and bh.job_id = $3
+        )
     `, [line.bom_line_id, line.qty_requested, jobId]);
     await client.query(`
       update material_requisition_lines
@@ -7778,7 +7784,13 @@ app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePerm
         set qty_issued = $2,
             planning_status = $3,
             updated_at = now()
-        where id = $1 and job_id = $4
+        where id = $1
+          and exists (
+            select 1
+            from bom_headers bh
+            where bh.id = bom_lines.bom_id
+              and bh.job_id = $4
+          )
       `, [line.bom_line_id, nextIssued, nextStatus, jobId]);
     }
       await client.query(`delete from material_issue_transactions where requisition_id = $1 and job_id = $2`, [req.params.id, jobId]);
