@@ -6792,15 +6792,12 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(line.iwp_no || "")}</td>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
-      <td>${esc(line.material_type)}</td>
       <td>${esc(formatQtyDisplay(line.qty_required))}</td>
       <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
       <td>${esc(formatQtyDisplay(line.qty_remaining))}</td>
       <td>${esc(formatQtyDisplay(line.qty_available))}</td>
       <td><input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(stagedSelection[String(line.id)] ?? Math.min(num(line.qty_remaining), num(line.qty_available))))}" /></td>
       <td>${esc(line.uom)}</td>
-      <td>${esc(line.spec || "")}</td>
-      <td>${esc(line.commodity_code || "")}</td>
       <td>${esc(line.tag_number || "")}</td>
       <td>${esc(line.size_1 || "")}</td>
       <td>${esc(line.size_2 || "")}</td>
@@ -6871,16 +6868,13 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:150px" />
                 <col style="width:100px" />
                 <col style="width:100px" />
-                <col style="width:320px" />
-                <col style="width:72px" />
+                <col style="width:360px" />
                 <col style="width:72px" />
                 <col style="width:72px" />
                 <col style="width:84px" />
                 <col style="width:84px" />
                 <col style="width:90px" />
-                <col style="width:80px" />
-                <col style="width:100px" />
-                <col style="width:120px" />
+                <col style="width:56px" />
                 <col style="width:110px" />
                 <col style="width:80px" />
                 <col style="width:80px" />
@@ -6897,15 +6891,12 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="nowrap" data-resizable="true">IWP</th>
                 <th class="nowrap" data-resizable="true">Item</th>
                 <th class="wrap" data-resizable="true">Description</th>
-                <th class="nowrap" data-resizable="true">Type</th>
                 <th class="nowrap" data-resizable="true">Req Qty</th>
                 <th class="nowrap" data-resizable="true">Issued</th>
                 <th class="nowrap" data-resizable="true">Remaining</th>
                 <th class="nowrap" data-resizable="true">Available</th>
                 <th class="nowrap" data-resizable="true">Request</th>
                 <th class="nowrap" data-resizable="true">UOM</th>
-                <th class="nowrap" data-resizable="true">Spec</th>
-                <th class="wrap" data-resizable="true">Commodity Code</th>
                 <th class="wrap" data-resizable="true">Tag Number</th>
                 <th class="nowrap" data-resizable="true">Size 1</th>
                 <th class="nowrap" data-resizable="true">Size 2</th>
@@ -6917,7 +6908,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               </tr>
               </thead>
               <tbody>
-              ${lineRows || `<tr><td colspan="22" class="muted">No BOM lines match the current filter.</td></tr>`}
+              ${lineRows || `<tr><td colspan="19" class="muted">No BOM lines match the current filter.</td></tr>`}
               </tbody>
             </table>
           </div>
