@@ -6848,7 +6848,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           </div>
           <style>
             body .shell {
-              max-width: calc(100vw - 24px);
+              max-width: calc(90vw - 24px);
             }
             #requisition-builder-scroll {
               max-height: calc(100vh - 240px);
