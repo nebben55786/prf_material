@@ -228,13 +228,13 @@ function formatShortDate(value) {
   const text = String(value || "").trim();
   if (!text) return "";
   const match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (match) return `${match[3]}-${match[2]}-${match[1]}`;
+  if (match) return `${match[2]}-${match[3]}-${match[1]}`;
   const parsed = new Date(text);
   if (!Number.isNaN(parsed.getTime())) {
     const day = String(parsed.getDate()).padStart(2, "0");
     const month = String(parsed.getMonth() + 1).padStart(2, "0");
     const year = String(parsed.getFullYear());
-    return `${day}-${month}-${year}`;
+    return `${month}-${day}-${year}`;
   }
   return text;
 }
@@ -245,7 +245,7 @@ function formatShortDateTime(value) {
   if (!text) return "";
   const match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2}))?/);
   if (match) {
-    const dateText = `${match[3]}-${match[2]}-${match[1]}`;
+    const dateText = `${match[2]}-${match[3]}-${match[1]}`;
     return match[4] && match[5] ? `${dateText} ${match[4]}:${match[5]}` : dateText;
   }
   const parsed = new Date(text);
@@ -256,7 +256,7 @@ function formatShortDateTime(value) {
     const hours = String(parsed.getHours()).padStart(2, "0");
     const minutes = String(parsed.getMinutes()).padStart(2, "0");
     const hasTime = parsed.getHours() !== 0 || parsed.getMinutes() !== 0 || /[T\s]\d{1,2}:\d{2}/.test(text);
-    return hasTime ? `${day}-${month}-${year} ${hours}:${minutes}` : `${day}-${month}-${year}`;
+    return hasTime ? `${month}-${day}-${year} ${hours}:${minutes}` : `${month}-${day}-${year}`;
   }
   return text;
 }

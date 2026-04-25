@@ -191,9 +191,9 @@ def format_display_date(value):
     try:
         if len(text) >= 19:
             parsed = datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
-            return parsed.strftime("%d-%m-%Y %H:%M")
+            return parsed.strftime("%m-%d-%Y %H:%M")
         parsed = datetime.strptime(text[:10], "%Y-%m-%d")
-        return parsed.strftime("%d-%m-%Y")
+        return parsed.strftime("%m-%d-%Y")
     except ValueError:
         return text
 
