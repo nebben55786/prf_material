@@ -7235,7 +7235,7 @@ app.post("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermis
       await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
     }
   });
-  res.redirect(`/requisitions/${req.params.id}`);
+  res.redirect("/requisitions");
 }));
 
 app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), upload.single("signed_copy"), asyncHandler(async (req, res) => {
@@ -7266,7 +7266,7 @@ app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requir
       await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
     }
   });
-  res.redirect(`/requisitions/${req.params.id}`);
+  res.redirect("/requisitions");
 }));
 
 app.get("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
