@@ -6850,6 +6850,9 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
             <button type="submit">Create Material Requisition</button>
           </div>
           <style>
+            body .shell {
+              max-width: calc(100vw - 24px);
+            }
             #requisition-builder-scroll {
               max-height: calc(100vh - 240px);
               overflow: auto;
@@ -6865,27 +6868,27 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
             <table id="requisition-builder-table" class="data-grid">
               <colgroup>
                 <col style="width:80px" />
-                <col style="width:170px" />
-                <col style="width:120px" />
-                <col style="width:120px" />
-                <col style="width:380px" />
-                <col style="width:90px" />
-                <col style="width:90px" />
-                <col style="width:90px" />
+                <col style="width:150px" />
                 <col style="width:100px" />
                 <col style="width:100px" />
+                <col style="width:320px" />
+                <col style="width:72px" />
+                <col style="width:72px" />
+                <col style="width:72px" />
+                <col style="width:84px" />
+                <col style="width:84px" />
+                <col style="width:90px" />
+                <col style="width:80px" />
+                <col style="width:100px" />
+                <col style="width:120px" />
                 <col style="width:110px" />
                 <col style="width:80px" />
+                <col style="width:80px" />
+                <col style="width:80px" />
+                <col style="width:80px" />
+                <col style="width:150px" />
+                <col style="width:100px" />
                 <col style="width:120px" />
-                <col style="width:140px" />
-                <col style="width:130px" />
-                <col style="width:80px" />
-                <col style="width:80px" />
-                <col style="width:80px" />
-                <col style="width:80px" />
-                <col style="width:180px" />
-                <col style="width:120px" />
-                <col style="width:140px" />
               </colgroup>
               <thead>
               <tr>
