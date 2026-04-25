@@ -788,8 +788,8 @@ function buildPickTicketPdf(header, lines) {
     }
 
     const tableTop = meta2Top - (header.notes ? 40 : 14);
-    const widths = [126, 96, 254, 50, 40, 170];
-    const headers = ["LINE", "ITEM", "DESCRIPTION", "QTY", "UOM", "LOCATION"];
+    const widths = [116, 344, 58, 46, 200];
+    const headers = ["ITEM", "DESCRIPTION", "QTY", "UOM", "LOCATION"];
     let x = left;
     content.push(rect(left, tableTop - rowHeight, right - left, rowHeight));
     for (let i = 0; i < widths.length; i += 1) {
@@ -803,10 +803,9 @@ function buildPickTicketPdf(header, lines) {
     for (const item of pageLines) {
       content.push(rect(left, y - rowHeight, right - left, rowHeight));
       let cellX = left;
-      const wrappedDescription = wrapPdfText(item.description, 36);
-      const wrappedLocation = wrapPdfText(item.pick_location || "", 22);
+      const wrappedDescription = wrapPdfText(item.description, 50);
+      const wrappedLocation = wrapPdfText(item.pick_location || "", 26);
       const rowValues = [
-        item.line_no || "",
         item.item_code || "",
         wrappedDescription[0] || "",
         formatQtyDisplay(item.qty_requested),
@@ -816,14 +815,15 @@ function buildPickTicketPdf(header, lines) {
       for (let i = 0; i < widths.length; i += 1) {
         const value = rowValues[i];
         const textX = i === 3 ? cellX + widths[i] - 24 : cellX + 4;
-        content.push(makeText(textX, y - 15, value, "F1", 8));
+        const qtyTextX = i === 2 ? cellX + widths[i] - 24 : textX;
+        content.push(makeText(i === 2 ? qtyTextX : textX, y - 15, value, "F1", 8));
         cellX += widths[i];
       }
       if (wrappedDescription[1]) {
-        content.push(makeText(left + widths[0] + widths[1] + 4, y - 21, wrappedDescription[1], "F1", 7));
+        content.push(makeText(left + widths[0] + 4, y - 21, wrappedDescription[1], "F1", 7));
       }
       if (wrappedLocation[1]) {
-        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + widths[4] + 4, y - 21, wrappedLocation[1], "F1", 7));
+        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + 4, y - 21, wrappedLocation[1], "F1", 7));
       }
       y -= rowHeight;
     }
@@ -7346,7 +7346,36 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, req
     }
   }
 
-  const printableLines = lines.map((line) => {
+  const groupedLines = [];
+  const groupedLineMap = new Map();
+  for (const line of lines) {
+    const groupKey = [
+      line.item_code || "",
+      line.description || "",
+      line.uom || "",
+      line.size_1 || "",
+      line.size_2 || "",
+      line.thk_1 || "",
+      line.thk_2 || ""
+    ].join("|");
+    if (!groupedLineMap.has(groupKey)) {
+      const grouped = {
+        item_code: line.item_code || "",
+        description: line.description || "",
+        uom: line.uom || "",
+        size_1: line.size_1 || "",
+        size_2: line.size_2 || "",
+        thk_1: line.thk_1 || "",
+        thk_2: line.thk_2 || "",
+        qty_requested: 0
+      };
+      groupedLineMap.set(groupKey, grouped);
+      groupedLines.push(grouped);
+    }
+    groupedLineMap.get(groupKey).qty_requested += Number(line.qty_requested || 0);
+  }
+
+  const printableLines = groupedLines.map((line) => {
     const key = [line.item_code, line.size_1, line.size_2, line.thk_1, line.thk_2].join("|");
     const locationRows = inventoryMap.get(key) || [];
     const pickLocation = buildPickLocationPlan(locationRows, line.qty_requested);
