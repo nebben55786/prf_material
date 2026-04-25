@@ -748,9 +748,9 @@ function buildPickTicketPdf(header, lines) {
   const left = 28;
   const right = pageWidth - 28;
   const top = pageHeight - 24;
-  const rowHeight = 24;
-  const maxRowsFirstPage = 14;
-  const maxRowsOtherPages = 17;
+  const rowHeight = 30;
+  const maxRowsFirstPage = 11;
+  const maxRowsOtherPages = 14;
   const chunks = [];
   let cursor = 0;
   while (cursor < lines.length || !chunks.length) {
@@ -823,14 +823,16 @@ function buildPickTicketPdf(header, lines) {
         const value = rowValues[i];
         const textX = i === 3 ? cellX + widths[i] - 24 : cellX + 4;
         const qtyTextX = i === 2 ? cellX + widths[i] - 24 : textX;
-        content.push(makeText(i === 2 ? qtyTextX : textX, y - 15, value, "F1", 8));
+        const wrappedCell = (i === 1 && wrappedDescription[1]) || (i === 4 && wrappedLocation[1]);
+        const textY = wrappedCell ? y - 11 : y - 15;
+        content.push(makeText(i === 2 ? qtyTextX : textX, textY, value, "F1", 8));
         cellX += widths[i];
       }
       if (wrappedDescription[1]) {
-        content.push(makeText(left + widths[0] + 4, y - 21, wrappedDescription[1], "F1", 8));
+        content.push(makeText(left + widths[0] + 4, y - 26, wrappedDescription[1], "F1", 8));
       }
       if (wrappedLocation[1]) {
-        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + 4, y - 21, wrappedLocation[1], "F1", 8));
+        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + 4, y - 26, wrappedLocation[1], "F1", 8));
       }
       y -= rowHeight;
     }
