@@ -184,6 +184,20 @@ def now_iso():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def format_display_date(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        if len(text) >= 19:
+            parsed = datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
+            return parsed.strftime("%d-%m-%Y %H:%M")
+        parsed = datetime.strptime(text[:10], "%Y-%m-%d")
+        return parsed.strftime("%d-%m-%Y")
+    except ValueError:
+        return text
+
+
 def _xlsx_col_to_index(cell_ref):
     letters = ""
     for ch in cell_ref:
@@ -964,7 +978,7 @@ class App(BaseHTTPRequestHandler):
         c = conn(); cur = c.cursor()
         cur.execute("SELECT * FROM rfqs ORDER BY id DESC")
         rows = cur.fetchall(); c.close()
-        trs = "".join([f"<tr><td><a href='/rfq/{r['id']}'>{r['rfq_no']}</a></td><td>{r['project_name']}</td><td>{r['due_date'] or ''}</td><td>{r['status']}</td></tr>" for r in rows])
+        trs = "".join([f"<tr><td><a href='/rfq/{r['id']}'>{r['rfq_no']}</a></td><td>{r['project_name']}</td><td>{format_display_date(r['due_date'])}</td><td>{r['status']}</td></tr>" for r in rows])
         body = f"""
         <h2>RFQs</h2>
         <div class='card'>
@@ -1302,7 +1316,7 @@ class App(BaseHTTPRequestHandler):
             blocks += f"""
             <div class='card'>
               <h3>{p['po_no']} - {p['vendor']}</h3>
-              <div class='muted'>RFQ: {p['rfq_no'] or 'N/A'} | Status: {p['status']} | Created: {p['created_at']}</div>
+              <div class='muted'>RFQ: {p['rfq_no'] or 'N/A'} | Status: {p['status']} | Created: {format_display_date(p['created_at'])}</div>
               <div class='actions' style='margin:8px 0 12px 0;'>
                 <a class='btn btn-secondary' href='/po/{p["id"]}/edit'>Edit PO</a>
                 <form method='post' action='/po/delete' onsubmit="return confirm('Delete this PO and all related receiving records?');">
@@ -1364,7 +1378,7 @@ class App(BaseHTTPRequestHandler):
         body = f"""
         <h2>Edit PO</h2>
         <div class='card'>
-          <div class='muted'>RFQ: {po['rfq_no'] or 'N/A'} | Created: {po['created_at']}</div>
+          <div class='muted'>RFQ: {po['rfq_no'] or 'N/A'} | Created: {format_display_date(po['created_at'])}</div>
           <form method='post' action='/po/update'>
             <input type='hidden' name='po_id' value='{po['id']}' />
             <input type='hidden' name='updated_at' value='{po['updated_at']}' />
@@ -1490,7 +1504,7 @@ class App(BaseHTTPRequestHandler):
             tuple(params)
         )
         recs = cur.fetchall(); c.close()
-        rows = "".join([f"<tr><td>{x['received_at']}</td><td>{x['po_no']}</td><td>{x['item_code']}</td><td>{x['size_1']}</td><td>{x['size_2']}</td><td>{x['thk_1']}</td><td>{x['thk_2']}</td><td>{x['qty_received']}</td><td>{x['warehouse']}</td><td>{x['location']}</td><td>{x['osd_status']}</td><td>{x['osd_notes'] or ''}</td></tr>" for x in recs])
+        rows = "".join([f"<tr><td>{format_display_date(x['received_at'])}</td><td>{x['po_no']}</td><td>{x['item_code']}</td><td>{x['size_1']}</td><td>{x['size_2']}</td><td>{x['thk_1']}</td><td>{x['thk_2']}</td><td>{x['qty_received']}</td><td>{x['warehouse']}</td><td>{x['location']}</td><td>{x['osd_status']}</td><td>{x['osd_notes'] or ''}</td></tr>" for x in recs])
         body = f"""
         <h2>Receiving</h2>
         <div class='card'>
