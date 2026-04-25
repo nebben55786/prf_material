@@ -709,7 +709,7 @@ function buildPickLocationPlan(locationRows, qtyRequested) {
     const qtyAvailable = Number(row.qty_available || 0);
     if (qtyAvailable <= 0) continue;
     const qtyPulled = Math.min(qtyNeeded, qtyAvailable);
-    plan.push(`${row.warehouse}/${row.location} (${qtyPulled})`);
+    plan.push(`${row.warehouse}/${row.location}`);
     qtyNeeded -= qtyPulled;
   }
   if (!plan.length) return "No inventory location";
