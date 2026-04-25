@@ -3448,7 +3448,7 @@ const requireAuth = asyncHandler(async (req, res, next) => {
     return;
   }
   const user = (await query(`
-    select id, username, role, is_active
+    select id, username, first_name, last_name, role, is_active
     from users
     where id = $1
   `, [sessionUser.id])).rows[0];
@@ -3523,6 +3523,12 @@ function requireInventoryAuditEdit(req, res, next) {
 function canEditRequisition(user, header) {
   if (!user || !header) return false;
   return header.status === "REQUESTED" && canAccess(user, "requisitions", "edit");
+}
+
+function getUserDisplayName(user) {
+  const first = String(user?.first_name || "").trim();
+  const last = String(user?.last_name || "").trim();
+  return [first, last].filter(Boolean).join(" ").trim() || String(user?.username || "").trim();
 }
 
 function canSignRequisition(user, header) {
@@ -5870,7 +5876,7 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
         insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, iwp_no, iso_no, status, notes)
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         returning id
-    `, [jobId, requisitionNo, bomId, req.user.id, String(req.body.requested_by_name || req.user.username).trim(), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
+    `, [jobId, requisitionNo, bomId, req.user.id, getUserDisplayName(req.user), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
       let createdLineCount = 0;
     for (const lineId of selectedLineIds) {
       const qtyRequested = selectedLineQtys.get(lineId);
@@ -6687,7 +6693,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         <form method="post" action="/bom/${selectedBom.id}/requisitions" class="stack" id="requisition-create-form">
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid">
-            <div><label>Requested By</label><input name="requested_by_name" value="${esc(req.user.username)}" required /></div>
+            <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
             <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
           </div>
           <div><label>Notes</label><input name="notes" /></div>
@@ -7054,15 +7060,31 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
 
 app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
-  const header = (await query(`
-    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
-    from material_requisitions mr
-    join bom_headers bh on bh.id = mr.bom_id
-    where mr.id = $1 and mr.job_id = $2
-  `, [req.params.id, jobId])).rows[0];
+  const [header, requesterNameRows] = await Promise.all([
+    query(`
+      select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
+      from material_requisitions mr
+      join bom_headers bh on bh.id = mr.bom_id
+      where mr.id = $1 and mr.job_id = $2
+    `, [req.params.id, jobId]).then((result) => result.rows[0]),
+    query(`
+      select distinct requested_by_name
+      from material_requisitions
+      where job_id = $1
+        and coalesce(requested_by_name, '') <> ''
+      order by requested_by_name
+    `, [jobId]).then((result) => result.rows)
+  ]);
   if (!header) throw new Error("Requisition not found.");
   if (!canSignRequisition(req.user, header)) throw new Error("Only verified or issued requisitions can be signed.");
-  const defaultSigner = String(header.signed_by_name || req.user.username || "").trim();
+  const signerNames = Array.from(new Set([
+    ...requesterNameRows.map((row) => String(row.requested_by_name || "").trim()).filter(Boolean),
+    String(header.signed_by_name || "").trim(),
+    String(header.requested_by_name || "").trim(),
+    getUserDisplayName(req.user)
+  ].filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const defaultSigner = String(header.signed_by_name || header.requested_by_name || getUserDisplayName(req.user)).trim();
+  const signerOptionsHtml = signerNames.map((name) => `<option value="${esc(name)}" ${name === defaultSigner ? "selected" : ""}>${esc(name)}</option>`).join("");
   res.send(layout(`Sign ${header.requisition_no}`, `
     <h1>Sign Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
@@ -7077,7 +7099,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         <h3>Electronic Signature</h3>
         <p class="muted">This works well on iPads and touch screens.</p>
         <form method="post" action="/requisitions/${header.id}/sign" class="stack" onsubmit="return submitRequisitionSignature();">
-          <div><label>Signed By</label><input id="requisition-signed-by-name" name="signed_by_name" value="${esc(defaultSigner)}" required /></div>
+          <div><label>Signed By</label><select id="requisition-signed-by-name" name="signed_by_name" required>${signerOptionsHtml}</select></div>
           <input type="hidden" id="requisition-signature-data" name="signature_data" />
           <div>
             <label>Draw Signature</label>
@@ -7096,7 +7118,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         <h3>Signed Paper Copy</h3>
         <p class="muted">Upload a photo, scan, or PDF of a physically signed pick ticket.</p>
         <form method="post" action="/requisitions/${header.id}/signed-copy" enctype="multipart/form-data" class="stack">
-          <div><label>Signed By</label><input name="signed_by_name" value="${esc(defaultSigner)}" required /></div>
+          <div><label>Signed By</label><select name="signed_by_name" required>${signerOptionsHtml}</select></div>
           <div><label>Signed Copy File</label><input type="file" name="signed_copy" accept=".pdf,image/png,image/jpeg,image/jpg" required /></div>
           <div class="actions">
             <button type="submit">${header.signed_copy_filename ? "Replace Uploaded Copy" : "Upload Signed Copy"}</button>
@@ -7511,7 +7533,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
       <p class="muted">BOM: ${esc(header.bom_name || header.bom_description || header.bom_no)} | BOM #: ${esc(header.bom_no)} | Status: ${esc(header.status)}</p>
       <form method="post" action="/requisitions/${header.id}/edit" class="stack">
         <div class="grid">
-          <div><label>Requested By</label><input name="requested_by_name" value="${esc(header.requested_by_name)}" required /></div>
+          <div><label>Requested By</label><input value="${esc(header.requested_by_name)}" readonly /></div>
           <div><label>IWP</label><input name="iwp_no" value="${esc(header.iwp_no || "")}" /></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(header.notes || "")}</textarea></div>
@@ -7533,7 +7555,7 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
       update material_requisitions
       set requested_by_name = $2, iwp_no = $3, notes = $4
       where id = $1 and job_id = $5
-    `, [req.params.id, String(req.body.requested_by_name || "").trim(), req.body.iwp_no || "", req.body.notes || "", jobId]);
+    `, [req.params.id, getUserDisplayName(req.user), req.body.iwp_no || "", req.body.notes || "", jobId]);
     const lines = (await client.query(`
       select
         mrl.id as requisition_line_id,
