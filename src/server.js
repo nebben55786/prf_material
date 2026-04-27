@@ -11940,64 +11940,113 @@ app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requir
     throw new Error("Selected BOM source was not found for the current job.");
   }
 
-  const reportRows = combinedMode
-    ? (await query(`
+  const reportParams = combinedMode ? [jobId] : [jobId, selectedBomId];
+  const reportRows = (await query(`
+    with bom_scope as (
+      select bl.*
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bh.job_id = $1
+        ${combinedMode ? "" : "and bl.bom_id = $2"}
+    ),
+    demand as (
+      select
+        coalesce(item_code, '') as item_code,
+        string_agg(distinct nullif(coalesce(description, ''), ''), ' | ' order by nullif(coalesce(description, ''), '')) as description,
+        string_agg(distinct nullif(coalesce(uom, ''), ''), ' | ' order by nullif(coalesce(uom, ''), '')) as uom,
+        string_agg(distinct nullif(coalesce(spec, ''), ''), ' | ' order by nullif(coalesce(spec, ''), '')) as spec,
+        string_agg(distinct nullif(coalesce(commodity_code, ''), ''), ' | ' order by nullif(coalesce(commodity_code, ''), '')) as commodity_code,
+        string_agg(distinct nullif(coalesce(tag_number, ''), ''), ' | ' order by nullif(coalesce(tag_number, ''), '')) as tag_number,
+        string_agg(distinct nullif(coalesce(size_1, ''), ''), ' | ' order by nullif(coalesce(size_1, ''), '')) as size_1,
+        string_agg(distinct nullif(coalesce(size_2, ''), ''), ' | ' order by nullif(coalesce(size_2, ''), '')) as size_2,
+        string_agg(distinct nullif(coalesce(thk_1, ''), ''), ' | ' order by nullif(coalesce(thk_1, ''), '')) as thk_1,
+        string_agg(distinct nullif(coalesce(thk_2, ''), ''), ' | ' order by nullif(coalesce(thk_2, ''), '')) as thk_2,
+        sum(coalesce(qty_required, 0)) as qty_required,
+        sum(coalesce(qty_ordered, 0)) as qty_ordered
+      from bom_scope
+      group by coalesce(item_code, '')
+    ),
+    available_by_variant as (
+      select
+        coalesce(inv.item_code, '') as item_code,
+        greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+      from (
+        ${getInventoryTotalsSubquery(jobId)}
+      ) inv
+      left join (
         select
-          coalesce(bl.item_code, '') as item_code,
-          coalesce(bl.description, '') as description,
-          coalesce(bl.uom, '') as uom,
-          coalesce(bl.spec, '') as spec,
-          coalesce(bl.commodity_code, '') as commodity_code,
-          coalesce(bl.tag_number, '') as tag_number,
-          coalesce(bl.size_1, '') as size_1,
-          coalesce(bl.size_2, '') as size_2,
-          coalesce(bl.thk_1, '') as thk_1,
-          coalesce(bl.thk_2, '') as thk_2,
-          sum(coalesce(bl.qty_required, 0)) as qty_required,
-          sum(coalesce(bl.qty_ordered, 0)) as qty_ordered,
-          greatest(sum(coalesce(bl.qty_required, 0)) - sum(coalesce(bl.qty_ordered, 0)), 0) as qty_to_purchase
-        from bom_lines bl
-        join bom_headers bh on bh.id = bl.bom_id
-        where bh.job_id = $1
+          bl_issued.item_code,
+          coalesce(bl_issued.size_1, '') as size_1,
+          coalesce(bl_issued.size_2, '') as size_2,
+          coalesce(bl_issued.thk_1, '') as thk_1,
+          coalesce(bl_issued.thk_2, '') as thk_2,
+          sum(bl_issued.qty_issued) as qty_issued_total
+        from bom_lines bl_issued
+        join bom_headers bh_issued on bh_issued.id = bl_issued.bom_id
+        where bh_issued.job_id = ${jobId}
         group by
-          coalesce(bl.item_code, ''),
-          coalesce(bl.description, ''),
-          coalesce(bl.uom, ''),
-          coalesce(bl.spec, ''),
-          coalesce(bl.commodity_code, ''),
-          coalesce(bl.tag_number, ''),
-          coalesce(bl.size_1, ''),
-          coalesce(bl.size_2, ''),
-          coalesce(bl.thk_1, ''),
-          coalesce(bl.thk_2, '')
-        having greatest(sum(coalesce(bl.qty_required, 0)) - sum(coalesce(bl.qty_ordered, 0)), 0) > 0
-        order by lower(coalesce(bl.item_code, '')), lower(coalesce(bl.description, ''))
-      `, [jobId])).rows
-    : (await query(`
+          bl_issued.item_code,
+          coalesce(bl_issued.size_1, ''),
+          coalesce(bl_issued.size_2, ''),
+          coalesce(bl_issued.thk_1, ''),
+          coalesce(bl_issued.thk_2, '')
+      ) issued
+        on issued.item_code = inv.item_code
+       and issued.size_1 = coalesce(inv.size_1, '')
+       and issued.size_2 = coalesce(inv.size_2, '')
+       and issued.thk_1 = coalesce(inv.thk_1, '')
+       and issued.thk_2 = coalesce(inv.thk_2, '')
+      left join (
         select
-          coalesce(bl.item_code, '') as item_code,
-          coalesce(bl.description, '') as description,
-          coalesce(bl.uom, '') as uom,
-          coalesce(bl.spec, '') as spec,
-          coalesce(bl.commodity_code, '') as commodity_code,
-          coalesce(bl.tag_number, '') as tag_number,
-          coalesce(bl.size_1, '') as size_1,
-          coalesce(bl.size_2, '') as size_2,
-          coalesce(bl.thk_1, '') as thk_1,
-          coalesce(bl.thk_2, '') as thk_2,
-          coalesce(bl.qty_required, 0) as qty_required,
-          coalesce(bl.qty_ordered, 0) as qty_ordered,
-          greatest(coalesce(bl.qty_required, 0) - coalesce(bl.qty_ordered, 0), 0) as qty_to_purchase
-        from bom_lines bl
-        join bom_headers bh on bh.id = bl.bom_id
-        where bh.job_id = $1
-          and bl.bom_id = $2
-          and greatest(coalesce(bl.qty_required, 0) - coalesce(bl.qty_ordered, 0), 0) > 0
-        order by
-          case when coalesce(bl.line_no, '') = '' then 1 else 0 end,
-          case when coalesce(bl.line_no, '') ~ '^[0-9]+$' then lpad(bl.line_no, 20, '0') else lower(coalesce(bl.line_no, '')) end,
-          bl.id
-      `, [jobId, selectedBomId])).rows;
+          bl2.item_code,
+          coalesce(bl2.size_1, '') as size_1,
+          coalesce(bl2.size_2, '') as size_2,
+          coalesce(bl2.thk_1, '') as thk_1,
+          coalesce(bl2.thk_2, '') as thk_2,
+          sum(mrl2.qty_requested) as qty_allocated_total
+        from material_requisition_lines mrl2
+        join material_requisitions mr2 on mr2.id = mrl2.requisition_id
+        join bom_lines bl2 on bl2.id = mrl2.bom_line_id
+        where mr2.status = 'VERIFIED'
+          and mr2.job_id = ${jobId}
+        group by
+          bl2.item_code,
+          coalesce(bl2.size_1, ''),
+          coalesce(bl2.size_2, ''),
+          coalesce(bl2.thk_1, ''),
+          coalesce(bl2.thk_2, '')
+      ) alloc
+        on alloc.item_code = inv.item_code
+       and alloc.size_1 = coalesce(inv.size_1, '')
+       and alloc.size_2 = coalesce(inv.size_2, '')
+       and alloc.thk_1 = coalesce(inv.thk_1, '')
+       and alloc.thk_2 = coalesce(inv.thk_2, '')
+    ),
+    available_by_item as (
+      select coalesce(item_code, '') as item_code, sum(coalesce(qty_available, 0)) as qty_available
+      from available_by_variant
+      group by coalesce(item_code, '')
+    )
+    select
+      demand.item_code,
+      coalesce(demand.description, '') as description,
+      coalesce(demand.uom, '') as uom,
+      coalesce(demand.spec, '') as spec,
+      coalesce(demand.commodity_code, '') as commodity_code,
+      coalesce(demand.tag_number, '') as tag_number,
+      coalesce(demand.size_1, '') as size_1,
+      coalesce(demand.size_2, '') as size_2,
+      coalesce(demand.thk_1, '') as thk_1,
+      coalesce(demand.thk_2, '') as thk_2,
+      demand.qty_required,
+      demand.qty_ordered,
+      coalesce(available_by_item.qty_available, 0) as qty_available,
+      greatest(demand.qty_required - demand.qty_ordered - coalesce(available_by_item.qty_available, 0), 0) as qty_to_purchase
+    from demand
+    left join available_by_item on available_by_item.item_code = demand.item_code
+    where greatest(demand.qty_required - demand.qty_ordered - coalesce(available_by_item.qty_available, 0), 0) > 0
+    order by lower(demand.item_code), lower(coalesce(demand.description, ''))
+  `, reportParams)).rows;
 
   const sourceOptions = [
     `<option value="combined" ${combinedMode ? "selected" : ""}>Combined BOMs</option>`,
@@ -12020,6 +12069,7 @@ app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requir
     <td>${esc(row.thk_2 || "")}</td>
     <td>${esc(formatQtyDisplay(row.qty_required))}</td>
     <td>${esc(formatQtyDisplay(row.qty_ordered))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_available))}</td>
     <td>${esc(formatQtyDisplay(row.qty_to_purchase))}</td>
   </tr>`).join("");
 
@@ -12038,17 +12088,18 @@ app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requir
       </form>
     </div>
     <div class="card">
-      <div class="stats" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+      <div class="stats" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
         <div class="stat"><div>Source</div><strong style="font-size:16px;">${esc(sourceLabel)}</strong></div>
         <div class="stat"><div>Rows</div><strong>${esc(reportRows.length)}</strong></div>
+        <div class="stat"><div>Available</div><strong>${esc(formatQtyDisplay(reportRows.reduce((sum, row) => sum + num(row.qty_available), 0)))}</strong></div>
         <div class="stat"><div>Qty To Purchase</div><strong>${esc(formatQtyDisplay(reportRows.reduce((sum, row) => sum + num(row.qty_to_purchase), 0)))}</strong></div>
       </div>
-      ${combinedMode ? `<p class="muted" style="margin-top:10px;">Showing rolled-up material demand across all BOMs in the current job where ordered quantity is still short of required quantity.</p>` : `<p class="muted" style="margin-top:10px;">Showing BOM lines from <strong>${esc(sourceLabel)}</strong> where ordered quantity is still short of required quantity.</p>`}
+      ${combinedMode ? `<p class="muted" style="margin-top:10px;">Showing material rolled up by item code across all BOMs in the current job. Available material is deducted before calculating the buy quantity.</p>` : `<p class="muted" style="margin-top:10px;">Showing material rolled up by item code for <strong>${esc(sourceLabel)}</strong>. Available material is deducted before calculating the buy quantity.</p>`}
     </div>
     <div class="card scroll">
       <table>
-        <tr><th>Item Code</th><th>Description</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty Required</th><th>Qty Ordered</th><th>Qty To Purchase</th></tr>
-        ${tableRows || `<tr><td colspan="13" class="muted">No material currently needs to be purchased for the selected source.</td></tr>`}
+        <tr><th>Item Code</th><th>Description</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty Required</th><th>Qty Ordered</th><th>Available</th><th>Qty To Purchase</th></tr>
+        ${tableRows || `<tr><td colspan="14" class="muted">No material currently needs to be purchased for the selected source.</td></tr>`}
       </table>
     </div>
   `, req.user));
