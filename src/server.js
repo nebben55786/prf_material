@@ -148,6 +148,10 @@ function canEditInventoryAudit(user) {
   return user.role === "admin" || user.role === "warehouse" || canAccess(user, "inventory", "edit");
 }
 
+function canViewMaterialPurchaseReport(user) {
+  return ["admin", "buyer", "supervisor"].includes(String(user?.role || "").trim().toLowerCase());
+}
+
 function getAppHeaderTitle(user = null) {
   const activeJob = user?.activeJob || null;
   const parts = [];
@@ -11181,6 +11185,7 @@ app.get("/material-logs", requireAuth, requireJobContext, requirePermission("mat
         <a class="btn btn-primary" href="/material-logs/fmr">Vendor FMR Log</a>
         <a class="btn btn-primary" href="/material-logs/opi">OPI Log</a>
         <a class="btn btn-primary" href="/material-logs/issue-report">Issue Report</a>
+        ${canViewMaterialPurchaseReport(req.user) ? `<a class="btn btn-primary" href="/material-logs/purchase-report">Material Purchase Report</a>` : ""}
       </div>
     </div>
   `, req.user));
@@ -11909,6 +11914,145 @@ app.get("/material-logs/issue-report", requireAuth, requireJobContext, requirePe
     </div>
   `, req.user));
 });
+
+app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
+  if (!canViewMaterialPurchaseReport(req.user)) {
+    res.status(403).send(layout("Forbidden", `<div class="card error"><h3>Forbidden</h3><p>You do not have permission to view the Material Purchase Report.</p></div>`, req.user));
+    return;
+  }
+
+  const jobId = currentJobId(req);
+  const boms = (await query(`
+    select id, bom_no, bom_name, description
+    from bom_headers
+    where job_id = $1
+    order by
+      case when coalesce(bom_name, '') = '' then 1 else 0 end,
+      lower(coalesce(bom_name, description, bom_no, '')),
+      id desc
+  `, [jobId])).rows;
+
+  const requestedSource = String(req.query.source || "combined").trim() || "combined";
+  const combinedMode = requestedSource === "combined";
+  const selectedBomId = combinedMode ? null : Number(requestedSource);
+  const selectedBom = combinedMode ? null : boms.find((row) => Number(row.id) === selectedBomId);
+  if (!combinedMode && !selectedBom) {
+    throw new Error("Selected BOM source was not found for the current job.");
+  }
+
+  const reportRows = combinedMode
+    ? (await query(`
+        select
+          coalesce(bl.item_code, '') as item_code,
+          coalesce(bl.description, '') as description,
+          coalesce(bl.uom, '') as uom,
+          coalesce(bl.spec, '') as spec,
+          coalesce(bl.commodity_code, '') as commodity_code,
+          coalesce(bl.tag_number, '') as tag_number,
+          coalesce(bl.size_1, '') as size_1,
+          coalesce(bl.size_2, '') as size_2,
+          coalesce(bl.thk_1, '') as thk_1,
+          coalesce(bl.thk_2, '') as thk_2,
+          sum(coalesce(bl.qty_required, 0)) as qty_required,
+          sum(coalesce(bl.qty_ordered, 0)) as qty_ordered,
+          greatest(sum(coalesce(bl.qty_required, 0)) - sum(coalesce(bl.qty_ordered, 0)), 0) as qty_to_purchase
+        from bom_lines bl
+        join bom_headers bh on bh.id = bl.bom_id
+        where bh.job_id = $1
+        group by
+          coalesce(bl.item_code, ''),
+          coalesce(bl.description, ''),
+          coalesce(bl.uom, ''),
+          coalesce(bl.spec, ''),
+          coalesce(bl.commodity_code, ''),
+          coalesce(bl.tag_number, ''),
+          coalesce(bl.size_1, ''),
+          coalesce(bl.size_2, ''),
+          coalesce(bl.thk_1, ''),
+          coalesce(bl.thk_2, '')
+        having greatest(sum(coalesce(bl.qty_required, 0)) - sum(coalesce(bl.qty_ordered, 0)), 0) > 0
+        order by lower(coalesce(bl.item_code, '')), lower(coalesce(bl.description, ''))
+      `, [jobId])).rows
+    : (await query(`
+        select
+          coalesce(bl.item_code, '') as item_code,
+          coalesce(bl.description, '') as description,
+          coalesce(bl.uom, '') as uom,
+          coalesce(bl.spec, '') as spec,
+          coalesce(bl.commodity_code, '') as commodity_code,
+          coalesce(bl.tag_number, '') as tag_number,
+          coalesce(bl.size_1, '') as size_1,
+          coalesce(bl.size_2, '') as size_2,
+          coalesce(bl.thk_1, '') as thk_1,
+          coalesce(bl.thk_2, '') as thk_2,
+          coalesce(bl.qty_required, 0) as qty_required,
+          coalesce(bl.qty_ordered, 0) as qty_ordered,
+          greatest(coalesce(bl.qty_required, 0) - coalesce(bl.qty_ordered, 0), 0) as qty_to_purchase
+        from bom_lines bl
+        join bom_headers bh on bh.id = bl.bom_id
+        where bh.job_id = $1
+          and bl.bom_id = $2
+          and greatest(coalesce(bl.qty_required, 0) - coalesce(bl.qty_ordered, 0), 0) > 0
+        order by
+          case when coalesce(bl.line_no, '') = '' then 1 else 0 end,
+          case when coalesce(bl.line_no, '') ~ '^[0-9]+$' then lpad(bl.line_no, 20, '0') else lower(coalesce(bl.line_no, '')) end,
+          bl.id
+      `, [jobId, selectedBomId])).rows;
+
+  const sourceOptions = [
+    `<option value="combined" ${combinedMode ? "selected" : ""}>Combined BOMs</option>`,
+    ...boms.map((bom) => {
+      const label = [bom.bom_name || bom.description || bom.bom_no, bom.bom_no].filter(Boolean).join(" | ");
+      return `<option value="${bom.id}" ${Number(bom.id) === Number(selectedBomId) ? "selected" : ""}>${esc(label)}</option>`;
+    })
+  ].join("");
+
+  const tableRows = reportRows.map((row) => `<tr>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.uom)}</td>
+    <td>${esc(row.spec || "")}</td>
+    <td>${esc(row.commodity_code || "")}</td>
+    <td>${esc(row.tag_number || "")}</td>
+    <td>${esc(row.size_1 || "")}</td>
+    <td>${esc(row.size_2 || "")}</td>
+    <td>${esc(row.thk_1 || "")}</td>
+    <td>${esc(row.thk_2 || "")}</td>
+    <td>${esc(formatQtyDisplay(row.qty_required))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_ordered))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_to_purchase))}</td>
+  </tr>`).join("");
+
+  const sourceLabel = combinedMode
+    ? "Combined BOMs"
+    : [selectedBom.bom_name || selectedBom.description || selectedBom.bom_no, selectedBom.bom_no].filter(Boolean).join(" | ");
+
+  res.send(layout("Material Purchase Report", `
+    <h1>Material Purchase Report</h1>
+    <div class="card">
+      <form method="get" action="/material-logs/purchase-report" class="stack">
+        <div class="grid" style="grid-template-columns: minmax(0, 320px) auto;">
+          <div><label>Source</label><select name="source">${sourceOptions}</select></div>
+          <div style="align-self:end;"><button type="submit">Load Report</button></div>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <div class="stats" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+        <div class="stat"><div>Source</div><strong style="font-size:16px;">${esc(sourceLabel)}</strong></div>
+        <div class="stat"><div>Rows</div><strong>${esc(reportRows.length)}</strong></div>
+        <div class="stat"><div>Qty To Purchase</div><strong>${esc(formatQtyDisplay(reportRows.reduce((sum, row) => sum + num(row.qty_to_purchase), 0)))}</strong></div>
+      </div>
+      ${combinedMode ? `<p class="muted" style="margin-top:10px;">Showing rolled-up material demand across all BOMs in the current job where ordered quantity is still short of required quantity.</p>` : `<p class="muted" style="margin-top:10px;">Showing BOM lines from <strong>${esc(sourceLabel)}</strong> where ordered quantity is still short of required quantity.</p>`}
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Item Code</th><th>Description</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty Required</th><th>Qty Ordered</th><th>Qty To Purchase</th></tr>
+        ${tableRows || `<tr><td colspan="13" class="muted">No material currently needs to be purchased for the selected source.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+}));
 
 app.post("/material-logs/import", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), upload.single("sheet"), async (req, res) => {
   const jobId = currentJobId(req);
