@@ -1800,6 +1800,73 @@ function parseUploadedRows(file, pastedText) {
   });
 }
 
+function splitCombinedDimensionValue(value) {
+  const text = String(value || "").trim();
+  if (!text) return { primary: "", secondary: "" };
+  const parts = text
+    .replace(/×/g, "x")
+    .split(/\s*x\s*/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return {
+    primary: parts[0] || "",
+    secondary: parts.length > 1 ? parts.slice(1).join(" x ") : ""
+  };
+}
+
+function parseRfqPasteRows(pastedText) {
+  const text = String(pastedText || "").trim();
+  if (!text) return [];
+  const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  if (!lines.length) return [];
+  const delimiter = lines[0].includes("\t") ? "\t" : ",";
+  const firstValues = lines[0].split(delimiter).map((cell) => String(cell ?? "").trim());
+  const firstHeaders = firstValues.map((cell) => normalizeHeader(cell));
+  const aliases = {
+    item_code: new Set(["ident", "item_code", "item", "code", "item_no", "item_number"]),
+    description: new Set(["description", "desc", "material_description"]),
+    size: new Set(["size", "sizes"]),
+    thk: new Set(["thk", "thickness", "thick", "wall"]),
+    qty: new Set(["qty", "quantity"])
+  };
+  const hasHeader = firstHeaders.some((header) => aliases.item_code.has(header))
+    && firstHeaders.some((header) => aliases.qty.has(header));
+  const dataLines = hasHeader ? lines.slice(1) : lines;
+  const headerMap = hasHeader ? Object.fromEntries(firstHeaders.map((header, index) => [header, index])) : {};
+  return dataLines.map((line) => {
+    const values = line.split(delimiter).map((cell) => String(cell ?? "").trim());
+    const itemCode = hasHeader
+      ? values[headerMap.ident ?? headerMap.item_code ?? headerMap.item ?? headerMap.code ?? headerMap.item_no ?? headerMap.item_number ?? -1] || ""
+      : values[0] || "";
+    const description = hasHeader
+      ? values[headerMap.description ?? headerMap.desc ?? headerMap.material_description ?? -1] || ""
+      : values[1] || "";
+    const sizeText = hasHeader
+      ? values[headerMap.size ?? headerMap.sizes ?? -1] || ""
+      : values[2] || "";
+    const thkText = hasHeader
+      ? values[headerMap.thk ?? headerMap.thickness ?? headerMap.thick ?? headerMap.wall ?? -1] || ""
+      : values[3] || "";
+    const qty = hasHeader
+      ? values[headerMap.qty ?? headerMap.quantity ?? -1] || ""
+      : values[4] || "";
+    const size = splitCombinedDimensionValue(sizeText);
+    const thk = splitCombinedDimensionValue(thkText);
+    return {
+      item_code: itemCode,
+      description,
+      size_1: size.primary,
+      size_2: size.secondary,
+      thk_1: thk.primary,
+      thk_2: thk.secondary,
+      qty,
+      material_type: "misc",
+      uom: "EA"
+    };
+  }).filter((row) => String(row.item_code || "").trim() || String(row.description || "").trim() || String(row.qty || "").trim());
+}
+
 function normalizePoImportRow(row) {
   const aliases = {
     po_no: ["po_no", "po_number", "po", "po_", "purchase_order", "purchase_order_number"],
@@ -8583,6 +8650,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     <div class="actions">
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/existing">Add Existing</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/new">Add New</a>` : ""}
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Values</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Import Quotes</a>` : ""}
     </div>`;
   const awardSummaryCard = `
@@ -8885,6 +8953,130 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
           </table>
         </div>
         <div class="actions"><button type="submit">Save Grid Rows</button><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.get("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, currentJobId(req)])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  res.send(layout(`Paste RFQ Values`, `
+    <h1>Paste RFQ Values</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      <p class="muted">Paste columns in this order: <strong>Ident</strong>, <strong>Description</strong>, <strong>Size</strong>, <strong>Thk</strong>, <strong>Qty</strong>. Header row is optional. Tab-delimited spreadsheet paste works best. Thickness can be blank.</p>
+      <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
+        <div><label>Pasted Values</label><textarea name="paste_text" style="min-height:220px;" placeholder="IDENT\tDESCRIPTION\tSIZE\tTHK\tQTY"></textarea></div>
+        <div class="actions">
+          <button type="submit" name="paste_action" value="preview">Preview Paste</button>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
+        </div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+
+  const pasteAction = String(req.body.paste_action || "preview").trim();
+  let rows = [];
+  const payload = String(req.body.rows_payload || "").trim();
+  const pastedText = String(req.body.paste_text || "").trim();
+  if (payload) {
+    rows = JSON.parse(Buffer.from(payload, "base64").toString("utf8"));
+  } else {
+    rows = parseRfqPasteRows(pastedText);
+  }
+  if (!rows.length) throw new Error("Paste at least one RFQ value row first.");
+
+  const normalizedCodes = Array.from(new Set(rows.map((row) => String(row.item_code || "").trim().toLowerCase()).filter(Boolean)));
+  const existingCodeSet = new Set((await query(
+    "select lower(item_code) as item_code from material_items where job_id = $1 and lower(item_code) = any($2::text[])",
+    [jobId, normalizedCodes]
+  )).rows.map((row) => String(row.item_code || "").trim().toLowerCase()));
+  const matchedRows = rows.filter((row) => existingCodeSet.has(String(row.item_code || "").trim().toLowerCase()));
+  const unmatchedRows = rows.filter((row) => !existingCodeSet.has(String(row.item_code || "").trim().toLowerCase()));
+
+  if (pasteAction === "import_matched" || pasteAction === "import_all") {
+    const rowsToImport = pasteAction === "import_matched" ? matchedRows : rows;
+    if (!rowsToImport.length) {
+      throw new Error(pasteAction === "import_matched" ? "No pasted idents matched the current item list." : "No rows were available to import.");
+    }
+    const batchId = await withTransaction(async (client) => {
+      const batchId = await createImportBatch(client, {
+        entityType: "rfq_items",
+        rfqId,
+        uploadedBy: req.user.id,
+        filename: pasteAction === "import_all" ? "pasted-values-add-missing" : "pasted-values-matched-only",
+        jobId
+      });
+      let insertedCount = 0;
+      let updatedCount = 0;
+      let skippedCount = 0;
+      for (let index = 0; index < rowsToImport.length; index += 1) {
+        const result = await upsertRfqItemRow(client, rfqId, rowsToImport[index], jobId);
+        if (result.status === "inserted") insertedCount += 1;
+        else if (result.status === "updated") updatedCount += 1;
+        else {
+          skippedCount += 1;
+          await addImportBatchError(client, batchId, index + 1, result.errorCode, result.message, rowsToImport[index]);
+        }
+      }
+      await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+      await auditLog(client, req.user.id, pasteAction === "import_all" ? "paste_add_missing" : "paste_match_only", "rfq_items", rfqId, `rows=${rowsToImport.length};batch=${batchId}`);
+      return batchId;
+    });
+    res.redirect(`/imports/${batchId}`);
+    return;
+  }
+
+  const rowsPayload = Buffer.from(JSON.stringify(rows), "utf8").toString("base64");
+  const previewRows = rows.map((row) => {
+    const size = [row.size_1, row.size_2].filter(Boolean).join(" x ");
+    const thk = [row.thk_1, row.thk_2].filter(Boolean).join(" x ");
+    const matched = existingCodeSet.has(String(row.item_code || "").trim().toLowerCase());
+    return `<tr>
+      <td>${esc(row.item_code || "")}</td>
+      <td>${esc(row.description || "")}</td>
+      <td>${esc(size)}</td>
+      <td>${esc(thk)}</td>
+      <td>${esc(formatQtyDisplay(row.qty))}</td>
+      <td>${matched ? `<span class="chip">Match</span>` : `<span class="chip" style="background:#fff3cd;border-color:#f4d58d;color:#7a5a00;">New Item</span>`}</td>
+    </tr>`;
+  }).join("");
+
+  res.send(layout(`Paste RFQ Values`, `
+    <h1>Paste RFQ Values</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      <div class="stats" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+        <div class="stat"><div>Pasted Rows</div><strong>${rows.length}</strong></div>
+        <div class="stat"><div>Matched Idents</div><strong>${matchedRows.length}</strong></div>
+        <div class="stat"><div>Missing Idents</div><strong>${unmatchedRows.length}</strong></div>
+      </div>
+      ${unmatchedRows.length > 0 ? `<p class="muted" style="margin-top:10px;">${unmatchedRows.length} ident(s) are not on the current item list yet. Do you want to add them with the pasted description, size, thickness, and quantity values?</p>` : `<p class="muted" style="margin-top:10px;">All pasted idents already exist on the current item list.</p>`}
+    </div>
+    <div class="card scroll">
+      <table>
+        <thead><tr><th>Ident</th><th>Description</th><th>Size</th><th>Thk</th><th>Qty</th><th>Status</th></tr></thead>
+        <tbody>${previewRows}</tbody>
+      </table>
+    </div>
+    <div class="card">
+      <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
+        <input type="hidden" name="rows_payload" value="${esc(rowsPayload)}" />
+        <div class="actions">
+          ${matchedRows.length > 0 ? `<button type="submit" name="paste_action" value="import_matched">Import Matched Only</button>` : ""}
+          <button type="submit" name="paste_action" value="import_all">${unmatchedRows.length > 0 ? "Yes, Add Missing Items Too" : "Import Rows"}</button>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Again</a>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
+        </div>
       </form>
     </div>
   `, req.user));
