@@ -9366,9 +9366,9 @@ app.get("/imports/:id", requireAuth, requireJobContext, async (req, res) => {
   const errors = (await query(`
     select row_number, error_code, message, raw_payload
     from import_batch_errors
-    where batch_id = $1 and job_id = $2
+    where batch_id = $1
     order by row_number, id
-  `, [req.params.id, jobId])).rows;
+  `, [req.params.id])).rows;
   const errorRows = errors.length > 0
     ? errors.map((error) => `<tr><td>${error.row_number}</td><td>${esc(error.error_code)}</td><td>${esc(error.message)}</td><td><code>${esc(JSON.stringify(error.raw_payload))}</code></td></tr>`).join("")
     : `<tr><td colspan="4" class="muted">No row-level errors.</td></tr>`;
