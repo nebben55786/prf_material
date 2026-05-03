@@ -3733,17 +3733,17 @@ async function backfillRfqVendors(client, rfqId) {
   if (!rfq) return;
   await client.query(`
     insert into rfq_vendors (job_id, rfq_id, vendor_id)
-    select distinct $2, ri.rfq_id, q.vendor_id
+    select distinct $2::bigint, ri.rfq_id, q.vendor_id
     from rfq_items ri
     join quotes q on q.rfq_item_id = ri.id
-    where ri.rfq_id = $1 and ri.job_id = $2 and q.job_id = $2
+    where ri.rfq_id = $1 and ri.job_id = $2::bigint and q.job_id = $2::bigint
     on conflict (rfq_id, vendor_id) do nothing
   `, [rfqId, rfq.job_id]);
   await client.query(`
     insert into rfq_vendors (job_id, rfq_id, vendor_id)
-    select distinct $2, rfq_id, awarded_vendor_id
+    select distinct $2::bigint, rfq_id, awarded_vendor_id
     from rfq_items
-    where rfq_id = $1 and job_id = $2 and awarded_vendor_id is not null
+    where rfq_id = $1 and job_id = $2::bigint and awarded_vendor_id is not null
     on conflict (rfq_id, vendor_id) do nothing
   `, [rfqId, rfq.job_id]);
 }
