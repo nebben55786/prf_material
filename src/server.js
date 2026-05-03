@@ -1827,32 +1827,47 @@ function parseRfqPasteRows(pastedText) {
     item_code: new Set(["ident", "item_code", "item", "code", "item_no", "item_number"]),
     description: new Set(["description", "desc", "material_description"]),
     size: new Set(["size", "sizes"]),
+    size_1: new Set(["size_1", "size1", "primary_size"]),
+    size_2: new Set(["size_2", "size2", "secondary_size"]),
     thk: new Set(["thk", "thickness", "thick", "wall"]),
+    thk_1: new Set(["thk_1", "thk1", "thickness_1", "wall_1"]),
+    thk_2: new Set(["thk_2", "thk2", "thickness_2", "wall_2"]),
     qty: new Set(["qty", "quantity"])
   };
   const hasHeader = firstHeaders.some((header) => aliases.item_code.has(header))
     && firstHeaders.some((header) => aliases.qty.has(header));
   const dataLines = hasHeader ? lines.slice(1) : lines;
   const headerMap = hasHeader ? Object.fromEntries(firstHeaders.map((header, index) => [header, index])) : {};
+  const pickHeaderValue = (values, candidates) => {
+    for (const candidate of candidates) {
+      const idx = headerMap[candidate];
+      if (idx !== undefined && idx >= 0) return values[idx] || "";
+    }
+    return "";
+  };
   return dataLines.map((line) => {
     const values = line.split(delimiter).map((cell) => String(cell ?? "").trim());
     const itemCode = hasHeader
-      ? values[headerMap.ident ?? headerMap.item_code ?? headerMap.item ?? headerMap.code ?? headerMap.item_no ?? headerMap.item_number ?? -1] || ""
+      ? pickHeaderValue(values, ["ident", "item_code", "item", "code", "item_no", "item_number"])
       : values[0] || "";
     const description = hasHeader
-      ? values[headerMap.description ?? headerMap.desc ?? headerMap.material_description ?? -1] || ""
+      ? pickHeaderValue(values, ["description", "desc", "material_description"])
       : values[1] || "";
-    const sizeText = hasHeader
-      ? values[headerMap.size ?? headerMap.sizes ?? -1] || ""
-      : values[2] || "";
-    const thkText = hasHeader
-      ? values[headerMap.thk ?? headerMap.thickness ?? headerMap.thick ?? headerMap.wall ?? -1] || ""
-      : values[3] || "";
+    const sizeText = hasHeader ? pickHeaderValue(values, ["size", "sizes"]) : values[2] || "";
+    const size1Text = hasHeader ? pickHeaderValue(values, ["size_1", "size1", "primary_size"]) : "";
+    const size2Text = hasHeader ? pickHeaderValue(values, ["size_2", "size2", "secondary_size"]) : "";
+    const thkText = hasHeader ? pickHeaderValue(values, ["thk", "thickness", "thick", "wall"]) : values[3] || "";
+    const thk1Text = hasHeader ? pickHeaderValue(values, ["thk_1", "thk1", "thickness_1", "wall_1"]) : "";
+    const thk2Text = hasHeader ? pickHeaderValue(values, ["thk_2", "thk2", "thickness_2", "wall_2"]) : "";
     const qty = hasHeader
-      ? values[headerMap.qty ?? headerMap.quantity ?? -1] || ""
+      ? pickHeaderValue(values, ["qty", "quantity"])
       : values[4] || "";
-    const size = splitCombinedDimensionValue(sizeText);
-    const thk = splitCombinedDimensionValue(thkText);
+    const size = size1Text || size2Text
+      ? { primary: size1Text, secondary: size2Text }
+      : splitCombinedDimensionValue(sizeText);
+    const thk = thk1Text || thk2Text
+      ? { primary: thk1Text, secondary: thk2Text }
+      : splitCombinedDimensionValue(thkText);
     return {
       item_code: itemCode,
       description,
@@ -1861,8 +1876,8 @@ function parseRfqPasteRows(pastedText) {
       thk_1: thk.primary,
       thk_2: thk.secondary,
       qty,
-      material_type: "misc",
-      uom: "EA"
+      material_type: "",
+      uom: ""
     };
   }).filter((row) => String(row.item_code || "").trim() || String(row.description || "").trim() || String(row.qty || "").trim());
 }
@@ -8653,6 +8668,19 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Values</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Import Quotes</a>` : ""}
     </div>`;
+  const inlinePasteWorkspace = poCount === 0 ? `
+    <div class="card" style="margin:12px 0;">
+      <h4 style="margin:0 0 8px;">Paste Values</h4>
+      <p class="muted" style="margin:0 0 10px;">Paste <strong>Ident, Description, Size, Thk, Qty</strong> directly here. Header row is optional. You can also use separate <strong>Size 1 / Size 2 / Thk 1 / Thk 2</strong> columns. Matched idents keep their current UOM automatically.</p>
+      <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
+        <input type="hidden" name="paste_action" value="preview" />
+        <div><textarea name="paste_text" style="min-height:120px;" placeholder="IDENT\tDESCRIPTION\tSIZE\tTHK\tQTY"></textarea></div>
+        <div class="actions">
+          <button type="submit">Preview Pasted Values</button>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Open Full Paste Tool</a>
+        </div>
+      </form>
+    </div>` : "";
   const awardSummaryCard = `
     <div class="card">
       <h3>Award Summary</h3>
@@ -8717,6 +8745,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <h3>Vendor Quote Workspace</h3>
       ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted" style="margin-bottom:10px;">Save at least one selected vendor to unlock quote tabs.</div>`}
       ${workspaceActions}
+      ${inlinePasteWorkspace}
       <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
         <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
         <div class="grid" style="grid-template-columns: minmax(0, 260px) 1fr;">
