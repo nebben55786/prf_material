@@ -8464,17 +8464,21 @@ app.post("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "edit
   res.redirect(`/rfq/${id}`);
 });
 
-app.post("/rfq/:id/status", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const jobId = currentJobId(req);
+  const projectName = String(req.body.project_name || "").trim();
+  const dueDate = String(req.body.due_date || "").trim();
   const requestedStatus = String(req.body.status || "").trim();
   const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "";
+  if (!projectName) throw new Error("Description is required.");
+  if (!dueDate) throw new Error("Due date is required.");
   if (!status) throw new Error("Choose a valid RFQ status.");
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    const rfq = (await client.query("select rfq_no, project_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
-    await client.query("update rfqs set status = $2 where id = $1 and job_id = $3", [rfqId, status, jobId]);
-    await auditLog(client, req.user.id, "update_status", "rfq", rfqId, `${rfq.rfq_no}:${status}`);
+    await client.query("update rfqs set project_name = $2, due_date = $3, status = $4 where id = $1 and job_id = $5", [rfqId, projectName, dueDate, status, jobId]);
+    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${dueDate}:${status}`);
   });
   res.redirect(`/rfq/${rfqId}`);
 });
@@ -8717,14 +8721,14 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</h1>
     <div class="card">
-      <form method="post" action="/rfq/${rfqId}/status" class="stack">
+      <form method="post" action="/rfq/${rfqId}/header" class="stack">
         <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
           <div><label>RFQ Number</label><input value="${esc(rfq.rfq_no)}" readonly /></div>
-          <div><label>Description</label><input value="${esc(rfq.project_name || "")}" readonly /></div>
-          <div><label>Due Date</label><input value="${esc(formatShortDate(rfq.due_date))}" readonly /></div>
+          <div><label>Description</label><input name="project_name" value="${esc(rfq.project_name || "")}" required /></div>
+          <div><label>Due Date</label><input type="date" name="due_date" value="${esc(String(rfq.due_date || "").match(/^\\d{4}-\\d{2}-\\d{2}/)?.[0] || "")}" required /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
-        <div class="actions"><button type="submit">Save Status</button><a class="btn btn-danger" href="/rfq/${rfqId}/delete">Delete RFQ</a></div>
+        <div class="actions"><button type="submit">Save Header</button><a class="btn btn-danger" href="/rfq/${rfqId}/delete">Delete RFQ</a></div>
       </form>
     </div>
     <div class="card">
