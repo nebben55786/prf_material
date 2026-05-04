@@ -9653,20 +9653,18 @@ app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission(
     <div class="card">
       <form method="post" action="/rfq-item/${item.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(item.updated_token)}" />
-        <div class="grid">
-          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" required /></div>
-          <div><label>Description</label><input name="description" value="${esc(item.description)}" /></div>
-          <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
-          <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
-          <div><label>Qty</label><input name="qty" value="${esc(item.qty)}" required /></div>
-          <div><label>Spec</label><input name="spec" value="${esc(item.spec || "")}" /></div>
-          <div><label>Commodity Code</label><input name="commodity_code" value="${esc(item.commodity_code || "")}" /></div>
-          <div><label>Tag Number</label><input name="tag_number" value="${esc(item.tag_number || "")}" /></div>
-          <div><label>Size 1</label><input name="size_1" value="${esc(item.size_1 || "")}" /></div>
-          <div><label>Size 2</label><input name="size_2" value="${esc(item.size_2 || "")}" /></div>
-          <div><label>Thk 1</label><input name="thk_1" value="${esc(item.thk_1 || "")}" /></div>
-          <div><label>Thk 2</label><input name="thk_2" value="${esc(item.thk_2 || "")}" /></div>
-        </div>
+        <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" required /></div>
+        <div><label>Description</label><input name="description" value="${esc(item.description)}" /></div>
+        <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
+        <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
+        <div><label>Qty</label><input name="qty" value="${esc(item.qty)}" required /></div>
+        <div><label>Spec</label><input name="spec" value="${esc(item.spec || "")}" /></div>
+        <div><label>Commodity Code</label><input name="commodity_code" value="${esc(item.commodity_code || "")}" /></div>
+        <div><label>Tag Number</label><input name="tag_number" value="${esc(item.tag_number || "")}" /></div>
+        <div><label>Size 1</label><input name="size_1" value="${esc(item.size_1 || "")}" /></div>
+        <div><label>Size 2</label><input name="size_2" value="${esc(item.size_2 || "")}" /></div>
+        <div><label>Thk 1</label><input name="thk_1" value="${esc(item.thk_1 || "")}" /></div>
+        <div><label>Thk 2</label><input name="thk_2" value="${esc(item.thk_2 || "")}" /></div>
         <div><label>Notes</label><textarea name="notes">${esc(item.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save Item</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
       </form>
