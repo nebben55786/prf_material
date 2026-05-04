@@ -8409,7 +8409,7 @@ app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "e
         </div>
         <div class="grid">
           <div><label>Description</label><input name="project_name" required /></div>
-          <div><label>Due Date</label><input type="date" name="due_date" /></div>
+          <div><label>Due Date</label><input type="date" name="due_date" required /></div>
         </div>
         <div class="grid">
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
@@ -8444,6 +8444,10 @@ app.get("/rfq/import/template", requireAuth, requirePermission("rfqs", "edit"), 
 
 app.post("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
+  const projectName = String(req.body.project_name || "").trim();
+  const dueDate = String(req.body.due_date || "").trim();
+  if (!projectName) throw new Error("Description is required.");
+  if (!dueDate) throw new Error("Due date is required.");
   const id = await withTransaction(async (client) => {
     const rfqNo = await getNextRfqNumber(client, jobId);
     const requestedStatus = String(req.body.status || "SEND_FOR_QUOTES").trim();
@@ -8451,7 +8455,7 @@ app.post("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "edit
     const selectedVendorIds = parseSelectedIdList(req.body.vendor_ids);
     const insert = await client.query(
       "insert into rfqs (job_id, rfq_no, project_name, due_date, status) values ($1, $2, $3, $4, $5) returning id",
-      [jobId, rfqNo, req.body.project_name?.trim(), req.body.due_date || null, status]
+      [jobId, rfqNo, projectName, dueDate, status]
     );
     await syncRfqVendors(client, insert.rows[0].id, selectedVendorIds);
     await auditLog(client, req.user.id, "create", "rfq", insert.rows[0].id, rfqNo);
