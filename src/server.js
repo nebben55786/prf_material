@@ -4108,7 +4108,7 @@ function loginPage(error = "") {
         <h2>Sign In</h2>
         <p class="muted">Default admin login: <strong>admin</strong> / <strong>admin123</strong></p>
         <form method="post" action="/login" class="stack">
-          <div class="grid">
+          <div class="stack">
             <div><label>Username</label><input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></div>
             <div><label>Password</label><input type="password" name="password" autocomplete="current-password" required /></div>
           </div>
