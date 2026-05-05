@@ -1306,6 +1306,9 @@ function layout(title, body, user) {
       .data-grid td { overflow: hidden; text-overflow: ellipsis; }
       .data-grid td.wrap, .data-grid th.wrap { white-space: normal; }
       .data-grid td.nowrap, .data-grid th.nowrap { white-space: nowrap; }
+      .rfq-entry-grid td { padding: 0; }
+      .rfq-entry-grid td input { width: 100%; min-height: 38px; border: 0; background: transparent; box-shadow: none; padding: 8px 10px; margin: 0; }
+      .rfq-entry-grid td input:focus { outline: 2px solid #6f95b8; outline-offset: -2px; background: #f7fbff; }
       .resize-handle { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: col-resize; }
       .chip { display: inline-block; padding: 3px 8px; border-radius: 2px; background: #e3ebf2; border: 1px solid #b6c4d1; color: #264b69; font-weight: 700; }
       .chip-remove { font-size: 0.2em; line-height: 1; padding: 0 1px; margin-left: 4px; min-width: 0; min-height: 0; vertical-align: middle; }
@@ -9112,7 +9115,7 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
     <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
     <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
       <div class="scroll">
-        <table class="data-grid">
+        <table class="data-grid rfq-entry-grid">
           <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
           <tbody>${newItemRows}</tbody>
         </table>
