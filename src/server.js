@@ -1821,6 +1821,8 @@ function parseRfqPasteRows(pastedText) {
   const text = String(pastedText || "").trim();
   if (!text) return [];
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const looksNumeric = (value) => Number.isFinite(parseQtyValue(value, NaN));
+  const looksLikeUom = (value) => /[a-z]/i.test(String(value || "").trim()) && !looksNumeric(value);
   const lines = text.split(/\r?\n/).filter((line) => line.trim());
   if (!lines.length) return [];
   const delimiter = lines[0].includes("\t") ? "\t" : ",";
@@ -1858,24 +1860,57 @@ function parseRfqPasteRows(pastedText) {
   };
   return dataLines.map((line) => {
     const values = line.split(delimiter).map((cell) => String(cell ?? "").trim());
-    const itemCode = hasHeader
-      ? pickHeaderValue(values, ["ident", "ident_code", "item_code", "item", "code", "item_no", "item_number"])
-      : values[0] || "";
-    const description = hasHeader
-      ? pickHeaderValue(values, ["description", "desc", "material_description"])
-      : values[1] || "";
-    const sizeText = hasHeader ? pickHeaderValue(values, ["size", "sizes"]) : values[2] || "";
-    const size1Text = hasHeader ? pickHeaderValue(values, ["size_1", "size1", "primary_size"]) : "";
-    const size2Text = hasHeader ? pickHeaderValue(values, ["size_2", "size2", "secondary_size"]) : "";
-    const thkText = hasHeader ? pickHeaderValue(values, ["thk", "thickness", "thick", "wall"]) : values[3] || "";
-    const thk1Text = hasHeader ? pickHeaderValue(values, ["thk_1", "thk1", "thickness_1", "wall_1"]) : "";
-    const thk2Text = hasHeader ? pickHeaderValue(values, ["thk_2", "thk2", "thickness_2", "wall_2"]) : "";
-    let qty = hasHeader
-      ? pickHeaderValue(values, ["qty", "quantity"])
-      : values[4] || "";
-    const uom = hasHeader
-      ? pickHeaderValue(values, ["uom", "unit", "unit_of_measure"])
-      : values[5] || "";
+    let itemCode = "";
+    let description = "";
+    let sizeText = "";
+    let size1Text = "";
+    let size2Text = "";
+    let thkText = "";
+    let thk1Text = "";
+    let thk2Text = "";
+    let qty = "";
+    let uom = "";
+    if (hasHeader) {
+      itemCode = pickHeaderValue(values, ["ident", "ident_code", "item_code", "item", "code", "item_no", "item_number"]);
+      description = pickHeaderValue(values, ["description", "desc", "material_description"]);
+      sizeText = pickHeaderValue(values, ["size", "sizes"]);
+      size1Text = pickHeaderValue(values, ["size_1", "size1", "primary_size"]);
+      size2Text = pickHeaderValue(values, ["size_2", "size2", "secondary_size"]);
+      thkText = pickHeaderValue(values, ["thk", "thickness", "thick", "wall"]);
+      thk1Text = pickHeaderValue(values, ["thk_1", "thk1", "thickness_1", "wall_1"]);
+      thk2Text = pickHeaderValue(values, ["thk_2", "thk2", "thickness_2", "wall_2"]);
+      qty = pickHeaderValue(values, ["qty", "quantity"]);
+      uom = pickHeaderValue(values, ["uom", "unit", "unit_of_measure"]);
+    } else {
+      itemCode = values[0] || "";
+      description = values[1] || "";
+      if (values.length >= 7) {
+        size1Text = values[2] || "";
+        size2Text = values[3] || "";
+        thkText = values[4] || "";
+        qty = values[5] || "";
+        uom = values[6] || "";
+      } else if (values.length === 6 && looksNumeric(values[4]) && looksLikeUom(values[5])) {
+        size1Text = values[2] || "";
+        const fourth = values[3] || "";
+        if (/[a-z]/i.test(fourth) && !looksNumeric(fourth)) {
+          thkText = fourth;
+        } else {
+          size2Text = fourth;
+        }
+        qty = values[4] || "";
+        uom = values[5] || "";
+      } else if (values.length === 5 && looksNumeric(values[3]) && looksLikeUom(values[4])) {
+        size1Text = values[2] || "";
+        qty = values[3] || "";
+        uom = values[4] || "";
+      } else {
+        sizeText = values[2] || "";
+        thkText = values[3] || "";
+        qty = values[4] || "";
+        uom = values[5] || "";
+      }
+    }
     if (hasHeader && !String(qty || "").trim()) {
       const uomIndex = pickHeaderIndex(["uom", "unit", "unit_of_measure"]);
       if (uomIndex > 0 && String(values[uomIndex - 1] || "").trim()) {
@@ -1900,6 +1935,19 @@ function parseRfqPasteRows(pastedText) {
       uom
     };
   }).filter((row) => String(row.item_code || "").trim() || String(row.description || "").trim() || String(row.qty || "").trim());
+}
+
+function getRfqPasteRowIssues(row, { matched = false } = {}) {
+  const issues = [];
+  const itemCode = String(row.item_code || "").trim();
+  const description = String(row.description || "").trim();
+  const qty = parseQtyValue(row.qty, NaN);
+  const uom = String(row.uom || "").trim();
+  if (!itemCode) issues.push("Ident is required");
+  if (!matched && !description) issues.push("Description is required");
+  if (!Number.isFinite(qty) || qty <= 0) issues.push("Qty is required");
+  if (!matched && !uom) issues.push("UOM is required");
+  return issues;
 }
 
 function normalizePoImportRow(row) {
@@ -9082,7 +9130,7 @@ app.get("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissio
     <h1>Paste RFQ Values</h1>
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
-      <p class="muted">Paste columns in this order: <strong>Ident Code</strong>, <strong>Description</strong>, <strong>Size_1</strong>, <strong>Size_2</strong>, <strong>Thk</strong>, <strong>Qty</strong>, <strong>Unit</strong>. Header row is optional. Tab-delimited spreadsheet paste works best. <strong>Size</strong> also still works if you are using one combined size column, and thickness can be blank.</p>
+      <p class="muted">Paste columns in this order: <strong>Ident Code</strong>, <strong>Description</strong>, <strong>Size_1</strong>, <strong>Size_2</strong>, <strong>Thk</strong>, <strong>Qty</strong>, <strong>Unit</strong>. Header row is optional. Tab-delimited spreadsheet paste works best. Shorter layouts like <strong>Ident Code</strong>, <strong>Description</strong>, <strong>Size_1</strong>, <strong>Qty</strong>, <strong>Unit</strong> also work. <strong>Size</strong> still works if you are using one combined size column, and thickness can be blank.</p>
       <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
         <div><label>Pasted Values</label><textarea name="paste_text" style="min-height:220px;" placeholder="IDENT CODE\tDESCRIPTION\tSIZE_1\tSIZE_2\tTHK\tQTY\tUNIT"></textarea></div>
         <div class="actions">
@@ -9118,11 +9166,22 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
   )).rows.map((row) => String(row.item_code || "").trim().toLowerCase()));
   const matchedRows = rows.filter((row) => existingCodeSet.has(String(row.item_code || "").trim().toLowerCase()));
   const unmatchedRows = rows.filter((row) => !existingCodeSet.has(String(row.item_code || "").trim().toLowerCase()));
+  const previewMeta = rows.map((row) => {
+    const matched = existingCodeSet.has(String(row.item_code || "").trim().toLowerCase());
+    return { row, matched, issues: getRfqPasteRowIssues(row, { matched }) };
+  });
+  const invalidPreviewRows = previewMeta.filter((entry) => entry.issues.length > 0);
+  const validMatchedRows = previewMeta.filter((entry) => entry.matched && entry.issues.length === 0).map((entry) => entry.row);
+  const validAllRows = previewMeta.filter((entry) => entry.issues.length === 0).map((entry) => entry.row);
 
   if (pasteAction === "import_matched" || pasteAction === "import_all") {
-    const rowsToImport = pasteAction === "import_matched" ? matchedRows : rows;
+    const rowsToImport = pasteAction === "import_matched" ? validMatchedRows : validAllRows;
     if (!rowsToImport.length) {
       throw new Error(pasteAction === "import_matched" ? "No pasted idents matched the current item list." : "No rows were available to import.");
+    }
+    if ((pasteAction === "import_all" && invalidPreviewRows.length > 0)
+      || (pasteAction === "import_matched" && matchedRows.length !== validMatchedRows.length)) {
+      throw new Error("Fix the missing required paste values before importing.");
     }
     const batchId = await withTransaction(async (client) => {
       const batchId = await createImportBatch(client, {
@@ -9153,9 +9212,12 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
   }
 
   const rowsPayload = Buffer.from(JSON.stringify(rows), "utf8").toString("base64");
-  const previewRows = rows.map((row) => {
+  const previewRows = previewMeta.map(({ row, matched, issues }) => {
     const thk = [row.thk_1, row.thk_2].filter(Boolean).join(" x ");
-    const matched = existingCodeSet.has(String(row.item_code || "").trim().toLowerCase());
+    const statusLabel = matched ? "Match" : "New Item";
+    const statusChip = matched
+      ? `<span class="chip">Match</span>`
+      : `<span class="chip" style="background:#fff3cd;border-color:#f4d58d;color:#7a5a00;">New Item</span>`;
     return `<tr>
       <td>${esc(row.item_code || "")}</td>
       <td>${esc(row.description || "")}</td>
@@ -9163,7 +9225,8 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
       <td>${esc(row.size_2 || "")}</td>
       <td>${esc(thk)}</td>
       <td>${esc(formatQtyDisplay(row.qty))}</td>
-      <td>${matched ? `<span class="chip">Match</span>` : `<span class="chip" style="background:#fff3cd;border-color:#f4d58d;color:#7a5a00;">New Item</span>`}</td>
+      <td>${esc(row.uom || "")}</td>
+      <td>${statusChip}${issues.length ? `<div class="muted" style="margin-top:4px;color:#b42318;">${esc(issues.join("; "))}</div>` : `<div class="muted" style="margin-top:4px;">${statusLabel}</div>`}</td>
     </tr>`;
   }).join("");
 
@@ -9177,10 +9240,11 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
         <div class="stat"><div>Missing Idents</div><strong>${unmatchedRows.length}</strong></div>
       </div>
       ${unmatchedRows.length > 0 ? `<p class="muted" style="margin-top:10px;">${unmatchedRows.length} ident(s) are not on the current item list yet. Do you want to add them with the pasted description, size, thickness, and quantity values?</p>` : `<p class="muted" style="margin-top:10px;">All pasted idents already exist on the current item list.</p>`}
+      ${invalidPreviewRows.length > 0 ? `<p class="muted" style="margin-top:10px;color:#b42318;">${invalidPreviewRows.length} row(s) are missing required values. Fix them and paste again before importing.</p>` : ""}
     </div>
     <div class="card scroll">
       <table>
-        <thead><tr><th>Ident</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk</th><th>Qty</th><th>Status</th></tr></thead>
+        <thead><tr><th>Ident</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk</th><th>Qty</th><th>UOM</th><th>Status</th></tr></thead>
         <tbody>${previewRows}</tbody>
       </table>
     </div>
@@ -9188,8 +9252,8 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
       <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
         <input type="hidden" name="rows_payload" value="${esc(rowsPayload)}" />
         <div class="actions">
-          ${matchedRows.length > 0 ? `<button type="submit" name="paste_action" value="import_matched">Import Matched Only</button>` : ""}
-          <button type="submit" name="paste_action" value="import_all">${unmatchedRows.length > 0 ? "Yes, Add Missing Items Too" : "Import Rows"}</button>
+          ${validMatchedRows.length > 0 ? `<button type="submit" name="paste_action" value="import_matched">Import Matched Only</button>` : ""}
+          ${invalidPreviewRows.length === 0 ? `<button type="submit" name="paste_action" value="import_all">${unmatchedRows.length > 0 ? "Yes, Add Missing Items Too" : "Import Rows"}</button>` : ""}
           <a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Again</a>
           <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
         </div>
