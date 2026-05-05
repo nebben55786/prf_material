@@ -8677,19 +8677,6 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Values</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Import Quotes</a>` : ""}
     </div>`;
-  const inlinePasteWorkspace = poCount === 0 ? `
-    <div class="card" style="margin:12px 0;">
-      <h4 style="margin:0 0 8px;">Paste Values</h4>
-      <p class="muted" style="margin:0 0 10px;">Paste <strong>Ident, Description, Size, Thk, Qty</strong> directly here. Header row is optional. You can also use separate <strong>Size 1 / Size 2 / Thk 1 / Thk 2</strong> columns. Matched idents keep their current UOM automatically.</p>
-      <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
-        <input type="hidden" name="paste_action" value="preview" />
-        <div><textarea name="paste_text" style="min-height:120px;" placeholder="IDENT\tDESCRIPTION\tSIZE\tTHK\tQTY"></textarea></div>
-        <div class="actions">
-          <button type="submit">Preview Pasted Values</button>
-          <a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Open Full Paste Tool</a>
-        </div>
-      </form>
-    </div>` : "";
   const awardSummaryCard = `
     <div class="card">
       <h3>Award Summary</h3>
@@ -8754,7 +8741,6 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted" style="margin-bottom:10px;">Save at least one selected vendor to unlock quote tabs.</div>`}
       ${activeVendorHeader}
       ${workspaceActions}
-      ${inlinePasteWorkspace}
       <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
         <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
         <div class="grid" style="grid-template-columns: minmax(0, 260px) 1fr;">
