@@ -9061,18 +9061,16 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
   res.send(layout(`Add New RFQ Items`, `
     <h1>Add New RFQ Items</h1>
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
-    <div class="card">
-      <p class="muted">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
-      <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
-        <div class="scroll">
-          <table class="data-grid">
-            <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
-            <tbody>${newItemRows}</tbody>
-          </table>
-        </div>
-        <div class="actions"><button type="submit">Save Grid Rows</button><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
-      </form>
-    </div>
+    <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
+    <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
+      <div class="scroll">
+        <table class="data-grid">
+          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
+          <tbody>${newItemRows}</tbody>
+        </table>
+      </div>
+      <div class="actions"><button type="submit">Save Grid Rows</button><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
+    </form>
   `, req.user));
 }));
 
