@@ -8740,7 +8740,6 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const importRows = recentImports.length > 0
     ? recentImports.map((batch) => `<tr><td><a href="/imports/${batch.id}">${esc(batch.entity_type)}</a></td><td>${esc(formatShortDateTime(batch.created_at))}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
     : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
-  const activeVendorHeader = `<div class="muted" style="margin:0 0 10px;"><strong>Selected Vendor:</strong> ${esc(activeVendor?.name || "Select a participating vendor")}</div>`;
   const workspaceActions = `
     <div class="actions">
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/existing">Add Existing</a>` : ""}
@@ -8810,7 +8809,6 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     <div class="card scroll">
       <h3>Vendor Quote Workspace</h3>
       ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted" style="margin-bottom:10px;">Save at least one selected vendor to unlock quote tabs.</div>`}
-      ${activeVendorHeader}
       ${workspaceActions}
       <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
         <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
