@@ -1827,7 +1827,7 @@ function parseRfqPasteRows(pastedText) {
   const firstValues = lines[0].split(delimiter).map((cell) => String(cell ?? "").trim());
   const firstHeaders = firstValues.map((cell) => normalizeHeader(cell));
   const aliases = {
-    item_code: new Set(["ident", "item_code", "item", "code", "item_no", "item_number"]),
+    item_code: new Set(["ident", "ident_code", "item_code", "item", "code", "item_no", "item_number"]),
     description: new Set(["description", "desc", "material_description"]),
     size: new Set(["size", "sizes"]),
     size_1: new Set(["size_1", "size1", "primary_size"]),
@@ -1851,7 +1851,7 @@ function parseRfqPasteRows(pastedText) {
   return dataLines.map((line) => {
     const values = line.split(delimiter).map((cell) => String(cell ?? "").trim());
     const itemCode = hasHeader
-      ? pickHeaderValue(values, ["ident", "item_code", "item", "code", "item_no", "item_number"])
+      ? pickHeaderValue(values, ["ident", "ident_code", "item_code", "item", "code", "item_no", "item_number"])
       : values[0] || "";
     const description = hasHeader
       ? pickHeaderValue(values, ["description", "desc", "material_description"])
