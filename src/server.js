@@ -305,7 +305,9 @@ function renderVendorPicker(vendors, selectedVendors = [], config = {}) {
     hiddenContainerId = "vendor-selected-hidden",
     datalistId = "vendor-picker-options",
     addButtonLabel = "Add Vendor",
-    formId = ""
+    formId = "",
+    label = "Participating Vendors",
+    showAddButton = true
   } = config;
   const optionMap = new Map(vendors.map((vendor) => [Number(vendor.id), vendor.name]));
   const normalizedSelected = selectedVendors
@@ -334,12 +336,13 @@ function renderVendorPicker(vendors, selectedVendors = [], config = {}) {
   const vendorLookup = JSON.stringify(vendors.map((vendor) => ({ id: Number(vendor.id), name: vendor.name })));
   return `
     <div class="stack">
-      <label>Participating Vendors</label>
+      ${label ? `<label>${esc(label)}</label>` : ""}
       <div id="${selectedListId}" class="chip-row">${selectedItems || `<span class="muted">No vendors selected yet.</span>`}</div>
       <div id="${hiddenContainerId}">${hiddenInputs}</div>
+      ${showAddButton ? `
       <div class="actions">
         <button type="button" onclick='openVendorPicker("${dialogId}", "${inputId}")'>${esc(addButtonLabel)}</button>
-      </div>
+      </div>` : ""}
     </div>
     <dialog id="${dialogId}" class="modal-card" data-vendors='${esc(vendorLookup)}' data-selected-list-id="${selectedListId}" data-hidden-container-id="${hiddenContainerId}" data-form-id="${formId}">
       <div class="stack">
@@ -8709,19 +8712,15 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</h1>
     <div class="card">
-      <form method="post" action="/rfq/${rfqId}/header" class="stack">
+      <form id="rfq-${rfqId}-header-form" method="post" action="/rfq/${rfqId}/header" class="stack">
         <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
           <div><label>RFQ Number</label><input value="${esc(rfq.rfq_no)}" readonly /></div>
           <div><label>Description</label><input name="project_name" value="${esc(rfq.project_name || "")}" required /></div>
           <div><label>Due Date</label><input type="date" name="due_date" value="${esc(String(rfq.due_date || "").match(/^\\d{4}-\\d{2}-\\d{2}/)?.[0] || "")}" required /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
-        <div class="actions"><button type="submit">Save Header</button><a class="btn btn-danger" href="/rfq/${rfqId}/delete">Delete RFQ</a></div>
       </form>
-    </div>
-    <div class="card">
-      <h3>Selected Vendors</h3>
-      <form id="rfq-${rfqId}-vendors-form" method="post" action="/rfq/${rfqId}/vendors" class="stack">
+      <form id="rfq-${rfqId}-vendors-form" method="post" action="/rfq/${rfqId}/vendors" class="stack" style="margin-top:12px;">
         ${renderVendorPicker(vendors, selectedVendors.map((vendor) => ({ id: vendor.vendor_id, name: vendor.name })), {
           dialogId: `rfq-${rfqId}-vendor-dialog`,
           inputId: `rfq-${rfqId}-vendor-input`,
@@ -8729,12 +8728,16 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           hiddenContainerId: `rfq-${rfqId}-vendor-hidden`,
           datalistId: `rfq-${rfqId}-vendor-options`,
           addButtonLabel: "Add Vendor",
-          formId: `rfq-${rfqId}-vendors-form`
+          formId: `rfq-${rfqId}-vendors-form`,
+          showAddButton: false
         })}
-        <div class="actions">
-          <span class="muted">Choose the vendors for this RFQ once, then enter quotes vendor-by-vendor in the tabs below.</span>
-        </div>
       </form>
+      <div class="actions">
+        <button type="submit" form="rfq-${rfqId}-header-form">Save Header</button>
+        <button type="button" onclick='openVendorPicker("rfq-${rfqId}-vendor-dialog", "rfq-${rfqId}-vendor-input")'>Add Vendor</button>
+        <a class="btn btn-danger" href="/rfq/${rfqId}/delete">Delete RFQ</a>
+      </div>
+      <div class="muted">Choose the vendors for this RFQ once, then enter quotes vendor-by-vendor in the tabs below.</div>
     </div>
     <div class="card scroll">
       <h3>Vendor Quote Workspace</h3>
