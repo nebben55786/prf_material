@@ -8930,18 +8930,18 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       <td>${esc(item.material_type)}</td>
       <td>${esc(item.uom)}</td>
       <td>
-        <form method="post" action="/rfq/${rfqId}/items/add">
-          <input type="hidden" name="item_code" value="${esc(item.item_code)}" />
-          <input type="hidden" name="description" value="${esc(item.description)}" />
-          <input type="hidden" name="size_1" value="${esc(item.size_1 || "")}" />
-          <input type="hidden" name="size_2" value="${esc(item.size_2 || "")}" />
-          <input type="hidden" name="thk_1" value="${esc(item.thk_1 || "")}" />
-          <input type="hidden" name="thk_2" value="${esc(item.thk_2 || "")}" />
-          <input type="hidden" name="material_type" value="${esc(item.material_type)}" />
-          <input type="hidden" name="uom" value="${esc(item.uom)}" />
-          <input type="hidden" name="qty" value="1" />
-          <button type="submit">Add</button>
-        </form>
+        <button
+          type="button"
+          data-item-code="${escAttr(item.item_code)}"
+          data-description="${escAttr(item.description)}"
+          data-size-1="${escAttr(item.size_1 || "")}"
+          data-size-2="${escAttr(item.size_2 || "")}"
+          data-thk-1="${escAttr(item.thk_1 || "")}"
+          data-thk-2="${escAttr(item.thk_2 || "")}"
+          data-material-type="${escAttr(item.material_type)}"
+          data-uom="${escAttr(item.uom)}"
+          onclick="openExistingRfqItemDialog(this, '${rfqId}')"
+        >Add</button>
       </td>
     </tr>`).join("");
   res.send(layout(`Add Existing Items`, `
@@ -8961,6 +8961,79 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       </div>
       <div class="actions"><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
     </div>
+    <dialog id="rfq-existing-item-dialog-${rfqId}" class="modal-card">
+      <form method="post" action="/rfq/${rfqId}/items/add" class="stack">
+        <input type="hidden" name="item_code" id="rfq-existing-item-code-${rfqId}" />
+        <input type="hidden" name="description" id="rfq-existing-item-description-${rfqId}" />
+        <input type="hidden" name="size_1" id="rfq-existing-item-size-1-${rfqId}" />
+        <input type="hidden" name="size_2" id="rfq-existing-item-size-2-${rfqId}" />
+        <input type="hidden" name="thk_1" id="rfq-existing-item-thk-1-${rfqId}" />
+        <input type="hidden" name="thk_2" id="rfq-existing-item-thk-2-${rfqId}" />
+        <input type="hidden" name="material_type" id="rfq-existing-item-type-${rfqId}" />
+        <h3>Add Existing RFQ Item</h3>
+        <div class="card" style="margin:0;">
+          <div><strong id="rfq-existing-item-title-${rfqId}"></strong></div>
+          <div class="muted" id="rfq-existing-item-summary-${rfqId}" style="margin-top:6px;"></div>
+        </div>
+        <div class="grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+          <div><label>Qty</label><input name="qty" id="rfq-existing-item-qty-${rfqId}" value="1" inputmode="decimal" required /></div>
+          <div><label>UOM</label><input name="uom" id="rfq-existing-item-uom-${rfqId}" required /></div>
+        </div>
+        <div class="actions">
+          <button type="submit">Add Item</button>
+          <button type="button" class="btn btn-secondary" onclick="closeExistingRfqItemDialog('${rfqId}')">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <script>
+      function closeExistingRfqItemDialog(rfqId) {
+        const dialog = document.getElementById('rfq-existing-item-dialog-' + rfqId);
+        if (!dialog) return false;
+        if (typeof dialog.close === 'function') dialog.close();
+        else dialog.removeAttribute('open');
+        return false;
+      }
+      function openExistingRfqItemDialog(button, rfqId) {
+        const dialog = document.getElementById('rfq-existing-item-dialog-' + rfqId);
+        if (!dialog || !button) return false;
+        const itemCode = String(button.getAttribute('data-item-code') || '');
+        const description = String(button.getAttribute('data-description') || '');
+        const size1 = String(button.getAttribute('data-size-1') || '');
+        const size2 = String(button.getAttribute('data-size-2') || '');
+        const thk1 = String(button.getAttribute('data-thk-1') || '');
+        const thk2 = String(button.getAttribute('data-thk-2') || '');
+        const materialType = String(button.getAttribute('data-material-type') || '');
+        const uom = String(button.getAttribute('data-uom') || '');
+        const sizeText = [size1, size2].filter(Boolean).join(' x ');
+        const thkText = [thk1, thk2].filter(Boolean).join(' x ');
+        const summaryBits = [];
+        if (sizeText) summaryBits.push('Size ' + sizeText);
+        if (thkText) summaryBits.push('Thk ' + thkText);
+        if (materialType) summaryBits.push('Type ' + materialType);
+        const setValue = (id, value) => {
+          const input = document.getElementById(id);
+          if (input) input.value = value;
+        };
+        setValue('rfq-existing-item-code-' + rfqId, itemCode);
+        setValue('rfq-existing-item-description-' + rfqId, description);
+        setValue('rfq-existing-item-size-1-' + rfqId, size1);
+        setValue('rfq-existing-item-size-2-' + rfqId, size2);
+        setValue('rfq-existing-item-thk-1-' + rfqId, thk1);
+        setValue('rfq-existing-item-thk-2-' + rfqId, thk2);
+        setValue('rfq-existing-item-type-' + rfqId, materialType);
+        setValue('rfq-existing-item-qty-' + rfqId, '1');
+        setValue('rfq-existing-item-uom-' + rfqId, uom);
+        const title = document.getElementById('rfq-existing-item-title-' + rfqId);
+        const summary = document.getElementById('rfq-existing-item-summary-' + rfqId);
+        if (title) title.textContent = itemCode;
+        if (summary) summary.textContent = [description].concat(summaryBits).filter(Boolean).join(' | ');
+        if (typeof dialog.showModal === 'function') dialog.showModal();
+        else dialog.setAttribute('open', 'open');
+        const qtyInput = document.getElementById('rfq-existing-item-qty-' + rfqId);
+        if (qtyInput) window.setTimeout(() => qtyInput.focus(), 0);
+        return false;
+      }
+    </script>
   `, req.user));
 }));
 
@@ -9205,6 +9278,10 @@ app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermiss
 
 app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
+  const qtyText = String(req.body.qty || "").trim();
+  const uom = String(req.body.uom || "").trim();
+  if (!qtyText) throw new Error("Qty is required.");
+  if (!uom) throw new Error("UOM is required.");
   await withTransaction(async (client) => {
     const result = await upsertRfqItemRow(client, rfqId, req.body, currentJobId(req));
     if (result.status === "skipped") throw new Error(result.message);
