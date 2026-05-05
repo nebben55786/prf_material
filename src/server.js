@@ -8747,7 +8747,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/new">Add New</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Values</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Import Quotes</a>` : ""}
-      <a class="btn" target="_blank" href="/rfq/${rfqId}/sheet.pdf">Open RFQ PDF</a>
+      <a class="btn btn-primary" target="_blank" href="/rfq/${rfqId}/sheet.pdf">Open RFQ PDF</a>
     </div>`;
   const awardSummaryCard = `
     <div class="card">
@@ -8814,7 +8814,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ${workspaceActions}
       <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
         <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
-        <div class="actions">
+        <div class="actions" style="margin-top:6px;">
           <button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Save ${esc(activeVendor?.name || "Vendor")} Quotes</button>
         </div>
         <table>
