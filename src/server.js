@@ -1835,7 +1835,8 @@ function parseRfqPasteRows(pastedText) {
     thk: new Set(["thk", "thickness", "thick", "wall"]),
     thk_1: new Set(["thk_1", "thk1", "thickness_1", "wall_1"]),
     thk_2: new Set(["thk_2", "thk2", "thickness_2", "wall_2"]),
-    qty: new Set(["qty", "quantity"])
+    qty: new Set(["qty", "quantity"]),
+    uom: new Set(["uom", "unit", "unit_of_measure"])
   };
   const hasHeader = firstHeaders.some((header) => aliases.item_code.has(header))
     && firstHeaders.some((header) => aliases.qty.has(header));
@@ -1847,6 +1848,13 @@ function parseRfqPasteRows(pastedText) {
       if (idx !== undefined && idx >= 0) return values[idx] || "";
     }
     return "";
+  };
+  const pickHeaderIndex = (candidates) => {
+    for (const candidate of candidates) {
+      const idx = headerMap[candidate];
+      if (idx !== undefined && idx >= 0) return idx;
+    }
+    return -1;
   };
   return dataLines.map((line) => {
     const values = line.split(delimiter).map((cell) => String(cell ?? "").trim());
@@ -1862,9 +1870,18 @@ function parseRfqPasteRows(pastedText) {
     const thkText = hasHeader ? pickHeaderValue(values, ["thk", "thickness", "thick", "wall"]) : values[3] || "";
     const thk1Text = hasHeader ? pickHeaderValue(values, ["thk_1", "thk1", "thickness_1", "wall_1"]) : "";
     const thk2Text = hasHeader ? pickHeaderValue(values, ["thk_2", "thk2", "thickness_2", "wall_2"]) : "";
-    const qty = hasHeader
+    let qty = hasHeader
       ? pickHeaderValue(values, ["qty", "quantity"])
       : values[4] || "";
+    const uom = hasHeader
+      ? pickHeaderValue(values, ["uom", "unit", "unit_of_measure"])
+      : values[5] || "";
+    if (hasHeader && !String(qty || "").trim()) {
+      const uomIndex = pickHeaderIndex(["uom", "unit", "unit_of_measure"]);
+      if (uomIndex > 0 && String(values[uomIndex - 1] || "").trim()) {
+        qty = String(values[uomIndex - 1] || "").trim();
+      }
+    }
     const size = size1Text || size2Text
       ? { primary: size1Text, secondary: size2Text }
       : splitCombinedDimensionValue(sizeText);
@@ -1880,7 +1897,7 @@ function parseRfqPasteRows(pastedText) {
       thk_2: thk.secondary,
       qty,
       material_type: "",
-      uom: ""
+      uom
     };
   }).filter((row) => String(row.item_code || "").trim() || String(row.description || "").trim() || String(row.qty || "").trim());
 }
@@ -8994,9 +9011,9 @@ app.get("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissio
     <h1>Paste RFQ Values</h1>
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
-      <p class="muted">Paste columns in this order: <strong>Ident</strong>, <strong>Description</strong>, <strong>Size</strong>, <strong>Thk</strong>, <strong>Qty</strong>. Header row is optional. Tab-delimited spreadsheet paste works best. Thickness can be blank.</p>
+      <p class="muted">Paste columns in this order: <strong>Ident Code</strong>, <strong>Description</strong>, <strong>Size_1</strong>, <strong>Size_2</strong>, <strong>Thk</strong>, <strong>Qty</strong>, <strong>Unit</strong>. Header row is optional. Tab-delimited spreadsheet paste works best. <strong>Size</strong> also still works if you are using one combined size column, and thickness can be blank.</p>
       <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
-        <div><label>Pasted Values</label><textarea name="paste_text" style="min-height:220px;" placeholder="IDENT\tDESCRIPTION\tSIZE\tTHK\tQTY"></textarea></div>
+        <div><label>Pasted Values</label><textarea name="paste_text" style="min-height:220px;" placeholder="IDENT CODE\tDESCRIPTION\tSIZE_1\tSIZE_2\tTHK\tQTY\tUNIT"></textarea></div>
         <div class="actions">
           <button type="submit" name="paste_action" value="preview">Preview Paste</button>
           <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
@@ -9066,13 +9083,13 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
 
   const rowsPayload = Buffer.from(JSON.stringify(rows), "utf8").toString("base64");
   const previewRows = rows.map((row) => {
-    const size = [row.size_1, row.size_2].filter(Boolean).join(" x ");
     const thk = [row.thk_1, row.thk_2].filter(Boolean).join(" x ");
     const matched = existingCodeSet.has(String(row.item_code || "").trim().toLowerCase());
     return `<tr>
       <td>${esc(row.item_code || "")}</td>
       <td>${esc(row.description || "")}</td>
-      <td>${esc(size)}</td>
+      <td>${esc(row.size_1 || "")}</td>
+      <td>${esc(row.size_2 || "")}</td>
       <td>${esc(thk)}</td>
       <td>${esc(formatQtyDisplay(row.qty))}</td>
       <td>${matched ? `<span class="chip">Match</span>` : `<span class="chip" style="background:#fff3cd;border-color:#f4d58d;color:#7a5a00;">New Item</span>`}</td>
@@ -9092,7 +9109,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
     </div>
     <div class="card scroll">
       <table>
-        <thead><tr><th>Ident</th><th>Description</th><th>Size</th><th>Thk</th><th>Qty</th><th>Status</th></tr></thead>
+        <thead><tr><th>Ident</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk</th><th>Qty</th><th>Status</th></tr></thead>
         <tbody>${previewRows}</tbody>
       </table>
     </div>
