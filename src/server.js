@@ -1037,7 +1037,15 @@ function buildMrrFormPdf(header, lines, options = {}) {
     if (!text) return "";
     return formatShortDateTime(text);
   };
-  const lineItems = lines.slice(0, 12);
+  const normalizedLines = lines.length > 0
+    ? lines.map((line, index) => ({
+        ...line,
+        description: String(line.description || "").trim() || (index === 0 ? String(header.material_description || "").trim() : "")
+      }))
+    : (String(header.material_description || "").trim()
+        ? [{ item_code: "", description: String(header.material_description || "").trim(), qty: "", location: "", grid: "", status: "", ordered: "", shipped: "", received: "", discrepancy: "" }]
+        : []);
+  const lineItems = normalizedLines.slice(0, 12);
   const discrepancyItems = lines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK").slice(0, 8);
   const jobNumber = String(options.jobNumber || "").trim();
   const deliveryLocation = String(options.deliveryLocation || "").trim();
@@ -1054,8 +1062,9 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const totalWidth = right - left;
   const col1 = 92;
   const col2 = 108;
-  const col3 = 96;
-  const col4 = totalWidth - col1 - col2 - col3;
+  const col3 = 150;
+  const pageCol = 40;
+  const ofCol = 78;
   const y1 = top;
   field(x0, y1, totalWidth - 94, 28, " ", "", { align: "center" });
   content.push(centerText(x0, y1 - 10, totalWidth - 94, "PERFORMANCE CONTRACTORS, INC.", "F2", 9));
@@ -1066,8 +1075,8 @@ function buildMrrFormPdf(header, lines, options = {}) {
   field(x0, y2, col1, 24, "1.JOB(CONTRACT)NO.", jobNumber);
   field(x0 + col1, y2, col2, 24, "2.DATE RECEIVED", formatDate(header.received_date));
   field(x0 + col1 + col2, y2, col3, 24, "3.P.O.NO", header.po_number || "");
-  field(x0 + col1 + col2 + col3, y2, 46, 24, "4.PAGE", pageNo);
-  field(x0 + col1 + col2 + col3 + 46, y2, totalWidth - col1 - col2 - col3 - 46, 24, "OF", pageCount);
+  field(x0 + col1 + col2 + col3, y2, pageCol, 24, "4.PAGE", pageNo);
+  field(x0 + col1 + col2 + col3 + pageCol, y2, ofCol, 24, "OF", pageCount);
 
   const y3 = y2 - 24;
   field(x0, y3, 130, 24, "5. SHIP TICKET NO", header.pick_ticket || "");
@@ -7758,7 +7767,7 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requireJobContext, requi
   const deliveryMatch = String(linkedFmr.fmr_number || "").match(/^FMR-([A-Z0-9]+)-/i);
   const printableLines = [...poReceiptLines.rows, ...manualLines.rows].map((row) => ({
     item_code: row.item_code || "",
-    description: header.material_description || row.description || "",
+    description: row.description || "",
     qty: formatQtyDisplay(row.received_qty),
     location: [row.warehouse, row.location].filter(Boolean).join(" / "),
     grid: "",
@@ -9107,6 +9116,24 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
     <h1>Add New RFQ Items</h1>
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
     <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
+    <style>
+      #rfq-grid-form-${rfqId} table td { padding: 0; }
+      #rfq-grid-form-${rfqId} table td input {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        border: 0;
+        border-radius: 0;
+        padding: 10px 8px;
+        background: transparent;
+        box-shadow: none;
+      }
+      #rfq-grid-form-${rfqId} table td input:focus {
+        outline: 2px solid #6d8fb8;
+        outline-offset: -2px;
+        background: #f7fbff;
+      }
+    </style>
     <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
       <div class="scroll">
         <table class="data-grid rfq-entry-grid">
