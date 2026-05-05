@@ -1040,7 +1040,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const lineItems = lines.slice(0, 12);
   const discrepancyItems = lines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK").slice(0, 8);
   const jobNumber = String(options.jobNumber || "").trim();
-  const deliveryLocation = String(options.deliveryLocation || "KEQ3").trim();
+  const deliveryLocation = String(options.deliveryLocation || "").trim();
   const fmrNumber = String(options.fmrNumber || "").trim();
   const pageNo = "1";
   const pageCount = "1";
@@ -7780,8 +7780,8 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requireJobContext, requi
     container_type: "",
     material_description: header.material_description || ""
   }, printableLines, {
-    jobNumber: req.user.activeJob?.job_number || "",
-    deliveryLocation: deliveryMatch?.[1] || "KEQ3",
+    jobNumber: req.user.activeJob?.performance_job_number || req.user.activeJob?.job_number || "",
+    deliveryLocation: deliveryMatch?.[1] || req.user.activeJob?.performance_job_number || req.user.activeJob?.job_number || "",
     fmrNumber: linkedFmr.fmr_number || ""
   });
   res.setHeader("Content-Type", "application/pdf");
