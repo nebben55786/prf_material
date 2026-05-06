@@ -7822,7 +7822,7 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requireJobContext, requi
     material_description: header.material_description || ""
   }, printableLines, {
     jobNumber: req.user.activeJob?.performance_job_number || req.user.activeJob?.job_number || "",
-    deliveryLocation: deliveryMatch?.[1] || req.user.activeJob?.performance_job_number || req.user.activeJob?.job_number || "",
+    deliveryLocation: deliveryMatch?.[1] || "",
     fmrNumber: linkedFmr.fmr_number || ""
   });
   res.setHeader("Content-Type", "application/pdf");
