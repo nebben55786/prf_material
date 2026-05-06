@@ -1132,6 +1132,9 @@ function buildMrrFormPdf(header, lines, options = {}) {
 
   const tableTop = y5 - 46;
   const tableHeaderHeight = 24;
+  const lineRowCount = Math.max(lineItems.length, 12);
+  const lineTableHeight = tableHeaderHeight + (lineRowCount * 18);
+  const lineTableBottom = tableTop - lineTableHeight;
   const itemCols = [140, 288, 48, 50, 50];
   const itemHeaders = [
     "13. STOCK/ITEM NO (TAG NO)",
@@ -1140,10 +1143,10 @@ function buildMrrFormPdf(header, lines, options = {}) {
     "16\nLOCATION",
     "17\nGRID"
   ];
-  content.push(rect(x0, tableTop - tableHeaderHeight - (lineItems.length * 18 || 216), totalWidth, tableHeaderHeight + (Math.max(lineItems.length, 12) * 18)));
+  content.push(rect(x0, lineTableBottom, totalWidth, lineTableHeight));
   let itemX = x0;
   for (let i = 0; i < itemCols.length; i += 1) {
-    if (i > 0) content.push(line(itemX, tableTop, itemX, tableTop - tableHeaderHeight - (Math.max(lineItems.length, 12) * 18)));
+    if (i > 0) content.push(line(itemX, tableTop, itemX, lineTableBottom));
     const headerLines = itemHeaders[i].split("\n");
     content.push(makeText(itemX + 2, tableTop - 8, headerLines[0], "F2", 6));
     if (headerLines[1]) content.push(centerText(itemX, tableTop - 17, itemCols[i], headerLines[1], "F2", 6));
