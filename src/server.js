@@ -1084,16 +1084,17 @@ function buildMrrFormPdf(header, lines, options = {}) {
 
   const x0 = left;
   const totalWidth = right - left;
+  const mrrNoWidth = 94;
   const col1 = 92;
   const col2 = 108;
-  const col3 = 150;
+  const col3 = totalWidth - mrrNoWidth - col1 - col2;
   const pageCol = 40;
   const ofCol = totalWidth - col1 - col2 - col3 - pageCol;
   const y1 = top;
-  field(x0, y1, totalWidth - 94, 28, " ", "", { align: "center" });
-  content.push(centerText(x0, y1 - 10, totalWidth - 94, "PERFORMANCE CONTRACTORS, INC.", "F2", 9));
-  content.push(centerText(x0, y1 - 21, totalWidth - 94, "MATERIAL RECEIVING REPORT (MRR)", "F2", 9));
-  field(right - 94, y1, 94, 28, "MRR NO.", header.mrr_number || "", { align: "center", valueSize: 9 });
+  field(x0, y1, totalWidth - mrrNoWidth, 28, " ", "", { align: "center" });
+  content.push(centerText(x0, y1 - 10, totalWidth - mrrNoWidth, "PERFORMANCE CONTRACTORS, INC.", "F2", 9));
+  content.push(centerText(x0, y1 - 21, totalWidth - mrrNoWidth, "MATERIAL RECEIVING REPORT (MRR)", "F2", 9));
+  field(right - mrrNoWidth, y1, mrrNoWidth, 28, "MRR NO.", header.mrr_number || "", { align: "center", valueSize: 9 });
 
   const y2 = y1 - 28;
   field(x0, y2, col1, 24, "1.JOB(CONTRACT)NO.", jobNumber);
@@ -1103,10 +1104,14 @@ function buildMrrFormPdf(header, lines, options = {}) {
   field(x0 + col1 + col2 + col3 + pageCol, y2, ofCol, 24, "OF", pageCount);
 
   const y3 = y2 - 24;
-  field(x0, y3, 130, 24, "5. SHIP TICKET NO", header.pick_ticket || "");
-  field(x0 + 130, y3, 140, 24, "6. SUPPLIER ORDER NO.", "");
-  field(x0 + 270, y3, 198, 24, "7. MATERIAL REQ/LOAD NO.", "");
-  field(x0 + 468, y3, totalWidth - 468, 24, "8. DELIVERY LOCATION (LAYDOWNYARD, UNIT, ETC.)", deliveryLocation);
+  const shipTicketWidth = 130;
+  const supplierOrderWidth = 140;
+  const materialReqWidth = 150;
+  const deliveryLocationWidth = totalWidth - shipTicketWidth - supplierOrderWidth - materialReqWidth;
+  field(x0, y3, shipTicketWidth, 24, "5. SHIP TICKET NO", header.pick_ticket || "");
+  field(x0 + shipTicketWidth, y3, supplierOrderWidth, 24, "6. SUPPLIER ORDER NO.", "");
+  field(x0 + shipTicketWidth + supplierOrderWidth, y3, materialReqWidth, 24, "7. MATERIAL REQ/LOAD NO.", "");
+  field(x0 + shipTicketWidth + supplierOrderWidth + materialReqWidth, y3, deliveryLocationWidth, 24, "8. DELIVERY LOCATION (LAYDOWNYARD, UNIT, ETC.)", deliveryLocation, { labelSize: 5.2 });
 
   const y4 = y3 - 24;
   field(x0, y4, 392, 24, "9. SUPPLIER", header.vendor_name || "");
