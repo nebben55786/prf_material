@@ -1105,7 +1105,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const y3 = y2 - 24;
   field(x0, y3, 130, 24, "5. SHIP TICKET NO", header.pick_ticket || "");
   field(x0 + 130, y3, 140, 24, "6. SUPPLIER ORDER NO.", "");
-  field(x0 + 270, y3, 198, 24, "7. MATERIAL REQ/LOAD NO.", header.load_number || fmrNumber);
+  field(x0 + 270, y3, 198, 24, "7. MATERIAL REQ/LOAD NO.", "");
   field(x0 + 468, y3, totalWidth - 468, 24, "8. DELIVERY LOCATION (LAYDOWNYARD, UNIT, ETC.)", deliveryLocation);
 
   const y4 = y3 - 24;
