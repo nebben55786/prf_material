@@ -1035,16 +1035,40 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const formatDate = (value) => {
     const text = String(value || "").trim();
     if (!text) return "";
-    return formatShortDateTime(text);
+    return formatShortDate(text);
   };
-  const normalizedLines = lines.length > 0
-    ? lines.map((line, index) => ({
-        ...line,
-        description: String(line.description || "").trim() || (index === 0 ? String(header.material_description || "").trim() : "")
-      }))
-    : (String(header.material_description || "").trim()
-        ? [{ item_code: "", description: String(header.material_description || "").trim(), qty: "", location: "", grid: "", status: "", ordered: "", shipped: "", received: "", discrepancy: "" }]
-        : []);
+  const headerDescription = String(header.material_description || "").trim();
+  const detailLines = lines
+    .map((line) => ({
+      ...line,
+      item_code: String(line.item_code || "").trim(),
+      description: String(line.description || "").trim(),
+      qty: String(line.qty || "").trim(),
+      location: String(line.location || "").trim(),
+      grid: String(line.grid || "").trim(),
+      status: String(line.status || "").trim(),
+      ordered: String(line.ordered || "").trim(),
+      shipped: String(line.shipped || "").trim(),
+      received: String(line.received || "").trim(),
+      discrepancy: String(line.discrepancy || "").trim()
+    }))
+    .filter((line) => line.item_code || line.description || line.qty || line.location || line.grid || line.discrepancy);
+  const normalizedLines = [];
+  if (headerDescription) {
+    normalizedLines.push({
+      item_code: "",
+      description: headerDescription,
+      qty: "",
+      location: "",
+      grid: "",
+      status: "",
+      ordered: "",
+      shipped: "",
+      received: "",
+      discrepancy: ""
+    });
+  }
+  normalizedLines.push(...detailLines);
   const lineItems = normalizedLines.slice(0, 12);
   const discrepancyItems = lines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK").slice(0, 8);
   const jobNumber = String(options.jobNumber || "").trim();
@@ -1064,7 +1088,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const col2 = 108;
   const col3 = 150;
   const pageCol = 40;
-  const ofCol = 78;
+  const ofCol = totalWidth - col1 - col2 - col3 - pageCol;
   const y1 = top;
   field(x0, y1, totalWidth - 94, 28, " ", "", { align: "center" });
   content.push(centerText(x0, y1 - 10, totalWidth - 94, "PERFORMANCE CONTRACTORS, INC.", "F2", 9));
@@ -1089,18 +1113,21 @@ function buildMrrFormPdf(header, lines, options = {}) {
   field(x0 + 392, y4, totalWidth - 392, 24, "10.CARRIER", "");
 
   const y5 = y4 - 24;
-  field(x0, y5, totalWidth / 2, 46, "11. DELIVERED BY", "");
-  field(x0 + totalWidth / 2, y5, totalWidth / 2, 46, "12. RECEIVED BY", header.received_by || "");
-  content.push(makeText(x0 + 128, y5 - 19, "(PRINT)", "F1", 6));
-  content.push(makeText(x0 + 128, y5 - 35, "(SIGNATURE)", "F1", 6));
-  content.push(makeText(x0 + 150, y5 - 35, "(DATE)", "F1", 6));
-  content.push(makeText(x0 + totalWidth / 2 + 125, y5 - 19, "(PRINT)", "F1", 6));
-  content.push(makeText(x0 + totalWidth / 2 + 125, y5 - 35, "(SIGNATURE)", "F1", 6));
-  content.push(makeText(x0 + totalWidth / 2 + 150, y5 - 35, "(DATE)", "F1", 6));
+  const signBlockWidth = totalWidth / 2;
+  field(x0, y5, signBlockWidth, 46, "11. DELIVERED BY", "");
+  field(x0 + signBlockWidth, y5, signBlockWidth, 46, "12. RECEIVED BY", "");
+  content.push(makeText(x0 + 2, y5 - 17, "(PRINT):", "F1", 6));
+  content.push(makeText(x0 + 150, y5 - 17, "(DATE):", "F1", 6));
+  content.push(makeText(x0 + 2, y5 - 43, "(SIGNATURE):", "F1", 6));
+  content.push(makeText(x0 + 150, y5 - 43, "(DATE):", "F1", 6));
+  content.push(makeText(x0 + signBlockWidth + 2, y5 - 17, "(PRINT):", "F1", 6));
+  content.push(makeText(x0 + signBlockWidth + 150, y5 - 17, "(DATE):", "F1", 6));
+  content.push(makeText(x0 + signBlockWidth + 2, y5 - 43, "(SIGNATURE):", "F1", 6));
+  content.push(makeText(x0 + signBlockWidth + 150, y5 - 43, "(DATE):", "F1", 6));
 
   const tableTop = y5 - 46;
   const tableHeaderHeight = 24;
-  const itemCols = [160, 252, 48, 52, 64];
+  const itemCols = [140, 288, 48, 50, 50];
   const itemHeaders = [
     "13. STOCK/ITEM NO (TAG NO)",
     "14. DESCRIPTION",
