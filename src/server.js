@@ -11668,9 +11668,6 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
 
 app.get("/material-logs/mrr/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
-  await withTransaction(async (client) => {
-    await syncMrrVendorsIntoVendorTable(client, jobId);
-  });
   const [disciplines, vendors, pos, receivers, nextMrrNumber, appPos] = await Promise.all([
     getMaterialLogLookupOptions("discipline", jobId),
     getMaterialLogLookupOptions("vendor_name", jobId),
@@ -12988,9 +12985,6 @@ app.post("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, re
 
 app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
-  await withTransaction(async (client) => {
-    await syncMrrVendorsIntoVendorTable(client, jobId);
-  });
   const row = (await query("select * from mrr_logs where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!row) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR log row not found.</h3></div>`, req.user));
