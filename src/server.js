@@ -1143,7 +1143,10 @@ function buildMrrFormPdf(header, lines, options = {}) {
     "16\nLOCATION",
     "17\nGRID"
   ];
-  content.push(rect(x0, lineTableBottom, totalWidth, lineTableHeight));
+  content.push(line(x0, tableTop, right, tableTop));
+  content.push(line(x0, lineTableBottom, right, lineTableBottom));
+  content.push(line(x0, tableTop, x0, lineTableBottom));
+  content.push(line(right, tableTop, right, lineTableBottom));
   let itemX = x0;
   for (let i = 0; i < itemCols.length; i += 1) {
     if (i > 0) content.push(line(itemX, tableTop, itemX, lineTableBottom));
@@ -1155,12 +1158,14 @@ function buildMrrFormPdf(header, lines, options = {}) {
   content.push(line(x0, tableTop - tableHeaderHeight, right, tableTop - tableHeaderHeight));
   content.push(makeText(x0 + 164, tableTop - 14, "(INDICATE NUMBER OF SHIPPING CONTAINERS - TYPE OF CONTAINER - CONTAINER NUMBER, ETC.)", "F1", 5));
   const rowHeight = 18;
+  for (let i = 1; i < lineRowCount; i += 1) {
+    const dividerY = tableTop - tableHeaderHeight - (i * rowHeight);
+    content.push(line(x0, dividerY, right, dividerY));
+  }
   for (let i = 0; i < lineRowCount; i += 1) {
     const item = lineItems[i] || {};
     const descLines = wrapPdfText(item.description || "", 48);
     const rowTop = tableTop - tableHeaderHeight - (i * rowHeight);
-    const rowBottom = rowTop - rowHeight;
-    if (i < lineRowCount - 1) content.push(line(x0, rowBottom, right, rowBottom));
     content.push(makeText(x0 + 2, rowTop - 12, item.item_code || "", "F1", 7));
     content.push(makeText(x0 + itemCols[0] + 2, rowTop - 10, descLines[0] || "", "F1", 6));
     if (descLines[1]) content.push(makeText(x0 + itemCols[0] + 2, rowTop - 16, descLines[1], "F1", 6));
