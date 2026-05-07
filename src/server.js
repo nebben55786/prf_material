@@ -1076,11 +1076,9 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const fmrNumber = String(options.fmrNumber || "").trim();
   const pageNo = "1";
   const pageCount = "1";
-  const topSectionBottom = top - 290;
 
   content.push("0.4 w");
   content.push("0 0 0 RG");
-  content.push(rect(left, topSectionBottom, right - left, top - topSectionBottom));
 
   const x0 = left;
   const totalWidth = right - left;
