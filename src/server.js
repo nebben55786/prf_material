@@ -1154,21 +1154,22 @@ function buildMrrFormPdf(header, lines, options = {}) {
   }
   content.push(line(x0, tableTop - tableHeaderHeight, right, tableTop - tableHeaderHeight));
   content.push(makeText(x0 + 164, tableTop - 14, "(INDICATE NUMBER OF SHIPPING CONTAINERS - TYPE OF CONTAINER - CONTAINER NUMBER, ETC.)", "F1", 5));
-  let rowY = tableTop - tableHeaderHeight;
-  for (let i = 0; i < 12; i += 1) {
+  const rowHeight = 18;
+  for (let i = 0; i < lineRowCount; i += 1) {
     const item = lineItems[i] || {};
     const descLines = wrapPdfText(item.description || "", 48);
-    content.push(line(x0, rowY - 18, right, rowY - 18));
-    content.push(makeText(x0 + 2, rowY - 12, item.item_code || "", "F1", 7));
-    content.push(makeText(x0 + itemCols[0] + 2, rowY - 10, descLines[0] || "", "F1", 6));
-    if (descLines[1]) content.push(makeText(x0 + itemCols[0] + 2, rowY - 16, descLines[1], "F1", 6));
-    content.push(centerText(x0 + itemCols[0] + itemCols[1], rowY - 12, itemCols[2], item.qty || "", "F1", 7));
-    content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2], rowY - 12, itemCols[3], item.location || "", "F1", 7));
-    content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2] + itemCols[3], rowY - 12, itemCols[4], item.grid || "", "F1", 7));
-    rowY -= 18;
+    const rowTop = tableTop - tableHeaderHeight - (i * rowHeight);
+    const rowBottom = rowTop - rowHeight;
+    if (i < lineRowCount - 1) content.push(line(x0, rowBottom, right, rowBottom));
+    content.push(makeText(x0 + 2, rowTop - 12, item.item_code || "", "F1", 7));
+    content.push(makeText(x0 + itemCols[0] + 2, rowTop - 10, descLines[0] || "", "F1", 6));
+    if (descLines[1]) content.push(makeText(x0 + itemCols[0] + 2, rowTop - 16, descLines[1], "F1", 6));
+    content.push(centerText(x0 + itemCols[0] + itemCols[1], rowTop - 12, itemCols[2], item.qty || "", "F1", 7));
+    content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2], rowTop - 12, itemCols[3], item.location || "", "F1", 7));
+    content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2] + itemCols[3], rowTop - 12, itemCols[4], item.grid || "", "F1", 7));
   }
 
-  const osdTop = rowY - 10;
+  const osdTop = lineTableBottom - 10;
   content.push(rect(x0, osdTop - 18, totalWidth, 18));
   content.push(makeText(x0 + 2, osdTop - 8, "18.REPORT OF UNSATISFACTORY OVER SHORT AND DAMAGED MATERIAL (ONLY NECESSARY IF DISCREPANCIES EXIST)", "F2", 5.5));
   const osdHeaderTop = osdTop - 18;
