@@ -1102,14 +1102,14 @@ function buildMrrFormPdf(header, lines, options = {}) {
   field(x0 + col1 + col2 + col3 + pageCol, y2, ofCol, 24, "OF", pageCount);
 
   const y3 = y2 - 24;
-  const shipTicketWidth = 130;
-  const supplierOrderWidth = 140;
-  const materialReqWidth = 150;
+  const shipTicketWidth = col1;
+  const supplierOrderWidth = col2;
+  const materialReqWidth = col3;
   const deliveryLocationWidth = totalWidth - shipTicketWidth - supplierOrderWidth - materialReqWidth;
   field(x0, y3, shipTicketWidth, 24, "5. SHIP TICKET NO", header.pick_ticket || "");
   field(x0 + shipTicketWidth, y3, supplierOrderWidth, 24, "6. SUPPLIER ORDER NO.", "");
   field(x0 + shipTicketWidth + supplierOrderWidth, y3, materialReqWidth, 24, "7. MATERIAL REQ/LOAD NO.", "");
-  field(x0 + shipTicketWidth + supplierOrderWidth + materialReqWidth, y3, deliveryLocationWidth, 24, "8. DELIVERY LOCATION (LAYDOWNYARD, UNIT, ETC.)", deliveryLocation, { labelSize: 5.2 });
+  field(x0 + shipTicketWidth + supplierOrderWidth + materialReqWidth, y3, deliveryLocationWidth, 24, "8. DELIVERY LOCATION (LAYDOWNYARD, UNIT, ETC.)", deliveryLocation, { labelSize: 3.8 });
 
   const y4 = y3 - 24;
   field(x0, y4, 392, 24, "9. SUPPLIER", header.vendor_name || "");
