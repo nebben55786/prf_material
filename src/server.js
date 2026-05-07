@@ -1144,7 +1144,6 @@ function buildMrrFormPdf(header, lines, options = {}) {
     "17\nGRID"
   ];
   content.push(line(x0, tableTop, right, tableTop));
-  content.push(line(x0, lineTableBottom, right, lineTableBottom));
   content.push(line(x0, tableTop, x0, lineTableBottom));
   content.push(line(right, tableTop, right, lineTableBottom));
   let itemX = x0;
@@ -1174,7 +1173,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
     content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2] + itemCols[3], rowTop - 12, itemCols[4], item.grid || "", "F1", 7));
   }
 
-  const osdTop = lineTableBottom - 10;
+  const osdTop = lineTableBottom;
   content.push(rect(x0, osdTop - 18, totalWidth, 18));
   content.push(makeText(x0 + 2, osdTop - 8, "18.REPORT OF UNSATISFACTORY OVER SHORT AND DAMAGED MATERIAL (ONLY NECESSARY IF DISCREPANCIES EXIST)", "F2", 5.5));
   const osdHeaderTop = osdTop - 18;
