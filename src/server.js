@@ -1239,10 +1239,10 @@ function buildMrrFormPdf(header, lines, options = {}) {
   content.push(makeText(x0 + 2, attachTop - 8, "ATACHMENTS:", "F2", 6));
   content.push(makeText(x0 + 2, attachTop - 18, "CARRIER INSPECTION REPORT", "F2", 6));
   checkbox(x0 + 188, attachTop - 18, false, "PHOTOS");
-  checkbox(x0 + 268, attachTop - 18, false, "PICK/SHIPPING TICKET");
-  checkbox(x0 + 404, attachTop - 18, false, "NCR(IF APPLICABLE)");
-  checkbox(x0 + 522, attachTop - 18, false, "MTRS");
-  checkbox(x0 + 560, attachTop - 18, false, "OTHER");
+  checkbox(x0 + 265, attachTop - 18, false, "PICK/SHIPPING TICKET");
+  checkbox(x0 + 403, attachTop - 18, false, "NCR(IF APPLICABLE)");
+  checkbox(x0 + 514, attachTop - 18, false, "MTRS");
+  checkbox(x0 + 550, attachTop - 18, false, "OTHER");
 
   const dispoTop = attachTop - 30;
   field(x0, dispoTop, 310, 18, "INSPECTING FIELD SUPT./ENG.:", "");
