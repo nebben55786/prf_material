@@ -10099,8 +10099,7 @@ app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"),
         select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
                v.name as vendor, coalesce(r.rfq_no, '') as rfq_no, coalesce(po.description, '') as description, coalesce(po.vendor_contact, '') as vendor_contact,
                coalesce(po.freight_terms, '') as freight_terms, coalesce(po.ship_to, '') as ship_to, coalesce(po.buyer_name, '') as buyer_name,
-               coalesce(open_counts.open_items, 0) as open_items,
-               coalesce(line_refs.po_lines, '') as po_line_refs
+               coalesce(open_counts.open_items, 0) as open_items
     from purchase_orders po
     join vendors v on v.id = po.vendor_id
     left join rfqs r on r.id = po.rfq_id
@@ -10116,14 +10115,6 @@ app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"),
       ) rcv on rcv.po_line_id = pl.id
       group by pl.po_id
     ) open_counts on open_counts.po_id = po.id
-    left join (
-      select
-        pl.po_id,
-        string_agg(nullif(pl.po_line, ''), ', ' order by nullif(pl.po_line, ''), pl.id) as po_lines
-      from po_lines pl
-      where coalesce(pl.po_line, '') <> ''
-      group by pl.po_id
-    ) line_refs on line_refs.po_id = po.id
     ${whereSql}
     order by po.id desc
     limit 300
@@ -10139,7 +10130,6 @@ app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"),
     <td>${esc(po.ship_to || "")}</td>
     <td>${esc(po.buyer_name || "")}</td>
     <td>${esc(po.status)}</td>
-    <td>${esc(po.po_line_refs || "")}</td>
     <td>${esc(po.open_items)}</td>
     <td>${esc(formatShortDateTime(po.created_at))}</td>
     <td>
@@ -10168,7 +10158,7 @@ app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"),
       <div class="actions"><a class="btn btn-primary" href="/po/new">Add PO</a></div>
     </div>
     <div class="card scroll">
-      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>PO Line</th><th>Open Items</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="13" class="muted">No POs match the current filter.</td></tr>`}</table>
+      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>Open Items</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="12" class="muted">No POs match the current filter.</td></tr>`}</table>
     </div>
   `, req.user));
 });
