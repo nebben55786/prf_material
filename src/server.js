@@ -8771,6 +8771,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     </tr>`);
   }
 
+  const soleAwardVendor = selectedVendors.length === 1 ? selectedVendors[0] : null;
   const awardVendorOptions = [`<option value="">Select vendor</option>`]
     .concat(selectedVendors.map((vendor) => `<option value="${vendor.vendor_id}" ${Number(vendor.vendor_id) === awardedVendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
@@ -8807,7 +8808,9 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <div style="margin-top:12px;">${selectedVendorChips}</div>
       <form method="post" action="/rfq/${rfqId}/award" class="stack" style="margin-top:12px;">
         <div class="grid" style="grid-template-columns: minmax(0, 280px) 1fr;">
-          <div><label>Award RFQ To Vendor</label><select id="rfq-award-vendor-${rfqId}" name="vendor_id">${awardVendorOptions}</select></div>
+          <div><label>Award RFQ To Vendor</label>${soleAwardVendor
+            ? `<input value="${esc(soleAwardVendor.name)}" readonly /><input type="hidden" name="vendor_id" value="${soleAwardVendor.vendor_id}" />`
+            : `<select id="rfq-award-vendor-${rfqId}" name="vendor_id">${awardVendorOptions}</select>`}</div>
           <div><label>Award Notes</label><input name="award_notes" value="${esc(items.find((item) => item.award_notes)?.award_notes || "")}" /></div>
         </div>
         <div class="actions">
@@ -9617,11 +9620,20 @@ app.get("/imports/:id", requireAuth, requireJobContext, async (req, res) => {
 
 app.post("/rfq/:id/award", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
-  const vendorId = Number(req.body.vendor_id);
   const jobId = currentJobId(req);
-  if (!vendorId) throw new Error("Select a participating vendor to award this RFQ.");
+  let awardedVendorId = 0;
   await withTransaction(async (client) => {
-    const isSelectedVendor = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2 and job_id = $3", [rfqId, vendorId, jobId])).rows[0];
+    const selectedVendorRows = (await client.query(`
+      select rv.vendor_id, v.name
+      from rfq_vendors rv
+      join vendors v on v.id = rv.vendor_id
+      where rv.rfq_id = $1 and rv.job_id = $2
+      order by v.name
+    `, [rfqId, jobId])).rows;
+    const vendorId = Number(req.body.vendor_id) || (selectedVendorRows.length === 1 ? Number(selectedVendorRows[0].vendor_id) : 0);
+    if (!vendorId) throw new Error("Select a participating vendor to award this RFQ.");
+    awardedVendorId = vendorId;
+    const isSelectedVendor = selectedVendorRows.find((vendor) => Number(vendor.vendor_id) === vendorId);
     if (!isSelectedVendor) throw new Error("Choose a vendor from the RFQ vendor list.");
     const items = (await client.query(`
       select ri.id, mi.item_code, mi.description, q.unit_price, q.lead_days
@@ -9667,7 +9679,7 @@ app.post("/rfq/:id/award", requireAuth, requireJobContext, requirePermission("rf
     await client.query("update rfqs set status = 'AWARDED' where id = $1 and job_id = $2", [rfqId, jobId]);
     await auditLog(client, req.user.id, "award", "rfq", rfqId, `vendor=${vendorId}`);
   });
-  res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(vendorId))}`);
+  res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(awardedVendorId || ""))}`);
 }));
 
 app.post("/rfq/:id/award/clear", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
