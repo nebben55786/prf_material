@@ -8754,20 +8754,20 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ? `${awardedVendor} | $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d`
       : "Open";
     itemRows.push(`<tr>
-      <td>${esc(item.po_line || "")}</td>
-      <td><input type="hidden" name="rfq_item_id_${item.id}" value="${item.id}" />${esc(item.item_code)}</td>
-      <td>${esc(item.description)}</td>
-      <td>${esc(formatQtyDisplay(item.qty))}</td>
-      <td>${esc(item.uom)}</td>
-      <td>${esc(item.spec || "")}</td>
-      <td>${esc([item.size_1, item.size_2].filter(Boolean).join(" x "))}</td>
-      <td>${esc([item.thk_1, item.thk_2].filter(Boolean).join(" x "))}</td>
-      <td>${esc(item.notes || "")}</td>
-      <td><input name="unit_price_${item.id}" value="${esc(formatCurrencyInput(selectedQuote?.unit_price))}" inputmode="decimal" /></td>
-      <td><input name="lead_days_${item.id}" value="${esc(selectedQuote?.lead_days || "")}" inputmode="numeric" /></td>
-      <td>${esc(item.award_status)}</td>
-      <td>${esc(awardSummary)}</td>
-      <td>${esc(poRefs)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.po_line || "")}</td>
+      <td style="width:1%; white-space:nowrap;"><input type="hidden" name="rfq_item_id_${item.id}" value="${item.id}" />${esc(item.item_code)}</td>
+      <td style="width:auto; min-width:260px;">${esc(item.description)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(item.qty))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.uom)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.spec || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc([item.size_1, item.size_2].filter(Boolean).join(" x "))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc([item.thk_1, item.thk_2].filter(Boolean).join(" x "))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.notes || "")}</td>
+      <td style="width:96px; white-space:nowrap;"><input name="unit_price_${item.id}" value="${esc(formatCurrencyInput(selectedQuote?.unit_price))}" inputmode="decimal" /></td>
+      <td style="width:88px; white-space:nowrap;"><input name="lead_days_${item.id}" value="${esc(selectedQuote?.lead_days || "")}" inputmode="numeric" /></td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.award_status)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(awardSummary)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(poRefs)}</td>
       <td><div class="actions">
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/quotes">Quotes / History</a>
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/edit">Edit</a>
@@ -8872,7 +8872,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Save ${esc(activeVendor?.name || "Vendor")} Quotes</button>
         </div>
         <table>
-          <tr><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Thk</th><th>Notes</th><th>Unit Price</th><th>Lead Days</th><th>Award Status</th><th>Award Summary</th><th>Issued PO</th><th>Actions</th></tr>
+          <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:260px;">Description</th><th style="width:1%; white-space:nowrap;">Qty</th><th style="width:1%; white-space:nowrap;">UOM</th><th style="width:1%; white-space:nowrap;">Spec</th><th style="width:1%; white-space:nowrap;">Size</th><th style="width:1%; white-space:nowrap;">Thk</th><th style="width:1%; white-space:nowrap;">Notes</th><th style="width:96px; white-space:nowrap;">Unit Price</th><th style="width:88px; white-space:nowrap;">Lead Days</th><th style="width:1%; white-space:nowrap;">Award Status</th><th style="width:1%; white-space:nowrap;">Award Summary</th><th style="width:1%; white-space:nowrap;">Issued PO</th><th>Actions</th></tr>
           ${itemRows.join("") || `<tr><td colspan="15" class="muted">No RFQ items loaded yet.</td></tr>`}
         </table>
       </form>
