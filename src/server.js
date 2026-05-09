@@ -10519,7 +10519,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     const locked = remainingQty <= 0;
     const qtyCell = locked
       ? `<span class="chip">Received</span><input type="hidden" name="po_line_ids" value="${lineId}" />`
-      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" />`;
+      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" size="4" style="width:4.5ch;" />`;
     const warehouseCell = locked
       ? `<span>${esc(line.last_warehouse || "")}</span>`
       : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select>`;
@@ -10527,17 +10527,17 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       ? `<span>${esc(line.last_location || "")}</span>`
       : `<select id="po-line-location-${lineId}" name="location_${lineId}" data-placeholder="Select location"><option value="">Select location</option></select>`;
     return `<tr>
-      <td>${esc(line.po_line || "")}</td>
-      <td>${esc(line.item_code)}</td>
-      <td>${esc(line.description)}</td>
-      <td>${esc(line.size_1 || "")}</td>
-      <td>${esc(line.size_2 || "")}</td>
-      <td>${esc(line.thk_1 || "")}</td>
-      <td>${esc(line.thk_2 || "")}</td>
-    <td>${esc(formatQtyDisplay(line.qty_ordered))}</td>
-      <td>${esc(formatQtyDisplay(line.qty_received))}</td>
-      <td>${esc(formatQtyDisplay(remainingQty))}</td>
-      <td>${qtyCell}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.po_line || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.item_code)}</td>
+      <td style="width:auto; min-width:320px;">${esc(line.description)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.size_1 || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.size_2 || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.thk_1 || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.thk_2 || "")}</td>
+    <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_ordered))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_received))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(remainingQty))}</td>
+      <td style="width:72px; white-space:nowrap;">${qtyCell}</td>
       <td>${warehouseCell}</td>
       <td>${locationCell}</td>
     </tr>`;
@@ -10576,7 +10576,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         </div>
         <div class="scroll">
           <table>
-            <tr><th>PO Line</th><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>Qty This Receipt</th><th>Warehouse</th><th>Location</th></tr>
+            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Remaining</th><th style="width:72px; white-space:nowrap;">Qty</th><th>Warehouse</th><th>Location</th></tr>
             ${lineRows || `<tr><td colspan="13" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
