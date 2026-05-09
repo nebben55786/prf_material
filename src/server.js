@@ -2129,12 +2129,18 @@ function parseVendorFmrRequestWorkbook(fileBuffer) {
 }
 
 function num(value, fallback = 0) {
-  const parsed = Number(value);
+  const parsed = Number(String(value ?? "").replace(/[$,]/g, "").trim());
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function quoteCell(unitPrice, leadDays) {
   return `$${Number(unitPrice).toFixed(2)} | ${num(leadDays)}d`;
+}
+
+function formatCurrencyInput(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return "";
+  const parsed = Number(String(value).replace(/[$,]/g, "").trim());
+  return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : String(value).trim();
 }
 
 async function getNextRfqLineNumber(client, rfqId) {
@@ -8757,7 +8763,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <td>${esc([item.size_1, item.size_2].filter(Boolean).join(" x "))}</td>
       <td>${esc([item.thk_1, item.thk_2].filter(Boolean).join(" x "))}</td>
       <td>${esc(item.notes || "")}</td>
-      <td><input name="unit_price_${item.id}" value="${esc(selectedQuote?.unit_price || "")}" inputmode="decimal" /></td>
+      <td><input name="unit_price_${item.id}" value="${esc(formatCurrencyInput(selectedQuote?.unit_price))}" inputmode="decimal" /></td>
       <td><input name="lead_days_${item.id}" value="${esc(selectedQuote?.lead_days || "")}" inputmode="numeric" /></td>
       <td>${esc(item.award_status)}</td>
       <td>${esc(awardSummary)}</td>
@@ -8833,7 +8839,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
           <div><label>RFQ Number</label><input value="${esc(rfq.rfq_no)}" readonly /></div>
           <div><label>Description</label><input name="project_name" value="${esc(rfq.project_name || "")}" required /></div>
-          <div><label>Due Date</label><input type="date" name="due_date" value="${esc(String(rfq.due_date || "").match(/^\\d{4}-\\d{2}-\\d{2}/)?.[0] || "")}" required /></div>
+          <div><label>Due Date</label><input type="date" name="due_date" value="${esc(textValue(rfq.due_date))}" required /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
       </form>
@@ -10519,7 +10525,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     const locked = remainingQty <= 0;
     const qtyCell = locked
       ? `<span class="chip">Received</span><input type="hidden" name="po_line_ids" value="${lineId}" />`
-      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" size="4" style="width:4.5ch;" />`;
+      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
     const warehouseCell = locked
       ? `<span>${esc(line.last_warehouse || "")}</span>`
       : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select>`;
@@ -10537,7 +10543,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_ordered))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_received))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(remainingQty))}</td>
-      <td style="width:72px; white-space:nowrap;">${qtyCell}</td>
+      <td style="width:84px; white-space:nowrap;">${qtyCell}</td>
       <td>${warehouseCell}</td>
       <td>${locationCell}</td>
     </tr>`;
@@ -10576,7 +10582,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         </div>
         <div class="scroll">
           <table>
-            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Remaining</th><th style="width:72px; white-space:nowrap;">Qty</th><th>Warehouse</th><th>Location</th></tr>
+            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Remaining</th><th style="width:84px; white-space:nowrap;">Qty</th><th>Warehouse</th><th>Location</th></tr>
             ${lineRows || `<tr><td colspan="13" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
