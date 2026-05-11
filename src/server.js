@@ -1845,11 +1845,11 @@ function parseUploadedRows(file, pastedText) {
     pastedText = file.buffer.toString("utf8");
   }
   if (!pastedText?.trim()) return [];
-  const lines = pastedText.trim().split(/\r?\n/);
-  const headers = lines.shift().split(",").map((cell) => normalizeHeader(cell));
-  return lines.filter((line) => line.trim()).map((line) => {
-    const values = line.split(",");
-    return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").trim()]));
+  const rows = parseDelimitedTextRows(pastedText.trim(), ",");
+  if (!rows.length) return [];
+  const headers = rows.shift().map((cell) => normalizeHeader(cell));
+  return rows.map((values) => {
+    return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").replace(/\s*\r?\n\s*/g, " ").trim()]));
   });
 }
 
@@ -1873,10 +1873,12 @@ function parseRfqPasteRows(pastedText) {
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   const looksNumeric = (value) => Number.isFinite(parseQtyValue(value, NaN));
   const looksLikeUom = (value) => /[a-z]/i.test(String(value || "").trim()) && !looksNumeric(value);
-  const lines = text.split(/\r?\n/).filter((line) => line.trim());
-  if (!lines.length) return [];
-  const delimiter = lines[0].includes("\t") ? "\t" : ",";
-  const firstValues = lines[0].split(delimiter).map((cell) => String(cell ?? "").trim());
+  const delimiter = text.includes("\t") ? "\t" : ",";
+  const rows = parseDelimitedTextRows(text, delimiter)
+    .map((values) => values.map((cell) => String(cell ?? "").replace(/\s*\r?\n\s*/g, " ").trim()))
+    .filter((values) => values.some((cell) => cell));
+  if (!rows.length) return [];
+  const firstValues = rows[0];
   const firstHeaders = firstValues.map((cell) => normalizeHeader(cell));
   const aliases = {
     item_code: new Set(["ident", "ident_code", "item_code", "item", "code", "item_no", "item_number"]),
@@ -1892,7 +1894,7 @@ function parseRfqPasteRows(pastedText) {
   };
   const hasHeader = firstHeaders.some((header) => aliases.item_code.has(header))
     && firstHeaders.some((header) => aliases.qty.has(header));
-  const dataLines = hasHeader ? lines.slice(1) : lines;
+  const dataRows = hasHeader ? rows.slice(1) : rows;
   const headerMap = hasHeader ? Object.fromEntries(firstHeaders.map((header, index) => [header, index])) : {};
   const pickHeaderValue = (values, candidates) => {
     for (const candidate of candidates) {
@@ -1908,8 +1910,7 @@ function parseRfqPasteRows(pastedText) {
     }
     return -1;
   };
-  return dataLines.map((line) => {
-    const values = line.split(delimiter).map((cell) => String(cell ?? "").trim());
+  return dataRows.map((values) => {
     let itemCode = "";
     let description = "";
     let sizeText = "";
@@ -2549,6 +2550,43 @@ function textValue(value) {
   if (value === undefined || value === null) return "";
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
   return String(value).trim();
+}
+
+function parseDelimitedTextRows(text, delimiter = ",") {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let inQuotes = false;
+  const source = String(text || "");
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "\"") {
+      if (inQuotes && source[index + 1] === "\"") {
+        cell += "\"";
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (!inQuotes && char === delimiter) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+    if (!inQuotes && (char === "\n" || char === "\r")) {
+      if (char === "\r" && source[index + 1] === "\n") index += 1;
+      row.push(cell);
+      if (row.some((value) => String(value || "").trim())) rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+  row.push(cell);
+  if (row.some((value) => String(value || "").trim())) rows.push(row);
+  return rows;
 }
 
 function firstNonEmptyWorkbookValue(row, ...keys) {
