@@ -8810,8 +8810,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <td><div class="actions">
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/quotes">Quotes / History</a>
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/edit">Edit</a>
-        ${item.award_status === "AWARDED" ? `<form method="post" action="/rfq-item/${item.id}/award/clear"><button class="btn btn-secondary" type="submit">Clear Award</button></form>` : ""}
-        <form method="post" action="/rfq-item/${item.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>
+        ${item.award_status === "AWARDED" ? `<button class="btn btn-secondary" type="submit" formaction="/rfq-item/${item.id}/award/clear" formmethod="post">Clear Award</button>` : ""}
+        <button class="btn btn-danger" type="submit" formaction="/rfq-item/${item.id}/delete" formmethod="post" onclick="return confirm('Delete RFQ line ${escAttr(String(item.po_line || item.item_code || item.id))}?');">Delete</button>
       </div></td>
     </tr>`);
   }
