@@ -22,6 +22,7 @@ const rfqStatuses = [
   { value: "WAITING_ON_QUOTES", label: "Waiting on Quotes" },
   { value: "AWARDED", label: "Awarded" },
   { value: "WAITING_ON_CLIENT", label: "Waiting on Client" },
+  { value: "CANCELLED", label: "Cancelled" },
   { value: "PURCHASED", label: "Purchased" },
   { value: "RECEIVED", label: "Received" }
 ];
@@ -3960,15 +3961,15 @@ async function recalcRfqStatus(client, rfqId) {
   const issued = Number(totals?.issued_count || 0);
   const fullyReceived = Number(totals?.fully_received_count || 0);
   if (total > 0 && fullyReceived >= total) {
-    await client.query("update rfqs set status = 'RECEIVED' where id = $1 and job_id = $2", [rfqId, rfq.job_id]);
+    await client.query("update rfqs set status = 'RECEIVED' where id = $1 and job_id = $2 and status <> 'CANCELLED'", [rfqId, rfq.job_id]);
   } else if (issued > 0) {
-    await client.query("update rfqs set status = 'PURCHASED' where id = $1 and job_id = $2 and status <> 'RECEIVED'", [rfqId, rfq.job_id]);
+    await client.query("update rfqs set status = 'PURCHASED' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'RECEIVED')", [rfqId, rfq.job_id]);
   } else if (total > 0 && awardedCount >= total) {
-    await client.query("update rfqs set status = 'AWARDED' where id = $1 and job_id = $2 and status not in ('PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
+    await client.query("update rfqs set status = 'AWARDED' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
   } else if (quotedCount > 0) {
-    await client.query("update rfqs set status = 'WAITING_ON_QUOTES' where id = $1 and job_id = $2 and status not in ('AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
+    await client.query("update rfqs set status = 'WAITING_ON_QUOTES' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
   } else {
-    await client.query("update rfqs set status = 'SEND_FOR_QUOTES' where id = $1 and job_id = $2 and status not in ('AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
+    await client.query("update rfqs set status = 'SEND_FOR_QUOTES' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
   }
 }
 
