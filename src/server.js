@@ -8871,7 +8871,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       </form>
     </div>`;
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
-    <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</h1>
+    <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</h1>
     <div class="card">
       <form id="rfq-${rfqId}-header-form" method="post" action="/rfq/${rfqId}/header" class="stack">
         <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
@@ -8943,7 +8943,7 @@ app.get("/rfq/:id/delete", requireAuth, requireJobContext, requirePermission("rf
     <h1>Delete RFQ</h1>
     <div class="card error">
       <h3>Confirm RFQ Deletion</h3>
-      <p><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</p>
+      <p><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</p>
       <p class="muted">Status: ${esc(rfq.status)} | Issued POs: ${poCount}</p>
       ${poCount > 0 ? `<p>This RFQ cannot be deleted because it already has purchase orders tied to it.</p>` : `<p>This will remove the RFQ, its vendor list, its items, quotes, quote history, and related import logs.</p>`}
       <div class="actions">
@@ -9085,7 +9085,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
     </tr>`).join("");
   res.send(layout(`Add Existing Items`, `
     <h1>Add Existing Items</h1>
-    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
       <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
       <div class="grid" style="grid-template-columns: 1fr auto;">
@@ -9199,7 +9199,7 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
   `).join("");
   res.send(layout(`Add New RFQ Items`, `
     <h1>Add New RFQ Items</h1>
-    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
     <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
     <style>
       #rfq-grid-form-${rfqId} table td { padding: 0; }
@@ -9237,7 +9237,7 @@ app.get("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissio
   if (!rfq) throw new Error("RFQ not found.");
   res.send(layout(`Paste RFQ Values`, `
     <h1>Paste RFQ Values</h1>
-    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
       <p class="muted">Paste columns in this order: <strong>Ident Code</strong>, <strong>Description</strong>, <strong>Size_1</strong>, <strong>Size_2</strong>, <strong>Thk</strong>, <strong>Qty</strong>, <strong>Unit</strong>. Header row is optional. Tab-delimited spreadsheet paste works best. Shorter layouts like <strong>Ident Code</strong>, <strong>Description</strong>, <strong>Size_1</strong>, <strong>Qty</strong>, <strong>Unit</strong> also work. <strong>Size</strong> still works if you are using one combined size column, and thickness can be blank.</p>
       <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
@@ -9341,7 +9341,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
 
   res.send(layout(`Paste RFQ Values`, `
     <h1>Paste RFQ Values</h1>
-    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
       <div class="stats" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
         <div class="stat"><div>Pasted Rows</div><strong>${rows.length}</strong></div>
@@ -9399,7 +9399,7 @@ app.get("/rfq/:id/quotes/import-page", requireAuth, requireJobContext, requirePe
     : "";
   res.send(layout(`Import RFQ Quotes`, `
     <h1>Import Quotes</h1>
-    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` | ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
       ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted">Save at least one selected vendor first.</div>`}
       <p class="muted">CSV/XLSX columns: item_code, unit_price, lead_days. If you include vendor_name, it must match one of the selected RFQ vendors.</p>
