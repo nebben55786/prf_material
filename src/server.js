@@ -3358,14 +3358,15 @@ async function ensureWarehouseLocationExists(client, warehouseName, locationName
 
 async function getNextMrrNumber(client = null, jobId = null) {
   const runner = client || { query };
+  const normalizedJobId = normalizeJobIdValue(jobId);
   const latest = (await runner.query(`
     select mrr_number
     from mrr_logs
     where coalesce(mrr_number, '') <> '' and mrr_number ~ '\\d+$'
-      ${jobId ? "and job_id = $1" : ""}
+      ${normalizedJobId ? "and job_id = $1::bigint" : ""}
     order by ((regexp_match(mrr_number, '(\\d+)$'))[1])::bigint desc, id desc
     limit 1
-  `, jobId ? [jobId] : [])).rows[0];
+  `, normalizedJobId ? [normalizedJobId] : [])).rows[0];
   const current = String(latest?.mrr_number || "").trim();
   if (!current) return "MRR-000001";
   const match = current.match(/^(.*?)(\d+)$/);
@@ -3377,14 +3378,15 @@ async function getNextMrrNumber(client = null, jobId = null) {
 
 async function getNextFmrNumber(client = null, jobId = null) {
   const runner = client || { query };
+  const normalizedJobId = normalizeJobIdValue(jobId);
   const latest = (await runner.query(`
     select fmr_number
     from fmr_logs
     where coalesce(fmr_number, '') <> '' and fmr_number ~ '\\d+$'
-      ${jobId ? "and job_id = $1" : ""}
+      ${normalizedJobId ? "and job_id = $1::bigint" : ""}
     order by ((regexp_match(fmr_number, '(\\d+)$'))[1])::bigint desc, id desc
     limit 1
-  `, jobId ? [jobId] : [])).rows[0];
+  `, normalizedJobId ? [normalizedJobId] : [])).rows[0];
   const current = String(latest?.fmr_number || "").trim();
   if (!current) return "FMR-000001";
   const match = current.match(/^(.*?)(\d+)$/);
@@ -3396,14 +3398,15 @@ async function getNextFmrNumber(client = null, jobId = null) {
 
 async function getNextOpiNumber(client = null, jobId = null) {
   const runner = client || { query };
+  const normalizedJobId = normalizeJobIdValue(jobId);
   const latest = (await runner.query(`
     select opi_number
     from mrr_logs
     where coalesce(opi_number, '') <> '' and opi_number ~ '\\d+$'
-      ${jobId ? "and job_id = $1" : ""}
+      ${normalizedJobId ? "and job_id = $1::bigint" : ""}
     order by ((regexp_match(opi_number, '(\\d+)$'))[1])::bigint desc, id desc
     limit 1
-  `, jobId ? [jobId] : [])).rows[0];
+  `, normalizedJobId ? [normalizedJobId] : [])).rows[0];
   const current = String(latest?.opi_number || "").trim();
   if (!current) return "OPI-000001";
   const match = current.match(/^(.*?)(\d+)$/);
@@ -3441,6 +3444,7 @@ async function getPoNumberForVendorCrate(client, vendorName, containerNo) {
 }
 
 async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, vendorName = "", containerNo = "", mrrNumber = "", poNumber = "", jobId = null } = {}) {
+  const normalizedJobId = normalizeJobIdValue(jobId);
   const vendor = String(vendorName || "").trim();
   const crate = String(containerNo || "").trim();
   if (!vendor || !crate) {
@@ -3449,7 +3453,7 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
   const description = `${vendor} pkg: ${crate}`;
   const effectivePoNumber = String(poNumber || "").trim() || await getPoNumberForVendorCrate(client, vendor, crate);
   const linkedPo = effectivePoNumber
-    ? (await client.query("select id, po_no from purchase_orders where po_no = $1 and ($2::bigint is null or job_id = $2) order by id desc limit 1", [effectivePoNumber, jobId])).rows[0]
+    ? (await client.query("select id, po_no from purchase_orders where po_no = $1 and ($2::bigint is null or job_id = $2::bigint) order by id desc limit 1", [effectivePoNumber, normalizedJobId])).rows[0]
     : null;
   const saveLinkedFmr = async (resolvedMrrNumber) => {
     if (!fmrId) return;
@@ -3473,7 +3477,7 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
       updates.push(`app_po_id = $${params.length}`);
     }
     if (!resolvedOpiNumber) {
-      resolvedOpiNumber = await getNextOpiNumber(client, jobId);
+      resolvedOpiNumber = await getNextOpiNumber(client, normalizedJobId);
       params.push(resolvedOpiNumber);
       updates.push(`opi_number = $${params.length}`);
     }
@@ -3482,8 +3486,8 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
         update mrr_logs
         set ${updates.join(", ")}, updated_at = now()
         where id = $1 and ($${params.length + 1}::bigint is null or job_id = $${params.length + 1})
-      `, [...params, jobId]);
-      await syncOpiLogsFromMrr(client, jobId);
+      `, [...params, normalizedJobId]);
+      await syncOpiLogsFromMrr(client, normalizedJobId);
     }
     await saveLinkedFmr(row.mrr_number);
     return { mrrNumber: row.mrr_number, opiNumber: resolvedOpiNumber, poNumber: effectivePoNumber, created: false };
@@ -3498,7 +3502,7 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
         and lower(trim(coalesce(vendor_name, ''))) = lower($2)
         and lower(trim(coalesce(material_description, ''))) = lower($3)
       limit 1
-    `, [requestedMrrNumber, vendor, description, jobId])).rows[0];
+    `, [requestedMrrNumber, vendor, description, normalizedJobId])).rows[0];
     if (exactMatch) {
       return syncExistingMrr(exactMatch);
     }
@@ -3511,20 +3515,20 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
       and lower(trim(coalesce(material_description, ''))) = lower($2)
     order by id desc
     limit 1
-  `, [vendor, description, jobId])).rows[0];
+  `, [vendor, description, normalizedJobId])).rows[0];
   if (existing) {
     return syncExistingMrr(existing);
   }
-  const nextMrrNumber = await getNextMrrNumber(client, jobId);
-  const nextOpiNumber = await getNextOpiNumber(client, jobId);
+  const nextMrrNumber = await getNextMrrNumber(client, normalizedJobId);
+  const nextOpiNumber = await getNextOpiNumber(client, normalizedJobId);
   const insert = (await client.query(`
     insert into mrr_logs (
       job_id, discipline, mrr_number, vendor_name, app_po_id, po_number, pick_ticket, material_description,
       received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
-    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+    ) values ($1::bigint,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
     returning id
   `, [
-    jobId,
+    normalizedJobId,
     "",
     nextMrrNumber,
     vendor,
@@ -3539,10 +3543,10 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
     nextOpiNumber,
     ""
   ])).rows[0];
-  await saveMaterialLogLookup(client, "vendor_name", vendor, jobId);
-  await saveMaterialLogLookup(client, "po_number", effectivePoNumber, jobId);
-  await syncMrrVendorsIntoVendorTable(client, jobId);
-  await syncOpiLogsFromMrr(client, jobId);
+  await saveMaterialLogLookup(client, "vendor_name", vendor, normalizedJobId);
+  await saveMaterialLogLookup(client, "po_number", effectivePoNumber, normalizedJobId);
+  await syncMrrVendorsIntoVendorTable(client, normalizedJobId);
+  await syncOpiLogsFromMrr(client, normalizedJobId);
   await saveLinkedFmr(nextMrrNumber);
   if (userId) {
     await auditLog(client, userId, "create", "mrr_log", insert.id, nextMrrNumber);
@@ -3625,10 +3629,11 @@ async function syncOpiLogsFromMrr(client, jobId = null) {
 }
 
 async function ensureUniqueFmrContainer(client, vendorName, containerNo, excludeId = null, jobId = null) {
+  const normalizedJobId = normalizeJobIdValue(jobId);
   const vendor = String(vendorName || "").trim().toLowerCase();
   const normalized = String(containerNo || "").trim();
   if (!vendor || !normalized) return;
-  const params = [jobId, vendor, normalized.toLowerCase()];
+  const params = [normalizedJobId, vendor, normalized.toLowerCase()];
   let sql = `
     select id
     from fmr_logs
@@ -3649,6 +3654,7 @@ async function ensureUniqueFmrContainer(client, vendorName, containerNo, exclude
 
 async function getRequestedVendorCrateSet(client = null, jobId = null) {
   const runner = client || { query };
+  const normalizedJobId = normalizeJobIdValue(jobId);
   const rows = (await runner.query(`
     select lower(trim(coalesce(vendor_name, ''))) as vendor_key,
            lower(trim(coalesce(container_no, ''))) as crate_key
@@ -3656,7 +3662,7 @@ async function getRequestedVendorCrateSet(client = null, jobId = null) {
     where ($1::bigint is null or job_id = $1)
       and trim(coalesce(vendor_name, '')) <> ''
       and trim(coalesce(container_no, '')) <> ''
-  `, [jobId])).rows;
+  `, [normalizedJobId])).rows;
   return new Set(rows.map((row) => `${row.vendor_key}|${row.crate_key}`));
 }
 
@@ -3671,14 +3677,15 @@ function getVendorFmrRequestBuilderQuery(source = {}) {
 }
 
 async function buildVendorFmrPreviewData(client, jobId = null) {
-  const requestedSet = await getRequestedVendorCrateSet(client, jobId);
+  const normalizedJobId = normalizeJobIdValue(jobId);
+  const requestedSet = await getRequestedVendorCrateSet(client, normalizedJobId);
   const stagedRows = (await client.query(`
     select *
     from vendor_fmr_request_lines
     where selected_for_request = true
       and ($1::bigint is null or job_id = $1)
     order by id
-  `, [jobId])).rows;
+  `, [normalizedJobId])).rows;
   const requestGroups = new Map();
   const invalidRows = [];
   const skippedRows = [];
@@ -3880,7 +3887,13 @@ const requireJobContext = asyncHandler(async (req, res, next) => {
 });
 
 function currentJobId(req) {
-  return Number(req.user?.job_id || 0);
+  const value = Number(req.user?.job_id || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function normalizeJobIdValue(jobId) {
+  const value = Number(jobId);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function requireRole(roles) {
@@ -12191,7 +12204,8 @@ app.post("/material-logs/fmr/request-lines/preview/remove", requireAuth, require
 }));
 
 app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
-  const jobId = currentJobId(req);
+  const jobId = normalizeJobIdValue(currentJobId(req));
+  if (!jobId) throw new Error("Select a valid current job before creating Vendor FMRs.");
   await withTransaction(async (client) => {
     const preview = await buildVendorFmrPreviewData(client, jobId);
     if (preview.stagedRows.length === 0) throw new Error("There are no staged lines ready to create.");
@@ -12213,7 +12227,7 @@ app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, require
         const insert = await client.query(`
           insert into fmr_logs (
             job_id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, request_date, updated_at
-          ) values ($1,$2,$3,$4,$5,$6,$7,$8, now())
+          ) values ($1::bigint,$2,$3,$4,$5,$6,$7,$8, now())
           returning id
         `, [
           jobId,
@@ -12931,14 +12945,15 @@ app.post("/material-logs/mrr/add", requireAuth, requireJobContext, requirePermis
 });
 
 app.post("/material-logs/fmr/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
-  const jobId = currentJobId(req);
+  const jobId = normalizeJobIdValue(currentJobId(req));
+  if (!jobId) throw new Error("Select a valid current job before creating a Vendor FMR.");
   await withTransaction(async (client) => {
     const fmrNumber = await getNextFmrNumber(client, jobId);
     await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no, null, jobId);
     const result = await client.query(`
       insert into fmr_logs (
         job_id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, mrr_number, request_date, need_date, pick_ticket, pickup_location, pickup_date, updated_at
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+      ) values ($1::bigint,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
       returning id
     `, [
       jobId,
