@@ -1475,6 +1475,22 @@ function layout(title, body, user) {
         orderInput.value = rows.map((row) => String(row.dataset.rfqItemId || "").trim()).filter(Boolean).join(",");
         return true;
       }
+      function openRfqPdfWithOrder(link, tableId) {
+        if (!link) return true;
+        const table = document.getElementById(tableId);
+        const url = new URL(link.getAttribute("href") || link.href, window.location.origin);
+        if (table) {
+          const rows = Array.from(table.querySelectorAll("tr[data-rfq-item-id]"));
+          const order = rows.map((row) => String(row.dataset.rfqItemId || "").trim()).filter(Boolean).join(",");
+          if (order) {
+            url.searchParams.set("order", order);
+          } else {
+            url.searchParams.delete("order");
+          }
+        }
+        window.open(url.toString(), link.target || "_blank");
+        return false;
+      }
       function promptPoNumber(button, vendorSelectId, targetFormId) {
         const vendorSelect = document.getElementById(vendorSelectId);
         const targetForm = document.getElementById(targetFormId);
@@ -2300,7 +2316,7 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
       and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
   `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || ""]);
   if (existingItem.rows[0]) {
-    const poLine = requestedLine || existingItem.rows[0].po_line || "";
+    const poLine = requestedLine || existingItem.rows[0].po_line || await getNextRfqLineNumber(client, rfqId);
     await client.query(`
       update rfq_items
       set po_line = $2, spec = $3, commodity_code = $4, tag_number = $5, qty = $6, notes = $7, updated_at = now()
@@ -2308,7 +2324,7 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
     `, [existingItem.rows[0].id, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
     return { status: "updated" };
   }
-  const poLine = requestedLine || "";
+  const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
   await client.query(`
     insert into rfq_items (job_id, rfq_id, material_item_id, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
@@ -9165,7 +9181,6 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const recentImports = recentImportsRes.rows;
   const materialItems = materialItemsRes.rows;
   const allQuotes = quotesRes.rows;
-  const hasAnyQuotes = allQuotes.length > 0;
   const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
   const selectedVendorIds = selectedVendors.map((vendor) => Number(vendor.vendor_id));
   const activeQuoteVendorId = selectedVendorIds.includes(Number(selectedVendorId))
@@ -9236,7 +9251,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ? `${awardedVendor} | $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d`
       : "Open";
     itemRows.push(`<tr data-rfq-item-id="${item.id}">
-      <td style="width:1%; white-space:nowrap;">${esc(hasAnyQuotes ? (item.po_line || "") : "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.po_line || "")}</td>
       <td style="width:1%; white-space:nowrap;"><input type="hidden" name="rfq_item_id_${item.id}" value="${item.id}" />${esc(item.item_code)}</td>
       <td style="width:auto; min-width:260px;">${esc(item.description)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(item.qty))}</td>
@@ -9282,7 +9297,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/new">Add New</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Values</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Import Quotes</a>` : ""}
-      <a class="btn btn-primary" target="_blank" href="/rfq/${rfqId}/sheet.pdf">Open RFQ PDF</a>
+      <a class="btn btn-primary" target="_blank" href="/rfq/${rfqId}/sheet.pdf" onclick="return openRfqPdfWithOrder(this, 'rfq-quote-table-${rfqId}');">Open RFQ PDF</a>
     </div>`;
   const awardSummaryCard = `
     <div class="card">
@@ -9354,7 +9369,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         <div class="actions" style="margin-top:6px;">
           <button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Save ${esc(activeVendor?.name || "Vendor")} Quotes</button>
         </div>
-        <table>
+        <table id="rfq-quote-table-${rfqId}">
           <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:260px;">Description</th><th style="width:1%; white-space:nowrap;">Qty</th><th style="width:1%; white-space:nowrap;">UOM</th><th style="width:1%; white-space:nowrap;">Spec</th><th style="width:1%; white-space:nowrap;">Size</th><th style="width:1%; white-space:nowrap;">Thk</th><th style="width:1%; white-space:nowrap;">Notes</th><th style="width:96px; white-space:nowrap;">Unit Price</th><th style="width:88px; white-space:nowrap;">Lead Days</th><th style="width:1%; white-space:nowrap;">Award Status</th><th style="width:1%; white-space:nowrap;">Award Summary</th><th style="width:1%; white-space:nowrap;">Issued PO</th><th>Actions</th></tr>
           ${itemRows.join("") || `<tr><td colspan="15" class="muted">No RFQ items loaded yet.</td></tr>`}
         </table>
@@ -9433,7 +9448,7 @@ app.post("/rfq/:id/delete", requireAuth, requireJobContext, requirePermission("r
 app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
   const jobId = currentJobId(req);
-  const [rfqRes, itemsRes, quoteCountRes] = await Promise.all([
+  const [rfqRes, itemsRes] = await Promise.all([
     query("select * from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
     query(`
       select
@@ -9456,21 +9471,25 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission(
         case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
-    `, [rfqId, jobId]),
-    query(`
-      select count(*) as count
-      from quotes q
-      join rfq_items ri on ri.id = q.rfq_item_id
-      where ri.rfq_id = $1 and ri.job_id = $2
     `, [rfqId, jobId])
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
-  const hasAnyQuotes = Number(quoteCountRes.rows[0]?.count || 0) > 0;
-  const pdfItems = hasAnyQuotes
-    ? itemsRes.rows
-    : itemsRes.rows.slice().sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
-  const pdfBuffer = buildRfqSheetPdf(rfq, pdfItems, { showPoLines: hasAnyQuotes });
+  const requestedOrder = String(req.query.order || "")
+    .split(",")
+    .map((value) => Number(String(value || "").trim()))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  let pdfItems = itemsRes.rows;
+  if (requestedOrder.length) {
+    const orderIndex = new Map(requestedOrder.map((itemId, index) => [itemId, index]));
+    pdfItems = itemsRes.rows.slice().sort((a, b) => {
+      const aIndex = orderIndex.has(Number(a.id)) ? orderIndex.get(Number(a.id)) : Number.MAX_SAFE_INTEGER;
+      const bIndex = orderIndex.has(Number(b.id)) ? orderIndex.get(Number(b.id)) : Number.MAX_SAFE_INTEGER;
+      if (aIndex !== bIndex) return aIndex - bIndex;
+      return Number(a.id || 0) - Number(b.id || 0);
+    });
+  }
+  const pdfBuffer = buildRfqSheetPdf(rfq, pdfItems);
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
   res.send(pdfBuffer);
