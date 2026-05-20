@@ -6394,6 +6394,9 @@ app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyn
 
 app.get("/bom", requireAuth, requireJobContext, requirePermission("bom", "view"), async (req, res) => {
   const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    await rebuildUnallocatedBom(client, jobId);
+  });
   const bomNo = String(req.query.bom_no || "").trim();
   const bomName = String(req.query.bom_name || "").trim();
   const bomType = String(req.query.bom_type || "").trim();
@@ -7410,6 +7413,9 @@ app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermissi
 
 app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("requisitions", "create"), async (req, res) => {
   const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    await rebuildUnallocatedBom(client, jobId);
+  });
   const availableBoms = (await query(`
     select id, bom_no, bom_name, description, status, is_system_generated, system_key
     from bom_headers
