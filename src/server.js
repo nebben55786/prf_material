@@ -17,6 +17,13 @@ const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing",
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
 const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CANCELLED", "CLOSED"];
+const unallocatedBomSystemKey = "UNALLOCATED";
+const unallocatedBomName = "Un-Allocated Inventory";
+const issueSourceTypes = {
+  bom: "BOM",
+  unallocated: "UNALLOCATED",
+  manual: "MANUAL"
+};
 const rfqStatuses = [
   { value: "SEND_FOR_QUOTES", label: "Send for Quotes" },
   { value: "WAITING_ON_QUOTES", label: "Waiting on Quotes" },
@@ -2877,6 +2884,17 @@ function getInventoryTotalsSubquery(jobId = null) {
   `;
 }
 
+function getInventoryTotalsByItemSubquery(jobId = null) {
+  return `
+    select
+      item_code,
+      max(description) as description,
+      sum(qty_on_hand) as qty_on_hand
+    from (${getInventoryByLocationSubquery(jobId)}) inventory_by_location
+    group by item_code
+  `;
+}
+
 function buildInventoryIssueKey(parts) {
   return JSON.stringify({
     item_code: normalizeInventoryKeyPart(parts.item_code),
@@ -2884,6 +2902,20 @@ function buildInventoryIssueKey(parts) {
     size_2: normalizeInventoryKeyPart(parts.size_2),
     thk_1: normalizeInventoryKeyPart(parts.thk_1),
     thk_2: normalizeInventoryKeyPart(parts.thk_2)
+  });
+}
+
+function buildInventoryItemKey(parts) {
+  return JSON.stringify({
+    item_code: normalizeInventoryKeyPart(parts.item_code)
+  });
+}
+
+function buildInventoryWarehouseItemKey(parts) {
+  return JSON.stringify({
+    item_code: normalizeInventoryKeyPart(parts.item_code),
+    warehouse: normalizeInventoryKeyPart(parts.warehouse),
+    location: normalizeInventoryKeyPart(parts.location)
   });
 }
 
@@ -2948,6 +2980,131 @@ async function getIssuedInventoryTotals(runner = { query }, jobId = null) {
   `, [jobId])).rows;
 }
 
+async function getIssuedInventoryTotalsByItemAndLocation(runner = { query }, jobId = null) {
+  return (await runner.query(`
+    select *
+    from (
+      select
+        bl.item_code,
+        initcap(lower(coalesce(mit.warehouse, ''))) as warehouse,
+        upper(coalesce(mit.location, '')) as location,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+      group by
+        bl.item_code,
+        initcap(lower(coalesce(mit.warehouse, ''))),
+        upper(coalesce(mit.location, ''))
+
+      union all
+
+      select
+        bl.item_code,
+        '' as warehouse,
+        '' as location,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by bl.item_code
+    ) issued_inventory
+  `, [jobId])).rows;
+}
+
+async function getIssuedInventoryTotalsByItem(runner = { query }, jobId = null) {
+  return (await runner.query(`
+    select
+      item_code,
+      sum(qty_issued_total) as qty_issued_total
+    from (
+      select
+        bl.item_code,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+      group by bl.item_code
+
+      union all
+
+      select
+        bl.item_code,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by bl.item_code
+    ) issued_inventory
+    group by item_code
+  `, [jobId])).rows;
+}
+
+function getIssuedInventoryTotalsByItemSubquery(jobId = null) {
+  const jobFilterSql = Number.isFinite(Number(jobId)) ? `and mr.job_id = ${Number(jobId)}` : "";
+  return `
+    select
+      item_code,
+      sum(qty_issued_total) as qty_issued_total
+    from (
+      select
+        bl.item_code,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        ${jobFilterSql}
+      group by bl.item_code
+
+      union all
+
+      select
+        bl.item_code,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        ${jobFilterSql}
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by bl.item_code
+    ) issued_inventory
+    group by item_code
+  `;
+}
+
 async function getVerifiedAllocatedInventoryTotals(runner = { query }, jobId = null) {
   return (await runner.query(`
     select
@@ -2969,6 +3126,35 @@ async function getVerifiedAllocatedInventoryTotals(runner = { query }, jobId = n
       coalesce(bl.thk_1, ''),
       coalesce(bl.thk_2, '')
   `, [jobId])).rows;
+}
+
+async function getVerifiedAllocatedInventoryTotalsByItem(runner = { query }, jobId = null) {
+  return (await runner.query(`
+    select
+      bl.item_code,
+      sum(mrl.qty_requested) as qty_allocated_total
+    from material_requisition_lines mrl
+    join material_requisitions mr on mr.id = mrl.requisition_id
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mr.status = 'VERIFIED'
+      and ($1::bigint is null or mr.job_id = $1)
+    group by bl.item_code
+  `, [jobId])).rows;
+}
+
+function getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId = null) {
+  const jobFilterSql = Number.isFinite(Number(jobId)) ? `and mr.job_id = ${Number(jobId)}` : "";
+  return `
+    select
+      bl.item_code,
+      sum(mrl.qty_requested) as qty_allocated_total
+    from material_requisition_lines mrl
+    join material_requisitions mr on mr.id = mrl.requisition_id
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mr.status = 'VERIFIED'
+      ${jobFilterSql}
+    group by bl.item_code
+  `;
 }
 
 async function getAvailableInventoryTotalsMap(runner = { query }, jobId = null, { allocatedOffsetMap = null } = {}) {
@@ -2996,8 +3182,290 @@ async function getAvailableInventoryTotalsMap(runner = { query }, jobId = null, 
   return availableMap;
 }
 
+async function getAvailableInventoryByItemMap(runner = { query }, jobId = null, { allocatedOffsetMap = null } = {}) {
+  const [inventoryRes, issuedRows, allocatedRows] = await Promise.all([
+    runner.query(getInventoryTotalsByItemSubquery(jobId)),
+    getIssuedInventoryTotalsByItem(runner, jobId),
+    getVerifiedAllocatedInventoryTotalsByItem(runner, jobId)
+  ]);
+  const availableMap = new Map(
+    inventoryRes.rows.map((row) => [buildInventoryItemKey(row), parseQtyValue(row.qty_on_hand || 0)])
+  );
+  for (const row of issuedRows) {
+    const key = buildInventoryItemKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_issued_total || 0), 0));
+  }
+  for (const row of allocatedRows) {
+    const key = buildInventoryItemKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_allocated_total || 0), 0));
+  }
+  if (allocatedOffsetMap instanceof Map) {
+    for (const [key, qty] of allocatedOffsetMap.entries()) {
+      availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) + parseQtyValue(qty || 0), 0));
+    }
+  }
+  return availableMap;
+}
+
+function deriveBomPlanningStatus(line, nextQtyIssued) {
+  const qtyRequired = parseQtyValue(line.qty_required || 0);
+  const qtyReceived = parseQtyValue(line.qty_received || 0);
+  const qtyOrdered = parseQtyValue(line.qty_ordered || 0);
+  const qtyAwarded = parseQtyValue(line.qty_awarded || 0);
+  const qtyQuoted = parseQtyValue(line.qty_quoted || 0);
+  if (qtyRequired > 0 && nextQtyIssued >= qtyRequired) return "ISSUED_TO_FIELD";
+  if (qtyReceived >= qtyRequired && qtyRequired > 0) return "RECEIVED";
+  if (qtyReceived > 0) return "PARTIALLY_RECEIVED";
+  if (qtyOrdered > 0) return "ORDERED";
+  if (qtyAwarded > 0) return "AWARDED";
+  if (qtyQuoted > 0) return "ON_RFQ";
+  return "PLANNED";
+}
+
+async function recomputeBomIssuedSummaries(client, jobId) {
+  const issuedRows = (await client.query(`
+    select
+      bom_line_id,
+      sum(qty_issued_total) as qty_issued_total
+    from (
+      select
+        coalesce(mit.source_bom_line_id, mrl.bom_line_id) as bom_line_id,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and mr.job_id = $1
+      group by coalesce(mit.source_bom_line_id, mrl.bom_line_id)
+
+      union all
+
+      select
+        mrl.bom_line_id,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and mr.job_id = $1
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by mrl.bom_line_id
+    ) issued_totals
+    group by bom_line_id
+  `, [jobId])).rows;
+  const issuedMap = new Map(issuedRows.map((row) => [Number(row.bom_line_id), parseQtyValue(row.qty_issued_total || 0)]));
+  const bomLines = (await client.query(`
+    select
+      bl.id,
+      bl.qty_required,
+      bl.qty_received,
+      bl.qty_ordered,
+      bl.qty_awarded,
+      bl.qty_quoted,
+      bl.qty_issued,
+      bl.planning_status
+    from bom_lines bl
+    join bom_headers bh on bh.id = bl.bom_id
+    where bh.job_id = $1
+      and coalesce(bh.system_key, '') <> $2
+  `, [jobId, unallocatedBomSystemKey])).rows;
+  for (const line of bomLines) {
+    const nextQtyIssued = parseQtyValue(issuedMap.get(Number(line.id)) || 0);
+    const nextStatus = deriveBomPlanningStatus(line, nextQtyIssued);
+    if (nextQtyIssued !== parseQtyValue(line.qty_issued || 0) || nextStatus !== line.planning_status) {
+      await client.query(`
+        update bom_lines
+        set qty_issued = $2,
+            planning_status = $3,
+            updated_at = now()
+        where id = $1
+      `, [line.id, nextQtyIssued, nextStatus]);
+    }
+  }
+}
+
+function isSystemGeneratedBom(bom) {
+  return Boolean(bom?.is_system_generated) || String(bom?.system_key || "").trim() !== "";
+}
+
+function isUnallocatedBom(bom) {
+  return String(bom?.system_key || "").trim().toUpperCase() === unallocatedBomSystemKey;
+}
+
+function assertBomAllowsManualChanges(bom, actionLabel = "modify") {
+  if (isSystemGeneratedBom(bom)) {
+    throw new Error(`System-generated BOMs cannot be ${actionLabel}d manually.`);
+  }
+}
+
+async function ensureUnallocatedBom(client, jobId) {
+  let bom = (await client.query(`
+    select *
+    from bom_headers
+    where job_id = $1
+      and system_key = $2
+    limit 1
+  `, [jobId, unallocatedBomSystemKey])).rows[0];
+  if (bom) return bom;
+  const job = (await client.query(`
+    select job_number
+    from jobs
+    where id = $1
+  `, [jobId])).rows[0];
+  if (!job) throw new Error("Job not found while building the Un-Allocated BOM.");
+  const bomNo = `${String(job.job_number || "").trim()}-BOM-UNALLOCATED`;
+  try {
+    bom = (await client.query(`
+      insert into bom_headers (
+        job_id, job_number, bom_no, bom_name, bom_type, revision, status,
+        is_system_generated, system_key, description, notes
+      )
+      values ($1, $2, $3, $4, 'misc', '0', 'ACTIVE', true, $5, $6, $7)
+      returning *
+    `, [
+      jobId,
+      String(job.job_number || "").trim(),
+      bomNo,
+      unallocatedBomName,
+      unallocatedBomSystemKey,
+      "System-generated BOM of inventory that is not currently allocated to other BOM demand.",
+      "Maintained automatically from item-code inventory balances."
+    ])).rows[0];
+  } catch (error) {
+    if (String(error.code || "") !== "23505") throw error;
+    bom = (await client.query(`
+      select *
+      from bom_headers
+      where job_id = $1
+        and system_key = $2
+      limit 1
+    `, [jobId, unallocatedBomSystemKey])).rows[0];
+  }
+  return bom;
+}
+
+async function rebuildUnallocatedBom(client, jobId) {
+  const bom = await ensureUnallocatedBom(client, jobId);
+  const [inventoryRows, demandRows, itemRows, existingLines] = await Promise.all([
+    client.query(getInventoryTotalsByItemSubquery(jobId)),
+    client.query(`
+      select
+        bl.item_code,
+        sum(greatest(coalesce(bl.qty_required, 0) - coalesce(bl.qty_issued, 0), 0)) as qty_needed
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bh.job_id = $1
+        and coalesce(bh.system_key, '') <> $2
+      group by bl.item_code
+    `, [jobId, unallocatedBomSystemKey]),
+    client.query(`
+      select item_code, description, material_type, uom
+      from material_items
+      where job_id = $1
+    `, [jobId]),
+    client.query(`
+      select bl.*,
+             coalesce((select count(*) from material_requisition_lines mrl where mrl.bom_line_id = bl.id), 0) as requisition_count
+      from bom_lines bl
+      where bl.bom_id = $1
+      order by bl.id
+    `, [bom.id])
+  ]);
+
+  const inventoryByItem = new Map(inventoryRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), parseQtyValue(row.qty_on_hand || 0)]));
+  const demandByItem = new Map(demandRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), parseQtyValue(row.qty_needed || 0)]));
+  const itemByCode = new Map(itemRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), row]));
+  const existingByItem = new Map(existingLines.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), row]));
+
+  const targetRows = [];
+  for (const [itemCode, qtyOnHand] of inventoryByItem.entries()) {
+    const qtyNeeded = parseQtyValue(demandByItem.get(itemCode) || 0);
+    const qtyUnallocated = Math.max(parseQtyValue(qtyOnHand || 0) - qtyNeeded, 0);
+    if (qtyUnallocated <= 0) continue;
+    const item = itemByCode.get(itemCode) || {};
+    const existing = existingByItem.get(itemCode) || {};
+    targetRows.push({
+      item_code: itemCode,
+      description: String(item.description || existing.description || "").trim() || itemCode,
+      material_type: String(item.material_type || existing.material_type || "misc").trim() || "misc",
+      uom: String(item.uom || existing.uom || "EA").trim() || "EA",
+      qty_required: qtyUnallocated
+    });
+  }
+  targetRows.sort((a, b) => String(a.item_code || "").localeCompare(String(b.item_code || ""), undefined, { numeric: true, sensitivity: "base" }));
+
+  const targetCodes = new Set(targetRows.map((row) => row.item_code));
+  for (let index = 0; index < targetRows.length; index += 1) {
+    const row = targetRows[index];
+    const existing = existingByItem.get(row.item_code);
+    const lineNo = String(index + 1);
+    if (existing) {
+      await client.query(`
+        update bom_lines
+        set line_no = $2,
+            description = $3,
+            material_type = $4,
+            uom = $5,
+            qty_required = $6,
+            qty_received = $6,
+            qty_issued = 0,
+            qty_quoted = 0,
+            qty_awarded = 0,
+            qty_ordered = 0,
+            spec = '',
+            commodity_code = '',
+            tag_number = '',
+            size_1 = '',
+            size_2 = '',
+            thk_1 = '',
+            thk_2 = '',
+            notes = '',
+            planning_status = 'RECEIVED',
+            updated_at = now()
+        where id = $1
+      `, [existing.id, lineNo, row.description, row.material_type, row.uom, row.qty_required]);
+    } else {
+      await client.query(`
+        insert into bom_lines (
+          bom_id, line_no, item_code, description, material_type, uom,
+          qty_required, qty_received, planning_status, notes
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $7, 'RECEIVED', '')
+      `, [bom.id, lineNo, row.item_code, row.description, row.material_type, row.uom, row.qty_required]);
+    }
+  }
+
+  for (const line of existingLines.rows) {
+    const itemCode = normalizeInventoryKeyPart(line.item_code);
+    if (targetCodes.has(itemCode)) continue;
+    if (Number(line.requisition_count || 0) > 0) {
+      await client.query(`
+        update bom_lines
+        set qty_required = 0,
+            qty_received = 0,
+            qty_issued = 0,
+            qty_quoted = 0,
+            qty_awarded = 0,
+            qty_ordered = 0,
+            planning_status = 'CLOSED',
+            updated_at = now()
+        where id = $1
+      `, [line.id]);
+    } else {
+      await client.query("delete from bom_lines where id = $1", [line.id]);
+    }
+  }
+
+  return bom;
+}
+
 async function markBomLinesReceivedFromInventory(client, bomId, jobId = null, userId = null) {
-  const [linesRes, inventoryRes, issuedRes, allocatedRes] = await Promise.all([
+  const [linesRes, availableMap] = await Promise.all([
     client.query(`
       select id, line_no, item_code, coalesce(size_1, '') as size_1, coalesce(size_2, '') as size_2,
              coalesce(thk_1, '') as thk_1, coalesce(thk_2, '') as thk_2,
@@ -3006,22 +3474,8 @@ async function markBomLinesReceivedFromInventory(client, bomId, jobId = null, us
       where bom_id = $1
       order by line_no, id
     `, [bomId]),
-    client.query(getInventoryTotalsSubquery(jobId)),
-    getIssuedInventoryTotals(client, jobId),
-    getVerifiedAllocatedInventoryTotals(client, jobId)
+    getAvailableInventoryByItemMap(client, jobId)
   ]);
-
-  const availableMap = new Map(
-    inventoryRes.rows.map((row) => [buildInventoryIssueKey(row), parseQtyValue(row.qty_on_hand || 0)])
-  );
-  for (const row of issuedRes) {
-    const key = buildInventoryIssueKey(row);
-    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_issued_total || 0), 0));
-  }
-  for (const row of allocatedRes) {
-    const key = buildInventoryIssueKey(row);
-    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_allocated_total || 0), 0));
-  }
 
   let updatedCount = 0;
   let fullyReceivedCount = 0;
@@ -3032,7 +3486,7 @@ async function markBomLinesReceivedFromInventory(client, bomId, jobId = null, us
     const qtyRequired = parseQtyValue(line.qty_required || 0);
     const qtyReceived = parseQtyValue(line.qty_received || 0);
     const qtyIssued = parseQtyValue(line.qty_issued || 0);
-    const key = buildInventoryIssueKey(line);
+    const key = buildInventoryItemKey(line);
     const availableQty = Math.max(parseQtyValue(availableMap.get(key) || 0), 0);
     const remainingQty = Math.max(qtyRequired - qtyReceived, 0);
 
@@ -3075,9 +3529,9 @@ function applyIssuedInventoryToRows(rows, issuedRows = []) {
     const qtyIssued = parseQtyValue(row.qty_issued_total || 0);
     if (qtyIssued <= 0) continue;
     if (String(row.warehouse || "").trim() && String(row.location || "").trim()) {
-      exactIssuedMap.set(buildInventoryEntryKey(row), qtyIssued);
+      exactIssuedMap.set(buildInventoryWarehouseItemKey(row), qtyIssued);
     } else {
-      fallbackIssuedMap.set(buildInventoryIssueKey(row), qtyIssued);
+      fallbackIssuedMap.set(buildInventoryItemKey(row), qtyIssued);
     }
   }
   const clonedRows = rows.map((row) => ({
@@ -3085,15 +3539,33 @@ function applyIssuedInventoryToRows(rows, issuedRows = []) {
     qty_on_hand: parseQtyValue(row.qty_on_hand || 0),
     qty_osd: parseQtyValue(row.qty_osd || 0)
   }));
+  const exactGroups = new Map();
   for (const row of clonedRows) {
-    const exactIssued = parseQtyValue(exactIssuedMap.get(buildInventoryEntryKey(row)) || 0);
-    if (exactIssued > 0) {
-      row.qty_on_hand = parseQtyValue(parseQtyValue(row.qty_on_hand || 0) - exactIssued, 0);
+    const key = buildInventoryWarehouseItemKey(row);
+    if (!exactGroups.has(key)) exactGroups.set(key, []);
+    exactGroups.get(key).push(row);
+  }
+  for (const [key, group] of exactGroups.entries()) {
+    let issuedRemaining = parseQtyValue(exactIssuedMap.get(key) || 0);
+    if (issuedRemaining <= 0) continue;
+    group.sort((a, b) => (
+      String(a.item_code || "").localeCompare(String(b.item_code || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.size_1 || "").localeCompare(String(b.size_1 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.size_2 || "").localeCompare(String(b.size_2 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.thk_1 || "").localeCompare(String(b.thk_1 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.thk_2 || "").localeCompare(String(b.thk_2 || ""), undefined, { numeric: true, sensitivity: "base" })
+    ));
+    for (const row of group) {
+      if (issuedRemaining <= 0) break;
+      const availableQty = Math.max(parseQtyValue(row.qty_on_hand || 0), 0);
+      const consumed = Math.min(availableQty, issuedRemaining);
+      row.qty_on_hand = parseQtyValue(parseQtyValue(row.qty_on_hand || 0) - consumed, 0);
+      issuedRemaining = parseQtyValue(issuedRemaining - consumed, 0);
     }
   }
   const groupedRows = new Map();
   for (const row of clonedRows) {
-    const key = buildInventoryIssueKey(row);
+    const key = buildInventoryItemKey(row);
     if (!groupedRows.has(key)) groupedRows.set(key, []);
     groupedRows.get(key).push(row);
   }
@@ -3102,7 +3574,10 @@ function applyIssuedInventoryToRows(rows, issuedRows = []) {
     group.sort((a, b) => (
       String(a.warehouse || "").localeCompare(String(b.warehouse || ""), undefined, { numeric: true, sensitivity: "base" })
       || String(a.location || "").localeCompare(String(b.location || ""), undefined, { numeric: true, sensitivity: "base" })
-      || String(a.item_code || "").localeCompare(String(b.item_code || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.size_1 || "").localeCompare(String(b.size_1 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.size_2 || "").localeCompare(String(b.size_2 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.thk_1 || "").localeCompare(String(b.thk_1 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.thk_2 || "").localeCompare(String(b.thk_2 || ""), undefined, { numeric: true, sensitivity: "base" })
     ));
     for (const row of group) {
       if (issuedRemaining <= 0) break;
@@ -3122,7 +3597,7 @@ async function getCurrentOnHandRows(runner = { query }, { jobId = null, whereSql
     ${whereSql}
     order by ${orderSql}
   `, params)).rows;
-  const issuedRows = await getIssuedInventoryTotals(runner, jobId);
+  const issuedRows = await getIssuedInventoryTotalsByItemAndLocation(runner, jobId);
   return applyIssuedInventoryToRows(baseRows, issuedRows);
 }
 
@@ -4211,6 +4686,9 @@ async function saveInventoryAuditReport(client, { userId, jobId = null, warehous
       userId || null
     ]);
     await auditLog(client, userId, "update", "inventory_audit_counts", `${desiredRow.item_code}|${desiredRow.warehouse}|${desiredRow.location}`, `actual_qty=${actualQty};report=${reportNo};delta=${adjustmentQty}`);
+  }
+  if (Number.isFinite(Number(jobId))) {
+    await rebuildUnallocatedBom(client, Number(jobId));
   }
   return { reportId, reportNo };
 }
@@ -6037,6 +6515,7 @@ app.get("/bom/:id/edit", requireAuth, requireJobContext, requirePermission("bom"
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
     return;
   }
+  assertBomAllowsManualChanges(bom, "edit");
   const typeOptions = bomTypes.map((value) => `<option value="${esc(value)}" ${bom.bom_type === value ? "selected" : ""}>${esc(value)}</option>`).join("");
   const statusOptions = bomStatuses.map((value) => `<option value="${esc(value)}" ${bom.status === value ? "selected" : ""}>${esc(value)}</option>`).join("");
   res.send(layout("Edit BOM", `
@@ -6066,6 +6545,9 @@ app.get("/bom/:id/edit", requireAuth, requireJobContext, requirePermission("bom"
 app.post("/bom/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    assertBomAllowsManualChanges(bom, "edit");
     await client.query(`
       update bom_headers
       set job_number = $2, bom_no = $3, bom_name = $4, bom_type = $5, area = $6, system_name = $7, revision = $8, status = $9, description = $10, notes = $11, updated_at = now()
@@ -6096,6 +6578,7 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
     return;
   }
+  const manualBom = !isSystemGeneratedBom(bom);
   const inventoryMarked = Number(req.query.inventory_marked || 0);
   const inventoryEligible = Number(req.query.inventory_eligible || 0);
   const inventoryAlready = Number(req.query.inventory_already || 0);
@@ -6144,10 +6627,13 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       </div>
     ` : ""}
     <div class="card">
-      <p class="muted">BOM #: ${esc(bom.bom_no)} | Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system_name || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}</p>
+      <p class="muted">BOM #: ${esc(bom.bom_no)} | Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system_name || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}${manualBom ? "" : " | System Generated"}</p>
       <p>${esc(bom.description || "")}</p>
       ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
-      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a>${req.user.role === "admin" ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>
+      ${manualBom
+        ? `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a>${req.user.role === "admin" ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>`
+        : `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a><a class="btn btn-primary" href="/requisitions/new?bom_id=${bom.id}">Create Requisition</a></div><p class="muted">This BOM is generated automatically from item-code inventory balances and cannot be edited manually.</p>`
+      }
     </div>
     <div class="stats">
       <div class="stat"><div>Lines</div><strong>${coverage.line_count}</strong></div>
@@ -6155,41 +6641,43 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       <div class="stat"><div>Qty Issued</div><strong>${esc(formatQtyDisplay(coverage.qty_issued))}</strong></div>
       <div class="stat"><div>Requisitioned</div><strong>${esc(formatQtyDisplay(requisitionSummary.qty_requested))}</strong></div>
     </div>
-    <div class="card">
-      <h3>Create RFQ From BOM</h3>
-        <p class="muted">Creates an RFQ for BOM lines that are still in planning and marks those lines as <code>ON_RFQ</code>.</p>
-      <form method="post" action="/bom/${bom.id}/to-rfq" class="stack">
-        <div class="grid">
-          <div><label>Project</label><input name="project_name" value="${esc(bom.bom_name || bom.description || bom.bom_no)}" required /></div>
-          <div><label>Due Date</label><input type="date" name="due_date" /></div>
-        </div>
-        <div class="actions"><button type="submit">Create RFQ From BOM Lines</button></div>
-      </form>
-    </div>
-    <div class="card">
-      <h3>Upload BOM Lines</h3>
-      <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes</p>
-        <form id="bom-lines-import-form" method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
-          <div><label>CSV/XLSX File</label><input id="bom-lines-import-file" type="file" name="sheet" /></div>
-          <div><label>Or Paste CSV</label><textarea id="bom-lines-import-text" name="csv_text"></textarea></div>
-          <div class="actions"><button type="submit">Import BOM Lines</button></div>
+    ${manualBom ? `
+      <div class="card">
+        <h3>Create RFQ From BOM</h3>
+          <p class="muted">Creates an RFQ for BOM lines that are still in planning and marks those lines as <code>ON_RFQ</code>.</p>
+        <form method="post" action="/bom/${bom.id}/to-rfq" class="stack">
+          <div class="grid">
+            <div><label>Project</label><input name="project_name" value="${esc(bom.bom_name || bom.description || bom.bom_no)}" required /></div>
+            <div><label>Due Date</label><input type="date" name="due_date" /></div>
+          </div>
+          <div class="actions"><button type="submit">Create RFQ From BOM Lines</button></div>
         </form>
-        <script>
-          (() => {
-            const form = document.getElementById("bom-lines-import-form");
-            const fileInput = document.getElementById("bom-lines-import-file");
-            const textInput = document.getElementById("bom-lines-import-text");
-            if (!form || !fileInput || !textInput) return;
-            form.addEventListener("submit", (event) => {
-              const hasFile = fileInput.files && fileInput.files.length > 0;
-              const hasText = textInput.value.trim().length > 0;
-              if (hasFile || hasText) return;
-              event.preventDefault();
-              window.alert("Upload BOM lines or paste CSV before importing.");
-            });
-          })();
-        </script>
       </div>
+      <div class="card">
+        <h3>Upload BOM Lines</h3>
+        <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes</p>
+          <form id="bom-lines-import-form" method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
+            <div><label>CSV/XLSX File</label><input id="bom-lines-import-file" type="file" name="sheet" /></div>
+            <div><label>Or Paste CSV</label><textarea id="bom-lines-import-text" name="csv_text"></textarea></div>
+            <div class="actions"><button type="submit">Import BOM Lines</button></div>
+          </form>
+          <script>
+            (() => {
+              const form = document.getElementById("bom-lines-import-form");
+              const fileInput = document.getElementById("bom-lines-import-file");
+              const textInput = document.getElementById("bom-lines-import-text");
+              if (!form || !fileInput || !textInput) return;
+              form.addEventListener("submit", (event) => {
+                const hasFile = fileInput.files && fileInput.files.length > 0;
+                const hasText = textInput.value.trim().length > 0;
+                if (hasFile || hasText) return;
+                event.preventDefault();
+                window.alert("Upload BOM lines or paste CSV before importing.");
+              });
+            })();
+          </script>
+        </div>
+    ` : ""}
     <div class="card scroll"><table><tr><th>Batch</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>${importRows}</table></div>
   `, req.user));
 });
@@ -6200,6 +6688,7 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
   const rfqId = await withTransaction(async (client) => {
     const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
     if (!bom) throw new Error("BOM not found.");
+    assertBomAllowsManualChanges(bom, "convert to RFQ");
     const lines = (await client.query(`
       select *
       from bom_lines
@@ -6300,53 +6789,19 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
           greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
         from bom_lines bl
         left join (
-          ${getInventoryTotalsSubquery(jobId)}
+          ${getInventoryTotalsByItemSubquery(jobId)}
         ) inv
           on inv.item_code = bl.item_code
-         and inv.size_1 = coalesce(bl.size_1, '')
-         and inv.size_2 = coalesce(bl.size_2, '')
-         and inv.thk_1 = coalesce(bl.thk_1, '')
-         and inv.thk_2 = coalesce(bl.thk_2, '')
         left join (
-          select
-            bl_issued.item_code,
-            coalesce(bl_issued.size_1, '') as size_1,
-            coalesce(bl_issued.size_2, '') as size_2,
-            coalesce(bl_issued.thk_1, '') as thk_1,
-            coalesce(bl_issued.thk_2, '') as thk_2,
-            sum(bl_issued.qty_issued) as qty_issued_total
-          from bom_lines bl_issued
-          join bom_headers bh_issued on bh_issued.id = bl_issued.bom_id
-          where bh_issued.job_id = $3
-          group by bl_issued.item_code, coalesce(bl_issued.size_1, ''), coalesce(bl_issued.size_2, ''), coalesce(bl_issued.thk_1, ''), coalesce(bl_issued.thk_2, '')
+          ${getIssuedInventoryTotalsByItemSubquery(jobId)}
         ) issued
           on issued.item_code = bl.item_code
-         and issued.size_1 = coalesce(bl.size_1, '')
-         and issued.size_2 = coalesce(bl.size_2, '')
-         and issued.thk_1 = coalesce(bl.thk_1, '')
-         and issued.thk_2 = coalesce(bl.thk_2, '')
         left join (
-          select
-            bl2.item_code,
-            coalesce(bl2.size_1, '') as size_1,
-            coalesce(bl2.size_2, '') as size_2,
-            coalesce(bl2.thk_1, '') as thk_1,
-            coalesce(bl2.thk_2, '') as thk_2,
-            sum(mrl2.qty_requested) as qty_allocated_total
-          from material_requisition_lines mrl2
-          join material_requisitions mr2 on mr2.id = mrl2.requisition_id
-          join bom_lines bl2 on bl2.id = mrl2.bom_line_id
-          where mr2.status = 'VERIFIED'
-            and mr2.job_id = $3
-          group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
+          ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
         ) alloc
           on alloc.item_code = bl.item_code
-         and alloc.size_1 = coalesce(bl.size_1, '')
-         and alloc.size_2 = coalesce(bl.size_2, '')
-         and alloc.thk_1 = coalesce(bl.thk_1, '')
-         and alloc.thk_2 = coalesce(bl.thk_2, '')
         where bl.id = $1 and bl.bom_id = $2
-      `, [lineId, bomId, jobId])).rows[0];
+      `, [lineId, bomId])).rows[0];
       if (!line) continue;
       const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
       if (qtyRequested <= 0 || qtyRequested > remaining) {
@@ -6373,11 +6828,15 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
   const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeBomImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
   const batchId = await withTransaction(async (client) => {
+    const jobId = currentJobId(req);
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    assertBomAllowsManualChanges(bom, "import");
     const batchId = await createImportBatch(client, {
       entityType: "bom_lines",
       uploadedBy: req.user.id,
       filename: req.file?.originalname || "",
-      jobId: currentJobId(req)
+      jobId
     });
     let insertedCount = 0;
     let updatedCount = 0;
@@ -6498,6 +6957,7 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
         ]);
       }
     }
+    await rebuildUnallocatedBom(client, jobId);
     await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
     await auditLog(client, req.user.id, "import", "bom_lines", bomId, `rows=${rows.length};batch=${batchId}`);
     return batchId;
@@ -6506,13 +6966,14 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
 });
 
 app.get("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
-  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1 and job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
   if (!bom) throw new Error("BOM not found.");
+  assertBomAllowsManualChanges(bom, "receive");
   res.send(layout("Confirm One-Time Receive", `
     <h1>One-Time BOM Receive From Inventory</h1>
     <div class="card error">
       <p><strong>BOM:</strong> ${esc(bom.bom_name || bom.description || bom.bom_no)}</p>
-      <p class="muted">This temporary admin utility will mark BOM lines as <code>RECEIVED</code> only when current available inventory can fully cover the remaining required quantity for that exact item/size/thickness match. It does not create receipts and it does not partially fill lines.</p>
+      <p class="muted">This temporary admin utility will mark BOM lines as <code>RECEIVED</code> only when current available inventory can fully cover the remaining required quantity for that item code. It does not create receipts and it does not partially fill lines.</p>
       <div class="actions">
         <form method="post" action="/bom/${bom.id}/receive-from-inventory">
           <button class="btn btn-primary" type="submit">Confirm One-Time Receive Update</button>
@@ -6527,8 +6988,9 @@ app.post("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requ
   const bomId = Number(req.params.id);
   const jobId = currentJobId(req);
   const result = await withTransaction(async (client) => {
-    const bom = (await client.query("select id from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
     if (!bom) throw new Error("BOM not found.");
+    assertBomAllowsManualChanges(bom, "receive");
     return markBomLinesReceivedFromInventory(client, bomId, jobId, req.user.id || null);
   });
   const params = new URLSearchParams({
@@ -6754,8 +7216,9 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
 
 app.get("/bom/:id/lines/new", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
-  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!bom) throw new Error("BOM not found.");
+  assertBomAllowsManualChanges(bom, "add line");
   const autocomplete = await getBomLineEntryAutocomplete(bom.id, jobId);
   res.send(buildBomLineGridPage(req, bom, [], [], autocomplete));
 }));
@@ -6763,8 +7226,9 @@ app.get("/bom/:id/lines/new", requireAuth, requireJobContext, requirePermission(
 app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
   const jobId = currentJobId(req);
-  const bom = (await query("select id, bom_no, bom_name, description from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
   if (!bom) throw new Error("BOM not found.");
+  assertBomAllowsManualChanges(bom, "add line");
   const rowCount = 8;
   const rows = Array.from({ length: rowCount }, (_, index) => ({
     line_no: String(req.body[`line_no_${index}`] || "").trim(),
@@ -6862,6 +7326,7 @@ app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermissio
       ]);
       await auditLog(client, req.user.id, "create", "bom_line", `${bomId}:${row.sourceUid}`, row.item_code);
     }
+    await rebuildUnallocatedBom(client, jobId);
   });
   const params = new URLSearchParams({
     added_lines: String(insertRows.length),
@@ -6872,11 +7337,12 @@ app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermissio
 }));
 
 app.get("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
-  const line = (await query("select bl.*, bh.bom_no from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
+  const line = (await query("select bl.*, bh.bom_no, bh.is_system_generated, bh.system_key from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
   if (!line) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM line not found.</h3></div>`, req.user));
     return;
   }
+  assertBomAllowsManualChanges(line, "edit");
   res.send(layout("Edit BOM Line", `
     <h1>Edit BOM Line</h1>
     <div class="card"><strong>BOM:</strong> ${esc(line.bom_no)} | <strong>Line:</strong> ${esc(line.line_no)}</div>
@@ -6910,8 +7376,9 @@ app.post("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission
   const lineId = Number(req.params.id);
   const jobId = currentJobId(req);
   const bomId = await withTransaction(async (client) => {
-    const current = (await client.query("select bl.bom_id, bl.planning_status from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
+    const current = (await client.query("select bl.bom_id, bl.planning_status, bh.is_system_generated, bh.system_key from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
     if (!current) throw new Error("BOM line not found.");
+    assertBomAllowsManualChanges(current, "edit");
     await client.query(`
       update bom_lines
       set line_no = $2, item_code = $3, description = $4, material_type = $5, uom = $6, qty_required = $7,
@@ -6919,6 +7386,7 @@ app.post("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission
           planning_status = $17, notes = $18, updated_at = now()
       where id = $1
     `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", current.planning_status || "PLANNED", req.body.notes || ""]);
+    await rebuildUnallocatedBom(client, jobId);
     await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
     return current.bom_id;
   });
@@ -6929,9 +7397,11 @@ app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermissi
   const lineId = Number(req.params.id);
   const jobId = currentJobId(req);
   const bomId = await withTransaction(async (client) => {
-    const current = (await client.query("select bl.bom_id from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
+    const current = (await client.query("select bl.bom_id, bh.is_system_generated, bh.system_key from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
     if (!current) throw new Error("BOM line not found.");
+    assertBomAllowsManualChanges(current, "delete");
     await client.query("delete from bom_lines where id = $1", [lineId]);
+    await rebuildUnallocatedBom(client, jobId);
     await auditLog(client, req.user.id, "delete", "bom_line", lineId, "");
     return current.bom_id;
   });
@@ -6941,12 +7411,14 @@ app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermissi
 app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("requisitions", "create"), async (req, res) => {
   const jobId = currentJobId(req);
   const availableBoms = (await query(`
-    select id, bom_no, bom_name, description, status
+    select id, bom_no, bom_name, description, status, is_system_generated, system_key
     from bom_headers
-    where bom_type = 'pipe'
-      and job_id = $1
-    order by id desc
-  `, [jobId])).rows;
+    where job_id = $1
+      and (bom_type = 'pipe' or system_key = $2)
+    order by
+      case when system_key = $2 then 0 else 1 end,
+      id desc
+  `, [jobId, unallocatedBomSystemKey])).rows;
   const selectedBomId = Number(req.query.bom_id || 0);
   const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
   const clearFilters = String(req.query.clear_filters || "") === "1";
@@ -6988,51 +7460,17 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
         from bom_lines bl
         left join (
-          ${getInventoryTotalsSubquery(jobId)}
+          ${getInventoryTotalsByItemSubquery(jobId)}
         ) inv
           on inv.item_code = bl.item_code
-         and inv.size_1 = coalesce(bl.size_1, '')
-         and inv.size_2 = coalesce(bl.size_2, '')
-         and inv.thk_1 = coalesce(bl.thk_1, '')
-         and inv.thk_2 = coalesce(bl.thk_2, '')
         left join (
-          select
-            item_code,
-            coalesce(size_1, '') as size_1,
-            coalesce(size_2, '') as size_2,
-            coalesce(thk_1, '') as thk_1,
-            coalesce(thk_2, '') as thk_2,
-            sum(qty_issued) as qty_issued_total
-          from bom_lines bl_issued
-          join bom_headers bh_issued on bh_issued.id = bl_issued.bom_id
-          where bh_issued.job_id = ${jobId}
-          group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+          ${getIssuedInventoryTotalsByItemSubquery(jobId)}
         ) issued
           on issued.item_code = bl.item_code
-         and issued.size_1 = coalesce(bl.size_1, '')
-         and issued.size_2 = coalesce(bl.size_2, '')
-         and issued.thk_1 = coalesce(bl.thk_1, '')
-         and issued.thk_2 = coalesce(bl.thk_2, '')
         left join (
-          select
-            bl2.item_code,
-            coalesce(bl2.size_1, '') as size_1,
-            coalesce(bl2.size_2, '') as size_2,
-            coalesce(bl2.thk_1, '') as thk_1,
-            coalesce(bl2.thk_2, '') as thk_2,
-            sum(mrl2.qty_requested) as qty_allocated_total
-          from material_requisition_lines mrl2
-          join material_requisitions mr2 on mr2.id = mrl2.requisition_id
-          join bom_lines bl2 on bl2.id = mrl2.bom_line_id
-          where mr2.status = 'VERIFIED'
-            and mr2.job_id = ${jobId}
-          group by bl2.item_code, coalesce(bl2.size_1, ''), coalesce(bl2.size_2, ''), coalesce(bl2.thk_1, ''), coalesce(bl2.thk_2, '')
+          ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
         ) alloc
           on alloc.item_code = bl.item_code
-         and alloc.size_1 = coalesce(bl.size_1, '')
-         and alloc.size_2 = coalesce(bl.size_2, '')
-         and alloc.thk_1 = coalesce(bl.thk_1, '')
-         and alloc.thk_2 = coalesce(bl.thk_2, '')
         where ${lineWhereSql.replace(/\bbom_id\b/g, "bl.bom_id").replace(/\bitem_code\b/g, "bl.item_code").replace(/\bline_no\b/g, "bl.line_no")}
         order by coalesce(bl.iwp_no, ''), bl.line_no, bl.id
         limit ${lineFilter.limit}
@@ -7048,6 +7486,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     ]);
     filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
     lineNumberOptionsHtml = lineNumberOptionsRes.rows.map((row) => `<option value="${esc(row.line_no)}"></option>`).join("");
+    const selectedBomAllowsManualLineEdits = !isSystemGeneratedBom(selectedBom);
     lineRows = linesRes.rows.map((line) => `<tr>
       <td><input type="checkbox" name="selected_line_ids" value="${line.id}" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
       <td>${esc(line.line_no)}</td>
@@ -7067,7 +7506,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(line.thk_2 || "")}</td>
       <td>${esc(line.notes || "")}</td>
       <td><span class="chip">${esc(line.planning_status)}</span></td>
-      <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a></div></td>
+      <td><div class="actions">${selectedBomAllowsManualLineEdits ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a>` : `<span class="muted">System BOM</span>`}</div></td>
     </tr>`).join("");
   }
   const bomOptions = availableBoms.map((row) => `<option value="${row.id}" ${Number(row.id) === selectedBomId ? "selected" : ""}>${esc(row.bom_name || row.description || row.bom_no)} | ${esc(row.bom_no)}</option>`).join("");
@@ -7302,6 +7741,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
   const jobId = currentJobId(req);
   const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!bom) throw new Error("BOM not found.");
+  const manualBom = !isSystemGeneratedBom(bom);
   const addedLines = Number(req.query.added_lines || 0);
   const skippedLines = Number(req.query.skipped_lines || 0);
   const lineSaveErrors = String(req.query.line_save_errors || "").trim();
@@ -7338,6 +7778,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
       from bom_lines bl2
       join bom_headers bh2 on bh2.id = bl2.bom_id
       where bh2.job_id = ${jobId}
+        and coalesce(bh2.system_key, '') <> '${unallocatedBomSystemKey}'
       group by bl2.item_code
     ) need on need.item_code = bl.item_code
     where ${where.join(" and ")}
@@ -7356,13 +7797,13 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
     <td>${esc(line.uom || "")}</td>
     <td>${esc(line.spec || "")}</td>
     <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
-    <td><div class="actions"><a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a></div></td>
+    <td><div class="actions">${manualBom ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a>` : ""}</div></td>
   </tr>`).join("");
   res.send(layout(`BOM Lines ${bom.bom_name || bom.description || bom.bom_no}`, `
     <h1>BOM Lines</h1>
     <div class="card">
       <p class="muted">BOM: <a href="/bom/${bom.id}">${esc(bom.bom_name || bom.description || bom.bom_no)}</a> | BOM #: ${esc(bom.bom_no)} | Type: ${esc(bom.bom_type)} | Status: ${esc(bom.status)}</p>
-      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}">Back to BOM</a>${canAccess(req.user, "bom", "edit") ? `<a class="btn btn-primary" href="/bom/${bom.id}/lines/new">Add BOM Line</a>` : ""}</div>
+      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}">Back to BOM</a>${canAccess(req.user, "bom", "edit") && manualBom ? `<a class="btn btn-primary" href="/bom/${bom.id}/lines/new">Add BOM Line</a>` : ""}</div>
     </div>
     ${addedLines ? `<div class="card success"><strong>Added ${addedLines} BOM line${addedLines === 1 ? "" : "s"}.</strong>${skippedLines ? ` ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.` : ""}</div>` : ""}
     ${!addedLines && skippedLines ? `<div class="card error"><strong>No BOM lines were added.</strong> ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.</div>` : ""}
@@ -7922,7 +8363,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
   `, [req.params.id, jobId])).rows[0];
   if (!header) throw new Error("Requisition not found.");
   if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
-  const availableMap = await getAvailableInventoryTotalsMap({ query }, jobId);
+  const availableMap = await getAvailableInventoryByItemMap({ query }, jobId);
   const lines = (await query(`
     select
       mrl.id as requisition_line_id,
@@ -7945,7 +8386,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
     order by bl.line_no, bl.id
   `, [req.params.id, jobId])).rows.map((line) => ({
     ...line,
-    qty_available: parseQtyValue(availableMap.get(buildInventoryIssueKey(line)) || 0, 0)
+    qty_available: parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0)
   }));
   const lineRows = lines.map((line) => {
     const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_available) + num(line.qty_requested));
@@ -7986,7 +8427,7 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
-    const availableMap = await getAvailableInventoryTotalsMap(client, jobId);
+    const availableMap = await getAvailableInventoryByItemMap(client, jobId);
     await client.query(`
       update material_requisitions
       set requested_by_name = $2, iwp_no = $3, notes = $4
@@ -8016,7 +8457,7 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
       }
       const requestedQty = parseQtyValue(req.body[`qty_requested_${line.requisition_line_id}`]);
       if (requestedQty <= 0) throw new Error(`Requested qty for ${line.item_code} must be greater than zero.`);
-      const qtyAvailable = parseQtyValue(availableMap.get(buildInventoryIssueKey(line)) || 0, 0);
+      const qtyAvailable = parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0);
       const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), qtyAvailable + num(line.qty_requested));
       if (requestedQty > maxQty) throw new Error(`Requested qty for ${line.item_code} exceeds available stock.`);
       await client.query("update material_requisition_lines set qty_requested = $2 where id = $1 and job_id = $3", [line.requisition_line_id, requestedQty, jobId]);
@@ -8053,7 +8494,7 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
   const currentRows = await getCurrentOnHandRows(client, { jobId });
   const inventoryMap = new Map();
   for (const row of currentRows) {
-    const key = buildInventoryIssueKey(row);
+    const key = buildInventoryItemKey(row);
     if (!inventoryMap.has(key)) inventoryMap.set(key, []);
     inventoryMap.get(key).push({
       warehouse: row.warehouse,
@@ -8067,6 +8508,7 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
       mrl.qty_requested,
       bl.id as bom_line_id,
       bl.item_code,
+      coalesce(bh.system_key, '') as system_key,
       coalesce(bl.size_1, '') as size_1,
       coalesce(bl.size_2, '') as size_2,
       coalesce(bl.thk_1, '') as thk_1,
@@ -8075,23 +8517,25 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
       bl.qty_issued
     from material_requisition_lines mrl
     join bom_lines bl on bl.id = mrl.bom_line_id
+    join bom_headers bh on bh.id = bl.bom_id
     where mrl.requisition_id = $1 and mrl.job_id = $2
     order by bl.line_no, bl.id
   `, [requisitionId, jobId])).rows;
   const currentReqAllocMap = new Map();
   for (const line of lines) {
-    const key = buildInventoryIssueKey(line);
+    const key = buildInventoryItemKey(line);
     currentReqAllocMap.set(key, parseQtyValue(currentReqAllocMap.get(key) || 0) + parseQtyValue(line.qty_requested || 0));
   }
-  const availableTotalsMap = await getAvailableInventoryTotalsMap(client, jobId, { allocatedOffsetMap: currentReqAllocMap });
+  const availableTotalsMap = await getAvailableInventoryByItemMap(client, jobId, { allocatedOffsetMap: currentReqAllocMap });
   if (lines.length === 0) throw new Error("No requisition lines found.");
   const lineAllocations = new Map();
   for (const line of lines) {
-    const qtyAvailable = parseQtyValue(availableTotalsMap.get(buildInventoryIssueKey(line)) || 0, 0);
+    const itemKey = buildInventoryItemKey(line);
+    const qtyAvailable = parseQtyValue(availableTotalsMap.get(itemKey) || 0, 0);
     if (num(line.qty_requested) > qtyAvailable) {
       throw new Error(`Cannot issue ${line.item_code}; requested qty exceeds available stock.`);
     }
-    const locationRows = (inventoryMap.get(buildInventoryIssueKey(line)) || []).map((row) => ({ ...row }));
+    const locationRows = (inventoryMap.get(itemKey) || []).map((row) => ({ ...row }));
     const allocations = buildPickLocationAllocations(locationRows, line.qty_requested);
     const allocatedQty = allocations.reduce((sum, row) => parseQtyValue(sum + parseQtyValue(row.qty_issued || 0), 0), 0);
     if (allocatedQty < num(line.qty_requested)) {
@@ -8099,7 +8543,7 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
     }
     lineAllocations.set(Number(line.requisition_line_id), allocations);
     let qtyToReserve = parseQtyValue(line.qty_requested || 0);
-    const currentLocationRows = inventoryMap.get(buildInventoryIssueKey(line)) || [];
+    const currentLocationRows = inventoryMap.get(itemKey) || [];
     for (const location of currentLocationRows) {
       if (qtyToReserve <= 0) break;
       const availableQty = parseQtyValue(location.qty_available || 0);
@@ -8112,22 +8556,6 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
   await client.query("delete from material_issue_transactions where requisition_id = $1 and job_id = $2", [requisitionId, jobId]);
   for (const line of lines) {
     await client.query(`
-      update bom_lines
-      set qty_issued = qty_issued + $2,
-          planning_status = case
-            when qty_issued + $2 >= qty_required then 'ISSUED_TO_FIELD'
-            else planning_status
-          end,
-          updated_at = now()
-      where id = $1
-        and exists (
-          select 1
-          from bom_headers bh
-          where bh.id = bom_lines.bom_id
-            and bh.job_id = $3
-        )
-    `, [line.bom_line_id, line.qty_requested, jobId]);
-    await client.query(`
       update material_requisition_lines
       set qty_issued = qty_requested
       where id = $1 and job_id = $2
@@ -8135,9 +8563,19 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
     const allocations = lineAllocations.get(Number(line.requisition_line_id)) || [];
     for (const allocation of allocations) {
       await client.query(`
-        insert into material_issue_transactions (job_id, requisition_id, requisition_line_id, warehouse, location, qty_issued, created_by)
-        values ($1, $2, $3, $4, $5, $6, $7)
-      `, [jobId, requisitionId, line.requisition_line_id, allocation.warehouse, allocation.location, allocation.qty_issued, userId || null]);
+        insert into material_issue_transactions (job_id, requisition_id, requisition_line_id, source_bom_line_id, issue_source, warehouse, location, qty_issued, created_by)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `, [
+        jobId,
+        requisitionId,
+        line.requisition_line_id,
+        line.bom_line_id,
+        String(line.system_key || "").trim().toUpperCase() === unallocatedBomSystemKey ? issueSourceTypes.unallocated : issueSourceTypes.bom,
+        allocation.warehouse,
+        allocation.location,
+        allocation.qty_issued,
+        userId || null
+      ]);
     }
   }
   await client.query(`
@@ -8147,6 +8585,8 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
         issued_by_user_id = $2
     where id = $1 and job_id = $3
   `, [requisitionId, userId, jobId]);
+  await recomputeBomIssuedSummaries(client, jobId);
+  await rebuildUnallocatedBom(client, jobId);
   await auditLog(client, userId, "issue", "material_requisition", requisitionId, header.requisition_no);
   return header;
 }
@@ -8166,45 +8606,19 @@ app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePerm
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (header.status === "CANCELLED") return;
-    const lines = (await client.query(`
-      select mrl.bom_line_id, mrl.qty_issued, bl.planning_status, bl.qty_required, bl.qty_issued as bom_qty_issued
-      from material_requisition_lines mrl
-      join bom_lines bl on bl.id = mrl.bom_line_id
-      where mrl.requisition_id = $1 and mrl.job_id = $2
-    `, [req.params.id, jobId])).rows;
-    for (const line of lines) {
-      const issuedRollback = num(line.qty_issued);
-      if (issuedRollback <= 0) continue;
-      const nextIssued = Math.max(num(line.bom_qty_issued) - issuedRollback, 0);
-      let nextStatus = line.planning_status;
-      if (line.planning_status === "ISSUED_TO_FIELD" && nextIssued < num(line.qty_required)) {
-        nextStatus = nextIssued > 0 ? "PARTIALLY_RECEIVED" : "RECEIVED";
-      }
-      await client.query(`
-        update bom_lines
-        set qty_issued = $2,
-            planning_status = $3,
-            updated_at = now()
-        where id = $1
-          and exists (
-            select 1
-            from bom_headers bh
-            where bh.id = bom_lines.bom_id
-              and bh.job_id = $4
-          )
-      `, [line.bom_line_id, nextIssued, nextStatus, jobId]);
-    }
-      await client.query(`delete from material_issue_transactions where requisition_id = $1 and job_id = $2`, [req.params.id, jobId]);
-      await client.query(`
-        update material_requisition_lines
-        set qty_issued = 0
-        where requisition_id = $1 and job_id = $2
-      `, [req.params.id, jobId]);
-      await client.query(`
-        update material_requisitions
-        set status = 'CANCELLED'
-        where id = $1 and job_id = $2
-      `, [req.params.id, jobId]);
+    await client.query(`delete from material_issue_transactions where requisition_id = $1 and job_id = $2`, [req.params.id, jobId]);
+    await client.query(`
+      update material_requisition_lines
+      set qty_issued = 0
+      where requisition_id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
+    await client.query(`
+      update material_requisitions
+      set status = 'CANCELLED'
+      where id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
+    await recomputeBomIssuedSummaries(client, jobId);
+    await rebuildUnallocatedBom(client, jobId);
     await auditLog(client, req.user.id, "cancel", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
@@ -10829,6 +11243,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
     if (postedCount === 0) throw new Error("Enter a received quantity on at least one editable PO line.");
     await recalcPoStatus(client, poId);
     if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
+    await rebuildUnallocatedBom(client, jobId);
     await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};mrr=${mrrNumber};lines=${postedCount}`);
   });
   res.redirect("/dashboard");
@@ -11170,6 +11585,7 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
       }
       if (poLine?.po_id) await recalcPoStatus(client, poLine.po_id);
       if (poLine?.rfq_id) await recalcRfqStatus(client, poLine.rfq_id);
+      await rebuildUnallocatedBom(client, jobId);
       await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `mrr=${mrr.mrr_number};po_line=${req.body.po_line_id}`);
     } else {
       const result = await client.query(`
@@ -12420,11 +12836,12 @@ app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requir
     select id, bom_no, bom_name, description
     from bom_headers
     where job_id = $1
+      and coalesce(system_key, '') <> $2
     order by
       case when coalesce(bom_name, '') = '' then 1 else 0 end,
       lower(coalesce(bom_name, description, bom_no, '')),
       id desc
-  `, [jobId])).rows;
+  `, [jobId, unallocatedBomSystemKey])).rows;
 
   const requestedSource = String(req.query.source || "combined").trim() || "combined";
   const combinedMode = requestedSource === "combined";
@@ -12441,6 +12858,7 @@ app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requir
       from bom_lines bl
       join bom_headers bh on bh.id = bl.bom_id
       where bh.job_id = $1
+        and coalesce(bh.system_key, '') <> '${unallocatedBomSystemKey}'
         ${combinedMode ? "" : "and bl.bom_id = $2"}
     ),
     demand as (
@@ -12460,66 +12878,21 @@ app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requir
       from bom_scope
       group by coalesce(item_code, '')
     ),
-    available_by_variant as (
+    available_by_item as (
       select
         coalesce(inv.item_code, '') as item_code,
         greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
       from (
-        ${getInventoryTotalsSubquery(jobId)}
+        ${getInventoryTotalsByItemSubquery(jobId)}
       ) inv
       left join (
-        select
-          bl_issued.item_code,
-          coalesce(bl_issued.size_1, '') as size_1,
-          coalesce(bl_issued.size_2, '') as size_2,
-          coalesce(bl_issued.thk_1, '') as thk_1,
-          coalesce(bl_issued.thk_2, '') as thk_2,
-          sum(bl_issued.qty_issued) as qty_issued_total
-        from bom_lines bl_issued
-        join bom_headers bh_issued on bh_issued.id = bl_issued.bom_id
-        where bh_issued.job_id = ${jobId}
-        group by
-          bl_issued.item_code,
-          coalesce(bl_issued.size_1, ''),
-          coalesce(bl_issued.size_2, ''),
-          coalesce(bl_issued.thk_1, ''),
-          coalesce(bl_issued.thk_2, '')
+        ${getIssuedInventoryTotalsByItemSubquery(jobId)}
       ) issued
         on issued.item_code = inv.item_code
-       and issued.size_1 = coalesce(inv.size_1, '')
-       and issued.size_2 = coalesce(inv.size_2, '')
-       and issued.thk_1 = coalesce(inv.thk_1, '')
-       and issued.thk_2 = coalesce(inv.thk_2, '')
       left join (
-        select
-          bl2.item_code,
-          coalesce(bl2.size_1, '') as size_1,
-          coalesce(bl2.size_2, '') as size_2,
-          coalesce(bl2.thk_1, '') as thk_1,
-          coalesce(bl2.thk_2, '') as thk_2,
-          sum(mrl2.qty_requested) as qty_allocated_total
-        from material_requisition_lines mrl2
-        join material_requisitions mr2 on mr2.id = mrl2.requisition_id
-        join bom_lines bl2 on bl2.id = mrl2.bom_line_id
-        where mr2.status = 'VERIFIED'
-          and mr2.job_id = ${jobId}
-        group by
-          bl2.item_code,
-          coalesce(bl2.size_1, ''),
-          coalesce(bl2.size_2, ''),
-          coalesce(bl2.thk_1, ''),
-          coalesce(bl2.thk_2, '')
+        ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
       ) alloc
         on alloc.item_code = inv.item_code
-       and alloc.size_1 = coalesce(inv.size_1, '')
-       and alloc.size_2 = coalesce(inv.size_2, '')
-       and alloc.thk_1 = coalesce(inv.thk_1, '')
-       and alloc.thk_2 = coalesce(inv.thk_2, '')
-    ),
-    available_by_item as (
-      select coalesce(item_code, '') as item_code, sum(coalesce(qty_available, 0)) as qty_available
-      from available_by_variant
-      group by coalesce(item_code, '')
     )
     select
       demand.item_code,

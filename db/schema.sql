@@ -101,6 +101,8 @@ create table if not exists bom_headers (
   notes text,
   revision text,
   status text not null default 'DRAFT',
+  is_system_generated boolean not null default false,
+  system_key text,
   description text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -175,6 +177,8 @@ create table if not exists material_issue_transactions (
   warehouse text not null,
   location text not null,
   qty_issued numeric(18,4) not null,
+  issue_source text not null default 'BOM',
+  source_bom_line_id bigint references bom_lines(id) on delete set null,
   created_by bigint references users(id) on delete set null,
   created_at timestamptz not null default now()
 );
@@ -190,6 +194,13 @@ alter table material_requisitions add column if not exists signed_copy_filename 
 alter table material_requisitions add column if not exists signed_copy_mime text;
 alter table material_requisitions add column if not exists signed_copy_data bytea;
 alter table material_requisition_lines add column if not exists qty_issued numeric(18,4) not null default 0;
+alter table bom_headers add column if not exists is_system_generated boolean not null default false;
+alter table bom_headers add column if not exists system_key text;
+create unique index if not exists bom_headers_system_key_job_idx
+  on bom_headers (job_id, system_key)
+  where system_key is not null;
+alter table material_issue_transactions add column if not exists issue_source text not null default 'BOM';
+alter table material_issue_transactions add column if not exists source_bom_line_id bigint references bom_lines(id) on delete set null;
 update material_requisitions set status = 'REQUESTED' where status = 'OPEN';
 
 create table if not exists rfq_items (
