@@ -1466,6 +1466,14 @@ function layout(title, body, user) {
         }
         return true;
       }
+      function captureRfqQuoteOrder(form) {
+        if (!form) return true;
+        const orderInput = form.querySelector('input[name="rfq_item_order"]');
+        if (!orderInput) return true;
+        const rows = Array.from(form.querySelectorAll("tr[data-rfq-item-id]"));
+        orderInput.value = rows.map((row) => String(row.dataset.rfqItemId || "").trim()).filter(Boolean).join(",");
+        return true;
+      }
       function promptPoNumber(button, vendorSelectId, targetFormId) {
         const vendorSelect = document.getElementById(vendorSelectId);
         const targetForm = document.getElementById(targetFormId);
@@ -2291,7 +2299,7 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
       and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
   `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || ""]);
   if (existingItem.rows[0]) {
-    const poLine = requestedLine || existingItem.rows[0].po_line || await getNextRfqLineNumber(client, rfqId);
+    const poLine = requestedLine || existingItem.rows[0].po_line || "";
     await client.query(`
       update rfq_items
       set po_line = $2, spec = $3, commodity_code = $4, tag_number = $5, qty = $6, notes = $7, updated_at = now()
@@ -2299,7 +2307,7 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
     `, [existingItem.rows[0].id, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
     return { status: "updated" };
   }
-  const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
+  const poLine = requestedLine || "";
   await client.query(`
     insert into rfq_items (job_id, rfq_id, material_item_id, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
@@ -9156,6 +9164,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const recentImports = recentImportsRes.rows;
   const materialItems = materialItemsRes.rows;
   const allQuotes = quotesRes.rows;
+  const hasAnyQuotes = allQuotes.length > 0;
   const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
   const selectedVendorIds = selectedVendors.map((vendor) => Number(vendor.vendor_id));
   const activeQuoteVendorId = selectedVendorIds.includes(Number(selectedVendorId))
@@ -9225,8 +9234,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     const awardSummary = item.award_status === "AWARDED"
       ? `${awardedVendor} | $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d`
       : "Open";
-    itemRows.push(`<tr>
-      <td style="width:1%; white-space:nowrap;">${esc(item.po_line || "")}</td>
+    itemRows.push(`<tr data-rfq-item-id="${item.id}">
+      <td style="width:1%; white-space:nowrap;">${esc(hasAnyQuotes ? (item.po_line || "") : "")}</td>
       <td style="width:1%; white-space:nowrap;"><input type="hidden" name="rfq_item_id_${item.id}" value="${item.id}" />${esc(item.item_code)}</td>
       <td style="width:auto; min-width:260px;">${esc(item.description)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(item.qty))}</td>
@@ -9338,8 +9347,9 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <h3>Vendor Quote Workspace</h3>
       ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted" style="margin-bottom:10px;">Save at least one selected vendor to unlock quote tabs.</div>`}
       ${workspaceActions}
-      <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack">
+      <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack" onsubmit="return captureRfqQuoteOrder(this);">
         <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
+        <input type="hidden" name="rfq_item_order" value="" />
         <div class="actions" style="margin-top:6px;">
           <button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Save ${esc(activeVendor?.name || "Vendor")} Quotes</button>
         </div>
@@ -10524,6 +10534,44 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermissi
     const vendorRow = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2 and job_id = $3", [rfqId, vendorId, jobId])).rows[0];
     if (!vendorRow) throw new Error("Choose a vendor from the RFQ vendor list.");
     const items = (await client.query("select id, awarded_vendor_id, award_status from rfq_items where rfq_id = $1 and job_id = $2", [rfqId, jobId])).rows;
+    const existingQuoteCount = Number((await client.query(`
+      select count(*) as count
+      from quotes q
+      join rfq_items ri on ri.id = q.rfq_item_id
+      where ri.rfq_id = $1 and ri.job_id = $2
+    `, [rfqId, jobId])).rows[0]?.count || 0);
+    const requestedOrder = String(req.body.rfq_item_order || "")
+      .split(",")
+      .map((value) => Number(String(value || "").trim()))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    const hasSubmittedQuotes = items.some((item) => {
+      const unitPriceRaw = String(req.body[`unit_price_${item.id}`] || "").trim();
+      const leadDaysRaw = String(req.body[`lead_days_${item.id}`] || "").trim();
+      return Boolean(unitPriceRaw || leadDaysRaw);
+    });
+    const seenOrderIds = new Set();
+    const orderedItemIds = [];
+    for (const itemId of requestedOrder) {
+      if (seenOrderIds.has(itemId)) continue;
+      if (!items.some((item) => Number(item.id) === itemId)) continue;
+      seenOrderIds.add(itemId);
+      orderedItemIds.push(itemId);
+    }
+    if (existingQuoteCount === 0 && hasSubmittedQuotes) {
+      for (const item of items) {
+        const itemId = Number(item.id);
+        if (seenOrderIds.has(itemId)) continue;
+        seenOrderIds.add(itemId);
+        orderedItemIds.push(itemId);
+      }
+      for (let index = 0; index < orderedItemIds.length; index += 1) {
+        await client.query(`
+          update rfq_items
+          set po_line = $2, updated_at = now()
+          where id = $1 and rfq_id = $3 and job_id = $4
+        `, [orderedItemIds[index], String(index + 1), rfqId, jobId]);
+      }
+    }
     for (const item of items) {
       const unitPriceRaw = String(req.body[`unit_price_${item.id}`] || "").trim();
       const leadDaysRaw = String(req.body[`lead_days_${item.id}`] || "").trim();
