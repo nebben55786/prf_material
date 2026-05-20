@@ -568,7 +568,8 @@ function formatPickTicketTimestamp(value = new Date()) {
   return formatShortDateTime(value);
 }
 
-function buildRfqSheetPdf(rfq, items) {
+function buildRfqSheetPdf(rfq, items, options = {}) {
+  const showPoLines = options.showPoLines !== false;
   const pageWidth = 792;
   const pageHeight = 612;
   const left = 28;
@@ -591,7 +592,7 @@ function buildRfqSheetPdf(rfq, items) {
   const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
 
   const rows = items.map((item) => {
-    const lineLines = wrapPdfText(item.po_line || "", 6);
+    const lineLines = wrapPdfText(showPoLines ? (item.po_line || "") : "", 6);
     const itemLines = wrapPdfText(item.item_code || "", 14);
     const descriptionLines = wrapPdfText(item.description || "", 44);
     const extraDescription = [];
@@ -9432,10 +9433,11 @@ app.post("/rfq/:id/delete", requireAuth, requireJobContext, requirePermission("r
 app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
   const jobId = currentJobId(req);
-  const [rfqRes, itemsRes] = await Promise.all([
+  const [rfqRes, itemsRes, quoteCountRes] = await Promise.all([
     query("select * from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
     query(`
       select
+        ri.id,
         ri.po_line,
         ri.qty,
         ri.notes,
@@ -9454,11 +9456,21 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission(
         case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
+    `, [rfqId, jobId]),
+    query(`
+      select count(*) as count
+      from quotes q
+      join rfq_items ri on ri.id = q.rfq_item_id
+      where ri.rfq_id = $1 and ri.job_id = $2
     `, [rfqId, jobId])
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
-  const pdfBuffer = buildRfqSheetPdf(rfq, itemsRes.rows);
+  const hasAnyQuotes = Number(quoteCountRes.rows[0]?.count || 0) > 0;
+  const pdfItems = hasAnyQuotes
+    ? itemsRes.rows
+    : itemsRes.rows.slice().sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+  const pdfBuffer = buildRfqSheetPdf(rfq, pdfItems, { showPoLines: hasAnyQuotes });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
   res.send(pdfBuffer);
