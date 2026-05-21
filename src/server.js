@@ -51,6 +51,7 @@ let headerJobNumber = defaultJobNumberValue;
 let headerPlantName = "";
 let headerPerformanceJobNumber = "";
 const pickTicketLogoPath = path.join(process.cwd(), "public", "prf-logo.png");
+const axImportTemplatePath = path.join(process.cwd(), "assets", "templates", "ax-import-template.xlsx");
 let pickTicketLogoBuffer = null;
 try {
   pickTicketLogoBuffer = fs.readFileSync(pickTicketLogoPath);
@@ -2175,6 +2176,86 @@ function formatCurrencyInput(value) {
   if (value === undefined || value === null || String(value).trim() === "") return "";
   const parsed = Number(String(value).replace(/[$,]/g, "").trim());
   return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : String(value).trim();
+}
+
+function combineRfqDimension(value1, value2) {
+  const parts = [textValue(value1), textValue(value2)].filter(Boolean);
+  return parts.join(" x ");
+}
+
+function buildRfqAxProductName(item) {
+  const productParts = [textValue(item.description)];
+  const sizeText = combineRfqDimension(item.size_1, item.size_2);
+  const thkText = combineRfqDimension(item.thk_1, item.thk_2);
+  if (sizeText) productParts.push(sizeText);
+  if (thkText) productParts.push(thkText);
+  if (textValue(item.item_code)) productParts.push(textValue(item.item_code));
+  return productParts.filter(Boolean).join(" ");
+}
+
+function clearWorksheetCellValue(cell) {
+  if (!cell) return;
+  delete cell.v;
+  delete cell.w;
+  delete cell.t;
+  delete cell.f;
+  delete cell.r;
+  delete cell.h;
+}
+
+function cloneWorksheetRowLayout(worksheet, targetRowNumber, templateRowNumber, range) {
+  if (!worksheet["!rows"]) worksheet["!rows"] = [];
+  const targetRowIndex = Number(targetRowNumber) - 1;
+  const templateRowIndex = Number(templateRowNumber) - 1;
+  if (!worksheet["!rows"][targetRowIndex] && worksheet["!rows"][templateRowIndex]) {
+    worksheet["!rows"][targetRowIndex] = { ...worksheet["!rows"][templateRowIndex] };
+  }
+  for (let col = range.s.c; col <= range.e.c; col += 1) {
+    const targetRef = XLSX.utils.encode_cell({ r: targetRowIndex, c: col });
+    const templateRef = XLSX.utils.encode_cell({ r: templateRowIndex, c: col });
+    const templateCell = worksheet[templateRef];
+    if (!worksheet[targetRef]) {
+      worksheet[targetRef] = {};
+      if (templateCell && templateCell.s !== undefined) worksheet[targetRef].s = templateCell.s;
+      if (templateCell && templateCell.z !== undefined) worksheet[targetRef].z = templateCell.z;
+    }
+    clearWorksheetCellValue(worksheet[targetRef]);
+  }
+}
+
+function writeWorksheetValue(worksheet, rowNumber, colIndex, value, templateRowNumber = 2) {
+  const rowIndex = Number(rowNumber) - 1;
+  const ref = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+  const templateRef = XLSX.utils.encode_cell({ r: Number(templateRowNumber) - 1, c: colIndex });
+  const templateCell = worksheet[templateRef];
+  if (!worksheet[ref]) {
+    worksheet[ref] = {};
+    if (templateCell && templateCell.s !== undefined) worksheet[ref].s = templateCell.s;
+    if (templateCell && templateCell.z !== undefined) worksheet[ref].z = templateCell.z;
+  }
+  const cell = worksheet[ref];
+  clearWorksheetCellValue(cell);
+  if (value === undefined || value === null || value === "") return;
+  if (typeof value === "number") {
+    cell.t = "n";
+    cell.v = value;
+    return;
+  }
+  cell.t = "s";
+  cell.v = String(value);
+}
+
+function getWorksheetHeaderColumnMap(worksheet, headerRowNumber = 1) {
+  const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1");
+  const headerRowIndex = Number(headerRowNumber) - 1;
+  const headerMap = new Map();
+  for (let col = range.s.c; col <= range.e.c; col += 1) {
+    const ref = XLSX.utils.encode_cell({ r: headerRowIndex, c: col });
+    const headerValue = textValue(worksheet[ref]?.v);
+    if (!headerValue) continue;
+    headerMap.set(normalizeWorkbookHeader(headerValue), col);
+  }
+  return headerMap;
 }
 
 async function getNextRfqLineNumber(client, rfqId) {
@@ -9320,6 +9401,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <button type="submit" ${selectedVendors.length === 0 ? "disabled" : ""}>Award Whole RFQ</button>
           ${awardedItems.length > 0 ? `<button class="btn btn-secondary" type="submit" formaction="/rfq/${rfqId}/award/clear">Clear Whole RFQ Award</button>` : ""}
           ${awardedVendorId ? `<button type="button" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}')">Create Draft PO</button>` : ""}
+          <a class="btn btn-secondary" href="/rfq/${rfqId}/export.xlsx">Export AX XLSX</a>
         </div>
         ${awardedVendorId ? `<div class="muted">Current award: <strong>${esc(awardedVendorName)}</strong> | ${awardedItems.length} line(s) | Estimated total $${awardedTotal.toFixed(2)}</div>` : `<div class="muted">Award the full RFQ to one vendor once the selected vendor has quotes on every RFQ line.</div>`}
       </form>
@@ -9493,6 +9575,82 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission(
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
   res.send(pdfBuffer);
+}));
+
+app.get("/rfq/:id/export.xlsx", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const [rfqRes, itemsRes] = await Promise.all([
+    query("select * from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
+    query(`
+      select
+        ri.id,
+        ri.po_line,
+        ri.qty,
+        ri.awarded_unit_price,
+        ri.size_1,
+        ri.size_2,
+        ri.thk_1,
+        ri.thk_2,
+        mi.item_code,
+        mi.description
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.rfq_id = $1 and ri.job_id = $2 and mi.job_id = $2
+      order by
+        case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
+        case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
+        ri.id
+    `, [rfqId, jobId])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  if (!fs.existsSync(axImportTemplatePath)) {
+    throw new Error("AX import template workbook is missing from the server.");
+  }
+  const workbook = XLSX.read(fs.readFileSync(axImportTemplatePath), { type: "buffer", cellStyles: true });
+  const worksheet = workbook.Sheets.Sheet1;
+  if (!worksheet) throw new Error("AX import template sheet 'Sheet1' was not found.");
+  const headerMap = getWorksheetHeaderColumnMap(worksheet, 1);
+  const productNameCol = headerMap.get("product_name");
+  const quantityCol = headerMap.get("quantity");
+  const unitPriceCol = headerMap.get("unit_price");
+  const procurementCategoryCol = headerMap.get("procurement_category");
+  if (![productNameCol, quantityCol, unitPriceCol, procurementCategoryCol].every((value) => Number.isInteger(value))) {
+    throw new Error("AX import template is missing one or more required columns.");
+  }
+
+  const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1:Q1");
+  const templateLastRowNumber = range.e.r + 1;
+  const dataStartRowNumber = 2;
+  const lastDataRowNumber = Math.max(templateLastRowNumber, dataStartRowNumber + itemsRes.rows.length - 1);
+
+  for (let rowNumber = dataStartRowNumber; rowNumber <= lastDataRowNumber; rowNumber += 1) {
+    if (rowNumber > templateLastRowNumber) {
+      cloneWorksheetRowLayout(worksheet, rowNumber, dataStartRowNumber, range);
+    } else {
+      for (let col = range.s.c; col <= range.e.c; col += 1) {
+        const ref = XLSX.utils.encode_cell({ r: rowNumber - 1, c: col });
+        clearWorksheetCellValue(worksheet[ref]);
+      }
+    }
+  }
+
+  itemsRes.rows.forEach((item, index) => {
+    const rowNumber = dataStartRowNumber + index;
+    writeWorksheetValue(worksheet, rowNumber, productNameCol, buildRfqAxProductName(item));
+    writeWorksheetValue(worksheet, rowNumber, quantityCol, num(item.qty));
+    writeWorksheetValue(worksheet, rowNumber, unitPriceCol, item.awarded_unit_price === null || item.awarded_unit_price === undefined || String(item.awarded_unit_price).trim() === "" ? "" : num(item.awarded_unit_price));
+    writeWorksheetValue(worksheet, rowNumber, procurementCategoryCol, "Field Material");
+  });
+
+  range.e.r = Math.max(range.e.r, lastDataRowNumber - 1);
+  worksheet["!ref"] = XLSX.utils.encode_range(range);
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer", cellStyles: true });
+  await auditLog(pool, req.user.id, "export", "rfq_ax_workbook", rfqId, `rows=${itemsRes.rows.length}|${rfq.rfq_no || ""}`);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}-ax-import.xlsx"`);
+  res.send(buffer);
 }));
 
 app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
