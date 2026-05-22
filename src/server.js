@@ -588,6 +588,7 @@ function buildRfqSheetPdf(rfq, items, options = {}) {
     { key: "qty", label: "QTY", width: 40 },
     { key: "uom", label: "UOM", width: 35 }
   ];
+  const descriptionWrapWidth = Math.max(12, Math.floor((cols[2].width - 12) / 5));
   const makeText = (x, y, text, font = "F1", size = 9) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
   const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
   const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
@@ -595,10 +596,10 @@ function buildRfqSheetPdf(rfq, items, options = {}) {
   const rows = items.map((item) => {
     const lineLines = wrapPdfText(showPoLines ? (item.po_line || "") : "", 6);
     const itemLines = wrapPdfText(item.item_code || "", 14);
-    const descriptionLines = wrapPdfText(item.description || "", 44);
+    const descriptionLines = wrapPdfText(item.description || "", descriptionWrapWidth);
     const extraDescription = [];
-    if (item.spec) extraDescription.push(...wrapPdfText(`Spec: ${item.spec}`, 44));
-    if (item.notes) extraDescription.push(...wrapPdfText(`Notes: ${item.notes}`, 44));
+    if (item.spec) extraDescription.push(...wrapPdfText(`Spec: ${item.spec}`, descriptionWrapWidth));
+    if (item.notes) extraDescription.push(...wrapPdfText(`Notes: ${item.notes}`, descriptionWrapWidth));
     const combinedDescription = descriptionLines.concat(extraDescription);
     const size1Lines = wrapPdfText(String(item.size_1 || ""), 8);
     const size2Lines = wrapPdfText(String(item.size_2 || ""), 8);
