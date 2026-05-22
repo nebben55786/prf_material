@@ -2675,11 +2675,22 @@ function parseDelimitedTextRows(text, delimiter = ",") {
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index];
     if (char === "\"") {
-      if (inQuotes && source[index + 1] === "\"") {
-        cell += "\"";
-        index += 1;
+      if (inQuotes) {
+        if (source[index + 1] === "\"") {
+          cell += "\"";
+          index += 1;
+        } else {
+          const nextChar = source[index + 1];
+          if (nextChar === delimiter || nextChar === "\n" || nextChar === "\r" || nextChar === undefined) {
+            inQuotes = false;
+          } else {
+            cell += "\"";
+          }
+        }
+      } else if (!cell) {
+        inQuotes = true;
       } else {
-        inQuotes = !inQuotes;
+        cell += "\"";
       }
       continue;
     }
