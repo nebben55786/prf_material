@@ -9069,8 +9069,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     .join("");
   const rows = rfqs.map((rfq) => `<tr>
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
-    <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.client_request_no || "")}</td>
+    <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.requestor_name || "")}</td>
     <td>${esc(formatShortDateTime(rfq.due_date || ""))}</td>
     <td><span class="chip">${esc((rfqStatuses.find((item) => item.value === rfq.status) || { label: rfq.status }).label)}</span></td>
@@ -9096,7 +9096,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table><tr><th>RFQ</th><th>Description</th><th>Client Request #</th><th>Requestor</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="6" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+        <table><tr><th>RFQ</th><th>Client Request #</th><th>Description</th><th>Requestor</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="6" class="muted">No RFQs match the current filter.</td></tr>`}</table>
       </div>
     </div>
   `, req.user));
