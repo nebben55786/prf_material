@@ -9053,7 +9053,13 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const [rfqsRes] = await Promise.all([
     query(`
-    select r.*
+    select
+      r.*,
+      coalesce((
+        select string_agg(distinct po.po_no, ', ' order by po.po_no)
+        from purchase_orders po
+        where po.rfq_id = r.id and po.job_id = r.job_id
+      ), '') as issued_po_refs
     from rfqs r
     ${whereSql}
     order by r.id desc
@@ -9072,6 +9078,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td>${esc(rfq.client_request_no || "")}</td>
     <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.requestor_name || "")}</td>
+    <td>${esc(rfq.issued_po_refs || "Not Issued")}</td>
     <td>${esc(formatShortDateTime(rfq.due_date || ""))}</td>
     <td><span class="chip">${esc((rfqStatuses.find((item) => item.value === rfq.status) || { label: rfq.status }).label)}</span></td>
   </tr>`).join("");
@@ -9096,7 +9103,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table><tr><th>RFQ</th><th>Client Request #</th><th>Description</th><th>Requestor</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="6" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+        <table><tr><th>RFQ</th><th>Client Request #</th><th>Description</th><th>Requestor</th><th>Issued PO(s)</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="7" class="muted">No RFQs match the current filter.</td></tr>`}</table>
       </div>
     </div>
   `, req.user));
