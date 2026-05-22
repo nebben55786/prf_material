@@ -9057,6 +9057,12 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     select
       r.*,
       coalesce((
+        select string_agg(distinct v.name, ', ' order by v.name)
+        from rfq_items ri
+        join vendors v on v.id = ri.awarded_vendor_id
+        where ri.rfq_id = r.id and ri.job_id = r.job_id and ri.award_status = 'AWARDED' and ri.awarded_vendor_id is not null
+      ), '') as awarded_vendor_refs,
+      coalesce((
         select string_agg(distinct po.po_no, ', ' order by po.po_no)
         from purchase_orders po
         where po.rfq_id = r.id and po.job_id = r.job_id
@@ -9079,6 +9085,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td>${esc(rfq.client_request_no || "")}</td>
     <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.requestor_name || "")}</td>
+    <td>${esc(rfq.awarded_vendor_refs || "")}</td>
     <td>${esc(rfq.issued_po_refs || "")}</td>
     <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
     <td><span class="chip">${esc((rfqStatuses.find((item) => item.value === rfq.status) || { label: rfq.status }).label)}</span></td>
@@ -9104,7 +9111,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table><tr><th>RFQ</th><th>Client Request #</th><th>Description</th><th>Requestor</th><th>Issued PO(s)</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="7" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+        <table><tr><th>RFQ</th><th>Client Request #</th><th>Description</th><th>Requestor</th><th>Awarded Vendor(s)</th><th>Issued PO(s)</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="8" class="muted">No RFQs match the current filter.</td></tr>`}</table>
       </div>
     </div>
   `, req.user));
