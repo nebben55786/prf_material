@@ -77,10 +77,15 @@ create table if not exists rfqs (
   id bigserial primary key,
   rfq_no text not null unique,
   project_name text not null,
+  client_request_no text,
+  requestor_name text,
   due_date date,
   status text not null default 'SEND_FOR_QUOTES',
   created_at timestamptz not null default now()
 );
+
+alter table rfqs add column if not exists client_request_no text;
+alter table rfqs add column if not exists requestor_name text;
 
 update rfqs
 set status = case

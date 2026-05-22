@@ -9070,6 +9070,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const rows = rfqs.map((rfq) => `<tr>
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td>${esc(rfq.project_name)}</td>
+    <td>${esc(rfq.client_request_no || "")}</td>
+    <td>${esc(rfq.requestor_name || "")}</td>
     <td>${esc(formatShortDateTime(rfq.due_date || ""))}</td>
     <td><span class="chip">${esc((rfqStatuses.find((item) => item.value === rfq.status) || { label: rfq.status }).label)}</span></td>
   </tr>`).join("");
@@ -9094,7 +9096,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table><tr><th>RFQ</th><th>Description</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="4" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+        <table><tr><th>RFQ</th><th>Description</th><th>Client Request #</th><th>Requestor</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="6" class="muted">No RFQs match the current filter.</td></tr>`}</table>
       </div>
     </div>
   `, req.user));
@@ -9123,6 +9125,10 @@ app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "e
         <div class="grid">
           <div><label>Description</label><input name="project_name" required /></div>
           <div><label>Due Date</label><input type="date" name="due_date" required /></div>
+        </div>
+        <div class="grid">
+          <div><label>Client Request #</label><input name="client_request_no" /></div>
+          <div><label>Requestor</label><input name="requestor_name" /></div>
         </div>
         <div class="grid">
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
@@ -9158,6 +9164,8 @@ app.get("/rfq/import/template", requireAuth, requirePermission("rfqs", "edit"), 
 app.post("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
   const projectName = String(req.body.project_name || "").trim();
+  const clientRequestNo = String(req.body.client_request_no || "").trim();
+  const requestorName = String(req.body.requestor_name || "").trim();
   const dueDate = String(req.body.due_date || "").trim();
   if (!projectName) throw new Error("Description is required.");
   if (!dueDate) throw new Error("Due date is required.");
@@ -9167,11 +9175,11 @@ app.post("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "edit
     const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "SEND_FOR_QUOTES";
     const selectedVendorIds = parseSelectedIdList(req.body.vendor_ids);
     const insert = await client.query(
-      "insert into rfqs (job_id, rfq_no, project_name, due_date, status) values ($1, $2, $3, $4, $5) returning id",
-      [jobId, rfqNo, projectName, dueDate, status]
+      "insert into rfqs (job_id, rfq_no, project_name, client_request_no, requestor_name, due_date, status) values ($1, $2, $3, $4, $5, $6, $7) returning id",
+      [jobId, rfqNo, projectName, clientRequestNo, requestorName, dueDate, status]
     );
     await syncRfqVendors(client, insert.rows[0].id, selectedVendorIds);
-    await auditLog(client, req.user.id, "create", "rfq", insert.rows[0].id, rfqNo);
+    await auditLog(client, req.user.id, "create", "rfq", insert.rows[0].id, `${rfqNo}|${clientRequestNo}|${requestorName}`);
     return insert.rows[0].id;
   });
   res.redirect(`/rfq/${id}`);
@@ -9181,6 +9189,8 @@ app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("r
   const rfqId = Number(req.params.id);
   const jobId = currentJobId(req);
   const projectName = String(req.body.project_name || "").trim();
+  const clientRequestNo = String(req.body.client_request_no || "").trim();
+  const requestorName = String(req.body.requestor_name || "").trim();
   const dueDate = String(req.body.due_date || "").trim();
   const requestedStatus = String(req.body.status || "").trim();
   const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "";
@@ -9188,10 +9198,10 @@ app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("r
   if (!dueDate) throw new Error("Due date is required.");
   if (!status) throw new Error("Choose a valid RFQ status.");
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select rfq_no, project_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    const rfq = (await client.query("select rfq_no, project_name, client_request_no, requestor_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
-    await client.query("update rfqs set project_name = $2, due_date = $3, status = $4 where id = $1 and job_id = $5", [rfqId, projectName, dueDate, status, jobId]);
-    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${dueDate}:${status}`);
+    await client.query("update rfqs set project_name = $2, client_request_no = $3, requestor_name = $4, due_date = $5, status = $6 where id = $1 and job_id = $7", [rfqId, projectName, clientRequestNo, requestorName, dueDate, status, jobId]);
+    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${clientRequestNo}:${requestorName}:${dueDate}:${status}`);
   });
   res.redirect(`/rfq/${rfqId}`);
 });
@@ -9431,6 +9441,10 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <div><label>Description</label><input name="project_name" value="${esc(rfq.project_name || "")}" required /></div>
           <div><label>Due Date</label><input type="date" name="due_date" value="${esc(textValue(rfq.due_date))}" required /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
+        </div>
+        <div class="grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+          <div><label>Client Request #</label><input name="client_request_no" value="${esc(rfq.client_request_no || "")}" /></div>
+          <div><label>Requestor</label><input name="requestor_name" value="${esc(rfq.requestor_name || "")}" /></div>
         </div>
       </form>
       <form id="rfq-${rfqId}-vendors-form" method="post" action="/rfq/${rfqId}/vendors" class="stack" style="margin-top:12px;">
