@@ -9078,8 +9078,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td>${esc(rfq.client_request_no || "")}</td>
     <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.requestor_name || "")}</td>
-    <td>${esc(rfq.issued_po_refs || "Not Issued")}</td>
-    <td>${esc(formatShortDateTime(rfq.due_date || ""))}</td>
+    <td>${esc(rfq.issued_po_refs || "")}</td>
+    <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
     <td><span class="chip">${esc((rfqStatuses.find((item) => item.value === rfq.status) || { label: rfq.status }).label)}</span></td>
   </tr>`).join("");
   res.send(layout("RFQs", `
