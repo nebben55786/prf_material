@@ -1683,9 +1683,14 @@ function layout(title, body, user) {
       }
       function makeTableSortable(table) {
         if (!table) return;
-        const rows = Array.from(table.querySelectorAll("tr"));
+        const headerRow = table.tHead && table.tHead.rows.length
+          ? table.tHead.rows[0]
+          : table.querySelector("tr");
+        const bodyContainer = table.tBodies && table.tBodies.length ? table.tBodies[0] : table;
+        const rows = headerRow
+          ? [headerRow].concat(Array.from(bodyContainer.querySelectorAll("tr")))
+          : Array.from(table.querySelectorAll("tr"));
         if (rows.length < 2) return;
-        const headerRow = rows[0];
         const headers = Array.from(headerRow.querySelectorAll("th"));
         if (!headers.length) return;
         headers.forEach((th, index) => {
@@ -1699,10 +1704,10 @@ function layout(title, body, user) {
           indicator.className = "sort-indicator";
           indicator.textContent = "";
           th.appendChild(indicator);
-            th.addEventListener("click", () => {
+          th.addEventListener("click", () => {
               const currentIndex = Number(table.dataset.sortIndex || -1);
               const nextDir = currentIndex === index && table.dataset.sortDir === "asc" ? "desc" : "asc";
-              const bodyRows = Array.from(table.querySelectorAll("tr")).slice(1);
+              const bodyRows = Array.from(bodyContainer.querySelectorAll("tr"));
               bodyRows.sort((a, b) => {
                 const aParsed = parseSortableValue(getSortableCellText(a.children[index]));
                 const bParsed = parseSortableValue(getSortableCellText(b.children[index]));
@@ -1714,7 +1719,7 @@ function layout(title, body, user) {
               }
               return nextDir === "asc" ? result : -result;
             });
-            bodyRows.forEach((row) => table.appendChild(row));
+            bodyRows.forEach((row) => bodyContainer.appendChild(row));
             table.dataset.sortIndex = String(index);
             table.dataset.sortDir = nextDir;
             headers.forEach((header, headerIndex) => {
@@ -1771,7 +1776,7 @@ function layout(title, body, user) {
         document.querySelectorAll("form[data-password-form='access-approve']").forEach((form) => {
           attachPasswordValidation(form.id, "temp_password", form.dataset.passwordMessageId);
         });
-        document.querySelectorAll(".card.scroll table").forEach((table) => makeTableSortable(table));
+        document.querySelectorAll(".scroll table").forEach((table) => makeTableSortable(table));
       });
     </script>
   </head>
