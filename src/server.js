@@ -7213,21 +7213,21 @@ async function getBomLineEntryAutocomplete(bomId, jobId) {
       limit 1000
     `, [jobId]),
     query(`
-      select distinct on (item_code)
-        item_code,
-        description,
-        material_type,
-        uom,
-        coalesce(spec, '') as spec,
-        coalesce(size_1, '') as size_1,
-        coalesce(size_2, '') as size_2,
-        coalesce(thk_1, '') as thk_1,
-        coalesce(thk_2, '') as thk_2
+      select distinct on (bl.item_code)
+        bl.item_code,
+        bl.description,
+        bl.material_type,
+        bl.uom,
+        coalesce(bl.spec, '') as spec,
+        coalesce(bl.size_1, '') as size_1,
+        coalesce(bl.size_2, '') as size_2,
+        coalesce(bl.thk_1, '') as thk_1,
+        coalesce(bl.thk_2, '') as thk_2
       from bom_lines bl
       join bom_headers bh on bh.id = bl.bom_id
       where bh.job_id = $1
-        and coalesce(item_code, '') <> ''
-      order by item_code, updated_at desc, id desc
+        and coalesce(bl.item_code, '') <> ''
+      order by bl.item_code, bl.updated_at desc, bl.id desc
     `, [jobId])
   ]);
   const itemDetails = {};
