@@ -1730,42 +1730,43 @@ function layout(title, body, user) {
           });
         });
       }
-      function randomSixDigitCode() {
-        return String(Math.floor(100000 + Math.random() * 900000));
-      }
       function prepareRfqGrid(formId, rowCount) {
         const form = document.getElementById(formId);
         if (!form) return true;
         const rowsMissingCode = [];
-        const usedCodes = new Set();
-        form.querySelectorAll('[name^="item_code_"]').forEach((input) => {
-          const value = String(input.value || "").trim();
-          if (value) usedCodes.add(value);
-        });
         for (let index = 0; index < rowCount; index += 1) {
           const itemCodeInput = form.querySelector('[name="item_code_' + index + '"]');
           const descriptionInput = form.querySelector('[name="description_' + index + '"]');
           const qtyInput = form.querySelector('[name="qty_' + index + '"]');
           const materialTypeInput = form.querySelector('[name="material_type_' + index + '"]');
           const uomInput = form.querySelector('[name="uom_' + index + '"]');
+          const size1Input = form.querySelector('[name="size_1_' + index + '"]');
+          const size2Input = form.querySelector('[name="size_2_' + index + '"]');
+          const thk1Input = form.querySelector('[name="thk_1_' + index + '"]');
+          const thk2Input = form.querySelector('[name="thk_2_' + index + '"]');
+          const notesInput = form.querySelector('[name="notes_' + index + '"]');
           const hasRowData = [descriptionInput, qtyInput, materialTypeInput, uomInput]
+            .concat([size1Input, size2Input, thk1Input, thk2Input, notesInput])
             .some((input) => input && String(input.value || "").trim());
           if (itemCodeInput && !String(itemCodeInput.value || "").trim() && hasRowData) {
             rowsMissingCode.push(itemCodeInput);
           }
         }
-        if (!rowsMissingCode.length) return true;
-        if (!window.confirm("No Item Code Entered. Do you want me to create on for you?")) {
+        let allowMissingInput = form.querySelector('input[name="allow_missing_item_codes"]');
+        if (!rowsMissingCode.length) {
+          if (allowMissingInput) allowMissingInput.value = "";
+          return true;
+        }
+        if (!window.confirm("No item codes, Do you want to continue?")) {
           return false;
         }
-        rowsMissingCode.forEach((input) => {
-          let nextCode = randomSixDigitCode();
-          while (usedCodes.has(nextCode)) {
-            nextCode = randomSixDigitCode();
-          }
-          usedCodes.add(nextCode);
-          input.value = nextCode;
-        });
+        if (!allowMissingInput) {
+          allowMissingInput = document.createElement("input");
+          allowMissingInput.type = "hidden";
+          allowMissingInput.name = "allow_missing_item_codes";
+          form.appendChild(allowMissingInput);
+        }
+        allowMissingInput.value = "1";
         return true;
       }
       document.addEventListener("DOMContentLoaded", () => {
@@ -1824,13 +1825,75 @@ function normalizePhone(value) {
   return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
 }
 
-function randomSixDigitItemCode(used = new Set()) {
+function randomFiveDigitItemCode(used = new Set()) {
   let nextCode = "";
   do {
-    nextCode = String(Math.floor(100000 + Math.random() * 900000));
+    nextCode = String(Math.floor(10000 + Math.random() * 90000));
   } while (used.has(nextCode));
   used.add(nextCode);
   return nextCode;
+}
+
+function rfqRowHasAnyEnteredValues(row) {
+  return [
+    row.description,
+    row.material_type,
+    row.uom,
+    row.spec,
+    row.commodity_code,
+    row.tag_number,
+    row.size_1,
+    row.size_2,
+    row.thk_1,
+    row.thk_2,
+    row.qty,
+    row.notes
+  ].some((value) => String(value || "").trim());
+}
+
+async function generateUniqueRfqItemCode(runner, used = new Set()) {
+  let attempts = 0;
+  while (attempts < 1000) {
+    const candidate = randomFiveDigitItemCode(used);
+    const existing = await runner.query("select 1 from material_items where item_code = $1 limit 1", [candidate]);
+    if (!existing.rows[0]) return candidate;
+    used.delete(candidate);
+    attempts += 1;
+  }
+  throw new Error("Unable to generate a unique 5-digit item code.");
+}
+
+async function assignGeneratedRfqItemCodes(runner, rows) {
+  const usedCodes = new Set(rows.map((row) => String(row.item_code || "").trim()).filter(Boolean));
+  let generatedCount = 0;
+  const nextRows = [];
+  for (const row of rows) {
+    const nextRow = { ...row };
+    const normalizedCode = String(nextRow.item_code || "").trim();
+    const needsGeneratedCode = !normalizedCode && rfqRowHasAnyEnteredValues(nextRow);
+    const needsRecheck = Boolean(nextRow.generated_item_code) && normalizedCode;
+    if (needsGeneratedCode || needsRecheck) {
+      let finalCode = normalizedCode;
+      if (!finalCode) {
+        finalCode = await generateUniqueRfqItemCode(runner, usedCodes);
+        generatedCount += 1;
+      } else {
+        const existing = await runner.query("select 1 from material_items where item_code = $1 limit 1", [finalCode]);
+        if (existing.rows[0]) {
+          usedCodes.delete(finalCode);
+          finalCode = await generateUniqueRfqItemCode(runner, usedCodes);
+        } else {
+          usedCodes.add(finalCode);
+        }
+      }
+      nextRow.item_code = finalCode;
+      nextRow.generated_item_code = true;
+    } else {
+      nextRow.item_code = normalizedCode;
+    }
+    nextRows.push(nextRow);
+  }
+  return { rows: nextRows, generatedCount };
 }
 
 function normalizeEmail(value) {
@@ -9936,6 +9999,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
   if (!rfq) throw new Error("RFQ not found.");
 
   const pasteAction = String(req.body.paste_action || "preview").trim();
+  const allowMissingItemCodes = String(req.body.allow_missing_item_codes || "").trim() === "1";
   let rows = [];
   const payload = String(req.body.rows_payload || "").trim();
   const pastedText = String(req.body.paste_text || "").trim();
@@ -9945,6 +10009,49 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
     rows = parseRfqPasteRows(pastedText);
   }
   if (!rows.length) throw new Error("Paste at least one RFQ value row first.");
+
+  const missingCodeRows = rows.filter((row) => !String(row.item_code || "").trim() && rfqRowHasAnyEnteredValues(row));
+  if (!payload && pasteAction === "preview" && missingCodeRows.length > 0 && !allowMissingItemCodes) {
+    const escapedPasteText = esc(pastedText);
+    res.send(layout(`Paste RFQ Values`, `
+      <h1>Paste RFQ Values</h1>
+      <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
+      <div class="card">
+        <p class="muted">${missingCodeRows.length} row(s) do not have an item code.</p>
+        <form id="rfq-missing-item-code-confirm-${rfqId}" method="post" action="/rfq/${rfqId}/items/paste" class="stack">
+          <input type="hidden" name="paste_action" value="preview" />
+          <input type="hidden" name="allow_missing_item_codes" value="1" />
+          <textarea name="paste_text" style="display:none;">${escapedPasteText}</textarea>
+          <noscript>
+            <div class="actions">
+              <button type="submit">Continue</button>
+              <a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Back</a>
+            </div>
+          </noscript>
+        </form>
+      </div>
+      <script>
+        (function () {
+          const proceed = window.confirm("No item codes, Do you want to continue?");
+          if (proceed) {
+            document.getElementById("rfq-missing-item-code-confirm-${rfqId}").submit();
+          } else {
+            if (window.history.length > 1) {
+              window.history.back();
+            } else {
+              window.location.href = "/rfq/${rfqId}/items/paste";
+            }
+          }
+        }());
+      </script>
+    `, req.user));
+    return;
+  }
+
+  if (missingCodeRows.length > 0 || rows.some((row) => row.generated_item_code)) {
+    const generated = await assignGeneratedRfqItemCodes({ query }, rows);
+    rows = generated.rows;
+  }
 
   const normalizedCodes = Array.from(new Set(rows.map((row) => String(row.item_code || "").trim().toLowerCase()).filter(Boolean)));
   const existingCodeSet = new Set((await query(
@@ -9960,6 +10067,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
   const invalidPreviewRows = previewMeta.filter((entry) => entry.issues.length > 0);
   const validMatchedRows = previewMeta.filter((entry) => entry.matched && entry.issues.length === 0).map((entry) => entry.row);
   const validAllRows = previewMeta.filter((entry) => entry.issues.length === 0).map((entry) => entry.row);
+  const generatedCodeCount = rows.filter((row) => row.generated_item_code).length;
 
   if (pasteAction === "import_matched" || pasteAction === "import_all") {
     const rowsToImport = pasteAction === "import_matched" ? validMatchedRows : validAllRows;
@@ -10026,6 +10134,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
         <div class="stat"><div>Matched Idents</div><strong>${matchedRows.length}</strong></div>
         <div class="stat"><div>Missing Idents</div><strong>${unmatchedRows.length}</strong></div>
       </div>
+      ${generatedCodeCount > 0 ? `<p class="muted" style="margin-top:10px;">${generatedCodeCount} row(s) were assigned generated 5-digit item codes.</p>` : ""}
       ${unmatchedRows.length > 0 ? `<p class="muted" style="margin-top:10px;">${unmatchedRows.length} ident(s) are not on the current item list yet. Do you want to add them with the pasted description, size, thickness, and quantity values?</p>` : `<p class="muted" style="margin-top:10px;">All pasted idents already exist on the current item list.</p>`}
       ${invalidPreviewRows.length > 0 ? `<p class="muted" style="margin-top:10px;color:#b42318;">${invalidPreviewRows.length} row(s) are missing required values. Fix them and paste again before importing.</p>` : ""}
     </div>
@@ -10141,7 +10250,7 @@ app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission
 
 app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
-  const usedItemCodes = new Set();
+  const allowMissingItemCodes = String(req.body.allow_missing_item_codes || "").trim() === "1";
   const rows = Array.from({ length: 8 }, (_, index) => ({
     item_code: req.body[`item_code_${index}`],
     description: req.body[`description_${index}`],
@@ -10156,20 +10265,15 @@ app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermissio
     thk_2: req.body[`thk_2_${index}`],
     qty: req.body[`qty_${index}`],
     notes: req.body[`notes_${index}`]
-  })).map((row) => {
-    const normalizedCode = String(row.item_code || "").trim();
-    if (normalizedCode) {
-      usedItemCodes.add(normalizedCode);
-      return row;
-    }
-    const hasRowData = String(row.description || "").trim() || String(row.qty || "").trim() || String(row.material_type || "").trim() || String(row.uom || "").trim();
-    if (hasRowData) {
-      row.item_code = randomSixDigitItemCode(usedItemCodes);
-    }
-    return row;
-  }).filter((row) => String(row.item_code || "").trim() || String(row.description || "").trim() || String(row.qty || "").trim());
+  })).filter((row) => String(row.item_code || "").trim() || rfqRowHasAnyEnteredValues(row));
+  if (rows.some((row) => !String(row.item_code || "").trim() && rfqRowHasAnyEnteredValues(row)) && !allowMissingItemCodes) {
+    throw new Error("Missing item codes require confirmation.");
+  }
   if (rows.length === 0) throw new Error("No grid rows were entered.");
   const batchId = await withTransaction(async (client) => {
+    const preparedRows = rows.some((row) => !String(row.item_code || "").trim() && rfqRowHasAnyEnteredValues(row))
+      ? (await assignGeneratedRfqItemCodes(client, rows)).rows
+      : rows;
     const batchId = await createImportBatch(client, {
       entityType: "rfq_items",
       rfqId,
@@ -10180,17 +10284,17 @@ app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermissio
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
-    for (let index = 0; index < rows.length; index += 1) {
-      const result = await upsertRfqItemRow(client, rfqId, rows[index], currentJobId(req));
+    for (let index = 0; index < preparedRows.length; index += 1) {
+      const result = await upsertRfqItemRow(client, rfqId, preparedRows[index], currentJobId(req));
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
         skippedCount += 1;
-        await addImportBatchError(client, batchId, index + 1, result.errorCode, result.message, rows[index]);
+        await addImportBatchError(client, batchId, index + 1, result.errorCode, result.message, preparedRows[index]);
       }
     }
     await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
-    await auditLog(client, req.user.id, "grid_add", "rfq_items", rfqId, `rows=${rows.length};batch=${batchId}`);
+    await auditLog(client, req.user.id, "grid_add", "rfq_items", rfqId, `rows=${preparedRows.length};batch=${batchId}`);
     return batchId;
   });
   res.redirect(`/imports/${batchId}`);
