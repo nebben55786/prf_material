@@ -2140,7 +2140,7 @@ function normalizePoImportRow(row) {
   return normalized;
 }
 
-function parseManualPoLineRows(body, poNo) {
+function parseManualPoLineRows(body, poId, poNo) {
   const rowCount = Math.max(1, Math.min(50, Number(body.row_count || 12) || 12));
   const rows = [];
   for (let index = 0; index < rowCount; index += 1) {
@@ -2162,6 +2162,7 @@ function parseManualPoLineRows(body, poNo) {
       po_no: poNo,
       ...rawRow
     });
+    row.po_id = poId;
     rows.push(row);
   }
   return rows;
@@ -2503,7 +2504,7 @@ async function upsertPurchaseOrderRow(client, row, jobId) {
     uom: row.uom || row.unit || "EA"
   }, jobId);
 
-  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2", [jobId, poNo])).rows[0];
+  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
   let poId;
   let headerStatus = "updated";
   if (poRow) {
@@ -2590,7 +2591,7 @@ async function upsertPurchaseOrderHeaderRow(client, row, jobId) {
   if (!vendorName) return { status: "skipped", errorCode: "missing_vendor", message: "Vendor name is required." };
 
   const vendorId = await findOrCreateVendorByName(client, vendorName, jobId);
-  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2", [jobId, poNo])).rows[0];
+  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
   if (poRow) {
     await client.query(`
       update purchase_orders
@@ -2651,7 +2652,10 @@ async function upsertPurchaseOrderLineRow(client, row, jobId) {
   if (qtyOrdered <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty ordered must be greater than zero." };
   if (unitPrice < 0) return { status: "skipped", errorCode: "invalid_unit_price", message: "Unit price cannot be negative." };
 
-  const poRow = (await client.query("select id, job_id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
+  const poId = Number(row.po_id || 0);
+  const poRow = poId
+    ? (await client.query("select id, job_id from purchase_orders where id = $1 and job_id = $2", [poId, jobId])).rows[0]
+    : (await client.query("select id, job_id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
   if (!poRow) return { status: "skipped", errorCode: "missing_po_header", message: "PO header not found. Import or create the PO header first." };
 
   const materialItemId = await upsertMaterialItem(client, {
@@ -11187,9 +11191,13 @@ app.post("/po/import/lines/commit", requireAuth, requireJobContext, requirePermi
 });
 
 app.post("/po/import/lines/manual", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
-  const poNo = String(req.body.po_no || "").trim();
-  if (!poNo) throw new Error("Choose a PO header before adding manual lines.");
-  const rows = parseManualPoLineRows(req.body, poNo);
+  const jobId = currentJobId(req);
+  const poId = Number(req.body.po_id || 0);
+  if (!poId) throw new Error("Choose a PO header before adding manual lines.");
+  const poHeader = (await query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [poId, jobId])).rows[0];
+  if (!poHeader) throw new Error("Selected PO header was not found. Refresh and try again.");
+  const poNo = String(poHeader.po_no || "").trim();
+  const rows = parseManualPoLineRows(req.body, poId, poNo);
   if (rows.length === 0) throw new Error("Enter at least one manual PO line.");
   const batchId = await withTransaction(async (client) => {
     const batchId = await createImportBatch(client, {
@@ -11197,13 +11205,13 @@ app.post("/po/import/lines/manual", requireAuth, requireJobContext, requirePermi
       rfqId: null,
       uploadedBy: req.user.id,
       filename: `Manual PO Lines - ${poNo}`,
-      jobId: currentJobId(req)
+      jobId
     });
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
     for (let index = 0; index < rows.length; index += 1) {
-      const result = await upsertPurchaseOrderLineRow(client, rows[index], currentJobId(req));
+      const result = await upsertPurchaseOrderLineRow(client, rows[index], jobId);
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
@@ -11237,13 +11245,14 @@ app.get("/po/new/manual", requireAuth, requireJobContext, requirePermission("pos
   const vendors = (await query("select id, name from vendors where is_active = true order by name")).rows;
   const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
   const poHeaders = (await query(`
-    select po_no, coalesce(description, '') as description
-    from purchase_orders
-    where job_id = $1
-    order by po_no
+    select po.id, po.po_no, coalesce(po.description, '') as description, coalesce(v.name, '') as vendor_name
+    from purchase_orders po
+    left join vendors v on v.id = po.vendor_id
+    where po.job_id = $1
+    order by po.po_no, po.id desc
   `, [jobId])).rows;
   const poOptions = poHeaders.length > 0
-    ? poHeaders.map((po) => `<option value="${esc(po.po_no)}">${esc(po.po_no)}${po.description ? ` | ${esc(po.description)}` : ""}</option>`).join("")
+    ? poHeaders.map((po) => `<option value="${po.id}">${esc(po.po_no)}${po.vendor_name ? ` | ${esc(po.vendor_name)}` : ""}${po.description ? ` | ${esc(po.description)}` : ""}</option>`).join("")
     : `<option value="">No PO headers available</option>`;
   const manualRows = Array.from({ length: 12 }, (_value, index) => `<tr>
     <td><input name="po_line_${index}" /></td>
@@ -11280,7 +11289,7 @@ app.get("/po/new/manual", requireAuth, requireJobContext, requirePermission("pos
       <form method="post" action="/po/import/lines/manual" class="stack">
         <input type="hidden" name="row_count" value="12" />
         <div class="grid">
-          <div><label>PO Header</label><select name="po_no" ${poHeaders.length === 0 ? "disabled" : ""}>${poOptions}</select></div>
+          <div><label>PO Header</label><select name="po_id" ${poHeaders.length === 0 ? "disabled" : ""}>${poOptions}</select></div>
         </div>
         <div class="card scroll" style="padding:0;">
           <table>
@@ -11859,7 +11868,7 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
   }
   const po = mrr.app_po_id
     ? (await query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [mrr.app_po_id, jobId])).rows[0]
-    : (mrr.po_number ? (await query("select id, po_no from purchase_orders where po_no = $1 and job_id = $2", [mrr.po_number, jobId])).rows[0] : null);
+    : (mrr.po_number ? (await query("select id, po_no from purchase_orders where po_no = $1 and job_id = $2 order by id desc limit 1", [mrr.po_number, jobId])).rows[0] : null);
   const warehouseOptions = await getWarehouseOptions(jobId);
   const locationMap = await getWarehouseLocationMap(jobId);
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]

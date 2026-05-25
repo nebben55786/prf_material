@@ -315,7 +315,7 @@ create table if not exists import_batch_errors (
 
 create table if not exists purchase_orders (
   id bigserial primary key,
-  po_no text not null unique,
+  po_no text not null,
   vendor_id bigint not null references vendors(id),
   rfq_id bigint references rfqs(id),
   description text,
