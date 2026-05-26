@@ -9520,7 +9520,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       </form>
     </div>`;
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
-    <h1>RFQ ${esc(rfq.rfq_no)}${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</h1>
+    <h1>${esc(rfq.rfq_no)}${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</h1>
     <div class="card">
       <form id="rfq-${rfqId}-header-form" method="post" action="/rfq/${rfqId}/header" class="stack">
         <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
