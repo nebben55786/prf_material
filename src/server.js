@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { Readable } from "node:stream";
 import zlib from "node:zlib";
+import { del, get, put } from "@vercel/blob";
 import express from "express";
 import cookieParser from "cookie-parser";
 import multer from "multer";
@@ -444,7 +446,7 @@ async function runResetTarget(client, target, user) {
   if (!user?.id) throw new Error("A signed-in admin user is required.");
   switch (target) {
     case "full_reset":
-        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
       await client.query("delete from users where id <> $1", [user.id]);
       await client.query("update users set is_active = true where id = $1", [user.id]);
       await client.query(`
@@ -456,7 +458,7 @@ async function runResetTarget(client, target, user) {
       await auditLog(client, user.id, "reset", "app_data", target, "Full reset completed.");
       return;
     case "data_only":
-        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
       await auditLog(client, user.id, "reset", "app_data", target, "Operational data reset completed.");
       return;
     case "vendors":
@@ -466,7 +468,7 @@ async function runResetTarget(client, target, user) {
         await client.query("truncate table material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers restart identity cascade");
       break;
     case "rfq_procurement":
-      await client.query("truncate table receipts, po_lines, purchase_orders, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs restart identity cascade");
+      await client.query("truncate table receipts, po_lines, purchase_orders, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs restart identity cascade");
       break;
     case "material_logs":
       await client.query("truncate table vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, material_log_lookup_values restart identity cascade");
@@ -2246,6 +2248,23 @@ function formatCurrencyInput(value) {
   if (value === undefined || value === null || String(value).trim() === "") return "";
   const parsed = Number(String(value).replace(/[$,]/g, "").trim());
   return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : String(value).trim();
+}
+
+function safeBlobPathSegment(value, fallback = "file") {
+  const cleaned = String(value ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120);
+  return cleaned || fallback;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function combineRfqDimension(value1, value2) {
@@ -9316,7 +9335,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
     return;
   }
-  const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes] = await Promise.all([
+  const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes, quoteFilesRes] = await Promise.all([
     query(`
       select ri.id, ri.po_line, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
              ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
@@ -9360,6 +9379,14 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       join purchase_orders po on po.id = pl.po_id
       where po.rfq_id = $1 and po.job_id = $2 and pl.rfq_item_id is not null
       group by pl.rfq_item_id
+    `, [rfqId, jobId]),
+    query(`
+      select qf.id, qf.vendor_id, qf.filename, qf.content_type, qf.size_bytes, qf.created_at, v.name as vendor_name, u.username as uploaded_by_name
+      from rfq_quote_files qf
+      left join vendors v on v.id = qf.vendor_id
+      left join users u on u.id = qf.uploaded_by
+      where qf.rfq_id = $1 and qf.job_id = $2
+      order by qf.created_at desc, qf.id desc
     `, [rfqId, jobId])
   ]);
 
@@ -9368,6 +9395,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const selectedVendors = selectedVendorsRes.rows;
   const poCount = Number(poCountRes.rows[0].count);
   const recentImports = recentImportsRes.rows;
+  const quoteFiles = quoteFilesRes.rows;
   const materialItems = materialItemsRes.rows;
   const allQuotes = quotesRes.rows;
   const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
@@ -9488,6 +9516,66 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Import Quotes</a>` : ""}
       <a class="btn btn-primary" target="_blank" href="/rfq/${rfqId}/sheet.pdf" onclick="return openRfqPdfWithOrder(this, 'rfq-quote-table-${rfqId}');">Open RFQ PDF</a>
     </div>`;
+  const quoteFileRows = quoteFiles.length > 0
+    ? quoteFiles.map((file) => `<tr>
+      <td>${esc(file.filename)}</td>
+      <td>${esc(file.vendor_name || "RFQ")}</td>
+      <td>${esc(formatBytes(file.size_bytes))}</td>
+      <td>${esc(file.uploaded_by_name || "")}</td>
+      <td>${esc(formatShortDateTime(file.created_at))}</td>
+      <td>
+        <div class="actions">
+          <a class="btn btn-secondary" target="_blank" href="/rfq/${rfqId}/quote-files/${file.id}/open">Open</a>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}/quote-files/${file.id}/download">Download</a>
+          <form method="post" action="/rfq/${rfqId}/quote-files/${file.id}/delete" onsubmit="return confirm('Delete quote file ${escAttr(file.filename)}?');">
+            <button class="btn btn-danger" type="submit">Delete</button>
+          </form>
+        </div>
+      </td>
+    </tr>`).join("")
+    : `<tr><td colspan="6" class="muted">No quote files uploaded yet.</td></tr>`;
+  const quoteFileCard = `
+    <div class="card">
+      <h3>Quote Files</h3>
+      <form id="rfq-quote-file-form-${rfqId}" method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/quote-files" class="stack">
+        <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
+        <label id="rfq-quote-drop-${rfqId}" for="rfq-quote-file-${rfqId}" style="display:grid; place-items:center; min-height:112px; border:2px dashed var(--line); border-radius:12px; background:#f8fafc; cursor:pointer; text-align:center; padding:18px;">
+          <span><strong>Drop quote file here</strong><br /><span class="muted">${activeVendor ? `Saved to ${esc(activeVendor.name)}` : "Select a vendor tab before uploading"}</span></span>
+          <input id="rfq-quote-file-${rfqId}" type="file" name="quote_file" style="position:absolute; opacity:0; width:1px; height:1px;" ${activeQuoteVendorId ? "" : "disabled"} />
+        </label>
+        <div class="actions">
+          <button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Upload Quote File</button>
+        </div>
+      </form>
+      <div class="scroll" style="margin-top:16px;">
+        <table><tr><th>File</th><th>Vendor</th><th>Size</th><th>Uploaded By</th><th>Uploaded</th><th>Actions</th></tr>${quoteFileRows}</table>
+      </div>
+      <script>
+        (() => {
+          const form = document.getElementById("rfq-quote-file-form-${rfqId}");
+          const drop = document.getElementById("rfq-quote-drop-${rfqId}");
+          const input = document.getElementById("rfq-quote-file-${rfqId}");
+          if (!form || !drop || !input) return;
+          const highlight = (on) => {
+            drop.style.borderColor = on ? "var(--brand)" : "var(--line)";
+            drop.style.background = on ? "rgba(14,90,109,.08)" : "#f8fafc";
+          };
+          ["dragenter", "dragover"].forEach((eventName) => drop.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            if (!input.disabled) highlight(true);
+          }));
+          ["dragleave", "drop"].forEach((eventName) => drop.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            highlight(false);
+          }));
+          drop.addEventListener("drop", (event) => {
+            if (input.disabled || !event.dataTransfer?.files?.length) return;
+            input.files = event.dataTransfer.files;
+            form.submit();
+          });
+        })();
+      </script>
+    </div>`;
   const awardSummaryCard = `
     <div class="card">
       <h3>Award Summary</h3>
@@ -9569,6 +9657,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         </table>
       </form>
     </div>
+    ${quoteFileCard}
     ${awardSummaryCard}
     <div class="card scroll">
       <h3>Recent Imports</h3>
@@ -9579,6 +9668,87 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     </div>
   `, req.user));
 });
+
+app.post("/rfq/:id/quote-files", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("quote_file"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const vendorId = Number(req.body.vendor_id || 0);
+  const file = req.file;
+  if (!file?.buffer?.length) throw new Error("Choose a quote file to upload.");
+  if (!vendorId) throw new Error("Select a vendor tab before uploading a quote file.");
+  if (file.size > 20 * 1024 * 1024) throw new Error("Quote file exceeds the 20 MB upload limit.");
+  if (!process.env.BLOB_READ_WRITE_TOKEN) throw new Error("BLOB_READ_WRITE_TOKEN is not set. Add a Vercel Blob store to the project and pull the env vars locally.");
+
+  const activeVendorId = await withTransaction(async (client) => {
+    const rfq = (await client.query("select rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    if (!rfq) throw new Error("RFQ not found.");
+    const vendor = (await client.query("select v.name from rfq_vendors rv join vendors v on v.id = rv.vendor_id where rv.rfq_id = $1 and rv.vendor_id = $2 and rv.job_id = $3", [rfqId, vendorId, jobId])).rows[0];
+    if (!vendor) throw new Error("Choose a vendor from the RFQ vendor list before uploading.");
+
+    const pathname = [
+      "rfq-quotes",
+      `job-${jobId}`,
+      `rfq-${safeBlobPathSegment(rfq.rfq_no, String(rfqId))}`,
+      `vendor-${safeBlobPathSegment(vendor.name, String(vendorId))}`,
+      `${Date.now()}-${safeBlobPathSegment(file.originalname, "quote-file")}`
+    ].join("/");
+    const blob = await put(pathname, file.buffer, {
+      access: "private",
+      addRandomSuffix: true,
+      contentType: file.mimetype || "application/octet-stream"
+    });
+    const insert = await client.query(`
+      insert into rfq_quote_files (job_id, rfq_id, vendor_id, filename, content_type, size_bytes, blob_url, blob_download_url, blob_pathname, uploaded_by)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      returning vendor_id
+    `, [jobId, rfqId, vendorId, file.originalname || "quote-file", file.mimetype || "", file.size || file.buffer.length, blob.url, blob.downloadUrl || "", blob.pathname, req.user.id]);
+    await auditLog(client, req.user.id, "upload", "rfq_quote_file", rfqId, `${vendor.name}:${file.originalname || "quote-file"}`);
+    return insert.rows[0].vendor_id;
+  });
+  res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(activeVendorId))}`);
+}));
+
+app.get("/rfq/:id/quote-files/:fileId/:mode(open|download)", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const fileId = Number(req.params.fileId);
+  const jobId = currentJobId(req);
+  const file = (await query(`
+    select qf.*
+    from rfq_quote_files qf
+    join rfqs r on r.id = qf.rfq_id and r.job_id = qf.job_id
+    where qf.id = $1 and qf.rfq_id = $2 and qf.job_id = $3
+  `, [fileId, rfqId, jobId])).rows[0];
+  if (!file) throw new Error("Quote file not found.");
+
+  const blob = await get(file.blob_pathname || file.blob_url, { access: "private" });
+  if (!blob.stream) throw new Error("Quote file is not available.");
+  const filename = safeBlobPathSegment(file.filename, "quote-file");
+  res.setHeader("Content-Type", file.content_type || blob.blob?.contentType || "application/octet-stream");
+  res.setHeader("Content-Disposition", `${req.params.mode === "download" ? "attachment" : "inline"}; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(file.filename || filename)}`);
+  if (file.size_bytes) res.setHeader("Content-Length", String(file.size_bytes));
+  Readable.fromWeb(blob.stream).pipe(res);
+}));
+
+app.post("/rfq/:id/quote-files/:fileId/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const fileId = Number(req.params.fileId);
+  const jobId = currentJobId(req);
+  const file = (await query(`
+    select qf.*, v.name as vendor_name
+    from rfq_quote_files qf
+    left join vendors v on v.id = qf.vendor_id
+    where qf.id = $1 and qf.rfq_id = $2 and qf.job_id = $3
+  `, [fileId, rfqId, jobId])).rows[0];
+  if (!file) throw new Error("Quote file not found.");
+  if (file.blob_pathname || file.blob_url) {
+    await del(file.blob_pathname || file.blob_url);
+  }
+  await withTransaction(async (client) => {
+    await client.query("delete from rfq_quote_files where id = $1 and rfq_id = $2 and job_id = $3", [fileId, rfqId, jobId]);
+    await auditLog(client, req.user.id, "delete", "rfq_quote_file", rfqId, `${file.vendor_name || "RFQ"}:${file.filename || fileId}`);
+  });
+  res.redirect(`/rfq/${rfqId}${file.vendor_id ? `?vendor_tab_id=${encodeURIComponent(String(file.vendor_id))}` : ""}`);
+}));
 
 app.get("/rfq/:id/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
