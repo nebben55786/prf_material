@@ -1,18 +1,184 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { Readable } from "node:stream";
+import zlib from "node:zlib";
+import { del, get, put } from "@vercel/blob";
 import express from "express";
 import cookieParser from "cookie-parser";
 import multer from "multer";
 import bcrypt from "bcryptjs";
 import XLSX from "xlsx";
-import { initDb, query, withTransaction, auditLog, vendorCategories, pool } from "./db.js";
+import { initDb, query, withTransaction, auditLog, vendorCategories, setVendorCategories, permissionMatrix, setPermissionMatrix, pool } from "./db.js";
 
 const app = express();
 const upload = multer();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
+const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
+const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
+const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
+const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CANCELLED", "CLOSED"];
+const unallocatedBomSystemKey = "UNALLOCATED";
+const unallocatedBomName = "Un-Allocated Inventory";
+const issueSourceTypes = {
+  bom: "BOM",
+  unallocated: "UNALLOCATED",
+  manual: "MANUAL"
+};
+const rfqStatuses = [
+  { value: "SEND_FOR_QUOTES", label: "Send for Quotes" },
+  { value: "WAITING_ON_QUOTES", label: "Waiting on Quotes" },
+  { value: "AWARDED", label: "Awarded" },
+  { value: "WAITING_ON_CLIENT", label: "Waiting on Client" },
+  { value: "CANCELLED", label: "Cancelled" },
+  { value: "PURCHASED", label: "Purchased" },
+  { value: "RECEIVED", label: "Received" }
+];
+const permissionSections = [
+  { key: "dashboard", label: "Dashboard", href: "/" },
+  { key: "material_logs", label: "Material Logs", href: "/material-logs" },
+  { key: "vendors", label: "Vendors", href: "/vendors" },
+  { key: "rfqs", label: "RFQs", href: "/rfq" },
+  { key: "pos", label: "POs", href: "/po" },
+  { key: "bom", label: "BOM", href: "/bom" },
+  { key: "receiving", label: "Receiving", href: "/receive" },
+  { key: "yard", label: "Yard", href: "/yard" },
+  { key: "requisitions", label: "REQs", href: "/requisitions" },
+  { key: "settings", label: "Settings", href: "/settings" }
+];
+const permissionRoles = ["admin", "buyer", "warehouse", "field", "supervisor"];
+const defaultJobNumberValue = String(process.env.DEFAULT_JOB_NUMBER || "0000").trim() || "0000";
+let headerJobNumber = defaultJobNumberValue;
+let headerPlantName = "";
+let headerPerformanceJobNumber = "";
+const pickTicketLogoPath = path.join(process.cwd(), "public", "prf-logo.png");
+const axImportTemplatePath = path.join(process.cwd(), "assets", "templates", "ax-import-template.xlsx");
+let pickTicketLogoBuffer = null;
+try {
+  pickTicketLogoBuffer = fs.readFileSync(pickTicketLogoPath);
+} catch {
+  pickTicketLogoBuffer = null;
+}
 
-app.use(express.urlencoded({ extended: true, limit: "20mb" }));
-app.use(cookieParser());
+const defaultPermissionMatrix = {
+  admin: {
+    dashboard: { view: true },
+    material_logs: { view: true, edit: true },
+    vendors: { view: true, edit: true },
+    rfqs: { view: true, edit: true },
+    pos: { view: true, edit: true },
+    bom: { view: true, edit: true },
+    receiving: { view: true, edit: true },
+    yard: { view: true },
+    inventory: { view: true, edit: true },
+    requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: true },
+    settings: { view: true, edit: true }
+  },
+  buyer: {
+    dashboard: { view: true },
+    material_logs: { view: true, edit: true },
+    vendors: { view: true, edit: true },
+    rfqs: { view: true, edit: true },
+    pos: { view: true, edit: true },
+    bom: { view: true, edit: true },
+    receiving: { view: true, edit: false },
+    yard: { view: true },
+    inventory: { view: true, edit: true },
+    requisitions: { view: true, create: false, edit: false, verify: false, issue: false, unverify: false, delete: false },
+    settings: { view: true, edit: true }
+  },
+  warehouse: {
+    dashboard: { view: true },
+    material_logs: { view: true, edit: true },
+    vendors: { view: false, edit: false },
+    rfqs: { view: false, edit: false },
+    pos: { view: true, edit: false },
+    bom: { view: false, edit: false },
+    receiving: { view: true, edit: true },
+    yard: { view: true },
+    inventory: { view: true, edit: false },
+    requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: false },
+    settings: { view: false, edit: false }
+  },
+  field: {
+    dashboard: { view: true },
+    material_logs: { view: false, edit: false },
+    vendors: { view: false, edit: false },
+    rfqs: { view: false, edit: false },
+    pos: { view: false, edit: false },
+    bom: { view: false, edit: false },
+    receiving: { view: false, edit: false },
+    yard: { view: true },
+    inventory: { view: true, edit: false },
+    requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
+    settings: { view: false, edit: false }
+  },
+  supervisor: {
+    dashboard: { view: true },
+    material_logs: { view: true, edit: false },
+    vendors: { view: true, edit: false },
+    rfqs: { view: true, edit: false },
+    pos: { view: true, edit: false },
+    bom: { view: true, edit: false },
+    receiving: { view: true, edit: false },
+    yard: { view: true },
+    inventory: { view: true, edit: false },
+    requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
+    settings: { view: false, edit: false }
+  }
+};
+
+function safeCookieDecode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function getPermissionsForRole(role) {
+  return {
+    ...(defaultPermissionMatrix[role] || {}),
+    ...(permissionMatrix[role] || {})
+  };
+}
+
+function canAccess(user, section, action = "view") {
+  if (!user) return false;
+  const rolePermissions = getPermissionsForRole(user.role);
+  const sectionPermissions = {
+    ...(defaultPermissionMatrix[user.role]?.[section] || {}),
+    ...(rolePermissions[section] || {})
+  };
+  return Boolean(sectionPermissions[action]);
+}
+
+function canEditInventoryAudit(user) {
+  if (!user) return false;
+  return user.role === "admin" || user.role === "warehouse" || canAccess(user, "inventory", "edit");
+}
+
+function canViewMaterialPurchaseReport(user) {
+  return ["admin", "buyer", "supervisor"].includes(String(user?.role || "").trim().toLowerCase());
+}
+
+function getAppHeaderTitle(user = null) {
+  const activeJob = user?.activeJob || null;
+  const parts = [];
+  const plantName = String(activeJob?.plant_name || headerPlantName || "").trim();
+  const jobNumber = String(activeJob?.job_number || headerJobNumber || "").trim();
+  const performanceJobNumber = String(activeJob?.performance_job_number || headerPerformanceJobNumber || "").trim();
+  if (plantName) parts.push(plantName);
+  if (jobNumber) parts.push(jobNumber);
+  parts.push("Material Control");
+  if (performanceJobNumber) parts.push(performanceJobNumber);
+  return parts.filter(Boolean).join(" - ");
+}
+
+app.use(express.urlencoded({ extended: true, limit: "20mb", parameterLimit: 20000 }));
+app.use(cookieParser(undefined, { decode: safeCookieDecode }));
+app.use("/public", express.static(path.join(process.cwd(), "public")));
 
 function esc(value) {
   return String(value ?? "")
@@ -23,7 +189,1112 @@ function esc(value) {
     .replaceAll("'", "&#39;");
 }
 
+function escAttr(value) {
+  return esc(value).replaceAll("`", "&#96;");
+}
+
+function pdfEscape(value) {
+  return String(value ?? "")
+    .replaceAll("\\", "\\\\")
+    .replaceAll("(", "\\(")
+    .replaceAll(")", "\\)")
+    .replaceAll("\r", " ")
+    .replaceAll("\n", " ");
+}
+
+function padPdfColumn(value, width, align = "left") {
+  const text = String(value ?? "");
+  if (text.length >= width) return text.slice(0, width);
+  const padding = " ".repeat(width - text.length);
+  return align === "right" ? `${padding}${text}` : `${text}${padding}`;
+}
+
+function wrapPdfText(value, width) {
+  const words = String(value ?? "").trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return [""];
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    if (!current) {
+      current = word;
+      continue;
+    }
+    if (`${current} ${word}`.length <= width) {
+      current = `${current} ${word}`;
+      continue;
+    }
+    lines.push(current);
+    current = word;
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function roundQtyUpToHalf(value) {
+  const qty = Number(value || 0);
+  if (!Number.isFinite(qty)) return 0;
+  return Math.ceil(qty * 2) / 2;
+}
+
+function parseQtyValue(value, fallback = 0) {
+  if (value === null || value === undefined) return fallback;
+  const parsed = Number(String(value).replace(/,/g, "").trim());
+  return Number.isFinite(parsed) ? roundQtyUpToHalf(parsed) : fallback;
+}
+
+function formatQtyDisplay(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return "";
+  const rounded = roundQtyUpToHalf(value);
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+function formatCombinedSize(size1, size2) {
+  const primary = String(size1 || "").trim();
+  const secondary = String(size2 || "").trim();
+  if (primary && secondary) return `${primary} x ${secondary}`;
+  return primary || secondary;
+}
+
+function formatShortDate(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) return `${match[2]}-${match[3]}-${match[1]}`;
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) {
+    const day = String(parsed.getDate()).padStart(2, "0");
+    const month = String(parsed.getMonth() + 1).padStart(2, "0");
+    const year = String(parsed.getFullYear());
+    return `${month}-${day}-${year}`;
+  }
+  return text;
+}
+
+function formatShortDateTime(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const text = String(value).trim();
+  if (!text) return "";
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2}))?/);
+  if (match) {
+    const dateText = `${match[2]}-${match[3]}-${match[1]}`;
+    return match[4] && match[5] ? `${dateText} ${match[4]}:${match[5]}` : dateText;
+  }
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) {
+    const day = String(parsed.getDate()).padStart(2, "0");
+    const month = String(parsed.getMonth() + 1).padStart(2, "0");
+    const year = String(parsed.getFullYear());
+    const hours = String(parsed.getHours()).padStart(2, "0");
+    const minutes = String(parsed.getMinutes()).padStart(2, "0");
+    const hasTime = parsed.getHours() !== 0 || parsed.getMinutes() !== 0 || /[T\s]\d{1,2}:\d{2}/.test(text);
+    return hasTime ? `${month}-${day}-${year} ${hours}:${minutes}` : `${month}-${day}-${year}`;
+  }
+  return text;
+}
+
+function parseSelectedIdList(value) {
+  if (Array.isArray(value)) return value.map((entry) => Number(entry)).filter((entry) => Number.isFinite(entry) && entry > 0);
+  if (value === null || value === undefined || value === "") return [];
+  return [Number(value)].filter((entry) => Number.isFinite(entry) && entry > 0);
+}
+
+function renderVendorSelectionOptions(vendors, selectedVendorIds = []) {
+  const selected = new Set(selectedVendorIds.map((vendorId) => Number(vendorId)));
+  return vendors.map((vendor) => `
+    <label class="check-option">
+      <input type="checkbox" name="vendor_ids" value="${vendor.id}" ${selected.has(Number(vendor.id)) ? "checked" : ""} />
+      <span>${esc(vendor.name)}</span>
+    </label>
+  `).join("");
+}
+
+function renderVendorPicker(vendors, selectedVendors = [], config = {}) {
+  const {
+    dialogId = "vendor-picker-dialog",
+    inputId = "vendor-picker-input",
+    selectedListId = "vendor-selected-list",
+    hiddenContainerId = "vendor-selected-hidden",
+    datalistId = "vendor-picker-options",
+    addButtonLabel = "Add Vendor",
+    formId = "",
+    label = "Participating Vendors",
+    showAddButton = true
+  } = config;
+  const optionMap = new Map(vendors.map((vendor) => [Number(vendor.id), vendor.name]));
+  const normalizedSelected = selectedVendors
+    .map((vendor) => ({ id: Number(vendor.id || vendor.vendor_id), name: vendor.name || optionMap.get(Number(vendor.id || vendor.vendor_id)) || "" }))
+    .filter((vendor) => Number.isFinite(vendor.id) && vendor.id > 0 && vendor.name);
+  const seen = new Set();
+  const selectedItems = normalizedSelected
+    .filter((vendor) => {
+      if (seen.has(vendor.id)) return false;
+      seen.add(vendor.id);
+      return true;
+    })
+    .map((vendor) => `
+      <span class="chip" data-vendor-chip="${vendor.id}">
+        ${esc(vendor.name)}
+        <button type="button" class="chip-remove" onclick="removeVendorSelection(${vendor.id}, '${selectedListId}', '${hiddenContainerId}', '${formId}')">x</button>
+      </span>
+    `)
+    .join("");
+  const hiddenInputs = Array.from(seen)
+    .map((vendorId) => `<input type="hidden" name="vendor_ids" value="${vendorId}" data-vendor-hidden="${vendorId}" />`)
+    .join("");
+  const datalistOptions = vendors
+    .map((vendor) => `<option value="${esc(vendor.name)}" data-vendor-id="${vendor.id}"></option>`)
+    .join("");
+  const vendorLookup = JSON.stringify(vendors.map((vendor) => ({ id: Number(vendor.id), name: vendor.name })));
+  return `
+    <div class="stack">
+      ${label ? `<label>${esc(label)}</label>` : ""}
+      <div id="${selectedListId}" class="chip-row">${selectedItems || `<span class="muted">No vendors selected yet.</span>`}</div>
+      <div id="${hiddenContainerId}">${hiddenInputs}</div>
+      ${showAddButton ? `
+      <div class="actions">
+        <button type="button" onclick='openVendorPicker("${dialogId}", "${inputId}")'>${esc(addButtonLabel)}</button>
+      </div>` : ""}
+    </div>
+    <dialog id="${dialogId}" class="modal-card" data-vendors='${esc(vendorLookup)}' data-selected-list-id="${selectedListId}" data-hidden-container-id="${hiddenContainerId}" data-form-id="${formId}">
+      <div class="stack">
+        <h3>Add Vendor</h3>
+        <div><label>Active Vendor</label><input id="${inputId}" list="${datalistId}" autocomplete="off" /></div>
+        <datalist id="${datalistId}">${datalistOptions}</datalist>
+        <div class="actions">
+          <button type="button" onclick='addVendorFromPicker("${dialogId}", "${inputId}")'>Add Vendor</button>
+          <button type="button" class="btn btn-secondary" onclick='closeVendorPicker("${dialogId}")'>Cancel</button>
+        </div>
+      </div>
+    </dialog>
+  `;
+}
+
+const resetTargetGroups = {
+  full_reset: {
+    label: "Full Reset",
+    confirmText: "DELETE FULL RESET",
+    description: "Deletes operational data, removes other users, and resets the job number back to the default value."
+  },
+  data_only: {
+    label: "Operational Data Only",
+    confirmText: "DELETE OPERATIONAL DATA",
+    description: "Deletes the app's working data but keeps users and setup settings."
+  },
+  vendors: {
+    label: "Vendors",
+    confirmText: "DELETE VENDORS",
+    description: "Deletes vendors and vendor contacts."
+  },
+  boms_reqs: {
+    label: "BOMs And REQs",
+    confirmText: "DELETE BOMS AND REQS",
+    description: "Deletes BOMs and material requisitions."
+  },
+  rfq_procurement: {
+    label: "RFQs / POs / Quotes",
+    confirmText: "DELETE RFQS POS QUOTES",
+    description: "Deletes RFQs, vendor selections, quotes, purchase orders, PO lines, and receipts."
+  },
+  material_logs: {
+    label: "Material Logs",
+    confirmText: "DELETE MATERIAL LOGS",
+    description: "Deletes receiving logs, MRR/FMR/OPI/OS&D logs, request-builder lines, and material log lookups."
+  },
+  inventory: {
+    label: "Inventory / Warehouses",
+    confirmText: "DELETE INVENTORY",
+    description: "Deletes inventory audit history, inventory adjustments, warehouses, and locations."
+  },
+  imports: {
+    label: "Import History",
+    confirmText: "DELETE IMPORT HISTORY",
+    description: "Deletes stored import batches and import errors."
+  },
+  access_requests: {
+    label: "Access Requests",
+    confirmText: "DELETE ACCESS REQUESTS",
+    description: "Deletes all pending and historical access requests."
+  },
+  audit_log: {
+    label: "Audit Log",
+    confirmText: "DELETE AUDIT LOG",
+    description: "Deletes the audit history log."
+  },
+  job_number: {
+    label: "Reset Job Number",
+    confirmText: "RESET JOB NUMBER",
+    description: `Resets the job number back to ${defaultJobNumberValue}.`
+  }
+};
+
+const resetTargetSections = [
+  {
+    heading: "Full Reset Options",
+    targets: ["full_reset", "data_only", "job_number"]
+  },
+  {
+    heading: "Delete Individual Data Sets",
+    targets: ["vendors", "boms_reqs", "rfq_procurement", "material_logs", "inventory", "imports", "access_requests", "audit_log"]
+  }
+];
+
+function getResetTargetConfig(target) {
+  return resetTargetGroups[target] || null;
+}
+
+async function runResetTarget(client, target, user) {
+  if (!user?.id) throw new Error("A signed-in admin user is required.");
+  switch (target) {
+    case "full_reset":
+        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+      await client.query("delete from users where id <> $1", [user.id]);
+      await client.query("update users set is_active = true where id = $1", [user.id]);
+      await client.query(`
+        insert into app_settings (key, value, updated_at)
+        values ('job_number', $1, now())
+        on conflict (key) do update
+        set value = excluded.value, updated_at = now()
+      `, [defaultJobNumberValue]);
+      await auditLog(client, user.id, "reset", "app_data", target, "Full reset completed.");
+      return;
+    case "data_only":
+        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+      await auditLog(client, user.id, "reset", "app_data", target, "Operational data reset completed.");
+      return;
+    case "vendors":
+      await client.query("truncate table vendor_contacts, vendors restart identity cascade");
+      break;
+    case "boms_reqs":
+        await client.query("truncate table material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers restart identity cascade");
+      break;
+    case "rfq_procurement":
+      await client.query("truncate table receipts, po_lines, purchase_orders, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs restart identity cascade");
+      break;
+    case "material_logs":
+      await client.query("truncate table vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, material_log_lookup_values restart identity cascade");
+      break;
+    case "inventory":
+      await client.query("truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, warehouse_locations, warehouses restart identity cascade");
+      break;
+    case "imports":
+      await client.query("truncate table import_batch_errors, import_batches restart identity cascade");
+      break;
+    case "access_requests":
+      await client.query("truncate table access_requests restart identity cascade");
+      break;
+    case "audit_log":
+      await client.query("truncate table audit_log restart identity cascade");
+      break;
+    case "job_number":
+      await client.query(`
+        insert into app_settings (key, value, updated_at)
+        values ('job_number', $1, now())
+        on conflict (key) do update
+        set value = excluded.value, updated_at = now()
+      `, [defaultJobNumberValue]);
+      break;
+    default:
+      throw new Error("Unknown reset target.");
+  }
+  await auditLog(client, user.id, "reset", "app_data", target, `Reset target ${target} completed.`);
+}
+
+function buildSimplePdf(title, detailLines, tableLines) {
+  const pageWidth = 612;
+  const pageHeight = 792;
+  const marginLeft = 36;
+  const marginTop = 42;
+  const lineHeight = 13;
+  const pageLineLimit = 50;
+  const allLines = [
+    title,
+    "",
+    ...detailLines,
+    "",
+    ...tableLines
+  ];
+  const pages = [];
+  for (let i = 0; i < allLines.length; i += pageLineLimit) {
+    pages.push(allLines.slice(i, i + pageLineLimit));
+  }
+  const objects = [];
+  const addObject = (body) => {
+    objects.push(body);
+    return objects.length;
+  };
+  const fontObjectId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
+  const pageObjectIds = [];
+  const contentObjectIds = [];
+  for (const pageLines of pages) {
+    let y = pageHeight - marginTop;
+    const contentParts = ["BT", `/F1 10 Tf`, "0 g"];
+    for (let i = 0; i < pageLines.length; i += 1) {
+      const line = pageLines[i];
+      if (i === 0) {
+        contentParts.push(`/F1 14 Tf`);
+      } else if (i === 1) {
+        contentParts.push(`/F1 10 Tf`);
+      }
+      contentParts.push(`1 0 0 1 ${marginLeft} ${y} Tm (${pdfEscape(line)}) Tj`);
+      y -= lineHeight;
+    }
+    contentParts.push("ET");
+    const contentStream = contentParts.join("\n");
+    const contentObjectId = addObject(`<< /Length ${Buffer.byteLength(contentStream, "utf8")} >>\nstream\n${contentStream}\nendstream`);
+    contentObjectIds.push(contentObjectId);
+    pageObjectIds.push(addObject(`<< /Type /Page /Parent PAGES_REF /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`));
+  }
+  const pagesObjectId = addObject(`<< /Type /Pages /Count ${pageObjectIds.length} /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(" ")}] >>`);
+  objects[pagesObjectId - 1] = objects[pagesObjectId - 1];
+  for (const pageObjectId of pageObjectIds) {
+    objects[pageObjectId - 1] = objects[pageObjectId - 1].replace("PAGES_REF", `${pagesObjectId} 0 R`);
+  }
+  const catalogObjectId = addObject(`<< /Type /Catalog /Pages ${pagesObjectId} 0 R >>`);
+
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (let i = 0; i < objects.length; i += 1) {
+    offsets.push(Buffer.byteLength(pdf, "utf8"));
+    pdf += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(pdf, "utf8");
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (let i = 1; i < offsets.length; i += 1) {
+    pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogObjectId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return Buffer.from(pdf, "utf8");
+}
+
+function formatPickTicketTimestamp(value = new Date()) {
+  return formatShortDateTime(value);
+}
+
+function buildRfqSheetPdf(rfq, items, options = {}) {
+  const showPoLines = options.showPoLines !== false;
+  const pageWidth = 792;
+  const pageHeight = 612;
+  const left = 28;
+  const right = pageWidth - 28;
+  const top = pageHeight - 24;
+  const usableWidth = right - left;
+  const cols = [
+    { key: "line", label: "LINE", width: 36 },
+    { key: "item", label: "ITEM", width: 95 },
+    { key: "description", label: "DESCRIPTION", width: 310 },
+    { key: "size_1", label: "SIZE 1", width: 55 },
+    { key: "size_2", label: "SIZE 2", width: 55 },
+    { key: "thk_1", label: "THK 1", width: 55 },
+    { key: "thk_2", label: "THK 2", width: 55 },
+    { key: "qty", label: "QTY", width: 40 },
+    { key: "uom", label: "UOM", width: 35 }
+  ];
+  const descriptionWrapWidth = Math.max(12, Math.floor((cols[2].width - 12) / 5));
+  const makeText = (x, y, text, font = "F1", size = 9) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
+  const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
+  const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
+
+  const rows = items.map((item) => {
+    const lineLines = wrapPdfText(showPoLines ? (item.po_line || "") : "", 6);
+    const itemLines = wrapPdfText(item.item_code || "", 14);
+    const descriptionLines = wrapPdfText(item.description || "", descriptionWrapWidth);
+    const extraDescription = [];
+    if (item.spec) extraDescription.push(...wrapPdfText(`Spec: ${item.spec}`, descriptionWrapWidth));
+    if (item.notes) extraDescription.push(...wrapPdfText(`Notes: ${item.notes}`, descriptionWrapWidth));
+    const combinedDescription = descriptionLines.concat(extraDescription);
+    const size1Lines = wrapPdfText(String(item.size_1 || ""), 8);
+    const size2Lines = wrapPdfText(String(item.size_2 || ""), 8);
+    const thk1Lines = wrapPdfText(String(item.thk_1 || ""), 8);
+    const thk2Lines = wrapPdfText(String(item.thk_2 || ""), 8);
+    const lineCount = Math.max(lineLines.length, itemLines.length, combinedDescription.length, size1Lines.length, size2Lines.length, thk1Lines.length, thk2Lines.length, 1);
+    return {
+      lineLines,
+      itemLines,
+      descriptionLines: combinedDescription.length ? combinedDescription : [""],
+      size1Lines: size1Lines.length ? size1Lines : [""],
+      size2Lines: size2Lines.length ? size2Lines : [""],
+      thk1Lines: thk1Lines.length ? thk1Lines : [""],
+      thk2Lines: thk2Lines.length ? thk2Lines : [""],
+      qty: formatQtyDisplay(item.qty),
+      uom: String(item.uom || ""),
+      height: 10 + (lineCount * 11)
+    };
+  });
+
+  const pages = [];
+  let currentPage = [];
+  let currentHeight = 0;
+  const tableHeaderHeight = 24;
+  const reservedHeaderHeight = 82;
+  const footerPadding = 22;
+  const pageBodyLimit = pageHeight - reservedHeaderHeight - footerPadding - 36;
+  for (const row of rows) {
+    if (currentPage.length && currentHeight + row.height > pageBodyLimit) {
+      pages.push(currentPage);
+      currentPage = [];
+      currentHeight = 0;
+    }
+    currentPage.push(row);
+    currentHeight += row.height;
+  }
+  if (!pages.length || currentPage.length) pages.push(currentPage);
+
+  return buildDrawnPdf(pages.map((pageRows, pageIndex) => {
+    const content = [];
+    content.push("0.2 w");
+    content.push("0 0 0 RG");
+
+    const metaTop = top;
+    content.push(rect(left, metaTop - 26, usableWidth, 26));
+    content.push(line(left + 160, metaTop, left + 160, metaTop - 26));
+    content.push(line(right - 170, metaTop, right - 170, metaTop - 26));
+    content.push(makeText(left + 8, metaTop - 17, "RFQ #", "F2", 9));
+    content.push(makeText(left + 48, metaTop - 17, String(rfq.rfq_no || ""), "F1", 10));
+    content.push(makeText(left + 168, metaTop - 17, "DESCRIPTION", "F2", 9));
+    content.push(makeText(right - 162, metaTop - 17, "CREATED", "F2", 9));
+  content.push(makeText(right - 110, metaTop - 17, formatShortDateTime(rfq.created_at), "F1", 10));
+
+    const descriptionBoxTop = metaTop - 26;
+    content.push(rect(left, descriptionBoxTop - 30, usableWidth, 30));
+    const headerDescription = wrapPdfText(String(rfq.project_name || ""), 92);
+    content.push(makeText(left + 8, descriptionBoxTop - 19, headerDescription[0] || "", "F1", 10));
+
+    const tableTop = descriptionBoxTop - 42;
+    let x = left;
+    content.push(rect(left, tableTop - tableHeaderHeight, usableWidth, tableHeaderHeight));
+    cols.forEach((column) => {
+      content.push(makeText(x + 6, tableTop - 16, column.label, "F2", 8));
+      x += column.width;
+      if (x < right) content.push(line(x, tableTop, x, tableTop - tableHeaderHeight));
+    });
+
+    let y = tableTop - tableHeaderHeight;
+    for (const row of pageRows) {
+      const rowTop = y;
+      const rowBottom = y - row.height;
+      x = left;
+      content.push(rect(left, rowBottom, usableWidth, row.height));
+      cols.forEach((column) => {
+        x += column.width;
+        if (x < right) content.push(line(x, rowTop, x, rowBottom));
+      });
+
+      const rowLineCount = Math.max(row.lineLines.length, row.itemLines.length, row.descriptionLines.length, row.size1Lines.length, row.size2Lines.length, row.thk1Lines.length, row.thk2Lines.length, 1);
+      for (let index = 0; index < rowLineCount; index += 1) {
+        const baseline = rowTop - 14 - (index * 11);
+        if (row.lineLines[index]) content.push(makeText(left + 6, baseline, row.lineLines[index], "F1", 8.5));
+        if (row.itemLines[index]) content.push(makeText(left + cols[0].width + 6, baseline, row.itemLines[index], "F1", 8.5));
+        if (row.descriptionLines[index]) content.push(makeText(left + cols[0].width + cols[1].width + 6, baseline, row.descriptionLines[index], "F1", 8.5));
+        if (row.size1Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + 6, baseline, row.size1Lines[index], "F1", 8.5));
+        if (row.size2Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + 6, baseline, row.size2Lines[index], "F1", 8.5));
+        if (row.thk1Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + cols[4].width + 6, baseline, row.thk1Lines[index], "F1", 8.5));
+        if (row.thk2Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + cols[4].width + cols[5].width + 6, baseline, row.thk2Lines[index], "F1", 8.5));
+        if (index === 0 && row.qty) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + cols[4].width + cols[5].width + cols[6].width + 8, baseline, row.qty, "F1", 8.5));
+        if (index === 0 && row.uom) content.push(makeText(right - cols[8].width + 4, baseline, row.uom, "F1", 8.5));
+      }
+
+      y = rowBottom;
+    }
+
+    content.push(makeText(right - 92, 18, `Page ${pageIndex + 1} of ${pages.length}`, "F1", 8));
+    return content.join("\n");
+  }), { pageWidth, pageHeight });
+}
+
+function buildDrawnPdf(pages, options = {}) {
+  const pageWidth = options.pageWidth || 612;
+  const pageHeight = options.pageHeight || 792;
+  const objects = [];
+  const addObject = (body) => {
+    objects.push(body);
+    return objects.length;
+  };
+  const fontRegularId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const fontBoldId = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
+
+  function paethPredictor(left, up, upLeft) {
+    const estimate = left + up - upLeft;
+    const deltaLeft = Math.abs(estimate - left);
+    const deltaUp = Math.abs(estimate - up);
+    const deltaUpLeft = Math.abs(estimate - upLeft);
+    if (deltaLeft <= deltaUp && deltaLeft <= deltaUpLeft) return left;
+    if (deltaUp <= deltaUpLeft) return up;
+    return upLeft;
+  }
+
+  function parsePngImage(buffer) {
+    const signature = buffer.subarray(0, 8);
+    if (!signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      throw new Error("Unsupported PNG image.");
+    }
+    let width = 0;
+    let height = 0;
+    let bitDepth = 0;
+    let colorType = 0;
+    const idatChunks = [];
+    let cursor = 8;
+    while (cursor < buffer.length) {
+      const length = buffer.readUInt32BE(cursor);
+      const type = buffer.subarray(cursor + 4, cursor + 8).toString("ascii");
+      const data = buffer.subarray(cursor + 8, cursor + 8 + length);
+      cursor += 12 + length;
+      if (type === "IHDR") {
+        width = data.readUInt32BE(0);
+        height = data.readUInt32BE(4);
+        bitDepth = data[8];
+        colorType = data[9];
+      } else if (type === "IDAT") {
+        idatChunks.push(data);
+      } else if (type === "IEND") {
+        break;
+      }
+    }
+    if (!width || !height) throw new Error("PNG dimensions are missing.");
+    if (bitDepth !== 8 || ![2, 6].includes(colorType)) {
+      throw new Error("Only 8-bit RGB/RGBA PNG logos are supported.");
+    }
+    const channels = colorType === 6 ? 4 : 3;
+    const bytesPerPixel = channels;
+    const stride = width * bytesPerPixel;
+    const inflated = zlib.inflateSync(Buffer.concat(idatChunks));
+    const raw = Buffer.alloc(height * stride);
+    let inOffset = 0;
+    let outOffset = 0;
+    for (let row = 0; row < height; row += 1) {
+      const filterType = inflated[inOffset];
+      inOffset += 1;
+      for (let column = 0; column < stride; column += 1) {
+        const source = inflated[inOffset++];
+        const left = column >= bytesPerPixel ? raw[outOffset + column - bytesPerPixel] : 0;
+        const up = row > 0 ? raw[outOffset - stride + column] : 0;
+        const upLeft = row > 0 && column >= bytesPerPixel ? raw[outOffset - stride + column - bytesPerPixel] : 0;
+        let value = source;
+        if (filterType === 1) value = (source + left) & 255;
+        else if (filterType === 2) value = (source + up) & 255;
+        else if (filterType === 3) value = (source + Math.floor((left + up) / 2)) & 255;
+        else if (filterType === 4) value = (source + paethPredictor(left, up, upLeft)) & 255;
+        raw[outOffset + column] = value;
+      }
+      outOffset += stride;
+    }
+    if (colorType === 2) {
+      return { width, height, rgb: raw, alpha: null };
+    }
+    const rgb = Buffer.alloc(width * height * 3);
+    const alpha = Buffer.alloc(width * height);
+    for (let pixel = 0, source = 0, rgbOffset = 0; pixel < width * height; pixel += 1, source += 4, rgbOffset += 3) {
+      rgb[rgbOffset] = raw[source];
+      rgb[rgbOffset + 1] = raw[source + 1];
+      rgb[rgbOffset + 2] = raw[source + 2];
+      alpha[pixel] = raw[source + 3];
+    }
+    return { width, height, rgb, alpha };
+  }
+
+  function buildPdfImageObject(buffer) {
+    const image = parsePngImage(buffer);
+    let softMaskId = null;
+    if (image.alpha) {
+      const alphaStream = zlib.deflateSync(image.alpha);
+      softMaskId = addObject(Buffer.concat([
+        Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length ${alphaStream.length} >>\nstream\n`, "utf8"),
+        alphaStream,
+        Buffer.from("\nendstream", "utf8")
+      ]));
+    }
+    const rgbStream = zlib.deflateSync(image.rgb);
+    return addObject(Buffer.concat([
+      Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode${softMaskId ? ` /SMask ${softMaskId} 0 R` : ""} /Length ${rgbStream.length} >>\nstream\n`, "utf8"),
+      rgbStream,
+      Buffer.from("\nendstream", "utf8")
+    ]));
+  }
+
+  const pageIds = [];
+  for (const pageEntry of pages) {
+    const page = typeof pageEntry === "string" ? { content: pageEntry, images: [] } : pageEntry;
+    const contentBuffer = Buffer.from(String(page.content || ""), "utf8");
+    const contentId = addObject(Buffer.concat([
+      Buffer.from(`<< /Length ${contentBuffer.length} >>\nstream\n`, "utf8"),
+      contentBuffer,
+      Buffer.from("\nendstream", "utf8")
+    ]));
+    const imageEntries = (page.images || []).map((image) => `/${image.name} ${buildPdfImageObject(image.buffer)} 0 R`);
+    const xObjectSection = imageEntries.length ? ` /XObject << ${imageEntries.join(" ")} >>` : "";
+    pageIds.push(addObject(`<< /Type /Page /Parent PAGES_REF /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontRegularId} 0 R /F2 ${fontBoldId} 0 R >>${xObjectSection} >> /Contents ${contentId} 0 R >>`));
+  }
+  const pagesId = addObject(`<< /Type /Pages /Count ${pageIds.length} /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] >>`);
+  for (const pageId of pageIds) {
+    objects[pageId - 1] = objects[pageId - 1].replace("PAGES_REF", `${pagesId} 0 R`);
+  }
+  const catalogId = addObject(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
+  const offsets = [0];
+  const pdfChunks = [Buffer.from("%PDF-1.4\n", "utf8")];
+  let pdfLength = pdfChunks[0].length;
+  for (let i = 0; i < objects.length; i += 1) {
+    const body = Buffer.isBuffer(objects[i]) ? objects[i] : Buffer.from(String(objects[i]), "utf8");
+    const objectHeader = Buffer.from(`${i + 1} 0 obj\n`, "utf8");
+    const objectFooter = Buffer.from("\nendobj\n", "utf8");
+    offsets.push(pdfLength);
+    pdfChunks.push(objectHeader, body, objectFooter);
+    pdfLength += objectHeader.length + body.length + objectFooter.length;
+  }
+  const xrefOffset = pdfLength;
+  let trailer = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i < offsets.length; i += 1) {
+    trailer += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  }
+  trailer += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  pdfChunks.push(Buffer.from(trailer, "utf8"));
+  return Buffer.concat(pdfChunks);
+}
+
+function buildPickLocationPlan(locationRows, qtyRequested) {
+  let qtyNeeded = Number(qtyRequested || 0);
+  const plan = [];
+  for (const row of locationRows) {
+    if (qtyNeeded <= 0) break;
+    const qtyAvailable = Number(row.qty_available || 0);
+    if (qtyAvailable <= 0) continue;
+    const qtyPulled = Math.min(qtyNeeded, qtyAvailable);
+    plan.push(`${row.warehouse}/${row.location}`);
+    qtyNeeded -= qtyPulled;
+  }
+  if (!plan.length) return "No inventory location";
+  if (qtyNeeded > 0) plan.push(`Short ${qtyNeeded}`);
+  return plan.join(", ");
+}
+
+function buildPickLocationAllocations(locationRows, qtyRequested) {
+  let qtyNeeded = parseQtyValue(qtyRequested || 0);
+  const allocations = [];
+  for (const row of locationRows) {
+    if (qtyNeeded <= 0) break;
+    const qtyAvailable = parseQtyValue(row.qty_available || 0);
+    if (qtyAvailable <= 0) continue;
+    const qtyIssued = Math.min(qtyNeeded, qtyAvailable);
+    allocations.push({
+      warehouse: String(row.warehouse || ""),
+      location: String(row.location || ""),
+      qty_issued: parseQtyValue(qtyIssued, 0)
+    });
+    qtyNeeded = parseQtyValue(qtyNeeded - qtyIssued, 0);
+  }
+  return allocations;
+}
+
+function buildPickTicketPdf(header, lines) {
+  const pageWidth = 792;
+  const pageHeight = 612;
+  const left = 28;
+  const right = pageWidth - 28;
+  const top = pageHeight - 24;
+  const rowHeight = 30;
+  const maxRowsFirstPage = 11;
+  const maxRowsOtherPages = 14;
+  const chunks = [];
+  let cursor = 0;
+  while (cursor < lines.length || !chunks.length) {
+    const maxRows = chunks.length ? maxRowsOtherPages : maxRowsFirstPage;
+    chunks.push(lines.slice(cursor, cursor + maxRows));
+    cursor += maxRows;
+  }
+
+  const makeText = (x, y, text, font = "F1", size = 9) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
+  const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
+  const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
+
+  return buildDrawnPdf(chunks.map((pageLines, pageIndex) => {
+    const content = [];
+    content.push("0.2 w");
+    content.push("0 0 0 RG");
+    content.push(rect(left, top - 40, right - left, 40));
+    if (pickTicketLogoBuffer) {
+      content.push(`q 44 0 0 28 ${left + 12} ${top - 34} cm /Logo Do Q`);
+    }
+    content.push(makeText(left + (pickTicketLogoBuffer ? 64 : 12), top - 23, "PICK TICKET", "F2", 17));
+    content.push(makeText(right - 170, top - 18, `REQ # ${header.requisition_no || ""}`, "F2", 12));
+    content.push(makeText(right - 170, top - 32, `Page ${pageIndex + 1} of ${chunks.length}`, "F1", 8));
+
+    const metaTop = top - 52;
+    content.push(rect(left, metaTop - 34, 240, 34));
+    content.push(rect(left + 240, metaTop - 34, 132, 34));
+    content.push(rect(left + 372, metaTop - 34, 140, 34));
+    content.push(rect(left + 512, metaTop - 34, 224, 34));
+    content.push(makeText(left + 8, metaTop - 13, "REQUESTED BY", "F2", 8));
+    content.push(makeText(left + 8, metaTop - 26, String(header.requested_by_name || "").slice(0, 34), "F1", 10));
+    content.push(makeText(left + 248, metaTop - 13, "CREATED", "F2", 8));
+  content.push(makeText(left + 248, metaTop - 26, formatShortDateTime(header.created_at), "F1", 9));
+    content.push(makeText(left + 380, metaTop - 13, "PRINTED", "F2", 8));
+    content.push(makeText(left + 380, metaTop - 26, formatPickTicketTimestamp().slice(0, 19), "F1", 9));
+    content.push(makeText(left + 520, metaTop - 13, "BOM", "F2", 8));
+    content.push(makeText(left + 520, metaTop - 26, String(header.bom_name || header.bom_description || header.bom_no || "").slice(0, 32), "F1", 9));
+
+    const meta2Top = metaTop - 42;
+    if (header.notes) {
+      content.push(rect(left, meta2Top - 26, right - left, 26));
+      content.push(makeText(left + 8, meta2Top - 10, "NOTES", "F2", 7));
+      content.push(makeText(left + 8, meta2Top - 20, String(header.notes).slice(0, 108), "F1", 8));
+    }
+
+    const tableTop = meta2Top - (header.notes ? 40 : 14);
+    const widths = [116, 344, 58, 46, 200];
+    const headers = ["ITEM", "DESCRIPTION", "QTY", "UOM", "LOCATION"];
+    let x = left;
+    content.push(rect(left, tableTop - rowHeight, right - left, rowHeight));
+    for (let i = 0; i < widths.length; i += 1) {
+      if (i > 0) content.push(line(x, tableTop, x, tableTop - rowHeight - (pageLines.length * rowHeight)));
+      content.push(makeText(x + 4, tableTop - 15, headers[i], "F2", 8));
+      x += widths[i];
+    }
+    content.push(line(right, tableTop, right, tableTop - rowHeight - (pageLines.length * rowHeight)));
+
+    let y = tableTop - rowHeight;
+    for (const item of pageLines) {
+      content.push(rect(left, y - rowHeight, right - left, rowHeight));
+      let cellX = left;
+      const wrappedDescription = wrapPdfText(item.description, 50);
+      const wrappedLocation = wrapPdfText(item.pick_location || "", 26);
+      const rowValues = [
+        item.item_code || "",
+        wrappedDescription[0] || "",
+        formatQtyDisplay(item.qty_requested),
+        item.uom || "",
+        wrappedLocation[0] || ""
+      ];
+      for (let i = 0; i < widths.length; i += 1) {
+        const value = rowValues[i];
+        const textX = i === 3 ? cellX + widths[i] - 24 : cellX + 4;
+        const qtyTextX = i === 2 ? cellX + widths[i] - 24 : textX;
+        const wrappedCell = (i === 1 && wrappedDescription[1]) || (i === 4 && wrappedLocation[1]);
+        const textY = wrappedCell ? y - 13 : y - 15;
+        content.push(makeText(i === 2 ? qtyTextX : textX, textY, value, "F1", 8));
+        cellX += widths[i];
+      }
+      if (wrappedDescription[1]) {
+        content.push(makeText(left + widths[0] + 4, y - 25, wrappedDescription[1], "F1", 8));
+      }
+      if (wrappedLocation[1]) {
+        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + 4, y - 25, wrappedLocation[1], "F1", 8));
+      }
+      y -= rowHeight;
+    }
+
+    if (pageIndex === chunks.length - 1) {
+      const footerTop = 86;
+      const footerBoxHeight = 30;
+      const footerGap = 8;
+      const printTop = footerTop - footerBoxHeight - footerGap;
+      const signTop = printTop - footerBoxHeight - footerGap;
+      content.push(rect(left + 8, footerTop, 510, footerBoxHeight));
+      content.push(rect(left + 518, footerTop, 160, footerBoxHeight));
+      content.push(makeText(left + 12, footerTop + 18, "Pulled by:", "F1", 8));
+      content.push(makeText(left + 522, footerTop + 18, "Date:", "F1", 8));
+
+      content.push(rect(left + 8, printTop, 510, footerBoxHeight));
+      content.push(makeText(left + 12, printTop + 18, "Received by (PRINT):", "F1", 8));
+
+      content.push(rect(left + 8, signTop, 510, footerBoxHeight));
+      content.push(rect(left + 518, signTop, 160, footerBoxHeight));
+      content.push(makeText(left + 12, signTop + 18, "Received by (SIGN):", "F1", 8));
+      content.push(makeText(left + 522, signTop + 18, "Date:", "F1", 8));
+    }
+
+    return {
+      content: content.join("\n"),
+      images: pickTicketLogoBuffer ? [{ name: "Logo", buffer: pickTicketLogoBuffer }] : []
+    };
+  }), { pageWidth, pageHeight });
+}
+
+function buildMrrFormPdf(header, lines, options = {}) {
+  const pageWidth = 612;
+  const pageHeight = 792;
+  const left = 18;
+  const right = pageWidth - 18;
+  const top = pageHeight - 18;
+  const content = [];
+  const makeText = (x, y, text, font = "F1", size = 8) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
+  const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
+  const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
+  const centerText = (x, y, w, text, font = "F1", size = 8) => {
+    const safe = String(text ?? "");
+    const estimatedWidth = safe.length * size * 0.42;
+    const textX = x + Math.max(2, (w - estimatedWidth) / 2);
+    return makeText(textX, y, safe, font, size);
+  };
+  const field = (x, yTop, w, h, label, value = "", opts = {}) => {
+    const labelSize = opts.labelSize || 6;
+    const valueSize = opts.valueSize || 8;
+    const align = opts.align || "left";
+    content.push(rect(x, yTop - h, w, h));
+    content.push(makeText(x + 2, yTop - 8, label, "F2", labelSize));
+    const text = String(value || "");
+    if (align === "center") {
+      content.push(centerText(x, yTop - 18, w, text, "F1", valueSize));
+    } else {
+      content.push(makeText(x + 2, yTop - 19, text, "F1", valueSize));
+    }
+  };
+  const checkbox = (x, y, checked = false, label = "") => {
+    content.push(rect(x, y - 8, 8, 8));
+    if (checked) {
+      content.push(line(x + 1.5, y - 6.5, x + 6.5, y - 1.5));
+      content.push(line(x + 6.5, y - 6.5, x + 1.5, y - 1.5));
+    }
+    if (label) content.push(makeText(x + 12, y - 6, label, "F1", 7));
+  };
+  const formatDate = (value) => {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    return formatShortDate(text);
+  };
+  const headerDescription = String(header.material_description || "").trim();
+  const detailLines = lines
+    .map((line) => ({
+      ...line,
+      item_code: String(line.item_code || "").trim(),
+      description: String(line.description || "").trim(),
+      qty: String(line.qty || "").trim(),
+      location: String(line.location || "").trim(),
+      grid: String(line.grid || "").trim(),
+      status: String(line.status || "").trim(),
+      ordered: String(line.ordered || "").trim(),
+      shipped: String(line.shipped || "").trim(),
+      received: String(line.received || "").trim(),
+      discrepancy: String(line.discrepancy || "").trim()
+    }))
+    .filter((line) => line.item_code || line.description || line.qty || line.location || line.grid || line.discrepancy);
+  const normalizedLines = [];
+  if (headerDescription) {
+    normalizedLines.push({
+      item_code: "",
+      description: headerDescription,
+      qty: "",
+      location: "",
+      grid: "",
+      status: "",
+      ordered: "",
+      shipped: "",
+      received: "",
+      discrepancy: ""
+    });
+  }
+  normalizedLines.push(...detailLines);
+  const lineItems = normalizedLines.slice(0, 12);
+  const discrepancyItems = lines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK").slice(0, 8);
+  const jobNumber = String(options.jobNumber || "").trim();
+  const deliveryLocation = String(options.deliveryLocation || "").trim();
+  const fmrNumber = String(options.fmrNumber || "").trim();
+  const pageNo = "1";
+  const pageCount = "1";
+
+  content.push("0.4 w");
+  content.push("0 0 0 RG");
+
+  const x0 = left;
+  const totalWidth = right - left;
+  const mrrNoWidth = 94;
+  const col1 = 92;
+  const col2 = 108;
+  const col3 = totalWidth - mrrNoWidth - col1 - col2;
+  const pageCol = 40;
+  const ofCol = totalWidth - col1 - col2 - col3 - pageCol;
+  const y1 = top;
+  field(x0, y1, totalWidth - mrrNoWidth, 28, " ", "", { align: "center" });
+  content.push(centerText(x0, y1 - 10, totalWidth - mrrNoWidth, "PERFORMANCE CONTRACTORS, INC.", "F2", 9));
+  content.push(centerText(x0, y1 - 21, totalWidth - mrrNoWidth, "MATERIAL RECEIVING REPORT (MRR)", "F2", 9));
+  field(right - mrrNoWidth, y1, mrrNoWidth, 28, "MRR NO.", header.mrr_number || "", { align: "center", valueSize: 9 });
+
+  const y2 = y1 - 28;
+  field(x0, y2, col1, 24, "1.JOB(CONTRACT)NO.", jobNumber);
+  field(x0 + col1, y2, col2, 24, "2.DATE RECEIVED", formatDate(header.received_date));
+  field(x0 + col1 + col2, y2, col3, 24, "3.P.O.NO", header.po_number || "");
+  field(x0 + col1 + col2 + col3, y2, pageCol, 24, "4.PAGE", pageNo);
+  field(x0 + col1 + col2 + col3 + pageCol, y2, ofCol, 24, "OF", pageCount);
+
+  const y3 = y2 - 24;
+  const shipTicketWidth = col1;
+  const supplierOrderWidth = col2;
+  const materialReqWidth = col3;
+  const deliveryLocationWidth = totalWidth - shipTicketWidth - supplierOrderWidth - materialReqWidth;
+  field(x0, y3, shipTicketWidth, 24, "5. SHIP TICKET NO", header.pick_ticket || "");
+  field(x0 + shipTicketWidth, y3, supplierOrderWidth, 24, "6. SUPPLIER ORDER NO.", "");
+  field(x0 + shipTicketWidth + supplierOrderWidth, y3, materialReqWidth, 24, "7. MATERIAL REQ/LOAD NO.", "");
+  field(x0 + shipTicketWidth + supplierOrderWidth + materialReqWidth, y3, deliveryLocationWidth, 24, "8. DELIVERY LOCATION (LAYDOWNYARD, UNIT, ETC.)", deliveryLocation, { labelSize: 3.8 });
+
+  const y4 = y3 - 24;
+  field(x0, y4, 392, 24, "9. SUPPLIER", header.vendor_name || "");
+  field(x0 + 392, y4, totalWidth - 392, 24, "10.CARRIER", "");
+
+  const y5 = y4 - 24;
+  const signBlockWidth = totalWidth / 2;
+  field(x0, y5, signBlockWidth, 46, "11. DELIVERED BY", "");
+  field(x0 + signBlockWidth, y5, signBlockWidth, 46, "12. RECEIVED BY", "");
+  content.push(makeText(x0 + 2, y5 - 17, "(PRINT):", "F1", 6));
+  content.push(makeText(x0 + 150, y5 - 17, "(DATE):", "F1", 6));
+  content.push(makeText(x0 + 2, y5 - 43, "(SIGNATURE):", "F1", 6));
+  content.push(makeText(x0 + 150, y5 - 43, "(DATE):", "F1", 6));
+  content.push(makeText(x0 + signBlockWidth + 2, y5 - 17, "(PRINT):", "F1", 6));
+  content.push(makeText(x0 + signBlockWidth + 150, y5 - 17, "(DATE):", "F1", 6));
+  content.push(makeText(x0 + signBlockWidth + 2, y5 - 43, "(SIGNATURE):", "F1", 6));
+  content.push(makeText(x0 + signBlockWidth + 150, y5 - 43, "(DATE):", "F1", 6));
+
+  const tableTop = y5 - 46;
+  const tableHeaderHeight = 24;
+  const lineRowCount = Math.max(lineItems.length, 12);
+  const lineTableHeight = tableHeaderHeight + (lineRowCount * 18);
+  const lineTableBottom = tableTop - lineTableHeight;
+  const itemCols = [140, 288, 48, 50, 50];
+  const itemHeaders = [
+    "13. STOCK/ITEM NO (TAG NO)",
+    "14. DESCRIPTION",
+    "15\nQTY",
+    "16\nLOCATION",
+    "17\nGRID"
+  ];
+  content.push(line(x0, tableTop, right, tableTop));
+  content.push(line(x0, tableTop, x0, lineTableBottom));
+  content.push(line(right, tableTop, right, lineTableBottom));
+  let itemX = x0;
+  for (let i = 0; i < itemCols.length; i += 1) {
+    if (i > 0) content.push(line(itemX, tableTop, itemX, lineTableBottom));
+    const headerLines = itemHeaders[i].split("\n");
+    content.push(makeText(itemX + 2, tableTop - 8, headerLines[0], "F2", 6));
+    if (headerLines[1]) content.push(centerText(itemX, tableTop - 17, itemCols[i], headerLines[1], "F2", 6));
+    itemX += itemCols[i];
+  }
+  content.push(line(x0, tableTop - tableHeaderHeight, right, tableTop - tableHeaderHeight));
+  content.push(makeText(x0 + 164, tableTop - 14, "(INDICATE NUMBER OF SHIPPING CONTAINERS - TYPE OF CONTAINER - CONTAINER NUMBER, ETC.)", "F1", 5));
+  const rowHeight = 18;
+  for (let i = 1; i < lineRowCount; i += 1) {
+    const dividerY = tableTop - tableHeaderHeight - (i * rowHeight);
+    content.push(line(x0, dividerY, right, dividerY));
+  }
+  for (let i = 0; i < lineRowCount; i += 1) {
+    const item = lineItems[i] || {};
+    const descLines = wrapPdfText(item.description || "", 48);
+    const rowTop = tableTop - tableHeaderHeight - (i * rowHeight);
+    content.push(makeText(x0 + 2, rowTop - 12, item.item_code || "", "F1", 7));
+    content.push(makeText(x0 + itemCols[0] + 2, rowTop - 10, descLines[0] || "", "F1", 6));
+    if (descLines[1]) content.push(makeText(x0 + itemCols[0] + 2, rowTop - 16, descLines[1], "F1", 6));
+    content.push(centerText(x0 + itemCols[0] + itemCols[1], rowTop - 12, itemCols[2], item.qty || "", "F1", 7));
+    content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2], rowTop - 12, itemCols[3], item.location || "", "F1", 7));
+    content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2] + itemCols[3], rowTop - 12, itemCols[4], item.grid || "", "F1", 7));
+  }
+
+  const osdTop = lineTableBottom;
+  content.push(rect(x0, osdTop - 18, totalWidth, 18));
+  content.push(makeText(x0 + 2, osdTop - 8, "18.REPORT OF UNSATISFACTORY OVER SHORT AND DAMAGED MATERIAL (ONLY NECESSARY IF DISCREPANCIES EXIST)", "F2", 5.5));
+  const osdHeaderTop = osdTop - 18;
+  const osdRowsHeight = Math.max(discrepancyItems.length, 8) * 16;
+  const itemWidth = 68;
+  const qtyTotalWidth = 240;
+  const qtyColWidth = qtyTotalWidth / 3;
+  const descWidth = totalWidth - itemWidth - qtyTotalWidth;
+  content.push(rect(x0, osdHeaderTop - 34 - osdRowsHeight, totalWidth, 34 + osdRowsHeight));
+  content.push(line(x0 + itemWidth, osdHeaderTop, x0 + itemWidth, osdHeaderTop - 34 - osdRowsHeight));
+  content.push(line(x0 + itemWidth + qtyTotalWidth, osdHeaderTop, x0 + itemWidth + qtyTotalWidth, osdHeaderTop - 34 - osdRowsHeight));
+  content.push(line(x0, osdHeaderTop - 18, right, osdHeaderTop - 18));
+  content.push(line(x0, osdHeaderTop - 34, right, osdHeaderTop - 34));
+  content.push(line(x0 + itemWidth + qtyColWidth, osdHeaderTop - 18, x0 + itemWidth + qtyColWidth, osdHeaderTop - 34 - osdRowsHeight));
+  content.push(line(x0 + itemWidth + qtyColWidth * 2, osdHeaderTop - 18, x0 + itemWidth + qtyColWidth * 2, osdHeaderTop - 34 - osdRowsHeight));
+  content.push(centerText(x0, osdHeaderTop - 12, itemWidth, "ITEM", "F2", 6));
+  content.push(centerText(x0 + itemWidth, osdHeaderTop - 12, qtyTotalWidth, "QUANTITY", "F2", 6));
+  content.push(makeText(x0 + itemWidth + qtyTotalWidth + 2, osdHeaderTop - 12, "COMPLETE DESCRIPTION OF DESCREPENCEY", "F2", 6));
+  content.push(centerText(x0, osdHeaderTop - 28, itemWidth, "TAG NO.", "F2", 5.5));
+  content.push(centerText(x0 + itemWidth, osdHeaderTop - 28, qtyColWidth, "ORDERED", "F2", 5.5));
+  content.push(centerText(x0 + itemWidth + qtyColWidth, osdHeaderTop - 28, qtyColWidth, "SHIPPED", "F2", 5.5));
+  content.push(centerText(x0 + itemWidth + qtyColWidth * 2, osdHeaderTop - 28, qtyColWidth, "RECEIVED", "F2", 5.5));
+  let osdY = osdHeaderTop - 34;
+  for (let i = 0; i < 8; i += 1) {
+    const item = discrepancyItems[i] || {};
+    const issueText = wrapPdfText(item.discrepancy || "", 40);
+    content.push(line(x0, osdY - 16, right, osdY - 16));
+    content.push(makeText(x0 + 2, osdY - 11, item.item_code || "", "F1", 6));
+    content.push(centerText(x0 + itemWidth, osdY - 11, qtyColWidth, item.ordered || "", "F1", 6));
+    content.push(centerText(x0 + itemWidth + qtyColWidth, osdY - 11, qtyColWidth, item.shipped || "", "F1", 6));
+    content.push(centerText(x0 + itemWidth + qtyColWidth * 2, osdY - 11, qtyColWidth, item.received || "", "F1", 6));
+    content.push(makeText(x0 + itemWidth + qtyTotalWidth + 2, osdY - 11, issueText[0] || "", "F1", 5.5));
+    if (issueText[1]) content.push(makeText(x0 + itemWidth + qtyTotalWidth + 2, osdY - 15, issueText[1], "F1", 5.5));
+    osdY -= 16;
+  }
+
+  const remarksTop = osdY;
+  field(x0, remarksTop, totalWidth, 18, "NATURE AND EXTENT OF OVERAGE-LOSS-DAMAGED OR UNSATISFACTORY CONDITION OF MATERIAL AND REMARKS:", "");
+  const infoTop = remarksTop - 18;
+  field(x0, infoTop, 192, 18, "TYPE OF CONTAINER:", header.container_type || "");
+  field(x0 + 192, infoTop, 166, 18, "CONTAINER FILED TO CAPACITY?:", "");
+  field(x0 + 358, infoTop, totalWidth - 358, 18, "TYPE OF PACKING USED:", "");
+
+  const info2Top = infoTop - 18;
+  field(x0, info2Top, 192, 18, "EXCEPTION NOTED ON SHIPPING/FREIGHT TICKET?", "");
+  field(x0 + 192, info2Top, 166, 18, "CARRIER NOTIFIED?", "");
+  field(x0 + 358, info2Top, totalWidth - 358, 18, "WAS DAMAGE CONCEALED?", "");
+
+  const info3Top = info2Top - 18;
+  field(x0, info3Top, 240, 18, "INSPECTED FOR CARRIER BY:", "");
+  field(x0 + 240, info3Top, 120, 18, "DATE:", "");
+  field(x0 + 360, info3Top, totalWidth - 360, 18, "CARRIER INSPECTION REPORT NO.:", "");
+
+  const optsTop = info3Top - 18;
+  content.push(rect(x0, optsTop - 24, totalWidth, 24));
+  content.push(makeText(x0 + 2, optsTop - 8, "THIS REPORT IS FOR:", "F2", 6));
+  checkbox(x0 + 76, optsTop - 6, false, "OVERAGE");
+  checkbox(x0 + 156, optsTop - 6, false, "SHORTAGE");
+  checkbox(x0 + 278, optsTop - 6, false, "DAMAGED");
+  checkbox(x0 + 400, optsTop - 6, false, "UNSATISFACTORY");
+  checkbox(x0 + 520, optsTop - 6, false, "OTHER");
+
+  const attachTop = optsTop - 24;
+  content.push(rect(x0, attachTop - 30, totalWidth, 30));
+  content.push(makeText(x0 + 2, attachTop - 8, "ATACHMENTS:", "F2", 6));
+  content.push(makeText(x0 + 2, attachTop - 18, "CARRIER INSPECTION REPORT", "F2", 6));
+  checkbox(x0 + 188, attachTop - 18, false, "PHOTOS");
+  checkbox(x0 + 265, attachTop - 18, false, "PICK/SHIPPING TICKET");
+  checkbox(x0 + 403, attachTop - 18, false, "NCR(IF APPLICABLE)");
+  checkbox(x0 + 514, attachTop - 18, false, "MTRS");
+  checkbox(x0 + 550, attachTop - 18, false, "OTHER");
+
+  const dispoTop = attachTop - 30;
+  field(x0, dispoTop, 310, 18, "INSPECTING FIELD SUPT./ENG.:", "");
+  field(x0 + 310, dispoTop, totalWidth - 310, 18, "DISPOSITION RECOMMENDED:", "");
+
+  const certTop = dispoTop - 22;
+  field(x0, certTop, totalWidth, 18, "I CERTIFY THE ABOVE REPORT TO BE TRUE AND IN ACCORDANCE WITH THE CONDITION OF THE GOODS UPON RECEIPT", "");
+  const signTop = certTop - 18;
+  field(x0, signTop, 194, 18, "DATE:", "");
+  field(x0 + 194, signTop, 164, 18, "BY:", "");
+  field(x0 + 358, signTop, totalWidth - 358, 18, "TITLE:", "");
+
+  return buildDrawnPdf([content.join("\n")], { pageWidth, pageHeight });
+}
+
+function renderJobSwitcher(user) {
+  const jobs = Array.isArray(user?.accessibleJobs) ? user.accessibleJobs.filter((job) => job?.is_active !== false) : [];
+  if (!user || jobs.length <= 1) return "";
+  const options = jobs.map((job) => `<option value="${job.id}" ${Number(user.job_id) === Number(job.id) ? "selected" : ""}>${esc(job.job_number)}${job.plant_name ? ` - ${esc(job.plant_name)}` : ""}</option>`).join("");
+  return `
+    <form method="post" action="/jobs/select" class="job-switcher">
+      <label>Current Job</label>
+      <input type="hidden" name="return_to" value="/dashboard" />
+      <select name="job_id" onchange="this.form.submit();">
+        ${options}
+      </select>
+    </form>
+  `;
+}
+
 function layout(title, body, user) {
+  const appHeaderTitle = getAppHeaderTitle(user);
+  const navLinks = user
+    ? permissionSections
+        .filter((section) => canAccess(user, section.key, "view"))
+        .map((section) => `<a href="${section.href}">${section.label}</a>`)
+        .concat(`<a href="/logout">Logout</a>`)
+        .join("")
+    : "";
   return `<!doctype html>
   <html>
   <head>
@@ -32,61 +1303,500 @@ function layout(title, body, user) {
     <title>${esc(title)}</title>
     <style>
       :root {
-        --bg: #eef3f7;
+        --bg: #dfe3e8;
         --panel: #ffffff;
-        --ink: #17324d;
-        --muted: #5d6f82;
-        --line: #d9e2eb;
-        --brand: #0e5a6d;
-        --brand-2: #164e63;
-        --warn: #b42318;
+        --ink: #16212b;
+        --muted: #4d5b69;
+        --line: #9ca8b3;
+        --line-strong: #798693;
+        --brand: #2d5d87;
+        --brand-2: #4b5966;
+        --warn: #a23622;
+        --header: #cfd6de;
+        --header-strong: #bcc6cf;
       }
       * { box-sizing: border-box; }
-      body { margin: 0; font-family: Georgia, "Palatino Linotype", serif; color: var(--ink); background: linear-gradient(180deg, #f8fafc 0%, var(--bg) 100%); }
-      .shell { max-width: 1400px; margin: 0 auto; padding: 24px; }
-      .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 22px; padding: 14px 18px; background: rgba(255,255,255,.8); border: 1px solid rgba(23,50,77,.08); border-radius: 18px; }
-      .brand { font-size: 28px; font-weight: 700; letter-spacing: .02em; }
-      .userline { color: var(--muted); font-size: 14px; }
-      nav { display: flex; gap: 10px; flex-wrap: wrap; }
-      nav a { color: var(--brand); text-decoration: none; font-weight: 700; padding: 8px 10px; border-radius: 10px; }
-      nav a:hover { background: rgba(14, 90, 109, .08); }
-      .card { background: var(--panel); border: 1px solid rgba(23,50,77,.08); border-radius: 18px; box-shadow: 0 18px 40px rgba(23,50,77,.06); padding: 22px; margin-bottom: 18px; }
+      body { margin: 0; font-family: "Segoe UI", Tahoma, Verdana, sans-serif; color: var(--ink); background: var(--bg); }
+      .shell { max-width: 1600px; margin: 0 auto; padding: 12px; }
+      .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; padding: 10px 12px; background: linear-gradient(180deg, var(--header) 0%, var(--header-strong) 100%); border: 1px solid var(--line-strong); border-radius: 2px; box-shadow: inset 0 1px 0 rgba(255,255,255,.55); }
+      .brand-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; width: 100%; }
+      .brand-link { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; min-width: 0; }
+      .brand-logo { width: 74px; height: 46px; object-fit: contain; flex-shrink: 0; }
+      .brand-copy { min-width: 0; }
+      .brand { font-size: 22px; font-weight: 700; letter-spacing: .01em; }
+      .userline { color: var(--muted); font-size: 12px; }
+      .job-switcher { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+      .job-switcher label { margin: 0; white-space: nowrap; }
+      .job-switcher select { min-width: 240px; }
+      nav { display: flex; gap: 6px; flex-wrap: wrap; }
+      nav a { color: #12324b; text-decoration: none; font-weight: 600; padding: 6px 9px; border: 1px solid transparent; border-radius: 2px; }
+      nav a:hover { background: #edf1f4; border-color: var(--line); }
+      .card { background: var(--panel); border: 1px solid var(--line-strong); border-radius: 2px; box-shadow: none; padding: 12px; margin-bottom: 10px; }
       h1, h2, h3 { margin: 0 0 12px; }
-      h1 { font-size: 36px; }
-      h2 { font-size: 30px; }
-      h3 { font-size: 24px; }
-      .muted { color: var(--muted); font-size: 14px; }
-      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-      .grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-      .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-      .stat { padding: 18px; border-radius: 16px; background: linear-gradient(135deg, rgba(14,90,109,.08), rgba(10,80,100,.14)); }
-      .stat strong { display: block; font-size: 36px; margin-top: 8px; }
-      label { display: block; font-size: 14px; font-weight: 700; margin-bottom: 4px; color: var(--muted); }
-      input, select, textarea { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: #fff; color: var(--ink); font: inherit; }
-      textarea { min-height: 120px; resize: vertical; }
-      button, .btn { display: inline-flex; align-items: center; justify-content: center; min-width: 104px; height: 38px; padding: 0 14px; border-radius: 10px; border: 0; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }
-      button, .btn-primary { background: var(--brand); color: white; }
-      .btn-secondary { background: var(--brand-2); color: white; }
-      .btn-danger { background: var(--warn); color: white; }
-      .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      h1 { font-size: 24px; }
+      h2 { font-size: 20px; }
+      h3 { font-size: 16px; text-transform: uppercase; letter-spacing: .03em; }
+      .muted { color: var(--muted); font-size: 12px; }
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+      .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+      .stat { padding: 10px; border: 1px solid var(--line-strong); border-radius: 2px; background: linear-gradient(180deg, #f6f8fa 0%, #e9eef2 100%); }
+      .stat strong { display: block; font-size: 24px; margin-top: 4px; }
+      label { display: block; font-size: 12px; font-weight: 700; margin-bottom: 3px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+      input, select, textarea { width: 100%; padding: 7px 8px; border-radius: 2px; border: 1px solid var(--line-strong); background: #fff; color: var(--ink); font: inherit; box-shadow: inset 0 1px 1px rgba(0,0,0,.04); }
+      textarea { min-height: 96px; resize: vertical; }
+      button, .btn { display: inline-flex; align-items: center; justify-content: center; min-width: 92px; height: 32px; padding: 0 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,.15); font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
+      button, .btn-primary { background: linear-gradient(180deg, #4278a9 0%, var(--brand) 100%); color: white; }
+      .btn-secondary { background: linear-gradient(180deg, #6a7681 0%, var(--brand-2) 100%); color: white; }
+      .btn-danger { background: linear-gradient(180deg, #bf5b49 0%, var(--warn) 100%); color: white; }
+      .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+      .check-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 14px; }
+      .check-option { display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 6px; padding: 4px 0; font-size: 12px; text-transform: uppercase; }
+      .check-option input { width: 14px; height: 14px; margin: 0; justify-self: center; }
+      .inline-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
       .scroll { overflow-x: auto; }
-      table { width: 100%; border-collapse: collapse; font-size: 14px; }
-      th, td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-      th { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
-      .chip { display: inline-block; padding: 4px 10px; border-radius: 999px; background: rgba(14,90,109,.08); color: var(--brand); font-weight: 700; }
-      .error { border-color: rgba(180,35,24,.22); background: rgba(180,35,24,.06); color: var(--warn); }
-      .stack { display: grid; gap: 18px; }
-      @media (max-width: 900px) { .grid, .grid-4, .stats { grid-template-columns: 1fr; } .topbar { flex-direction: column; align-items: flex-start; } }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; }
+      th, td { padding: 6px 7px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+      th { color: #223240; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; background: linear-gradient(180deg, #e5eaef 0%, #d3dbe3 100%); }
+      th.sortable-th { cursor: pointer; }
+      th.sortable-th .sort-indicator { margin-left: 4px; color: var(--muted); font-size: 10px; }
+      tr:nth-child(even) td { background: #f7f9fb; }
+      .data-grid { table-layout: fixed; min-width: 1400px; }
+      .data-grid th { position: relative; user-select: none; }
+      .data-grid td { overflow: hidden; text-overflow: ellipsis; }
+      .data-grid td.wrap, .data-grid th.wrap { white-space: normal; }
+      .data-grid td.nowrap, .data-grid th.nowrap { white-space: nowrap; }
+      .rfq-entry-grid td { padding: 0; }
+      .rfq-entry-grid td input { width: 100%; min-height: 38px; border: 0; background: transparent; box-shadow: none; padding: 8px 10px; margin: 0; }
+      .rfq-entry-grid td input:focus { outline: 2px solid #6f95b8; outline-offset: -2px; background: #f7fbff; }
+      .resize-handle { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: col-resize; }
+      .chip { display: inline-block; padding: 3px 8px; border-radius: 2px; background: #e3ebf2; border: 1px solid #b6c4d1; color: #264b69; font-weight: 700; }
+      .chip-remove { font-size: 0.2em; line-height: 1; padding: 0 1px; margin-left: 4px; min-width: 0; min-height: 0; vertical-align: middle; }
+      .tab-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+      .tab-link { display: inline-flex; align-items: center; justify-content: center; min-width: 92px; min-height: 32px; padding: 6px 12px; border-radius: 2px; border: 1px solid var(--line-strong); background: linear-gradient(180deg, #eef3f7 0%, #d9e1e8 100%); color: #18354e; font-weight: 700; text-decoration: none; }
+      .tab-link.active { background: linear-gradient(180deg, #4278a9 0%, var(--brand) 100%); border-color: rgba(0,0,0,.15); color: white; }
+      .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+      .dashboard-sections { display: grid; gap: 10px; }
+      .error { border-color: #d0a19b; background: #f8ecea; color: var(--warn); }
+      .stack { display: grid; gap: 10px; }
+      @media (max-width: 900px) { .grid, .grid-4, .stats, .summary-grid { grid-template-columns: 1fr; } .topbar { flex-direction: column; align-items: flex-start; } }
     </style>
+    <script>
+      function togglePassword(button, targetId) {
+        const input = document.getElementById(targetId);
+        if (!input) return;
+        const nextType = input.type === "password" ? "text" : "password";
+        input.type = nextType;
+        button.textContent = nextType === "password" ? "Show" : "Hide";
+      }
+      function passwordRuleError(value) {
+        const password = String(value || "");
+        if (password.length < 10) return "Password must be at least 10 characters.";
+        if (!/[A-Z]/.test(password)) return "Password must include at least one uppercase letter.";
+        if (!/[a-z]/.test(password)) return "Password must include at least one lowercase letter.";
+        if (!/[0-9]/.test(password)) return "Password must include at least one number.";
+        return "";
+      }
+      function validatePasswordForm(formId, inputName, messageId) {
+        const form = document.getElementById(formId);
+        if (!form) return true;
+        const input = form.querySelector('[name="' + inputName + '"]');
+        const message = document.getElementById(messageId);
+        if (!input) return true;
+        const value = String(input.value || "");
+        if (!value) {
+          if (message) {
+            message.textContent = "";
+            message.style.color = "#4d5b69";
+          }
+          return true;
+        }
+        const error = passwordRuleError(value);
+        if (message) {
+          message.textContent = error || "Password meets requirements.";
+          message.style.color = error ? "#a23622" : "#1f6b3a";
+        }
+        return !error;
+      }
+      function attachPasswordValidation(formId, inputName, messageId) {
+        const form = document.getElementById(formId);
+        if (!form) return;
+        const input = form.querySelector('[name="' + inputName + '"]');
+        const run = () => validatePasswordForm(formId, inputName, messageId);
+        if (input) input.addEventListener("input", run);
+        form.addEventListener("submit", (event) => {
+          if (!validatePasswordForm(formId, inputName, messageId)) {
+            event.preventDefault();
+          }
+        });
+      }
+      function phoneDigits(value) {
+        return String(value || "").replace(/\D/g, "").slice(0, 11);
+      }
+      function formatPhoneValue(value) {
+        const digits = phoneDigits(value);
+        if (digits.length === 11 && digits.startsWith("1")) {
+          return "1-" + digits.slice(1, 4) + "-" + digits.slice(4, 7) + "-" + digits.slice(7, 11);
+        }
+        if (digits.length <= 3) return digits;
+        if (digits.length <= 6) return digits.slice(0, 3) + "-" + digits.slice(3);
+        return digits.slice(0, 3) + "-" + digits.slice(3, 6) + "-" + digits.slice(6, 10);
+      }
+      function applyPhoneMask(input) {
+        if (!input) return;
+        input.value = formatPhoneValue(input.value);
+      }
+      function formatPhoneOnBlur(input) {
+        applyPhoneMask(input);
+      }
+      function validateBulkAward(form) {
+        if (!form) return true;
+        const prices = Array.from(form.querySelectorAll('input[name^="unit_price_"]'));
+        let populatedCount = 0;
+        for (const priceInput of prices) {
+          const itemId = priceInput.name.replace("unit_price_", "");
+          const leadInput = form.querySelector('input[name="lead_days_' + itemId + '"]');
+          const priceValue = String(priceInput.value || "").trim();
+          const leadValue = String(leadInput ? leadInput.value || "" : "").trim();
+          if (!priceValue) continue;
+          populatedCount += 1;
+          if (!leadValue) {
+            window.alert("Lead time is required for every row with a unit price before awarding.");
+            return false;
+          }
+        }
+        if (!populatedCount) {
+          window.alert("Enter at least one unit price before awarding.");
+          return false;
+        }
+        return true;
+      }
+      function captureRfqQuoteOrder(form) {
+        if (!form) return true;
+        const orderInput = form.querySelector('input[name="rfq_item_order"]');
+        if (!orderInput) return true;
+        const rows = Array.from(form.querySelectorAll("tr[data-rfq-item-id]"));
+        orderInput.value = rows.map((row) => String(row.dataset.rfqItemId || "").trim()).filter(Boolean).join(",");
+        return true;
+      }
+      function openRfqPdfWithOrder(link, tableId) {
+        if (!link) return true;
+        const table = document.getElementById(tableId);
+        const url = new URL(link.getAttribute("href") || link.href, window.location.origin);
+        if (table) {
+          const rows = Array.from(table.querySelectorAll("tr[data-rfq-item-id]"));
+          const order = rows.map((row) => String(row.dataset.rfqItemId || "").trim()).filter(Boolean).join(",");
+          if (order) {
+            url.searchParams.set("order", order);
+          } else {
+            url.searchParams.delete("order");
+          }
+        }
+        window.open(url.toString(), link.target || "_blank");
+        return false;
+      }
+      function promptPoNumber(button, vendorSelectId, targetFormId) {
+        const vendorSelect = document.getElementById(vendorSelectId);
+        const targetForm = document.getElementById(targetFormId);
+        if (!vendorSelect || !targetForm) return false;
+        if (!vendorSelect.value) {
+          window.alert("Select a vendor first.");
+          return false;
+        }
+        const poNumber = window.prompt("Enter PO number");
+        if (!poNumber || !String(poNumber).trim()) return false;
+        const poInput = targetForm.querySelector('input[name="po_no"]');
+        const vendorInput = targetForm.querySelector('input[name="vendor_id"]');
+        if (!poInput || !vendorInput) return false;
+        poInput.value = String(poNumber).trim();
+        vendorInput.value = vendorSelect.value;
+        targetForm.submit();
+        return false;
+      }
+      function filterTableRows(inputId, tableId) {
+        const input = document.getElementById(inputId);
+        const table = document.getElementById(tableId);
+        if (!input || !table) return;
+        const term = input.value.toLowerCase();
+        const rows = table.querySelectorAll("tbody tr");
+        rows.forEach((row) => {
+          row.style.display = row.innerText.toLowerCase().includes(term) ? "" : "none";
+        });
+      }
+      function openVendorPicker(dialogId, inputId) {
+        const dialog = document.getElementById(dialogId);
+        const input = document.getElementById(inputId);
+        if (!dialog) return false;
+        if (typeof dialog.showModal === "function") dialog.showModal();
+        else dialog.setAttribute("open", "open");
+        if (input) {
+          input.value = "";
+          window.setTimeout(() => input.focus(), 0);
+        }
+        return false;
+      }
+      function closeVendorPicker(dialogId) {
+        const dialog = document.getElementById(dialogId);
+        if (!dialog) return false;
+        if (typeof dialog.close === "function") dialog.close();
+        else dialog.removeAttribute("open");
+        return false;
+      }
+      function removeVendorSelection(vendorId, selectedListId, hiddenContainerId, formId) {
+        const selectedList = document.getElementById(selectedListId);
+        const hiddenContainer = document.getElementById(hiddenContainerId);
+        if (hiddenContainer) {
+          const hiddenInput = hiddenContainer.querySelector('[data-vendor-hidden="' + vendorId + '"]');
+          if (hiddenInput) hiddenInput.remove();
+        }
+        if (selectedList) {
+          const chip = selectedList.querySelector('[data-vendor-chip="' + vendorId + '"]');
+          if (chip) chip.remove();
+          if (!selectedList.querySelector('[data-vendor-chip]')) {
+            selectedList.innerHTML = '<span class="muted">No vendors selected yet.</span>';
+          }
+        }
+        const form = formId ? document.getElementById(formId) : null;
+        if (form) form.submit();
+        return false;
+      }
+      function addVendorFromPicker(dialogId, inputId) {
+        const dialog = document.getElementById(dialogId);
+        const input = document.getElementById(inputId);
+        if (!dialog || !input) return false;
+        const selectedList = document.getElementById(dialog.getAttribute("data-selected-list-id"));
+        const hiddenContainer = document.getElementById(dialog.getAttribute("data-hidden-container-id"));
+        const vendors = JSON.parse(dialog.getAttribute("data-vendors") || "[]");
+        const term = String(input.value || "").trim().toLowerCase();
+        if (!term) {
+          window.alert("Choose an active vendor.");
+          return false;
+        }
+        const vendor = vendors.find((entry) => String(entry.name || "").trim().toLowerCase() === term);
+        if (!vendor) {
+          window.alert("Choose a vendor from the active vendor list.");
+          return false;
+        }
+        if (!selectedList || !hiddenContainer) return false;
+        if (hiddenContainer.querySelector('[data-vendor-hidden="' + vendor.id + '"]')) {
+          closeVendorPicker(dialogId);
+          return false;
+        }
+        const emptyState = selectedList.querySelector(".muted");
+        if (emptyState) emptyState.remove();
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        chip.setAttribute("data-vendor-chip", String(vendor.id));
+        chip.innerHTML = vendor.name + ' <button type="button" class="chip-remove">x</button>';
+        const removeButton = chip.querySelector(".chip-remove");
+        if (removeButton) removeButton.addEventListener("click", () => removeVendorSelection(vendor.id, dialog.getAttribute("data-selected-list-id"), dialog.getAttribute("data-hidden-container-id"), dialog.getAttribute("data-form-id")));
+        selectedList.appendChild(chip);
+        const hiddenInput = document.createElement("input");
+        hiddenInput.type = "hidden";
+        hiddenInput.name = "vendor_ids";
+        hiddenInput.value = String(vendor.id);
+        hiddenInput.setAttribute("data-vendor-hidden", String(vendor.id));
+        hiddenContainer.appendChild(hiddenInput);
+        closeVendorPicker(dialogId);
+        const formId = dialog.getAttribute("data-form-id");
+        const form = formId ? document.getElementById(formId) : null;
+        if (form) form.submit();
+        return false;
+      }
+      function syncLocationOptions(warehouseSelectId, locationSelectId, optionsByWarehouse, selectedValue) {
+        const warehouseSelect = document.getElementById(warehouseSelectId);
+        const locationSelect = document.getElementById(locationSelectId);
+        if (!warehouseSelect || !locationSelect) return;
+        const warehouseName = String(warehouseSelect.value || "");
+        const locations = optionsByWarehouse[warehouseName] || [];
+        const keepValue = selectedValue !== undefined ? String(selectedValue || "") : String(locationSelect.value || "");
+        const placeholder = locationSelect.getAttribute("data-placeholder") || "Select location";
+        locationSelect.innerHTML = "";
+        const placeholderOption = document.createElement("option");
+        placeholderOption.value = "";
+        placeholderOption.textContent = placeholder;
+        locationSelect.appendChild(placeholderOption);
+        locations.forEach((locationName) => {
+          const option = document.createElement("option");
+          option.value = locationName;
+          option.textContent = locationName;
+          if (locationName === keepValue) option.selected = true;
+          locationSelect.appendChild(option);
+        });
+        if (!locations.includes(keepValue)) {
+          locationSelect.value = "";
+        }
+      }
+      function enableResizableTable(tableId) {
+        const table = document.getElementById(tableId);
+        if (!table) return;
+        const headers = table.querySelectorAll("th[data-resizable='true']");
+        headers.forEach((header) => {
+          if (header.querySelector(".resize-handle")) return;
+          const handle = document.createElement("span");
+          handle.className = "resize-handle";
+          header.appendChild(handle);
+          handle.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+            const startX = event.pageX;
+            const startWidth = header.offsetWidth;
+            const onMove = (moveEvent) => {
+              const nextWidth = Math.max(60, startWidth + (moveEvent.pageX - startX));
+              header.style.width = nextWidth + "px";
+            };
+            const onUp = () => {
+              document.removeEventListener("mousemove", onMove);
+              document.removeEventListener("mouseup", onUp);
+            };
+            document.addEventListener("mousemove", onMove);
+            document.addEventListener("mouseup", onUp);
+          });
+        });
+      }
+      function getSortableCellText(cell) {
+        if (!cell) return "";
+        if (cell.dataset && cell.dataset.sortValue !== undefined) return String(cell.dataset.sortValue || "");
+        const select = cell.querySelector("select");
+        if (select) {
+          const selectedOption = select.options[select.selectedIndex];
+          return selectedOption ? String(selectedOption.text || selectedOption.value || "") : String(select.value || "");
+        }
+        const input = cell.querySelector("input, textarea");
+        if (input) return String(input.value || input.getAttribute("value") || "");
+        return String(cell.innerText || cell.textContent || "");
+      }
+      function parseSortableValue(text) {
+        const value = String(text || "").trim();
+        if (!value) return { type: "text", value: "" };
+        const shortDateMatch = value.match(/^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2}))?$/);
+        if (shortDateMatch) {
+          const year = Number(shortDateMatch[3]);
+          const month = Number(shortDateMatch[2]) - 1;
+          const day = Number(shortDateMatch[1]);
+          const hour = Number(shortDateMatch[4] || 0);
+          const minute = Number(shortDateMatch[5] || 0);
+          return { type: "number", value: new Date(year, month, day, hour, minute).getTime() };
+        }
+        const numericText = value.replace(/,/g, "");
+        if (/^-?\d+(?:\.\d+)?$/.test(numericText)) {
+          return { type: "number", value: Number(numericText) };
+        }
+        return { type: "text", value: value.toLowerCase() };
+      }
+      function makeTableSortable(table) {
+        if (!table) return;
+        const headerRow = table.tHead && table.tHead.rows.length
+          ? table.tHead.rows[0]
+          : table.querySelector("tr");
+        const bodyContainer = table.tBodies && table.tBodies.length ? table.tBodies[0] : table;
+        const rows = headerRow
+          ? [headerRow].concat(Array.from(bodyContainer.querySelectorAll("tr")))
+          : Array.from(table.querySelectorAll("tr"));
+        if (rows.length < 2) return;
+        const headers = Array.from(headerRow.querySelectorAll("th"));
+        if (!headers.length) return;
+        headers.forEach((th, index) => {
+          if (th.querySelector("a")) return;
+          const headerText = String(th.innerText || "").trim().toLowerCase();
+          if (!headerText || headerText === "action" || headerText === "actions") return;
+          if (th.dataset.sortReady === "1") return;
+          th.dataset.sortReady = "1";
+          th.classList.add("sortable-th");
+          const indicator = document.createElement("span");
+          indicator.className = "sort-indicator";
+          indicator.textContent = "";
+          th.appendChild(indicator);
+          th.addEventListener("click", () => {
+              const currentIndex = Number(table.dataset.sortIndex || -1);
+              const nextDir = currentIndex === index && table.dataset.sortDir === "asc" ? "desc" : "asc";
+              const bodyRows = Array.from(bodyContainer.querySelectorAll("tr"));
+              bodyRows.sort((a, b) => {
+                const aParsed = parseSortableValue(getSortableCellText(a.children[index]));
+                const bParsed = parseSortableValue(getSortableCellText(b.children[index]));
+                let result = 0;
+                if (aParsed.type === "number" && bParsed.type === "number") {
+                  result = aParsed.value - bParsed.value;
+              } else {
+                result = String(aParsed.value).localeCompare(String(bParsed.value), undefined, { numeric: true, sensitivity: "base" });
+              }
+              return nextDir === "asc" ? result : -result;
+            });
+            bodyRows.forEach((row) => bodyContainer.appendChild(row));
+            table.dataset.sortIndex = String(index);
+            table.dataset.sortDir = nextDir;
+            headers.forEach((header, headerIndex) => {
+              const headerIndicator = header.querySelector(".sort-indicator");
+              if (!headerIndicator) return;
+              headerIndicator.textContent = headerIndex === index ? (nextDir === "asc" ? "↑" : "↓") : "";
+            });
+          });
+        });
+      }
+      function prepareRfqGrid(formId, rowCount) {
+        const form = document.getElementById(formId);
+        if (!form) return true;
+        const rowsMissingCode = [];
+        for (let index = 0; index < rowCount; index += 1) {
+          const itemCodeInput = form.querySelector('[name="item_code_' + index + '"]');
+          const descriptionInput = form.querySelector('[name="description_' + index + '"]');
+          const qtyInput = form.querySelector('[name="qty_' + index + '"]');
+          const materialTypeInput = form.querySelector('[name="material_type_' + index + '"]');
+          const uomInput = form.querySelector('[name="uom_' + index + '"]');
+          const size1Input = form.querySelector('[name="size_1_' + index + '"]');
+          const size2Input = form.querySelector('[name="size_2_' + index + '"]');
+          const thk1Input = form.querySelector('[name="thk_1_' + index + '"]');
+          const thk2Input = form.querySelector('[name="thk_2_' + index + '"]');
+          const notesInput = form.querySelector('[name="notes_' + index + '"]');
+          const hasRowData = [descriptionInput, qtyInput, materialTypeInput, uomInput]
+            .concat([size1Input, size2Input, thk1Input, thk2Input, notesInput])
+            .some((input) => input && String(input.value || "").trim());
+          if (itemCodeInput && !String(itemCodeInput.value || "").trim() && hasRowData) {
+            rowsMissingCode.push(itemCodeInput);
+          }
+        }
+        let allowMissingInput = form.querySelector('input[name="allow_missing_item_codes"]');
+        if (!rowsMissingCode.length) {
+          if (allowMissingInput) allowMissingInput.value = "";
+          return true;
+        }
+        if (!window.confirm("No item codes, Do you want to continue?")) {
+          return false;
+        }
+        if (!allowMissingInput) {
+          allowMissingInput = document.createElement("input");
+          allowMissingInput.type = "hidden";
+          allowMissingInput.name = "allow_missing_item_codes";
+          form.appendChild(allowMissingInput);
+        }
+        allowMissingInput.value = "1";
+        return true;
+      }
+      document.addEventListener("DOMContentLoaded", () => {
+        attachPasswordValidation("new-user-form", "password", "new-user-password-error");
+        document.querySelectorAll("form[data-password-form='edit-user']").forEach((form) => {
+          attachPasswordValidation(form.id, "password", form.dataset.passwordMessageId);
+        });
+        document.querySelectorAll("form[data-password-form='access-approve']").forEach((form) => {
+          attachPasswordValidation(form.id, "temp_password", form.dataset.passwordMessageId);
+        });
+        document.querySelectorAll(".scroll table").forEach((table) => makeTableSortable(table));
+      });
+    </script>
   </head>
   <body>
     <div class="shell">
       <div class="topbar">
-        <div>
-          <div class="brand">Material Control</div>
-          ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
+        <div class="brand-wrap">
+          <a class="brand-link" href="${user ? "/dashboard" : "/"}">
+            <img class="brand-logo" src="/public/prf-logo.png" alt="Performance Contractors logo" />
+            <div class="brand-copy">
+              <div class="brand">${esc(appHeaderTitle)}</div>
+              ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
+            </div>
+          </a>
+          ${user ? renderJobSwitcher(user) : ""}
         </div>
-        ${user ? `<nav><a href="/">Dashboard</a><a href="/vendors">Vendors</a><a href="/rfq">RFQs</a><a href="/po">POs</a><a href="/receive">Receiving</a><a href="/inventory">Inventory</a><a href="/material-logs">Material Logs</a><a href="/logout">Logout</a></nav>` : ""}
+        ${user ? `<nav>${navLinks}</nav>` : ""}
       </div>
       ${body}
     </div>
@@ -99,23 +1809,938 @@ function normalizeCategories(input) {
   return vendorCategories.filter((category) => values.includes(category)).join(",");
 }
 
+function normalizeCategoryList(text) {
+  const seen = new Set();
+  return String(text || "")
+    .split(/\r?\n|,/)
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value && !seen.has(value) && seen.add(value));
+}
+
+function normalizePhone(value) {
+  const digits = String(value || "").replace(/\D/g, "").slice(0, 11);
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return `1-${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7, 11)}`;
+  }
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
+}
+
+function randomFiveDigitItemCode(used = new Set()) {
+  let nextCode = "";
+  do {
+    nextCode = String(Math.floor(10000 + Math.random() * 90000));
+  } while (used.has(nextCode));
+  used.add(nextCode);
+  return nextCode;
+}
+
+function rfqRowHasAnyEnteredValues(row) {
+  return [
+    row.description,
+    row.material_type,
+    row.uom,
+    row.spec,
+    row.commodity_code,
+    row.tag_number,
+    row.size_1,
+    row.size_2,
+    row.thk_1,
+    row.thk_2,
+    row.qty,
+    row.notes
+  ].some((value) => String(value || "").trim());
+}
+
+async function generateUniqueRfqItemCode(runner, used = new Set()) {
+  let attempts = 0;
+  while (attempts < 1000) {
+    const candidate = randomFiveDigitItemCode(used);
+    const existing = await runner.query("select 1 from material_items where item_code = $1 limit 1", [candidate]);
+    if (!existing.rows[0]) return candidate;
+    used.delete(candidate);
+    attempts += 1;
+  }
+  throw new Error("Unable to generate a unique 5-digit item code.");
+}
+
+async function assignGeneratedRfqItemCodes(runner, rows) {
+  const usedCodes = new Set(rows.map((row) => String(row.item_code || "").trim()).filter(Boolean));
+  let generatedCount = 0;
+  const nextRows = [];
+  for (const row of rows) {
+    const nextRow = { ...row };
+    const normalizedCode = String(nextRow.item_code || "").trim();
+    const needsGeneratedCode = !normalizedCode && rfqRowHasAnyEnteredValues(nextRow);
+    const needsRecheck = Boolean(nextRow.generated_item_code) && normalizedCode;
+    if (needsGeneratedCode || needsRecheck) {
+      let finalCode = normalizedCode;
+      if (!finalCode) {
+        finalCode = await generateUniqueRfqItemCode(runner, usedCodes);
+        generatedCount += 1;
+      } else {
+        const existing = await runner.query("select 1 from material_items where item_code = $1 limit 1", [finalCode]);
+        if (existing.rows[0]) {
+          usedCodes.delete(finalCode);
+          finalCode = await generateUniqueRfqItemCode(runner, usedCodes);
+        } else {
+          usedCodes.add(finalCode);
+        }
+      }
+      nextRow.item_code = finalCode;
+      nextRow.generated_item_code = true;
+    } else {
+      nextRow.item_code = normalizedCode;
+    }
+    nextRows.push(nextRow);
+  }
+  return { rows: nextRows, generatedCount };
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function nextSortDir(currentSort, currentDir, column) {
+  if (currentSort !== column) return "asc";
+  return currentDir === "asc" ? "desc" : "asc";
+}
+
+function sortLabel(label, currentSort, currentDir, column) {
+  if (currentSort !== column) return label;
+  return `${label} ${currentDir === "asc" ? "↑" : "↓"}`;
+}
+
+async function syncLegacyVendorContact(client, vendorId) {
+  const vendor = (await client.query("select contact_name, email, phone from vendors where id = $1", [vendorId])).rows[0];
+  if (!vendor) return;
+  const contactName = String(vendor.contact_name || "").trim();
+  const email = normalizeEmail(vendor.email);
+  const phone = normalizePhone(vendor.phone);
+  if (!contactName && !email && !phone) return;
+  const existing = (await client.query(`
+    select id
+    from vendor_contacts
+    where vendor_id = $1
+      and coalesce(contact_name, '') = $2
+      and coalesce(email, '') = $3
+      and coalesce(phone, '') = $4
+  `, [vendorId, contactName, email, phone])).rows[0];
+  if (existing) {
+    await client.query("update vendor_contacts set is_primary = true where id = $1", [existing.id]);
+    return;
+  }
+  await client.query(`
+    insert into vendor_contacts (vendor_id, contact_name, email, phone, is_primary)
+    values ($1, $2, $3, $4, true)
+  `, [vendorId, contactName || "Primary Contact", email, phone]);
+}
+
 function parseUploadedRows(file, pastedText) {
+  const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (file?.buffer?.length) {
-    if ((file.originalname || "").toLowerCase().endsWith(".xlsx")) {
+    const lowerName = String(file.originalname || "").toLowerCase();
+    if (/\.(xlsx|xlsm|xlsb|xls)$/.test(lowerName)) {
       const workbook = XLSX.read(file.buffer, { type: "buffer" });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
-      return rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [String(key).trim().toLowerCase(), String(value ?? "").trim()])));
+      return rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeHeader(key), String(value ?? "").trim()])));
     }
     pastedText = file.buffer.toString("utf8");
   }
   if (!pastedText?.trim()) return [];
-  const lines = pastedText.trim().split(/\r?\n/);
-  const headers = lines.shift().split(",").map((cell) => cell.trim().toLowerCase());
-  return lines.filter((line) => line.trim()).map((line) => {
-    const values = line.split(",");
-    return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").trim()]));
+  const rows = parseDelimitedTextRows(pastedText.trim(), ",");
+  if (!rows.length) return [];
+  const headers = rows.shift().map((cell) => normalizeHeader(cell));
+  return rows.map((values) => {
+    return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").replace(/\s*\r?\n\s*/g, " ").trim()]));
   });
+}
+
+function splitCombinedDimensionValue(value) {
+  const text = String(value || "").trim();
+  if (!text) return { primary: "", secondary: "" };
+  const parts = text
+    .replace(/×/g, "x")
+    .split(/\s*x\s*/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return {
+    primary: parts[0] || "",
+    secondary: parts.length > 1 ? parts.slice(1).join(" x ") : ""
+  };
+}
+
+function parseRfqPasteRows(pastedText) {
+  const text = String(pastedText || "").trim();
+  if (!text) return [];
+  const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const looksNumeric = (value) => Number.isFinite(parseQtyValue(value, NaN));
+  const looksLikeUom = (value) => /[a-z]/i.test(String(value || "").trim()) && !looksNumeric(value);
+  const delimiter = text.includes("\t") ? "\t" : ",";
+  const rows = parseDelimitedTextRows(text, delimiter)
+    .map((values) => values.map((cell) => String(cell ?? "").replace(/\s*\r?\n\s*/g, " ").trim()))
+    .filter((values) => values.some((cell) => cell));
+  if (!rows.length) return [];
+  const firstValues = rows[0];
+  const firstHeaders = firstValues.map((cell) => normalizeHeader(cell));
+  const aliases = {
+    item_code: new Set(["ident", "ident_code", "item_code", "item", "code", "item_no", "item_number"]),
+    description: new Set(["description", "desc", "material_description"]),
+    size: new Set(["size", "sizes"]),
+    size_1: new Set(["size_1", "size1", "primary_size"]),
+    size_2: new Set(["size_2", "size2", "secondary_size"]),
+    thk: new Set(["thk", "thickness", "thick", "wall"]),
+    thk_1: new Set(["thk_1", "thk1", "thickness_1", "wall_1"]),
+    thk_2: new Set(["thk_2", "thk2", "thickness_2", "wall_2"]),
+    qty: new Set(["qty", "quantity"]),
+    uom: new Set(["uom", "unit", "unit_of_measure"])
+  };
+  const hasHeader = firstHeaders.some((header) => aliases.item_code.has(header))
+    && firstHeaders.some((header) => aliases.qty.has(header));
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const headerMap = hasHeader ? Object.fromEntries(firstHeaders.map((header, index) => [header, index])) : {};
+  const pickHeaderValue = (values, candidates) => {
+    for (const candidate of candidates) {
+      const idx = headerMap[candidate];
+      if (idx !== undefined && idx >= 0) return values[idx] || "";
+    }
+    return "";
+  };
+  const pickHeaderIndex = (candidates) => {
+    for (const candidate of candidates) {
+      const idx = headerMap[candidate];
+      if (idx !== undefined && idx >= 0) return idx;
+    }
+    return -1;
+  };
+  return dataRows.map((values) => {
+    let itemCode = "";
+    let description = "";
+    let sizeText = "";
+    let size1Text = "";
+    let size2Text = "";
+    let thkText = "";
+    let thk1Text = "";
+    let thk2Text = "";
+    let qty = "";
+    let uom = "";
+    if (hasHeader) {
+      itemCode = pickHeaderValue(values, ["ident", "ident_code", "item_code", "item", "code", "item_no", "item_number"]);
+      description = pickHeaderValue(values, ["description", "desc", "material_description"]);
+      sizeText = pickHeaderValue(values, ["size", "sizes"]);
+      size1Text = pickHeaderValue(values, ["size_1", "size1", "primary_size"]);
+      size2Text = pickHeaderValue(values, ["size_2", "size2", "secondary_size"]);
+      thkText = pickHeaderValue(values, ["thk", "thickness", "thick", "wall"]);
+      thk1Text = pickHeaderValue(values, ["thk_1", "thk1", "thickness_1", "wall_1"]);
+      thk2Text = pickHeaderValue(values, ["thk_2", "thk2", "thickness_2", "wall_2"]);
+      qty = pickHeaderValue(values, ["qty", "quantity"]);
+      uom = pickHeaderValue(values, ["uom", "unit", "unit_of_measure"]);
+    } else {
+      itemCode = values[0] || "";
+      description = values[1] || "";
+      if (values.length >= 7) {
+        size1Text = values[2] || "";
+        size2Text = values[3] || "";
+        thkText = values[4] || "";
+        qty = values[5] || "";
+        uom = values[6] || "";
+      } else if (values.length === 6 && looksNumeric(values[4]) && looksLikeUom(values[5])) {
+        size1Text = values[2] || "";
+        const fourth = values[3] || "";
+        if (/[a-z]/i.test(fourth) && !looksNumeric(fourth)) {
+          thkText = fourth;
+        } else {
+          size2Text = fourth;
+        }
+        qty = values[4] || "";
+        uom = values[5] || "";
+      } else if (values.length === 5 && looksNumeric(values[3]) && looksLikeUom(values[4])) {
+        size1Text = values[2] || "";
+        qty = values[3] || "";
+        uom = values[4] || "";
+      } else {
+        sizeText = values[2] || "";
+        thkText = values[3] || "";
+        qty = values[4] || "";
+        uom = values[5] || "";
+      }
+    }
+    if (hasHeader && !String(qty || "").trim()) {
+      const uomIndex = pickHeaderIndex(["uom", "unit", "unit_of_measure"]);
+      if (uomIndex > 0 && String(values[uomIndex - 1] || "").trim()) {
+        qty = String(values[uomIndex - 1] || "").trim();
+      }
+    }
+    const size = size1Text || size2Text
+      ? { primary: size1Text, secondary: size2Text }
+      : splitCombinedDimensionValue(sizeText);
+    const thk = thk1Text || thk2Text
+      ? { primary: thk1Text, secondary: thk2Text }
+      : splitCombinedDimensionValue(thkText);
+    return {
+      item_code: itemCode,
+      description,
+      size_1: size.primary,
+      size_2: size.secondary,
+      thk_1: thk.primary,
+      thk_2: thk.secondary,
+      qty,
+      material_type: "",
+      uom
+    };
+  }).filter((row) => String(row.item_code || "").trim() || String(row.description || "").trim() || String(row.qty || "").trim());
+}
+
+function getRfqPasteRowIssues(row, { matched = false } = {}) {
+  const issues = [];
+  const itemCode = String(row.item_code || "").trim();
+  const description = String(row.description || "").trim();
+  const qty = parseQtyValue(row.qty, NaN);
+  const uom = String(row.uom || "").trim();
+  if (!itemCode) issues.push("Ident is required");
+  if (!matched && !description) issues.push("Description is required");
+  if (!Number.isFinite(qty) || qty <= 0) issues.push("Qty is required");
+  if (!matched && !uom) issues.push("UOM is required");
+  return issues;
+}
+
+function normalizePoImportRow(row) {
+  const aliases = {
+    po_no: ["po_no", "po_number", "po", "po_", "purchase_order", "purchase_order_number"],
+    po_line: ["po_line", "po_line_no", "po_line_number", "line_no", "line_number", "line"],
+    vendor_name: ["vendor_name", "vendor", "supplier", "supplier_name", "name"],
+    item_code: ["item_code", "item", "item_no", "item_number", "material_code", "material_item"],
+    description: ["description", "item_description", "material_description", "desc"],
+    material_type: ["material_type", "type", "item_type"],
+    uom: ["uom", "unit", "unit_of_measure"],
+    size_1: ["size_1", "size1", "primary_size"],
+    size_2: ["size_2", "size2", "secondary_size"],
+    thk_1: ["thk_1", "thk1", "thickness_1", "wall_1"],
+    thk_2: ["thk_2", "thk2", "thickness_2", "wall_2"],
+    qty_ordered: ["qty_ordered", "qty", "quantity", "ordered_qty", "order_qty"],
+    unit_price: ["unit_price", "price", "unitcost", "unit_cost", "cost"],
+    vendor_contact: ["vendor_contact", "contact_name", "contact", "vendor_reference"],
+    freight_terms: ["freight_terms", "freight", "vendor_terms_conditions"],
+    ship_to: ["ship_to", "shipto"],
+    bill_to: ["bill_to", "billto", "invoice_account"],
+    po_description: ["po_description", "purchase_order_description", "project_name", "project"],
+    notes: ["notes", "comments", "remarks", "purchase_type", "purchase_agreement_id", "vendor_account"],
+    buyer_name: ["buyer_name", "buyer", "purchased_by"],
+    status: ["status", "po_status"],
+    approval_status: ["approval_status"]
+  };
+  const normalized = {};
+  for (const [target, keys] of Object.entries(aliases)) {
+    const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] || "").trim() !== "");
+    normalized[target] = sourceKey ? String(row[sourceKey] || "").trim() : "";
+  }
+  const normalizedNames = normalizeWarehouseLocationValues(normalized.warehouse_name, normalized.location_name);
+  normalized.warehouse_name = normalizedNames.warehouse;
+  normalized.location_name = normalizedNames.location;
+  return normalized;
+}
+
+function parseManualPoLineRows(body, poId, poNo) {
+  const rowCount = Math.max(1, Math.min(50, Number(body.row_count || 12) || 12));
+  const rows = [];
+  for (let index = 0; index < rowCount; index += 1) {
+    const rawRow = {
+      po_line: body[`po_line_${index}`],
+      item_code: body[`item_code_${index}`],
+      description: body[`description_${index}`],
+      material_type: body[`material_type_${index}`],
+      uom: body[`uom_${index}`],
+      size_1: body[`size_1_${index}`],
+      size_2: body[`size_2_${index}`],
+      thk_1: body[`thk_1_${index}`],
+      thk_2: body[`thk_2_${index}`],
+      qty_ordered: body[`qty_ordered_${index}`],
+      unit_price: body[`unit_price_${index}`]
+    };
+    if (!Object.values(rawRow).some((value) => String(value || "").trim() !== "")) continue;
+    const row = normalizePoImportRow({
+      po_no: poNo,
+      ...rawRow
+    });
+    row.po_id = poId;
+    rows.push(row);
+  }
+  return rows;
+}
+
+function normalizeBomImportRow(row) {
+  const text = (...values) => {
+    for (const value of values) {
+      const normalized = String(value ?? "").trim();
+      if (normalized) return normalized;
+    }
+    return "";
+  };
+  return {
+    line_no: text(row.line_no, row.line, row.line_number),
+    item_code: text(row.item_code, row.ident, row.ident_code, row.item),
+    description: text(row.description, row.abbrev_description, row.abbrev_desc),
+    material_type: text(row.material_type, row.category, row.type, "misc"),
+    uom: text(row.uom, row.unit, row.unit_of_measure, "EA"),
+    spec: text(row.spec),
+    commodity_code: text(row.commodity_code, row.commodity),
+    tag_number: text(row.tag_number, row.tag),
+    iwp_no: text(row.iwp_no, row.iwp),
+    iso_no: text(row.iso_no, row.iso),
+    size_1: text(row.size_1, row.size1),
+    size_2: text(row.size_2, row.size2),
+    thk_1: text(row.thk_1, row.thk1),
+    thk_2: text(row.thk_2, row.thk2),
+    qty_required: text(row.qty_required, row.qty, row.quantity, row.bom_qty),
+    notes: text(row.notes, row.note, row.remarks)
+  };
+}
+
+function normalizeVendorFmrRequestLine(row) {
+  const aliases = {
+    po_number: ["po", "po_number"],
+    vendor_name: ["supplier", "vendor", "vendor_name"],
+    item_code: ["item_code", "item"],
+    abbrev_description: ["abbrev_description", "description", "abbrev_desc"],
+    po_line: ["line", "po_line"],
+    sub_line: ["sub", "sub_line"],
+    qty_ordered: ["ord", "ordered_qty", "qty_ordered"],
+    qty_received: ["rcvd", "received_qty", "qty_received"],
+    mrr_number: ["mrr_number"],
+    issued_date: ["issued", "issued_date"],
+    received_date: ["date_rcvd", "received_date"],
+    srn_number: ["srn", "srn_number", "shipment_number", "shipment_no"]
+  };
+  const normalized = {};
+  for (const [target, keys] of Object.entries(aliases)) {
+    const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] ?? "").trim() !== "");
+    const raw = sourceKey ? row[sourceKey] : "";
+    if (target === "qty_ordered" || target === "qty_received") normalized[target] = parseQtyValue(raw);
+    else normalized[target] = textValue(raw);
+  }
+  normalized.crate_number = textValue(row.crate_number || row.container_no || row.package_number || "");
+  return normalized;
+}
+
+function parseVendorFmrRequestWorkbook(fileBuffer) {
+  const workbook = XLSX.read(fileBuffer, { type: "buffer", cellDates: true });
+  const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+  if (!firstSheet) return [];
+  const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "", raw: false });
+  return rows
+    .map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeWorkbookHeader(key), value])))
+    .map(normalizeVendorFmrRequestLine)
+    .filter((row) => row.po_number && row.item_code && row.abbrev_description);
+}
+
+function num(value, fallback = 0) {
+  const parsed = Number(String(value ?? "").replace(/[$,]/g, "").trim());
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function quoteCell(unitPrice, leadDays) {
+  return `$${Number(unitPrice).toFixed(2)} | ${num(leadDays)}d`;
+}
+
+function formatCurrencyInput(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return "";
+  const parsed = Number(String(value).replace(/[$,]/g, "").trim());
+  return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : String(value).trim();
+}
+
+function safeBlobPathSegment(value, fallback = "file") {
+  const cleaned = String(value ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120);
+  return cleaned || fallback;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function combineRfqDimension(value1, value2) {
+  const parts = [textValue(value1), textValue(value2)].filter(Boolean);
+  return parts.join(" x ");
+}
+
+function buildRfqAxProductName(item) {
+  const productParts = [textValue(item.description)];
+  const sizeText = combineRfqDimension(item.size_1, item.size_2);
+  const thkText = combineRfqDimension(item.thk_1, item.thk_2);
+  if (sizeText) productParts.push(sizeText);
+  if (thkText) productParts.push(thkText);
+  if (textValue(item.item_code)) productParts.push(textValue(item.item_code));
+  return productParts.filter(Boolean).join(" ");
+}
+
+function clearWorksheetCellValue(cell) {
+  if (!cell) return;
+  delete cell.v;
+  delete cell.w;
+  delete cell.t;
+  delete cell.f;
+  delete cell.r;
+  delete cell.h;
+}
+
+function cloneWorksheetRowLayout(worksheet, targetRowNumber, templateRowNumber, range) {
+  if (!worksheet["!rows"]) worksheet["!rows"] = [];
+  const targetRowIndex = Number(targetRowNumber) - 1;
+  const templateRowIndex = Number(templateRowNumber) - 1;
+  if (!worksheet["!rows"][targetRowIndex] && worksheet["!rows"][templateRowIndex]) {
+    worksheet["!rows"][targetRowIndex] = { ...worksheet["!rows"][templateRowIndex] };
+  }
+  for (let col = range.s.c; col <= range.e.c; col += 1) {
+    const targetRef = XLSX.utils.encode_cell({ r: targetRowIndex, c: col });
+    const templateRef = XLSX.utils.encode_cell({ r: templateRowIndex, c: col });
+    const templateCell = worksheet[templateRef];
+    if (!worksheet[targetRef]) {
+      worksheet[targetRef] = {};
+      if (templateCell && templateCell.s !== undefined) worksheet[targetRef].s = templateCell.s;
+      if (templateCell && templateCell.z !== undefined) worksheet[targetRef].z = templateCell.z;
+    }
+    clearWorksheetCellValue(worksheet[targetRef]);
+  }
+}
+
+function writeWorksheetValue(worksheet, rowNumber, colIndex, value, templateRowNumber = 2) {
+  const rowIndex = Number(rowNumber) - 1;
+  const ref = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+  const templateRef = XLSX.utils.encode_cell({ r: Number(templateRowNumber) - 1, c: colIndex });
+  const templateCell = worksheet[templateRef];
+  if (!worksheet[ref]) {
+    worksheet[ref] = {};
+    if (templateCell && templateCell.s !== undefined) worksheet[ref].s = templateCell.s;
+    if (templateCell && templateCell.z !== undefined) worksheet[ref].z = templateCell.z;
+  }
+  const cell = worksheet[ref];
+  clearWorksheetCellValue(cell);
+  if (value === undefined || value === null || value === "") return;
+  if (typeof value === "number") {
+    cell.t = "n";
+    cell.v = value;
+    return;
+  }
+  cell.t = "s";
+  cell.v = String(value);
+}
+
+function getWorksheetHeaderColumnMap(worksheet, headerRowNumber = 1) {
+  const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1");
+  const headerRowIndex = Number(headerRowNumber) - 1;
+  const headerMap = new Map();
+  for (let col = range.s.c; col <= range.e.c; col += 1) {
+    const ref = XLSX.utils.encode_cell({ r: headerRowIndex, c: col });
+    const headerValue = textValue(worksheet[ref]?.v);
+    if (!headerValue) continue;
+    headerMap.set(normalizeWorkbookHeader(headerValue), col);
+  }
+  return headerMap;
+}
+
+async function getNextRfqLineNumber(client, rfqId) {
+  const result = await client.query(`
+    select coalesce(max(case when coalesce(po_line, '') ~ '^[0-9]+$' then po_line::integer else null end), 0) + 1 as next_line
+    from rfq_items
+    where rfq_id = $1
+  `, [rfqId]);
+  return String(result.rows[0]?.next_line || 1);
+}
+
+function validatePasswordRules(password) {
+  const value = String(password || "");
+  if (value.length < 10) return "Password must be at least 10 characters.";
+  if (!/[A-Z]/.test(value)) return "Password must include at least one uppercase letter.";
+  if (!/[a-z]/.test(value)) return "Password must include at least one lowercase letter.";
+  if (!/[0-9]/.test(value)) return "Password must include at least one number.";
+  return "";
+}
+
+function asyncHandler(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+function getHttpErrorStatus(error) {
+  if (Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode < 600) return error.statusCode;
+  const message = String(error?.message || "").toLowerCase();
+  if (/(required|must be|choose|select|invalid|exceeds|cannot|already|only .* can|no .* found|not found|refresh and try again|at least one|greater than zero|before saving)/i.test(message)) {
+    return 400;
+  }
+  return 500;
+}
+
+function landingPage() {
+  return `<!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PRF Material Control</title>
+    <style>
+      body { margin: 0; font-family: "Segoe UI", Tahoma, Verdana, sans-serif; background: linear-gradient(180deg, #dfe3e8 0%, #c7d0da 100%); color: #16212b; }
+      .hero { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+      .panel { width: min(760px, 100%); background: #fff; border: 1px solid #798693; padding: 24px; text-align: center; }
+      .logo { max-width: 336px; width: 100%; height: auto; margin-bottom: 20px; }
+      h1 { margin: 0 0 8px; font-size: 34px; }
+      p { margin: 0 0 20px; color: #4d5b69; }
+      .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+      .btn { display: inline-flex; align-items: center; justify-content: center; min-width: 150px; height: 40px; padding: 0 14px; text-decoration: none; font-weight: 700; border: 1px solid rgba(0,0,0,.15); }
+      .btn-primary { background: linear-gradient(180deg, #4278a9 0%, #2d5d87 100%); color: #fff; }
+      .btn-secondary { background: linear-gradient(180deg, #6a7681 0%, #4b5966 100%); color: #fff; }
+    </style>
+  </head>
+  <body>
+    <div class="hero">
+      <div class="panel">
+        <img class="logo" src="/public/prf-logo.png" alt="PRF Logo" />
+        <h1>Material Control</h1>
+        <p>Procurement, receiving, inventory, and field issue tracking for Performance Contractors.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="/login">Sign In</a>
+          <a class="btn btn-secondary" href="/request-access">Request Access</a>
+        </div>
+      </div>
+    </div>
+  </body>
+  </html>`;
+}
+
+function requestAccessPage(error = "", success = "") {
+  return layout("Request Access", `
+    ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
+    ${success ? `<div class="card"><strong>${esc(success)}</strong></div>` : ""}
+    <div class="card">
+      <h2>Request Access</h2>
+      <p class="muted">Enter your email address and an administrator will review the request, assign a username, and create a temporary password.</p>
+      <form method="post" action="/request-access" class="stack">
+        <div class="grid">
+          <div><label>Email Address</label><input type="email" name="email" required /></div>
+        </div>
+        <div class="actions"><button type="submit">Submit Request</button><a class="btn btn-secondary" href="/">Back</a></div>
+      </form>
+    </div>
+  `, null);
+}
+
+const rfqItemColumns = ["po_line", "item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
+
+async function upsertMaterialItem(client, row, jobId) {
+  const itemCode = String(row.item_code || "").trim();
+  const description = String(row.description || "").trim();
+  const materialType = String(row.material_type || "").trim();
+  const uom = String(row.uom || "").trim();
+  if (!itemCode) throw new Error("Item code is required.");
+  const existing = await client.query("select id, description, material_type, uom from material_items where job_id = $1 and item_code = $2", [jobId, itemCode]);
+  if (existing.rows[0]) {
+    const current = existing.rows[0];
+    await client.query(
+      "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
+      [current.id, description || current.description, materialType || current.material_type, uom || current.uom]
+    );
+    return current.id;
+  }
+  const insert = await client.query(
+    "insert into material_items (job_id, item_code, description, material_type, uom) values ($1, $2, $3, $4, $5) returning id",
+    [jobId, itemCode, description || itemCode, materialType || "misc", uom || "EA"]
+  );
+  return insert.rows[0].id;
+}
+
+async function findOrCreateVendorByName(client, vendorName, jobId) {
+  const normalized = String(vendorName || "").trim();
+  if (!normalized) throw new Error("Vendor name is required.");
+  const existing = (await client.query("select id from vendors where lower(name) = lower($1) limit 1", [normalized])).rows[0];
+  if (existing) {
+    await client.query("update vendors set is_active = true where id = $1", [existing.id]);
+    return existing.id;
+  }
+  const insert = await client.query(`
+    insert into vendors (job_id, name, contact_name, website, email, phone, categories, is_active)
+    values (null, $1, '', '', '', '', '', true)
+    returning id
+  `, [normalized]);
+  return insert.rows[0].id;
+}
+
+async function upsertRfqItemRow(client, rfqId, row, jobId) {
+  const itemCode = String(row.item_code || "").trim();
+  const requestedLine = String(row.po_line || row.line_no || row.line || "").trim();
+  const qty = parseQtyValue(row.qty);
+  if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
+  if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
+  const materialItemId = await upsertMaterialItem(client, row, jobId);
+  const existingItem = await client.query(`
+    select id, coalesce(po_line, '') as po_line
+    from rfq_items
+    where rfq_id = $1 and material_item_id = $2
+      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
+      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
+  `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || ""]);
+  if (existingItem.rows[0]) {
+    const poLine = requestedLine || existingItem.rows[0].po_line || await getNextRfqLineNumber(client, rfqId);
+    await client.query(`
+      update rfq_items
+      set po_line = $2, spec = $3, commodity_code = $4, tag_number = $5, qty = $6, notes = $7, updated_at = now()
+      where id = $1
+    `, [existingItem.rows[0].id, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
+    return { status: "updated" };
+  }
+  const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
+  await client.query(`
+    insert into rfq_items (job_id, rfq_id, material_item_id, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+  `, [jobId, rfqId, materialItemId, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
+  return { status: "inserted" };
+}
+
+async function upsertPurchaseOrderRow(client, row, jobId) {
+  const poNo = String(row.po_no || row.po_number || "").trim();
+  const vendorName = String(row.vendor_name || row.vendor || "").trim();
+  const itemCode = String(row.item_code || "").trim();
+  const qtyOrdered = parseQtyValue(row.qty_ordered || row.qty || row.quantity);
+  const unitPrice = num(row.unit_price || row.price || row.unitcost || row.unit_cost);
+  const poLine = String(row.po_line || row.line_no || row.line || "").trim();
+  if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
+  if (!vendorName) return { status: "skipped", errorCode: "missing_vendor", message: "Vendor name is required." };
+  if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
+  if (qtyOrdered <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty ordered must be greater than zero." };
+  if (unitPrice < 0) return { status: "skipped", errorCode: "invalid_unit_price", message: "Unit price cannot be negative." };
+
+  const vendorId = await findOrCreateVendorByName(client, vendorName, jobId);
+  const materialItemId = await upsertMaterialItem(client, {
+    item_code: itemCode,
+    description: row.description || row.item_description || itemCode,
+    material_type: row.material_type || row.type || "misc",
+    uom: row.uom || row.unit || "EA"
+  }, jobId);
+
+  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
+  let poId;
+  let headerStatus = "updated";
+  if (poRow) {
+    poId = poRow.id;
+    await client.query(`
+      update purchase_orders
+      set vendor_id = $2,
+          vendor_contact = $3,
+          freight_terms = $4,
+          ship_to = $5,
+          bill_to = $6,
+          description = $7,
+          notes = $8,
+          buyer_name = $9,
+          status = $10,
+          updated_at = now()
+      where id = $1
+    `, [
+      poId,
+      vendorId,
+      String(row.vendor_contact || row.contact_name || "").trim(),
+      String(row.freight_terms || "").trim(),
+      String(row.ship_to || "").trim(),
+      String(row.bill_to || "").trim(),
+      String(row.po_description || "").trim(),
+      String(row.notes || "").trim(),
+      String(row.buyer_name || row.buyer || "").trim(),
+      String(row.status || "OPEN").trim() || "OPEN"
+    ]);
+  } else {
+    const insertPo = await client.query(`
+      insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, description, notes, buyer_name, status, updated_at)
+      values ($1, $2, $3, null, $4, $5, $6, $7, $8, $9, $10, $11, now())
+      returning id
+    `, [
+      jobId,
+      poNo,
+      vendorId,
+      String(row.vendor_contact || row.contact_name || "").trim(),
+      String(row.freight_terms || "").trim(),
+      String(row.ship_to || "").trim(),
+      String(row.bill_to || "").trim(),
+      String(row.po_description || "").trim(),
+      String(row.notes || "").trim(),
+      String(row.buyer_name || row.buyer || "").trim(),
+      String(row.status || "OPEN").trim() || "OPEN"
+    ]);
+    poId = insertPo.rows[0].id;
+    headerStatus = "inserted";
+  }
+
+  const size1 = String(row.size_1 || "").trim();
+  const size2 = String(row.size_2 || "").trim();
+  const thk1 = String(row.thk_1 || "").trim();
+  const thk2 = String(row.thk_2 || "").trim();
+  const existingLine = (await client.query(`
+    select id
+    from po_lines
+    where po_id = $1 and material_item_id = $2
+      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
+      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
+    limit 1
+  `, [poId, materialItemId, size1, size2, thk1, thk2])).rows[0];
+  if (existingLine) {
+    await client.query(`
+      update po_lines
+      set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
+      where id = $1
+    `, [existingLine.id, poLine, qtyOrdered, unitPrice, size1, size2, thk1, thk2]);
+    return { status: headerStatus === "inserted" ? "inserted" : "updated" };
+  }
+
+  await client.query(`
+    insert into po_lines (job_id, po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
+    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
+  `, [jobId, poId, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
+  return { status: "inserted" };
+}
+
+async function upsertPurchaseOrderHeaderRow(client, row, jobId) {
+  const poNo = String(row.po_no || row.po_number || "").trim();
+  const vendorName = String(row.vendor_name || row.vendor || "").trim();
+  if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
+  if (!vendorName) return { status: "skipped", errorCode: "missing_vendor", message: "Vendor name is required." };
+
+  const vendorId = await findOrCreateVendorByName(client, vendorName, jobId);
+  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
+  if (poRow) {
+    await client.query(`
+      update purchase_orders
+      set vendor_id = $2,
+          vendor_contact = $3,
+          freight_terms = $4,
+          ship_to = $5,
+          bill_to = $6,
+          description = $7,
+          notes = $8,
+          buyer_name = $9,
+          status = $10,
+          updated_at = now()
+      where id = $1
+    `, [
+      poRow.id,
+      vendorId,
+      String(row.vendor_contact || row.contact_name || "").trim(),
+      String(row.freight_terms || "").trim(),
+      String(row.ship_to || "").trim(),
+      String(row.bill_to || "").trim(),
+      String(row.po_description || "").trim(),
+      String(row.notes || "").trim(),
+      String(row.buyer_name || row.buyer || "").trim(),
+      String(row.status || "OPEN").trim() || "OPEN"
+    ]);
+    return { status: "updated" };
+  }
+
+  await client.query(`
+    insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, vendor_contact, freight_terms, ship_to, bill_to, description, notes, buyer_name, status, updated_at)
+    values ($1, $2, $3, null, $4, $5, $6, $7, $8, $9, $10, $11, now())
+  `, [
+    jobId,
+    poNo,
+    vendorId,
+    String(row.vendor_contact || row.contact_name || "").trim(),
+    String(row.freight_terms || "").trim(),
+    String(row.ship_to || "").trim(),
+    String(row.bill_to || "").trim(),
+    String(row.po_description || "").trim(),
+    String(row.notes || "").trim(),
+    String(row.buyer_name || row.buyer || "").trim(),
+    String(row.status || "OPEN").trim() || "OPEN"
+  ]);
+  return { status: "inserted" };
+}
+
+async function upsertPurchaseOrderLineRow(client, row, jobId) {
+  const poNo = String(row.po_no || row.po_number || "").trim();
+  const itemCode = String(row.item_code || "").trim();
+  const qtyOrdered = parseQtyValue(row.qty_ordered || row.qty || row.quantity);
+  const unitPrice = num(row.unit_price || row.price || row.unitcost || row.unit_cost);
+  const poLine = String(row.po_line || row.line_no || row.line || "").trim();
+  if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
+  if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
+  if (!String(row.description || "").trim()) return { status: "skipped", errorCode: "missing_description", message: "Description is required." };
+  if (qtyOrdered <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty ordered must be greater than zero." };
+  if (unitPrice < 0) return { status: "skipped", errorCode: "invalid_unit_price", message: "Unit price cannot be negative." };
+
+  const poId = Number(row.po_id || 0);
+  const poRow = poId
+    ? (await client.query("select id, job_id from purchase_orders where id = $1 and job_id = $2", [poId, jobId])).rows[0]
+    : (await client.query("select id, job_id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
+  if (!poRow) return { status: "skipped", errorCode: "missing_po_header", message: "PO header not found. Import or create the PO header first." };
+
+  const materialItemId = await upsertMaterialItem(client, {
+    item_code: itemCode,
+    description: row.description || row.item_description || itemCode,
+    material_type: row.material_type || row.type || "misc",
+    uom: row.uom || row.unit || "EA"
+  }, poRow.job_id);
+
+  const size1 = String(row.size_1 || "").trim();
+  const size2 = String(row.size_2 || "").trim();
+  const thk1 = String(row.thk_1 || "").trim();
+  const thk2 = String(row.thk_2 || "").trim();
+  const existingLine = (await client.query(`
+    select id
+    from po_lines
+    where po_id = $1 and material_item_id = $2
+      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
+      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
+    limit 1
+  `, [poRow.id, materialItemId, size1, size2, thk1, thk2])).rows[0];
+  if (existingLine) {
+    await client.query(`
+      update po_lines
+      set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
+      where id = $1
+    `, [existingLine.id, poLine, qtyOrdered, unitPrice, size1, size2, thk1, thk2]);
+    return { status: "updated" };
+  }
+
+  await client.query(`
+    insert into po_lines (job_id, po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
+    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
+  `, [poRow.job_id, poRow.id, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
+  return { status: "inserted" };
+}
+
+async function writeQuoteRevision(client, { rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId = null, createdBy = null, jobId = null }) {
+  await client.query(`
+    insert into quote_revisions (job_id, rfq_item_id, vendor_id, unit_price, lead_days, source_type, source_batch_id, created_by)
+    values ($1, $2, $3, $4, $5, $6, $7, $8)
+  `, [jobId, rfqItemId, vendorId, unitPrice, leadDays, sourceType, sourceBatchId, createdBy]);
+}
+
+async function createImportBatch(client, { entityType, rfqId = null, uploadedBy, filename, jobId = null }) {
+  const result = await client.query(`
+    insert into import_batches (job_id, entity_type, rfq_id, uploaded_by, filename, status)
+    values ($1, $2, $3, $4, $5, 'COMPLETED')
+    returning id
+  `, [jobId, entityType, rfqId, uploadedBy || null, filename || ""]);
+  return result.rows[0].id;
+}
+
+async function updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount, status = "COMPLETED" }) {
+  await client.query(`
+    update import_batches
+    set inserted_count = $2, updated_count = $3, skipped_count = $4, status = $5
+    where id = $1
+  `, [batchId, insertedCount, updatedCount, skippedCount, status]);
+}
+
+async function addImportBatchError(client, batchId, rowNumber, errorCode, message, rawPayload) {
+  await client.query(`
+    insert into import_batch_errors (batch_id, row_number, error_code, message, raw_payload)
+    values ($1, $2, $3, $4, $5::jsonb)
+  `, [batchId, rowNumber, errorCode, message, JSON.stringify(rawPayload || {})]);
 }
 
 function normalizeWorkbookHeader(value) {
@@ -131,6 +2756,62 @@ function textValue(value) {
   if (value === undefined || value === null) return "";
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
   return String(value).trim();
+}
+
+function parseDelimitedTextRows(text, delimiter = ",") {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let inQuotes = false;
+  const source = String(text || "");
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "\"") {
+      if (inQuotes) {
+        if (source[index + 1] === "\"") {
+          cell += "\"";
+          index += 1;
+        } else {
+          const nextChar = source[index + 1];
+          if (nextChar === delimiter || nextChar === "\n" || nextChar === "\r" || nextChar === undefined) {
+            inQuotes = false;
+          } else {
+            cell += "\"";
+          }
+        }
+      } else if (!cell) {
+        inQuotes = true;
+      } else {
+        cell += "\"";
+      }
+      continue;
+    }
+    if (!inQuotes && char === delimiter) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+    if (!inQuotes && (char === "\n" || char === "\r")) {
+      if (char === "\r" && source[index + 1] === "\n") index += 1;
+      row.push(cell);
+      if (row.some((value) => String(value || "").trim())) rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+  row.push(cell);
+  if (row.some((value) => String(value || "").trim())) rows.push(row);
+  return rows;
+}
+
+function firstNonEmptyWorkbookValue(row, ...keys) {
+  for (const key of keys) {
+    const value = textValue(row?.[key]);
+    if (value) return value;
+  }
+  return "";
 }
 
 function numberValue(value) {
@@ -160,22 +2841,1602 @@ function workbookRowsFromSheet(workbook, sheetName, headerRowIndex) {
   return rows;
 }
 
+function firstWorkbookSheetName(workbook) {
+  return Array.isArray(workbook?.SheetNames) && workbook.SheetNames.length > 0
+    ? String(workbook.SheetNames[0] || "").trim()
+    : "";
+}
+
+function workbookRowsFromPreferredSheets(workbook, candidates = [], fallbackHeaderRowIndex = 0) {
+  for (const candidate of candidates) {
+    if (!candidate?.sheetName) continue;
+    const rows = workbookRowsFromSheet(workbook, candidate.sheetName, Number(candidate.headerRowIndex || 0));
+    if (rows.length > 0) return rows;
+  }
+  const fallbackSheetName = firstWorkbookSheetName(workbook);
+  if (!fallbackSheetName) return [];
+  return workbookRowsFromSheet(workbook, fallbackSheetName, fallbackHeaderRowIndex);
+}
+
 function importRowsFromWorkbook(fileBuffer, logType) {
   const workbook = XLSX.read(fileBuffer, { type: "buffer", cellDates: true });
   if (logType === "receiving") {
-    return workbookRowsFromSheet(workbook, workbook.SheetNames.includes("Table_Receiving") ? "Table_Receiving" : "Material Receiving", workbook.SheetNames.includes("Table_Receiving") ? 0 : 1);
+    return workbookRowsFromPreferredSheets(workbook, [
+      { sheetName: "Table_Receiving", headerRowIndex: 0 },
+      { sheetName: "Material Receiving", headerRowIndex: 1 }
+    ], 1);
   }
   if (logType === "mrr") {
-    return workbookRowsFromSheet(workbook, workbook.SheetNames.includes("MRR_Log_Table") ? "MRR_Log_Table" : "MRR Log", workbook.SheetNames.includes("MRR_Log_Table") ? 0 : 1);
+    return workbookRowsFromPreferredSheets(workbook, [
+      { sheetName: "MRR_Log_Table", headerRowIndex: 0 },
+      { sheetName: "MRR Log", headerRowIndex: 1 }
+    ], 1);
   }
   if (logType === "fmr") {
-    return workbookRowsFromSheet(workbook, "FMR Log", 4);
+    return workbookRowsFromPreferredSheets(workbook, [
+      { sheetName: "FMR Log", headerRowIndex: 4 }
+    ], 4);
   }
   throw new Error("Unsupported log type.");
 }
 
 function formatTimestamp(value) {
   return textValue(value).replace("T", " ").replace("Z", "");
+}
+
+function normalizeWarehouseName(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  return text.replace(/\b[a-z]/g, (match) => match.toUpperCase());
+}
+
+function normalizeLocationName(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function normalizeWarehouseLocationValues(warehouseName, locationName) {
+  return {
+    warehouse: normalizeWarehouseName(warehouseName),
+    location: normalizeLocationName(locationName)
+  };
+}
+
+async function saveMaterialLogLookup(client, kind, value, jobId = null) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return;
+  await client.query(`
+    insert into material_log_lookup_values (job_id, kind, value)
+    values ($1, $2, $3)
+    on conflict (job_id, kind, value) do nothing
+  `, [jobId, kind, normalized]);
+}
+
+async function getMaterialLogLookupOptions(kind, jobId = null) {
+  const result = await query(`
+    select value
+    from (
+      select value from material_log_lookup_values where kind = $1 and ($2::bigint is null or job_id = $2)
+      union
+      select name as value from vendors where $1 = 'vendor_name' and coalesce(name, '') <> ''
+      union
+      select po_no as value from purchase_orders where $1 = 'po_number' and coalesce(po_no, '') <> '' and ($2::bigint is null or job_id = $2)
+      union
+      select discipline as value from mrr_logs where $1 = 'discipline' and coalesce(discipline, '') <> '' and ($2::bigint is null or job_id = $2)
+      union
+      select discipline as value from material_receiving_logs where $1 = 'discipline' and coalesce(discipline, '') <> '' and ($2::bigint is null or job_id = $2)
+      union
+      select received_by as value from mrr_logs where $1 = 'received_by' and coalesce(received_by, '') <> '' and ($2::bigint is null or job_id = $2)
+      union
+      select received_by as value from material_receiving_logs where $1 = 'received_by' and coalesce(received_by, '') <> '' and ($2::bigint is null or job_id = $2)
+      union
+      select vendor_name as value from mrr_logs where $1 = 'vendor_name' and coalesce(vendor_name, '') <> '' and ($2::bigint is null or job_id = $2)
+    ) options
+    where coalesce(value, '') <> ''
+    order by value
+  `, [kind, jobId]);
+  return result.rows.map((row) => row.value);
+}
+
+async function getAppPurchaseOrderOptions(jobId = null) {
+  const result = await query(`
+    select po.id, po.po_no, coalesce(po.description, '') as description, coalesce(v.name, '') as vendor_name
+    from purchase_orders po
+    left join vendors v on v.id = po.vendor_id
+    where coalesce(po.po_no, '') <> ''
+      and ($1::bigint is null or po.job_id = $1)
+    order by po.id desc
+  `, [jobId]);
+  return result.rows;
+}
+
+async function getWarehouseOptions(jobId = null) {
+  const result = await query(`
+    select id, name
+    from warehouses
+    where is_active = true
+      and ($1::bigint is null or job_id = $1)
+    order by name
+  `, [jobId]);
+  const seen = new Set();
+  return result.rows
+    .map((row) => ({ ...row, name: normalizeWarehouseName(row.name) }))
+    .filter((row) => {
+      const key = row.name.toLowerCase();
+      if (!row.name || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+async function getWarehouseLocationOptions(jobId = null) {
+  const result = await query(`
+    select wl.id, wl.name, wl.warehouse_id, w.name as warehouse_name
+    from warehouse_locations wl
+    join warehouses w on w.id = wl.warehouse_id
+    where wl.is_active = true and w.is_active = true
+      and ($1::bigint is null or wl.job_id = $1)
+    order by w.name, wl.name
+  `, [jobId]);
+  const seen = new Set();
+  return result.rows
+    .map((row) => {
+      const normalizedNames = normalizeWarehouseLocationValues(row.warehouse_name, row.name);
+      return {
+        ...row,
+        warehouse_name: normalizedNames.warehouse,
+        name: normalizedNames.location
+      };
+    })
+    .filter((row) => {
+      const key = `${row.warehouse_name.toLowerCase()}|${row.name.toLowerCase()}`;
+      if (!row.warehouse_name || !row.name || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+async function getWarehouseLocationMap(jobId = null) {
+  const rows = await getWarehouseLocationOptions(jobId);
+  const map = {};
+  for (const row of rows) {
+    if (!map[row.warehouse_name]) map[row.warehouse_name] = [];
+    map[row.warehouse_name].push(row.name);
+  }
+  return map;
+}
+
+function getInventoryByLocationSubquery(jobId = null) {
+  const jobFilterSql = Number.isFinite(Number(jobId)) ? `and r.job_id = ${Number(jobId)}` : "";
+  const adjustmentJobFilterSql = Number.isFinite(Number(jobId)) ? `where job_id = ${Number(jobId)}` : "";
+  return `
+    select
+      coalesce(receipt_inventory.item_code, adjustment_inventory.item_code) as item_code,
+      coalesce(receipt_inventory.description, adjustment_inventory.description) as description,
+      coalesce(receipt_inventory.size_1, adjustment_inventory.size_1) as size_1,
+      coalesce(receipt_inventory.size_2, adjustment_inventory.size_2) as size_2,
+      coalesce(receipt_inventory.thk_1, adjustment_inventory.thk_1) as thk_1,
+      coalesce(receipt_inventory.thk_2, adjustment_inventory.thk_2) as thk_2,
+      coalesce(receipt_inventory.warehouse, adjustment_inventory.warehouse) as warehouse,
+      coalesce(receipt_inventory.location, adjustment_inventory.location) as location,
+      coalesce(receipt_inventory.qty_on_hand, 0) + coalesce(adjustment_inventory.qty_adjustment, 0) as qty_on_hand,
+      coalesce(receipt_inventory.qty_osd, 0) as qty_osd
+    from (
+      select
+        mi.item_code,
+        mi.description,
+        coalesce(pl.size_1, '') as size_1,
+        coalesce(pl.size_2, '') as size_2,
+        coalesce(pl.thk_1, '') as thk_1,
+        coalesce(pl.thk_2, '') as thk_2,
+        initcap(lower(coalesce(r.warehouse, ''))) as warehouse,
+        upper(coalesce(r.location, '')) as location,
+        sum(case when coalesce(r.osd_status, 'OK') = 'OK' then r.qty_received else 0 end) as qty_on_hand,
+        sum(case when coalesce(r.osd_status, 'OK') = 'OK' then 0 else r.qty_received end) as qty_osd
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join material_items mi on mi.id = pl.material_item_id
+      ${jobFilterSql}
+      group by
+        mi.item_code,
+        mi.description,
+        coalesce(pl.size_1, ''),
+        coalesce(pl.size_2, ''),
+        coalesce(pl.thk_1, ''),
+        coalesce(pl.thk_2, ''),
+        initcap(lower(coalesce(r.warehouse, ''))),
+        upper(coalesce(r.location, ''))
+    ) receipt_inventory
+    full outer join (
+      select
+        item_code,
+        description,
+        coalesce(size_1, '') as size_1,
+        coalesce(size_2, '') as size_2,
+        coalesce(thk_1, '') as thk_1,
+        coalesce(thk_2, '') as thk_2,
+        initcap(lower(coalesce(warehouse, ''))) as warehouse,
+        upper(coalesce(location, '')) as location,
+        sum(qty_adjustment) as qty_adjustment
+      from inventory_adjustment_lines
+      ${adjustmentJobFilterSql}
+      group by
+        item_code,
+        description,
+        coalesce(size_1, ''),
+        coalesce(size_2, ''),
+        coalesce(thk_1, ''),
+        coalesce(thk_2, ''),
+        initcap(lower(coalesce(warehouse, ''))),
+        upper(coalesce(location, ''))
+    ) adjustment_inventory
+      on adjustment_inventory.item_code = receipt_inventory.item_code
+     and adjustment_inventory.size_1 = receipt_inventory.size_1
+     and adjustment_inventory.size_2 = receipt_inventory.size_2
+     and adjustment_inventory.thk_1 = receipt_inventory.thk_1
+     and adjustment_inventory.thk_2 = receipt_inventory.thk_2
+     and adjustment_inventory.warehouse = receipt_inventory.warehouse
+     and adjustment_inventory.location = receipt_inventory.location
+  `;
+}
+
+function getInventoryTotalsSubquery(jobId = null) {
+  return `
+    select
+      item_code,
+      coalesce(size_1, '') as size_1,
+      coalesce(size_2, '') as size_2,
+      coalesce(thk_1, '') as thk_1,
+      coalesce(thk_2, '') as thk_2,
+      sum(qty_on_hand) as qty_on_hand
+    from (${getInventoryByLocationSubquery(jobId)}) inventory_by_location
+      group by item_code, coalesce(size_1, ''), coalesce(size_2, ''), coalesce(thk_1, ''), coalesce(thk_2, '')
+  `;
+}
+
+function getInventoryTotalsByItemSubquery(jobId = null) {
+  return `
+    select
+      item_code,
+      max(description) as description,
+      sum(qty_on_hand) as qty_on_hand
+    from (${getInventoryByLocationSubquery(jobId)}) inventory_by_location
+    group by item_code
+  `;
+}
+
+function buildInventoryIssueKey(parts) {
+  return JSON.stringify({
+    item_code: normalizeInventoryKeyPart(parts.item_code),
+    size_1: normalizeInventoryKeyPart(parts.size_1),
+    size_2: normalizeInventoryKeyPart(parts.size_2),
+    thk_1: normalizeInventoryKeyPart(parts.thk_1),
+    thk_2: normalizeInventoryKeyPart(parts.thk_2)
+  });
+}
+
+function buildInventoryItemKey(parts) {
+  return JSON.stringify({
+    item_code: normalizeInventoryKeyPart(parts.item_code)
+  });
+}
+
+function buildInventoryWarehouseItemKey(parts) {
+  return JSON.stringify({
+    item_code: normalizeInventoryKeyPart(parts.item_code),
+    warehouse: normalizeInventoryKeyPart(parts.warehouse),
+    location: normalizeInventoryKeyPart(parts.location)
+  });
+}
+
+async function getIssuedInventoryTotals(runner = { query }, jobId = null) {
+  return (await runner.query(`
+    select *
+    from (
+      select
+        bl.item_code,
+        coalesce(bl.size_1, '') as size_1,
+        coalesce(bl.size_2, '') as size_2,
+        coalesce(bl.thk_1, '') as thk_1,
+        coalesce(bl.thk_2, '') as thk_2,
+        initcap(lower(coalesce(mit.warehouse, ''))) as warehouse,
+        upper(coalesce(mit.location, '')) as location,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+      group by
+        bl.item_code,
+        coalesce(bl.size_1, ''),
+        coalesce(bl.size_2, ''),
+        coalesce(bl.thk_1, ''),
+        coalesce(bl.thk_2, ''),
+        initcap(lower(coalesce(mit.warehouse, ''))),
+        upper(coalesce(mit.location, ''))
+
+      union all
+
+      select
+        bl.item_code,
+        coalesce(bl.size_1, '') as size_1,
+        coalesce(bl.size_2, '') as size_2,
+        coalesce(bl.thk_1, '') as thk_1,
+        coalesce(bl.thk_2, '') as thk_2,
+        '' as warehouse,
+        '' as location,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by
+        bl.item_code,
+        coalesce(bl.size_1, ''),
+        coalesce(bl.size_2, ''),
+        coalesce(bl.thk_1, ''),
+        coalesce(bl.thk_2, '')
+    ) issued_inventory
+  `, [jobId])).rows;
+}
+
+async function getIssuedInventoryTotalsByItemAndLocation(runner = { query }, jobId = null) {
+  return (await runner.query(`
+    select *
+    from (
+      select
+        bl.item_code,
+        initcap(lower(coalesce(mit.warehouse, ''))) as warehouse,
+        upper(coalesce(mit.location, '')) as location,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+      group by
+        bl.item_code,
+        initcap(lower(coalesce(mit.warehouse, ''))),
+        upper(coalesce(mit.location, ''))
+
+      union all
+
+      select
+        bl.item_code,
+        '' as warehouse,
+        '' as location,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by bl.item_code
+    ) issued_inventory
+  `, [jobId])).rows;
+}
+
+async function getIssuedInventoryTotalsByItem(runner = { query }, jobId = null) {
+  return (await runner.query(`
+    select
+      item_code,
+      sum(qty_issued_total) as qty_issued_total
+    from (
+      select
+        bl.item_code,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+      group by bl.item_code
+
+      union all
+
+      select
+        bl.item_code,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and ($1::bigint is null or mr.job_id = $1)
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by bl.item_code
+    ) issued_inventory
+    group by item_code
+  `, [jobId])).rows;
+}
+
+function getIssuedInventoryTotalsByItemSubquery(jobId = null) {
+  const jobFilterSql = Number.isFinite(Number(jobId)) ? `and mr.job_id = ${Number(jobId)}` : "";
+  return `
+    select
+      item_code,
+      sum(qty_issued_total) as qty_issued_total
+    from (
+      select
+        bl.item_code,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        ${jobFilterSql}
+      group by bl.item_code
+
+      union all
+
+      select
+        bl.item_code,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        ${jobFilterSql}
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by bl.item_code
+    ) issued_inventory
+    group by item_code
+  `;
+}
+
+async function getVerifiedAllocatedInventoryTotals(runner = { query }, jobId = null) {
+  return (await runner.query(`
+    select
+      bl.item_code,
+      coalesce(bl.size_1, '') as size_1,
+      coalesce(bl.size_2, '') as size_2,
+      coalesce(bl.thk_1, '') as thk_1,
+      coalesce(bl.thk_2, '') as thk_2,
+      sum(mrl.qty_requested) as qty_allocated_total
+    from material_requisition_lines mrl
+    join material_requisitions mr on mr.id = mrl.requisition_id
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mr.status = 'VERIFIED'
+      and ($1::bigint is null or mr.job_id = $1)
+    group by
+      bl.item_code,
+      coalesce(bl.size_1, ''),
+      coalesce(bl.size_2, ''),
+      coalesce(bl.thk_1, ''),
+      coalesce(bl.thk_2, '')
+  `, [jobId])).rows;
+}
+
+async function getVerifiedAllocatedInventoryTotalsByItem(runner = { query }, jobId = null) {
+  return (await runner.query(`
+    select
+      bl.item_code,
+      sum(mrl.qty_requested) as qty_allocated_total
+    from material_requisition_lines mrl
+    join material_requisitions mr on mr.id = mrl.requisition_id
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mr.status = 'VERIFIED'
+      and ($1::bigint is null or mr.job_id = $1)
+    group by bl.item_code
+  `, [jobId])).rows;
+}
+
+function getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId = null) {
+  const jobFilterSql = Number.isFinite(Number(jobId)) ? `and mr.job_id = ${Number(jobId)}` : "";
+  return `
+    select
+      bl.item_code,
+      sum(mrl.qty_requested) as qty_allocated_total
+    from material_requisition_lines mrl
+    join material_requisitions mr on mr.id = mrl.requisition_id
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mr.status = 'VERIFIED'
+      ${jobFilterSql}
+    group by bl.item_code
+  `;
+}
+
+async function getAvailableInventoryTotalsMap(runner = { query }, jobId = null, { allocatedOffsetMap = null } = {}) {
+  const [inventoryRes, issuedRows, allocatedRows] = await Promise.all([
+    runner.query(getInventoryTotalsSubquery(jobId)),
+    getIssuedInventoryTotals(runner, jobId),
+    getVerifiedAllocatedInventoryTotals(runner, jobId)
+  ]);
+  const availableMap = new Map(
+    inventoryRes.rows.map((row) => [buildInventoryIssueKey(row), parseQtyValue(row.qty_on_hand || 0)])
+  );
+  for (const row of issuedRows) {
+    const key = buildInventoryIssueKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_issued_total || 0), 0));
+  }
+  for (const row of allocatedRows) {
+    const key = buildInventoryIssueKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_allocated_total || 0), 0));
+  }
+  if (allocatedOffsetMap instanceof Map) {
+    for (const [key, qty] of allocatedOffsetMap.entries()) {
+      availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) + parseQtyValue(qty || 0), 0));
+    }
+  }
+  return availableMap;
+}
+
+async function getAvailableInventoryByItemMap(runner = { query }, jobId = null, { allocatedOffsetMap = null } = {}) {
+  const [inventoryRes, issuedRows, allocatedRows] = await Promise.all([
+    runner.query(getInventoryTotalsByItemSubquery(jobId)),
+    getIssuedInventoryTotalsByItem(runner, jobId),
+    getVerifiedAllocatedInventoryTotalsByItem(runner, jobId)
+  ]);
+  const availableMap = new Map(
+    inventoryRes.rows.map((row) => [buildInventoryItemKey(row), parseQtyValue(row.qty_on_hand || 0)])
+  );
+  for (const row of issuedRows) {
+    const key = buildInventoryItemKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_issued_total || 0), 0));
+  }
+  for (const row of allocatedRows) {
+    const key = buildInventoryItemKey(row);
+    availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) - parseQtyValue(row.qty_allocated_total || 0), 0));
+  }
+  if (allocatedOffsetMap instanceof Map) {
+    for (const [key, qty] of allocatedOffsetMap.entries()) {
+      availableMap.set(key, Math.max(parseQtyValue(availableMap.get(key) || 0) + parseQtyValue(qty || 0), 0));
+    }
+  }
+  return availableMap;
+}
+
+function deriveBomPlanningStatus(line, nextQtyIssued) {
+  const qtyRequired = parseQtyValue(line.qty_required || 0);
+  const qtyReceived = parseQtyValue(line.qty_received || 0);
+  const qtyOrdered = parseQtyValue(line.qty_ordered || 0);
+  const qtyAwarded = parseQtyValue(line.qty_awarded || 0);
+  const qtyQuoted = parseQtyValue(line.qty_quoted || 0);
+  if (qtyRequired > 0 && nextQtyIssued >= qtyRequired) return "ISSUED_TO_FIELD";
+  if (qtyReceived >= qtyRequired && qtyRequired > 0) return "RECEIVED";
+  if (qtyReceived > 0) return "PARTIALLY_RECEIVED";
+  if (qtyOrdered > 0) return "ORDERED";
+  if (qtyAwarded > 0) return "AWARDED";
+  if (qtyQuoted > 0) return "ON_RFQ";
+  return "PLANNED";
+}
+
+async function recomputeBomIssuedSummaries(client, jobId) {
+  const issuedRows = (await client.query(`
+    select
+      bom_line_id,
+      sum(qty_issued_total) as qty_issued_total
+    from (
+      select
+        coalesce(mit.source_bom_line_id, mrl.bom_line_id) as bom_line_id,
+        sum(mit.qty_issued) as qty_issued_total
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and mr.job_id = $1
+      group by coalesce(mit.source_bom_line_id, mrl.bom_line_id)
+
+      union all
+
+      select
+        mrl.bom_line_id,
+        sum(mrl.qty_issued) as qty_issued_total
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      where coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and mr.job_id = $1
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+      group by mrl.bom_line_id
+    ) issued_totals
+    group by bom_line_id
+  `, [jobId])).rows;
+  const issuedMap = new Map(issuedRows.map((row) => [Number(row.bom_line_id), parseQtyValue(row.qty_issued_total || 0)]));
+  const bomLines = (await client.query(`
+    select
+      bl.id,
+      bl.qty_required,
+      bl.qty_received,
+      bl.qty_ordered,
+      bl.qty_awarded,
+      bl.qty_quoted,
+      bl.qty_issued,
+      bl.planning_status
+    from bom_lines bl
+    join bom_headers bh on bh.id = bl.bom_id
+    where bh.job_id = $1
+      and coalesce(bh.system_key, '') <> $2
+  `, [jobId, unallocatedBomSystemKey])).rows;
+  for (const line of bomLines) {
+    const nextQtyIssued = parseQtyValue(issuedMap.get(Number(line.id)) || 0);
+    const nextStatus = deriveBomPlanningStatus(line, nextQtyIssued);
+    if (nextQtyIssued !== parseQtyValue(line.qty_issued || 0) || nextStatus !== line.planning_status) {
+      await client.query(`
+        update bom_lines
+        set qty_issued = $2,
+            planning_status = $3,
+            updated_at = now()
+        where id = $1
+      `, [line.id, nextQtyIssued, nextStatus]);
+    }
+  }
+}
+
+function isSystemGeneratedBom(bom) {
+  return Boolean(bom?.is_system_generated) || String(bom?.system_key || "").trim() !== "";
+}
+
+function isUnallocatedBom(bom) {
+  return String(bom?.system_key || "").trim().toUpperCase() === unallocatedBomSystemKey;
+}
+
+function assertBomAllowsManualChanges(bom, actionLabel = "modify") {
+  if (isSystemGeneratedBom(bom)) {
+    throw new Error(`System-generated BOMs cannot be ${actionLabel}d manually.`);
+  }
+}
+
+async function ensureUnallocatedBom(client, jobId) {
+  let bom = (await client.query(`
+    select *
+    from bom_headers
+    where job_id = $1
+      and system_key = $2
+    limit 1
+  `, [jobId, unallocatedBomSystemKey])).rows[0];
+  if (bom) return bom;
+  const job = (await client.query(`
+    select job_number
+    from jobs
+    where id = $1
+  `, [jobId])).rows[0];
+  if (!job) throw new Error("Job not found while building the Un-Allocated BOM.");
+  const bomNo = `${String(job.job_number || "").trim()}-BOM-UNALLOCATED`;
+  try {
+    bom = (await client.query(`
+      insert into bom_headers (
+        job_id, job_number, bom_no, bom_name, bom_type, revision, status,
+        is_system_generated, system_key, description, notes
+      )
+      values ($1, $2, $3, $4, 'misc', '0', 'ACTIVE', true, $5, $6, $7)
+      returning *
+    `, [
+      jobId,
+      String(job.job_number || "").trim(),
+      bomNo,
+      unallocatedBomName,
+      unallocatedBomSystemKey,
+      "System-generated BOM of inventory that is not currently allocated to other BOM demand.",
+      "Maintained automatically from item-code inventory balances."
+    ])).rows[0];
+  } catch (error) {
+    if (String(error.code || "") !== "23505") throw error;
+    bom = (await client.query(`
+      select *
+      from bom_headers
+      where job_id = $1
+        and system_key = $2
+      limit 1
+    `, [jobId, unallocatedBomSystemKey])).rows[0];
+  }
+  return bom;
+}
+
+async function rebuildUnallocatedBom(client, jobId) {
+  const bom = await ensureUnallocatedBom(client, jobId);
+  const [inventoryRows, demandRows, itemRows, existingLines] = await Promise.all([
+    client.query(getInventoryTotalsByItemSubquery(jobId)),
+    client.query(`
+      select
+        bl.item_code,
+        sum(greatest(coalesce(bl.qty_required, 0) - coalesce(bl.qty_issued, 0), 0)) as qty_needed
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bh.job_id = $1
+        and coalesce(bh.system_key, '') <> $2
+      group by bl.item_code
+    `, [jobId, unallocatedBomSystemKey]),
+    client.query(`
+      select item_code, description, material_type, uom
+      from material_items
+      where job_id = $1
+    `, [jobId]),
+    client.query(`
+      select bl.*,
+             coalesce((select count(*) from material_requisition_lines mrl where mrl.bom_line_id = bl.id), 0) as requisition_count
+      from bom_lines bl
+      where bl.bom_id = $1
+      order by bl.id
+    `, [bom.id])
+  ]);
+
+  const inventoryByItem = new Map(inventoryRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), parseQtyValue(row.qty_on_hand || 0)]));
+  const demandByItem = new Map(demandRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), parseQtyValue(row.qty_needed || 0)]));
+  const itemByCode = new Map(itemRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), row]));
+  const existingByItem = new Map(existingLines.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), row]));
+
+  const targetRows = [];
+  for (const [itemCode, qtyOnHand] of inventoryByItem.entries()) {
+    const qtyNeeded = parseQtyValue(demandByItem.get(itemCode) || 0);
+    const qtyUnallocated = Math.max(parseQtyValue(qtyOnHand || 0) - qtyNeeded, 0);
+    if (qtyUnallocated <= 0) continue;
+    const item = itemByCode.get(itemCode) || {};
+    const existing = existingByItem.get(itemCode) || {};
+    targetRows.push({
+      item_code: itemCode,
+      description: String(item.description || existing.description || "").trim() || itemCode,
+      material_type: String(item.material_type || existing.material_type || "misc").trim() || "misc",
+      uom: String(item.uom || existing.uom || "EA").trim() || "EA",
+      qty_required: qtyUnallocated
+    });
+  }
+  targetRows.sort((a, b) => String(a.item_code || "").localeCompare(String(b.item_code || ""), undefined, { numeric: true, sensitivity: "base" }));
+
+  const targetCodes = new Set(targetRows.map((row) => row.item_code));
+  for (let index = 0; index < targetRows.length; index += 1) {
+    const row = targetRows[index];
+    const existing = existingByItem.get(row.item_code);
+    const lineNo = String(index + 1);
+    if (existing) {
+      await client.query(`
+        update bom_lines
+        set line_no = $2,
+            description = $3,
+            material_type = $4,
+            uom = $5,
+            qty_required = $6,
+            qty_received = $6,
+            qty_issued = 0,
+            qty_quoted = 0,
+            qty_awarded = 0,
+            qty_ordered = 0,
+            spec = '',
+            commodity_code = '',
+            tag_number = '',
+            size_1 = '',
+            size_2 = '',
+            thk_1 = '',
+            thk_2 = '',
+            notes = '',
+            planning_status = 'RECEIVED',
+            updated_at = now()
+        where id = $1
+      `, [existing.id, lineNo, row.description, row.material_type, row.uom, row.qty_required]);
+    } else {
+      await client.query(`
+        insert into bom_lines (
+          bom_id, line_no, item_code, description, material_type, uom,
+          qty_required, qty_received, planning_status, notes
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $7, 'RECEIVED', '')
+      `, [bom.id, lineNo, row.item_code, row.description, row.material_type, row.uom, row.qty_required]);
+    }
+  }
+
+  for (const line of existingLines.rows) {
+    const itemCode = normalizeInventoryKeyPart(line.item_code);
+    if (targetCodes.has(itemCode)) continue;
+    if (Number(line.requisition_count || 0) > 0) {
+      await client.query(`
+        update bom_lines
+        set qty_required = 0,
+            qty_received = 0,
+            qty_issued = 0,
+            qty_quoted = 0,
+            qty_awarded = 0,
+            qty_ordered = 0,
+            planning_status = 'CLOSED',
+            updated_at = now()
+        where id = $1
+      `, [line.id]);
+    } else {
+      await client.query("delete from bom_lines where id = $1", [line.id]);
+    }
+  }
+
+  return bom;
+}
+
+async function markBomLinesReceivedFromInventory(client, bomId, jobId = null, userId = null) {
+  const [linesRes, availableMap] = await Promise.all([
+    client.query(`
+      select id, line_no, item_code, coalesce(size_1, '') as size_1, coalesce(size_2, '') as size_2,
+             coalesce(thk_1, '') as thk_1, coalesce(thk_2, '') as thk_2,
+             qty_required, qty_received, qty_issued, planning_status
+      from bom_lines
+      where bom_id = $1
+      order by line_no, id
+    `, [bomId]),
+    getAvailableInventoryByItemMap(client, jobId)
+  ]);
+
+  let updatedCount = 0;
+  let fullyReceivedCount = 0;
+  let alreadyReceivedCount = 0;
+  let untouchedCount = 0;
+
+  for (const line of linesRes.rows) {
+    const qtyRequired = parseQtyValue(line.qty_required || 0);
+    const qtyReceived = parseQtyValue(line.qty_received || 0);
+    const qtyIssued = parseQtyValue(line.qty_issued || 0);
+    const key = buildInventoryItemKey(line);
+    const availableQty = Math.max(parseQtyValue(availableMap.get(key) || 0), 0);
+    const remainingQty = Math.max(qtyRequired - qtyReceived, 0);
+
+    let nextQtyReceived = qtyReceived;
+    let nextStatus = line.planning_status;
+
+    if (qtyRequired > 0 && remainingQty <= 0) {
+      nextQtyReceived = qtyRequired;
+      nextStatus = qtyIssued > 0 ? "ISSUED_TO_FIELD" : "RECEIVED";
+      alreadyReceivedCount += 1;
+    } else if (qtyRequired > 0 && availableQty >= remainingQty) {
+      nextQtyReceived = qtyRequired;
+      nextStatus = qtyIssued > 0 ? "ISSUED_TO_FIELD" : "RECEIVED";
+      availableMap.set(key, parseQtyValue(availableQty - remainingQty));
+      fullyReceivedCount += 1;
+    } else {
+      untouchedCount += 1;
+    }
+
+    if (nextQtyReceived !== qtyReceived || nextStatus !== line.planning_status) {
+      await client.query(`
+        update bom_lines
+        set qty_received = $2,
+            planning_status = $3,
+            updated_at = now()
+        where id = $1
+      `, [line.id, nextQtyReceived, nextStatus]);
+      updatedCount += 1;
+    }
+  }
+
+  await auditLog(client, userId, "one_time_receive", "bom_header", bomId, `updated=${updatedCount}|filled_from_inventory=${fullyReceivedCount}|already_received=${alreadyReceivedCount}|untouched=${untouchedCount}`);
+  return { updatedCount, fullyReceivedCount, alreadyReceivedCount, untouchedCount };
+}
+
+function applyIssuedInventoryToRows(rows, issuedRows = []) {
+  const exactIssuedMap = new Map();
+  const fallbackIssuedMap = new Map();
+  for (const row of issuedRows) {
+    const qtyIssued = parseQtyValue(row.qty_issued_total || 0);
+    if (qtyIssued <= 0) continue;
+    if (String(row.warehouse || "").trim() && String(row.location || "").trim()) {
+      exactIssuedMap.set(buildInventoryWarehouseItemKey(row), qtyIssued);
+    } else {
+      fallbackIssuedMap.set(buildInventoryItemKey(row), qtyIssued);
+    }
+  }
+  const clonedRows = rows.map((row) => ({
+    ...row,
+    qty_on_hand: parseQtyValue(row.qty_on_hand || 0),
+    qty_osd: parseQtyValue(row.qty_osd || 0)
+  }));
+  const exactGroups = new Map();
+  for (const row of clonedRows) {
+    const key = buildInventoryWarehouseItemKey(row);
+    if (!exactGroups.has(key)) exactGroups.set(key, []);
+    exactGroups.get(key).push(row);
+  }
+  for (const [key, group] of exactGroups.entries()) {
+    let issuedRemaining = parseQtyValue(exactIssuedMap.get(key) || 0);
+    if (issuedRemaining <= 0) continue;
+    group.sort((a, b) => (
+      String(a.item_code || "").localeCompare(String(b.item_code || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.size_1 || "").localeCompare(String(b.size_1 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.size_2 || "").localeCompare(String(b.size_2 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.thk_1 || "").localeCompare(String(b.thk_1 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.thk_2 || "").localeCompare(String(b.thk_2 || ""), undefined, { numeric: true, sensitivity: "base" })
+    ));
+    for (const row of group) {
+      if (issuedRemaining <= 0) break;
+      const availableQty = Math.max(parseQtyValue(row.qty_on_hand || 0), 0);
+      const consumed = Math.min(availableQty, issuedRemaining);
+      row.qty_on_hand = parseQtyValue(parseQtyValue(row.qty_on_hand || 0) - consumed, 0);
+      issuedRemaining = parseQtyValue(issuedRemaining - consumed, 0);
+    }
+  }
+  const groupedRows = new Map();
+  for (const row of clonedRows) {
+    const key = buildInventoryItemKey(row);
+    if (!groupedRows.has(key)) groupedRows.set(key, []);
+    groupedRows.get(key).push(row);
+  }
+  for (const [key, group] of groupedRows.entries()) {
+    let issuedRemaining = parseQtyValue(fallbackIssuedMap.get(key) || 0);
+    group.sort((a, b) => (
+      String(a.warehouse || "").localeCompare(String(b.warehouse || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.location || "").localeCompare(String(b.location || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.size_1 || "").localeCompare(String(b.size_1 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.size_2 || "").localeCompare(String(b.size_2 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.thk_1 || "").localeCompare(String(b.thk_1 || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.thk_2 || "").localeCompare(String(b.thk_2 || ""), undefined, { numeric: true, sensitivity: "base" })
+    ));
+    for (const row of group) {
+      if (issuedRemaining <= 0) break;
+      const availableQty = Math.max(parseQtyValue(row.qty_on_hand || 0), 0);
+      const consumed = Math.min(availableQty, issuedRemaining);
+      row.qty_on_hand = parseQtyValue(parseQtyValue(row.qty_on_hand || 0) - consumed, 0);
+      issuedRemaining = parseQtyValue(issuedRemaining - consumed, 0);
+    }
+  }
+  return clonedRows;
+}
+
+async function getCurrentOnHandRows(runner = { query }, { jobId = null, whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
+  const baseRows = (await runner.query(`
+    select inventory_by_location.*
+    from (${getInventoryByLocationSubquery(jobId)}) inventory_by_location
+    ${whereSql}
+    order by ${orderSql}
+  `, params)).rows;
+  const issuedRows = await getIssuedInventoryTotalsByItemAndLocation(runner, jobId);
+  return applyIssuedInventoryToRows(baseRows, issuedRows);
+}
+
+async function getInventoryAuditVisibleRows(runner = { query }, { jobId = null, whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
+  const offsetWhereSql = String(whereSql || "").replace(/\$(\d+)/g, (_, value) => `$${Number(value) + 1}`);
+  const baseRows = (await runner.query(`
+    select inventory_by_location.*
+    from (
+      select
+        coalesce(current_rows.item_code, counted_rows.item_code) as item_code,
+        coalesce(current_rows.description, counted_rows.description) as description,
+        coalesce(current_rows.size_1, counted_rows.size_1) as size_1,
+        coalesce(current_rows.size_2, counted_rows.size_2) as size_2,
+        coalesce(current_rows.thk_1, counted_rows.thk_1) as thk_1,
+        coalesce(current_rows.thk_2, counted_rows.thk_2) as thk_2,
+        coalesce(current_rows.warehouse, counted_rows.warehouse) as warehouse,
+        coalesce(current_rows.location, counted_rows.location) as location,
+        coalesce(current_rows.qty_on_hand, 0) as qty_on_hand,
+        coalesce(current_rows.qty_osd, 0) as qty_osd
+      from (${getInventoryByLocationSubquery(jobId)}) current_rows
+      full outer join (
+        select
+          item_code,
+          description,
+          coalesce(size_1, '') as size_1,
+          coalesce(size_2, '') as size_2,
+          coalesce(thk_1, '') as thk_1,
+          coalesce(thk_2, '') as thk_2,
+          initcap(lower(coalesce(warehouse, ''))) as warehouse,
+          upper(coalesce(location, '')) as location
+        from inventory_audit_counts
+        where ($1::bigint is null or job_id = $1)
+      ) counted_rows
+        on counted_rows.item_code = current_rows.item_code
+       and counted_rows.size_1 = current_rows.size_1
+       and counted_rows.size_2 = current_rows.size_2
+       and counted_rows.thk_1 = current_rows.thk_1
+       and counted_rows.thk_2 = current_rows.thk_2
+       and counted_rows.warehouse = current_rows.warehouse
+       and counted_rows.location = current_rows.location
+    ) inventory_by_location
+    ${offsetWhereSql}
+    order by ${orderSql}
+  `, [jobId, ...params])).rows;
+  const issuedRows = await getIssuedInventoryTotals(runner, jobId);
+  return applyIssuedInventoryToRows(baseRows, issuedRows);
+}
+
+function normalizeWarehouseLocationImportRow(row) {
+  const normalized = {};
+  const aliases = {
+    warehouse_id: ["warehouse_id", "warehouseid"],
+    warehouse_name: ["warehouse_name", "warehouse", "warehouse_code"],
+    location_id: ["location_id", "locationid"],
+    location_name: ["location_name", "location", "bin", "slot"],
+    is_active: ["is_active", "active", "status"]
+  };
+  for (const [target, keys] of Object.entries(aliases)) {
+    const sourceKey = keys.find((key) => row[key] !== undefined && String(row[key] || "").trim() !== "");
+    normalized[target] = sourceKey ? String(row[sourceKey] || "").trim() : "";
+  }
+  return normalized;
+}
+
+function normalizeInventoryTrueUpRow(row) {
+  const aliases = {
+    item_code: ["ident_code", "item_code", "item", "ident"],
+    description: ["description", "column1"],
+    size_1: ["size_1", "size1"],
+    size_2: ["size_2", "size2"],
+    thk_1: ["thk_1", "thk1"],
+    thk_2: ["thk_2", "thk2"],
+    actual_qty: ["in_stock", "instock", "qty_on_hand", "actual_qty", "quantity"],
+    warehouse: ["warehouse"],
+    location: ["location"]
+  };
+  const normalized = {};
+  for (const [target, keys] of Object.entries(aliases)) {
+    const sourceKey = target === "actual_qty"
+      ? keys.find((key) => row[key] !== undefined)
+      : keys.find((key) => row[key] !== undefined && String(row[key] ?? "").trim() !== "");
+    normalized[target] = sourceKey ? row[sourceKey] : "";
+  }
+  const rawActualQty = normalized.actual_qty;
+  const actualQty = String(rawActualQty ?? "").trim() === ""
+    ? 0
+    : parseQtyValue(rawActualQty, NaN);
+  return {
+    item_code: textValue(normalized.item_code),
+    description: textValue(normalized.description),
+    size_1: textValue(normalized.size_1),
+    size_2: textValue(normalized.size_2),
+    thk_1: textValue(normalized.thk_1),
+    thk_2: textValue(normalized.thk_2),
+    warehouse: normalizeWarehouseName(normalized.warehouse),
+    location: normalizeLocationName(normalized.location),
+    actual_qty: actualQty
+  };
+}
+
+function importInventoryTrueUpRows(fileBuffer) {
+  const workbook = XLSX.read(fileBuffer, { type: "buffer", cellDates: true });
+  for (const sheetName of workbook.SheetNames) {
+    const rows = workbookRowsFromSheet(workbook, sheetName, 0);
+    if (rows.length === 0) continue;
+    const sample = rows[0] || {};
+    const headers = new Set(Object.keys(sample));
+    if (!headers.has("warehouse") || !headers.has("location")) continue;
+    if (!(headers.has("in_stock") || headers.has("instock") || headers.has("qty_on_hand") || headers.has("actual_qty"))) continue;
+    if (!(headers.has("ident_code") || headers.has("item_code") || headers.has("ident"))) continue;
+    return rows.map(normalizeInventoryTrueUpRow);
+  }
+  throw new Error("Could not find an inventory sheet with item, warehouse, location, and in-stock columns.");
+}
+
+function normalizeInventoryKeyPart(value) {
+  return String(value || "").trim();
+}
+
+function buildInventoryEntryKey(parts) {
+  return JSON.stringify({
+    item_code: normalizeInventoryKeyPart(parts.item_code),
+    size_1: normalizeInventoryKeyPart(parts.size_1),
+    size_2: normalizeInventoryKeyPart(parts.size_2),
+    thk_1: normalizeInventoryKeyPart(parts.thk_1),
+    thk_2: normalizeInventoryKeyPart(parts.thk_2),
+    warehouse: normalizeInventoryKeyPart(parts.warehouse),
+    location: normalizeInventoryKeyPart(parts.location)
+  });
+}
+
+function setDesiredInventoryRow(targetMap, row, actualQty) {
+  const normalized = {
+    item_code: normalizeInventoryKeyPart(row.item_code),
+    description: String(row.description || "").trim(),
+    size_1: normalizeInventoryKeyPart(row.size_1),
+    size_2: normalizeInventoryKeyPart(row.size_2),
+    thk_1: normalizeInventoryKeyPart(row.thk_1),
+    thk_2: normalizeInventoryKeyPart(row.thk_2),
+    warehouse: normalizeInventoryKeyPart(row.warehouse),
+    location: normalizeInventoryKeyPart(row.location),
+    actual_qty: parseQtyValue(actualQty, 0)
+  };
+  targetMap.set(buildInventoryEntryKey(normalized), normalized);
+}
+
+function addDesiredInventoryRow(targetMap, row, actualQty) {
+  const normalized = {
+    item_code: normalizeInventoryKeyPart(row.item_code),
+    description: String(row.description || "").trim(),
+    size_1: normalizeInventoryKeyPart(row.size_1),
+    size_2: normalizeInventoryKeyPart(row.size_2),
+    thk_1: normalizeInventoryKeyPart(row.thk_1),
+    thk_2: normalizeInventoryKeyPart(row.thk_2),
+    warehouse: normalizeInventoryKeyPart(row.warehouse),
+    location: normalizeInventoryKeyPart(row.location)
+  };
+  const key = buildInventoryEntryKey(normalized);
+  const current = targetMap.get(key);
+  const nextQty = parseQtyValue((current?.actual_qty || 0) + actualQty, 0);
+  targetMap.set(key, {
+    ...normalized,
+    description: normalized.description || current?.description || "",
+    actual_qty: nextQty
+  });
+}
+
+function parseImportActiveFlag(value, fallback = true) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return fallback;
+  if (["true", "yes", "y", "1", "active"].includes(text)) return true;
+  if (["false", "no", "n", "0", "inactive"].includes(text)) return false;
+  return fallback;
+}
+
+async function assertValidWarehouseLocation(client, warehouseName, locationName, jobId = null) {
+  const normalizedNames = normalizeWarehouseLocationValues(warehouseName, locationName);
+  const warehouse = normalizedNames.warehouse;
+  const location = normalizedNames.location;
+  if (!warehouse) throw new Error("Warehouse is required.");
+  if (!location) throw new Error("Location is required.");
+  const match = (await client.query(`
+    select wl.id
+    from warehouse_locations wl
+    join warehouses w on w.id = wl.warehouse_id
+    where w.is_active = true
+      and wl.is_active = true
+      and ($3::bigint is null or wl.job_id = $3)
+      and lower(w.name) = lower($1)
+      and lower(wl.name) = lower($2)
+    limit 1
+  `, [warehouse, location, jobId])).rows[0];
+  if (!match) throw new Error("Select a valid location for the chosen warehouse.");
+}
+
+async function ensureWarehouseLocationExists(client, warehouseName, locationName, jobId = null) {
+  const normalizedNames = normalizeWarehouseLocationValues(warehouseName, locationName);
+  const warehouse = normalizedNames.warehouse;
+  const location = normalizedNames.location;
+  if (!warehouse || !location) return;
+  let warehouseRow = (await client.query(`
+    select id
+    from warehouses
+    where lower(name) = lower($1)
+      and ($2::bigint is null or job_id = $2)
+    limit 1
+  `, [warehouse, jobId])).rows[0];
+  if (!warehouseRow) {
+    warehouseRow = (await client.query(`
+      insert into warehouses (job_id, name, is_active)
+      values ($1, $2, true)
+      returning id
+    `, [jobId, warehouse])).rows[0];
+  } else {
+    await client.query("update warehouses set is_active = true where id = $1", [warehouseRow.id]);
+  }
+  const locationRow = (await client.query(`
+    select wl.id
+    from warehouse_locations wl
+    where wl.warehouse_id = $1
+      and lower(wl.name) = lower($2)
+    limit 1
+  `, [warehouseRow.id, location])).rows[0];
+  if (!locationRow) {
+    await client.query(`
+      insert into warehouse_locations (job_id, warehouse_id, name, is_active)
+      values ($1, $2, $3, true)
+    `, [jobId, warehouseRow.id, location]);
+  } else {
+    await client.query("update warehouse_locations set is_active = true where id = $1", [locationRow.id]);
+  }
+}
+
+async function getNextMrrNumber(client = null, jobId = null) {
+  const runner = client || { query };
+  const normalizedJobId = normalizeJobIdValue(jobId);
+  const latest = (await runner.query(`
+    select mrr_number
+    from mrr_logs
+    where coalesce(mrr_number, '') <> '' and mrr_number ~ '\\d+$'
+      ${normalizedJobId ? "and job_id = $1::bigint" : ""}
+    order by ((regexp_match(mrr_number, '(\\d+)$'))[1])::bigint desc, id desc
+    limit 1
+  `, normalizedJobId ? [normalizedJobId] : [])).rows[0];
+  const current = String(latest?.mrr_number || "").trim();
+  if (!current) return "MRR-000001";
+  const match = current.match(/^(.*?)(\d+)$/);
+  if (!match) return "MRR-000001";
+  const prefix = match[1];
+  const nextValue = String(Number(match[2]) + 1).padStart(match[2].length, "0");
+  return `${prefix}${nextValue}`;
+}
+
+async function getNextFmrNumber(client = null, jobId = null) {
+  const runner = client || { query };
+  const normalizedJobId = normalizeJobIdValue(jobId);
+  const latest = (await runner.query(`
+    select fmr_number
+    from fmr_logs
+    where coalesce(fmr_number, '') <> '' and fmr_number ~ '\\d+$'
+      ${normalizedJobId ? "and job_id = $1::bigint" : ""}
+    order by ((regexp_match(fmr_number, '(\\d+)$'))[1])::bigint desc, id desc
+    limit 1
+  `, normalizedJobId ? [normalizedJobId] : [])).rows[0];
+  const current = String(latest?.fmr_number || "").trim();
+  if (!current) return "FMR-000001";
+  const match = current.match(/^(.*?)(\d+)$/);
+  if (!match) return "FMR-000001";
+  const prefix = match[1];
+  const nextValue = String(Number(match[2]) + 1).padStart(match[2].length, "0");
+  return `${prefix}${nextValue}`;
+}
+
+async function getNextOpiNumber(client = null, jobId = null) {
+  const runner = client || { query };
+  const normalizedJobId = normalizeJobIdValue(jobId);
+  const latest = (await runner.query(`
+    select opi_number
+    from mrr_logs
+    where coalesce(opi_number, '') <> '' and opi_number ~ '\\d+$'
+      ${normalizedJobId ? "and job_id = $1::bigint" : ""}
+    order by ((regexp_match(opi_number, '(\\d+)$'))[1])::bigint desc, id desc
+    limit 1
+  `, normalizedJobId ? [normalizedJobId] : [])).rows[0];
+  const current = String(latest?.opi_number || "").trim();
+  if (!current) return "OPI-000001";
+  const match = current.match(/^(.*?)(\d+)$/);
+  if (!match) return "OPI-000001";
+  const prefix = match[1];
+  const nextValue = String(Number(match[2]) + 1).padStart(match[2].length, "0");
+  return `${prefix}${nextValue}`;
+}
+
+async function getLatestMrrForPo(client, poId) {
+  if (!poId) return null;
+  return (await client.query(`
+    select id, mrr_number
+    from mrr_logs
+    where app_po_id = $1
+    order by id desc
+    limit 1
+  `, [poId])).rows[0] || null;
+}
+
+async function getPoNumberForVendorCrate(client, vendorName, containerNo) {
+  const vendor = String(vendorName || "").trim();
+  const crate = String(containerNo || "").trim();
+  if (!vendor || !crate) return "";
+  const row = (await client.query(`
+    select trim(coalesce(po_number, '')) as po_number
+    from vendor_fmr_request_lines
+    where lower(trim(coalesce(vendor_name, ''))) = lower($1)
+      and lower(trim(coalesce(crate_number, ''))) = lower($2)
+      and trim(coalesce(po_number, '')) <> ''
+    order by id
+    limit 1
+  `, [vendor, crate])).rows[0];
+  return String(row?.po_number || "").trim();
+}
+
+async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, vendorName = "", containerNo = "", mrrNumber = "", poNumber = "", jobId = null } = {}) {
+  const normalizedJobId = normalizeJobIdValue(jobId);
+  const vendor = String(vendorName || "").trim();
+  const crate = String(containerNo || "").trim();
+  if (!vendor || !crate) {
+    return { mrrNumber: String(mrrNumber || "").trim(), opiNumber: "", poNumber: String(poNumber || "").trim(), created: false };
+  }
+  const description = `${vendor} pkg: ${crate}`;
+  const effectivePoNumber = String(poNumber || "").trim() || await getPoNumberForVendorCrate(client, vendor, crate);
+  const linkedPo = effectivePoNumber
+    ? (await client.query("select id, po_no from purchase_orders where po_no = $1 and ($2::bigint is null or job_id = $2::bigint) order by id desc limit 1", [effectivePoNumber, normalizedJobId])).rows[0]
+    : null;
+  const saveLinkedFmr = async (resolvedMrrNumber) => {
+    if (!fmrId) return;
+    await client.query(`
+      update fmr_logs
+      set mrr_number = $2,
+          updated_at = now()
+      where id = $1
+    `, [fmrId, resolvedMrrNumber]);
+  };
+  const syncExistingMrr = async (row) => {
+    let resolvedOpiNumber = String(row.opi_number || "").trim();
+    const updates = [];
+    const params = [row.id];
+    if (!String(row.po_number || "").trim() && effectivePoNumber) {
+      params.push(effectivePoNumber);
+      updates.push(`po_number = $${params.length}`);
+    }
+    if (!row.app_po_id && linkedPo?.id) {
+      params.push(linkedPo.id);
+      updates.push(`app_po_id = $${params.length}`);
+    }
+    if (!resolvedOpiNumber) {
+      resolvedOpiNumber = await getNextOpiNumber(client, normalizedJobId);
+      params.push(resolvedOpiNumber);
+      updates.push(`opi_number = $${params.length}`);
+    }
+    if (updates.length > 0) {
+      await client.query(`
+        update mrr_logs
+        set ${updates.join(", ")}, updated_at = now()
+        where id = $1 and ($${params.length + 1}::bigint is null or job_id = $${params.length + 1})
+      `, [...params, normalizedJobId]);
+      await syncOpiLogsFromMrr(client, normalizedJobId);
+    }
+    await saveLinkedFmr(row.mrr_number);
+    return { mrrNumber: row.mrr_number, opiNumber: resolvedOpiNumber, poNumber: effectivePoNumber, created: false };
+  };
+  const requestedMrrNumber = String(mrrNumber || "").trim();
+  if (requestedMrrNumber) {
+    const exactMatch = (await client.query(`
+      select id, mrr_number, opi_number, po_number, app_po_id
+      from mrr_logs
+      where ($4::bigint is null or job_id = $4)
+        and mrr_number = $1
+        and lower(trim(coalesce(vendor_name, ''))) = lower($2)
+        and lower(trim(coalesce(material_description, ''))) = lower($3)
+      limit 1
+    `, [requestedMrrNumber, vendor, description, normalizedJobId])).rows[0];
+    if (exactMatch) {
+      return syncExistingMrr(exactMatch);
+    }
+  }
+  const existing = (await client.query(`
+    select id, mrr_number, opi_number, po_number, app_po_id
+    from mrr_logs
+    where ($3::bigint is null or job_id = $3)
+      and lower(trim(coalesce(vendor_name, ''))) = lower($1)
+      and lower(trim(coalesce(material_description, ''))) = lower($2)
+    order by id desc
+    limit 1
+  `, [vendor, description, normalizedJobId])).rows[0];
+  if (existing) {
+    return syncExistingMrr(existing);
+  }
+  const nextMrrNumber = await getNextMrrNumber(client, normalizedJobId);
+  const nextOpiNumber = await getNextOpiNumber(client, normalizedJobId);
+  const insert = (await client.query(`
+    insert into mrr_logs (
+      job_id, discipline, mrr_number, vendor_name, app_po_id, po_number, pick_ticket, material_description,
+      received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
+    ) values ($1::bigint,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+    returning id
+  `, [
+    normalizedJobId,
+    "",
+    nextMrrNumber,
+    vendor,
+    linkedPo?.id || null,
+    effectivePoNumber,
+    "",
+    description,
+    "",
+    "",
+    "",
+    "",
+    nextOpiNumber,
+    ""
+  ])).rows[0];
+  await saveMaterialLogLookup(client, "vendor_name", vendor, normalizedJobId);
+  await saveMaterialLogLookup(client, "po_number", effectivePoNumber, normalizedJobId);
+  await syncMrrVendorsIntoVendorTable(client, normalizedJobId);
+  await syncOpiLogsFromMrr(client, normalizedJobId);
+  await saveLinkedFmr(nextMrrNumber);
+  if (userId) {
+    await auditLog(client, userId, "create", "mrr_log", insert.id, nextMrrNumber);
+  }
+  return { mrrNumber: nextMrrNumber, opiNumber: nextOpiNumber, poNumber: effectivePoNumber, created: true };
+}
+
+async function createOsdLog(client, payload) {
+  await client.query(`
+    insert into osd_logs (
+      job_id, mrr_log_id, receipt_id, po_id, po_line_id, mrr_number, po_number, item_code, description,
+      warehouse, location, expected_qty, received_qty, osd_qty, osd_status, notes, updated_at
+    )
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+  `, [
+    payload.job_id || null,
+    payload.mrr_log_id || null,
+    payload.receipt_id || null,
+    payload.po_id || null,
+    payload.po_line_id || null,
+    String(payload.mrr_number || ""),
+    String(payload.po_number || ""),
+    String(payload.item_code || ""),
+    String(payload.description || ""),
+    String(payload.warehouse || ""),
+    String(payload.location || ""),
+    Number(payload.expected_qty || 0),
+    Number(payload.received_qty || 0),
+    Number(payload.osd_qty || 0),
+    String(payload.osd_status || ""),
+    String(payload.notes || "")
+  ]);
+}
+
+async function syncMrrVendorsIntoVendorTable(client, jobId = null) {
+  await client.query(`
+    insert into vendors (job_id, name, contact_name, website, email, phone, categories)
+    select distinct null, trim(m.vendor_name), '', '', '', '', ''
+    from mrr_logs m
+    left join vendors v on lower(v.name) = lower(trim(m.vendor_name))
+    where trim(coalesce(m.vendor_name, '')) <> ''
+      and ($1::bigint is null or m.job_id = $1)
+      and v.id is null
+  `, [jobId]);
+}
+
+async function syncOpiLogsFromMrr(client, jobId = null) {
+  await client.query(`
+    delete from opi_logs o
+    where not exists (
+      select 1
+      from mrr_logs m
+      where trim(coalesce(m.opi_number, '')) <> ''
+        and trim(m.opi_number) = o.opi_number
+        and ($1::bigint is null or m.job_id = $1)
+    )
+      and ($1::bigint is null or o.job_id = $1)
+  `, [jobId]);
+  await client.query(`
+    insert into opi_logs (job_id, opi_number, vendor_name, material_description, load_number, mrr_number, updated_at)
+    select distinct on (trim(m.opi_number))
+           $1,
+           trim(m.opi_number),
+           coalesce(m.vendor_name, ''),
+           coalesce(m.material_description, ''),
+           coalesce(m.load_number, ''),
+           coalesce(m.mrr_number, ''),
+           now()
+    from mrr_logs m
+    where trim(coalesce(m.opi_number, '')) <> ''
+      and ($1::bigint is null or m.job_id = $1)
+    order by trim(m.opi_number), m.id desc
+    on conflict (job_id, opi_number) do update set
+      vendor_name = excluded.vendor_name,
+      material_description = excluded.material_description,
+      load_number = excluded.load_number,
+      mrr_number = excluded.mrr_number,
+      updated_at = now()
+  `, [jobId]);
+}
+
+async function ensureUniqueFmrContainer(client, vendorName, containerNo, excludeId = null, jobId = null) {
+  const normalizedJobId = normalizeJobIdValue(jobId);
+  const vendor = String(vendorName || "").trim().toLowerCase();
+  const normalized = String(containerNo || "").trim();
+  if (!vendor || !normalized) return;
+  const params = [normalizedJobId, vendor, normalized.toLowerCase()];
+  let sql = `
+    select id
+    from fmr_logs
+    where ($1::bigint is null or job_id = $1)
+      and lower(trim(coalesce(vendor_name, ''))) = $2
+      and lower(trim(coalesce(container_no, ''))) = $3
+  `;
+  if (excludeId) {
+    params.push(excludeId);
+    sql += " and id <> $4";
+  }
+  sql += " limit 1";
+  const existing = (await client.query(sql, params)).rows[0];
+  if (existing) {
+    throw new Error("This vendor already has that container number on the Vendor FMR Log.");
+  }
+}
+
+async function getRequestedVendorCrateSet(client = null, jobId = null) {
+  const runner = client || { query };
+  const normalizedJobId = normalizeJobIdValue(jobId);
+  const rows = (await runner.query(`
+    select lower(trim(coalesce(vendor_name, ''))) as vendor_key,
+           lower(trim(coalesce(container_no, ''))) as crate_key
+    from fmr_logs
+    where ($1::bigint is null or job_id = $1)
+      and trim(coalesce(vendor_name, '')) <> ''
+      and trim(coalesce(container_no, '')) <> ''
+  `, [normalizedJobId])).rows;
+  return new Set(rows.map((row) => `${row.vendor_key}|${row.crate_key}`));
+}
+
+function getVendorFmrRequestBuilderQuery(source = {}) {
+  return new URLSearchParams({
+    po_number: String(source.po_number || ""),
+    item_code: String(source.item_code || ""),
+    abbrev_description: String(source.abbrev_description || ""),
+    show_requested: String(source.show_requested || "0"),
+    current_crate_number: String(source.current_crate_number || "")
+  }).toString();
+}
+
+async function buildVendorFmrPreviewData(client, jobId = null) {
+  const normalizedJobId = normalizeJobIdValue(jobId);
+  const requestedSet = await getRequestedVendorCrateSet(client, normalizedJobId);
+  const stagedRows = (await client.query(`
+    select *
+    from vendor_fmr_request_lines
+    where selected_for_request = true
+      and ($1::bigint is null or job_id = $1)
+    order by id
+  `, [normalizedJobId])).rows;
+  const requestGroups = new Map();
+  const invalidRows = [];
+  const skippedRows = [];
+  for (const row of stagedRows) {
+    const crateNumber = String(row.crate_number || "").trim();
+    const srnNumber = String(row.srn_number || "").trim();
+    const vendorName = String(row.vendor_name || "").trim();
+    const vendorKey = vendorName.toLowerCase();
+    if (!crateNumber) {
+      invalidRows.push({
+        id: row.id,
+        vendorName,
+        poNumber: row.po_number || "",
+        itemCode: row.item_code || "",
+        abbrevDescription: row.abbrev_description || "",
+        srnNumber
+      });
+      continue;
+    }
+    const crateKey = `${vendorKey}|${crateNumber.toLowerCase()}`;
+    if (requestedSet.has(crateKey)) {
+      skippedRows.push({
+        id: row.id,
+        vendorName,
+        crateNumber,
+        poNumber: row.po_number || "",
+        itemCode: row.item_code || "",
+        abbrevDescription: row.abbrev_description || "",
+        srnNumber
+      });
+      continue;
+    }
+    const requestGroupKey = `${vendorKey}|${srnNumber ? srnNumber.toLowerCase() : "__blank__"}`;
+    if (!requestGroups.has(requestGroupKey)) {
+      requestGroups.set(requestGroupKey, {
+        vendorName,
+        srnNumber,
+        rowsByCrate: new Map()
+      });
+    }
+    const group = requestGroups.get(requestGroupKey);
+    if (!group.rowsByCrate.has(crateKey)) {
+      group.rowsByCrate.set(crateKey, {
+        row,
+        vendorName,
+        crateNumber,
+        srnNumber,
+        stagedLineCount: 1
+      });
+    } else {
+      group.rowsByCrate.get(crateKey).stagedLineCount += 1;
+    }
+  }
+  const previewGroups = Array.from(requestGroups.values()).map((group) => ({
+    ...group,
+    crates: Array.from(group.rowsByCrate.values())
+  }));
+  const previewRows = previewGroups.flatMap((group) => group.crates.map((crate) => ({
+    vendorName: crate.vendorName,
+    crateNumber: crate.crateNumber,
+    srnNumber: crate.srnNumber,
+    poNumber: crate.row.po_number || "",
+    itemCode: crate.row.item_code || "",
+    abbrevDescription: crate.row.abbrev_description || "",
+    stagedLineCount: crate.stagedLineCount
+  })));
+  return { stagedRows, previewGroups, previewRows, invalidRows, skippedRows };
 }
 
 function signSession(payload) {
@@ -196,18 +4457,127 @@ function readSession(token) {
   }
 }
 
-function currentUser(req) {
-  return readSession(req.cookies.session_token);
+async function getJobRecord(jobId, client = null) {
+  const normalizedJobId = Number(jobId || 0);
+  if (!Number.isFinite(normalizedJobId) || normalizedJobId <= 0) return null;
+  const runner = client || { query };
+  return (await runner.query(`
+    select id, job_number, plant_name, performance_job_number, is_active, created_at, updated_at
+    from jobs
+    where id = $1
+  `, [normalizedJobId])).rows[0] || null;
 }
 
-function requireAuth(req, res, next) {
-  const user = currentUser(req);
-  if (!user) {
+async function getAccessibleJobsForUser(userId, role, client = null) {
+  const runner = client || { query };
+  if (role === "admin") {
+    return (await runner.query(`
+      select id, job_number, plant_name, performance_job_number, is_active, created_at, updated_at
+      from jobs
+      order by is_active desc, job_number asc, id asc
+    `)).rows;
+  }
+  return (await runner.query(`
+    select j.id, j.job_number, j.plant_name, j.performance_job_number, j.is_active, j.created_at, j.updated_at
+    from user_jobs uj
+    join jobs j on j.id = uj.job_id
+    where uj.user_id = $1
+    order by j.is_active desc, j.job_number asc, j.id asc
+  `, [userId])).rows;
+}
+
+function setSessionCookie(res, payload) {
+  const token = signSession(payload);
+  res.cookie("session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
+}
+
+function buildSessionPayload(user, jobId = null) {
+  return {
+    id: Number(user.id),
+    username: String(user.username || ""),
+    role: String(user.role || ""),
+    job_id: jobId ? Number(jobId) : null
+  };
+}
+
+async function resolveJobContextForUser(user, client = null, requestedJobId = null) {
+  const jobs = await getAccessibleJobsForUser(user.id, user.role, client);
+  const activeJobs = jobs.filter((job) => job.is_active);
+  let activeJob = null;
+  const normalizedRequestedJobId = Number(requestedJobId || 0);
+  if (normalizedRequestedJobId > 0) {
+    activeJob = activeJobs.find((job) => Number(job.id) === normalizedRequestedJobId) || null;
+  }
+  if (!activeJob && user.role !== "admin" && activeJobs.length === 1) {
+    activeJob = activeJobs[0];
+  }
+  return {
+    jobs,
+    activeJobs,
+    activeJob
+  };
+}
+
+function currentUser(req) {
+  const sessionToken = req?.cookies?.session_token;
+  return sessionToken ? readSession(sessionToken) : null;
+}
+
+const requireAuth = asyncHandler(async (req, res, next) => {
+  const sessionUser = currentUser(req);
+  if (!sessionUser) {
     res.redirect("/login");
     return;
   }
-  req.user = user;
+  const user = (await query(`
+    select id, username, first_name, last_name, role, is_active
+    from users
+    where id = $1
+  `, [sessionUser.id])).rows[0];
+  if (!user || !user.is_active) {
+    res.clearCookie("session_token", { path: "/" });
+    res.redirect("/login");
+    return;
+  }
+  const { jobs, activeJobs, activeJob } = await resolveJobContextForUser(user, null, sessionUser.job_id);
+  req.user = {
+    ...user,
+    job_id: activeJob ? Number(activeJob.id) : null,
+    activeJob: activeJob || null,
+    accessibleJobs: jobs,
+    activeJobs
+  };
   next();
+});
+
+const requireJobContext = asyncHandler(async (req, res, next) => {
+  if (req.user?.activeJob) {
+    next();
+    return;
+  }
+  if (req.user?.role === "admin" || (req.user?.activeJobs || []).length > 1) {
+    res.redirect("/jobs/select");
+    return;
+  }
+  if ((req.user?.activeJobs || []).length === 1) {
+    const onlyJob = req.user.activeJobs[0];
+    req.user.job_id = Number(onlyJob.id);
+    req.user.activeJob = onlyJob;
+    setSessionCookie(res, buildSessionPayload(req.user, onlyJob.id));
+    next();
+    return;
+  }
+  res.redirect("/jobs/no-access");
+});
+
+function currentJobId(req) {
+  const value = Number(req.user?.job_id || 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function normalizeJobIdValue(jobId) {
+  const value = Number(jobId);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function requireRole(roles) {
@@ -220,394 +4590,6170 @@ function requireRole(roles) {
   };
 }
 
+function requirePermission(section, action = "view") {
+  return (req, res, next) => {
+    if (!canAccess(req.user, section, action)) {
+      res.status(403).send(layout("Forbidden", `<div class="card error"><h3>Forbidden</h3><p>You do not have permission for this action.</p></div>`, req.user));
+      return;
+    }
+    next();
+  };
+}
+
+function requireInventoryAuditEdit(req, res, next) {
+  if (!canEditInventoryAudit(req.user)) {
+    res.status(403).send(layout("Forbidden", `<div class="card error"><h3>Forbidden</h3><p>You do not have permission for this action.</p></div>`, req.user));
+    return;
+  }
+  next();
+}
+
+function canEditRequisition(user, header) {
+  if (!user || !header) return false;
+  return header.status === "REQUESTED" && canAccess(user, "requisitions", "edit");
+}
+
+function getUserDisplayName(user) {
+  const first = String(user?.first_name || "").trim();
+  const last = String(user?.last_name || "").trim();
+  return [first, last].filter(Boolean).join(" ").trim() || String(user?.username || "").trim();
+}
+
+function hasLoggedRequisitionSignature(header) {
+  if (!header) return false;
+  return Boolean(header.signed_at || header.signed_signature_data || header.signed_copy_filename);
+}
+
+function canSignRequisition(user, header) {
+  if (!user || !header) return false;
+  if (!canAccess(user, "requisitions", "issue")) return false;
+  if (user.role === "admin") return ["VERIFIED", "ISSUED"].includes(String(header.status || "").toUpperCase());
+  if (hasLoggedRequisitionSignature(header)) return false;
+  return String(header.status || "").toUpperCase() === "VERIFIED";
+}
+
 async function recalcRfqStatus(client, rfqId) {
-  const total = Number((await client.query("select count(*) from rfq_items where rfq_id = $1", [rfqId])).rows[0].count);
-  const issued = Number((await client.query(`
-    select count(distinct ri.id)
+  const rfq = (await client.query("select id, job_id from rfqs where id = $1", [rfqId])).rows[0];
+  if (!rfq) return;
+  const total = Number((await client.query("select count(*) from rfq_items where rfq_id = $1 and job_id = $2", [rfqId, rfq.job_id])).rows[0].count);
+  const awardedCount = Number((await client.query("select count(*) from rfq_items where rfq_id = $1 and job_id = $2 and award_status = 'AWARDED' and awarded_vendor_id is not null", [rfqId, rfq.job_id])).rows[0]?.count || 0);
+  const quotedCount = Number((await client.query(`
+    select count(distinct ri.id) as quoted_count
     from rfq_items ri
-    join purchase_orders po on po.rfq_id = ri.rfq_id
-    join po_lines pl on pl.po_id = po.id and pl.material_item_id = ri.material_item_id
-    where ri.rfq_id = $1
-  `, [rfqId])).rows[0].count);
-  await client.query("update rfqs set status = $2 where id = $1", [rfqId, total > 0 && issued >= total ? "CLOSED" : "OPEN"]);
+    join quotes q on q.rfq_item_id = ri.id
+    where ri.rfq_id = $1 and ri.job_id = $2 and q.job_id = $2
+  `, [rfqId, rfq.job_id])).rows[0]?.quoted_count || 0);
+  const totals = (await client.query(`
+    select count(distinct pl.rfq_item_id)
+      filter (where pl.rfq_item_id is not null) as issued_count,
+      count(distinct pl.rfq_item_id)
+      filter (
+        where pl.rfq_item_id is not null
+          and coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) >= pl.qty_ordered
+      ) as fully_received_count
+    from purchase_orders po
+    join po_lines pl on pl.po_id = po.id
+    where po.rfq_id = $1 and po.job_id = $2 and pl.job_id = $2
+  `, [rfqId, rfq.job_id])).rows[0];
+  const issued = Number(totals?.issued_count || 0);
+  const fullyReceived = Number(totals?.fully_received_count || 0);
+  if (total > 0 && fullyReceived >= total) {
+    await client.query("update rfqs set status = 'RECEIVED' where id = $1 and job_id = $2 and status <> 'CANCELLED'", [rfqId, rfq.job_id]);
+  } else if (issued > 0) {
+    await client.query("update rfqs set status = 'PURCHASED' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'RECEIVED')", [rfqId, rfq.job_id]);
+  } else if (total > 0 && awardedCount >= total) {
+    await client.query("update rfqs set status = 'AWARDED' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
+  } else if (quotedCount > 0) {
+    await client.query("update rfqs set status = 'WAITING_ON_QUOTES' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
+  } else {
+    await client.query("update rfqs set status = 'SEND_FOR_QUOTES' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
+  }
+}
+
+async function backfillRfqVendors(client, rfqId) {
+  const rfq = (await client.query("select job_id from rfqs where id = $1", [rfqId])).rows[0];
+  if (!rfq) return;
+  await client.query(`
+    insert into rfq_vendors (job_id, rfq_id, vendor_id)
+    select distinct $2::bigint, ri.rfq_id, q.vendor_id
+    from rfq_items ri
+    join quotes q on q.rfq_item_id = ri.id
+    where ri.rfq_id = $1 and ri.job_id = $2::bigint and q.job_id = $2::bigint
+    on conflict (rfq_id, vendor_id) do nothing
+  `, [rfqId, rfq.job_id]);
+  await client.query(`
+    insert into rfq_vendors (job_id, rfq_id, vendor_id)
+    select distinct $2::bigint, rfq_id, awarded_vendor_id
+    from rfq_items
+    where rfq_id = $1 and job_id = $2::bigint and awarded_vendor_id is not null
+    on conflict (rfq_id, vendor_id) do nothing
+  `, [rfqId, rfq.job_id]);
+}
+
+async function getRfqVendorRows(client, rfqId) {
+  await backfillRfqVendors(client, rfqId);
+  const rfq = (await client.query("select job_id from rfqs where id = $1", [rfqId])).rows[0];
+  if (!rfq) return [];
+  return (await client.query(`
+    select rv.vendor_id, v.name
+    from rfq_vendors rv
+    join vendors v on v.id = rv.vendor_id
+    where rv.rfq_id = $1 and rv.job_id = $2
+    order by v.name
+  `, [rfqId, rfq.job_id])).rows;
+}
+
+async function syncRfqVendors(client, rfqId, vendorIds) {
+  const rfq = (await client.query("select job_id from rfqs where id = $1", [rfqId])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const deduped = Array.from(new Set(vendorIds.map((vendorId) => Number(vendorId)).filter((vendorId) => Number.isFinite(vendorId) && vendorId > 0)));
+  await client.query("delete from rfq_vendors where rfq_id = $1 and job_id = $3 and not (vendor_id = any($2::bigint[]))", [rfqId, deduped, rfq.job_id]);
+  if (deduped.length === 0) {
+    await client.query("delete from rfq_vendors where rfq_id = $1 and job_id = $2", [rfqId, rfq.job_id]);
+    return;
+  }
+  await client.query(`
+    insert into rfq_vendors (job_id, rfq_id, vendor_id)
+    select $3, $1, vendor_id
+    from unnest($2::bigint[]) as vendor_id
+    where exists (select 1 from vendors v where v.id = vendor_id)
+    on conflict (rfq_id, vendor_id) do nothing
+  `, [rfqId, deduped, rfq.job_id]);
+}
+
+async function recalcPoStatus(client, poId) {
+  const po = (await client.query("select status from purchase_orders where id = $1", [poId])).rows[0];
+  if (!po || po.status === "CANCELLED" || po.status === "DRAFT") return;
+  const totals = (await client.query(`
+    select
+      count(*) as line_count,
+      count(*) filter (
+        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) >= pl.qty_ordered
+      ) as fully_received_count,
+      count(*) filter (
+        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) > 0
+      ) as received_count
+    from po_lines pl
+    where pl.po_id = $1
+  `, [poId])).rows[0];
+  const lineCount = num(totals?.line_count);
+  const fullyReceivedCount = num(totals?.fully_received_count);
+  const receivedCount = num(totals?.received_count);
+  let nextStatus = "ISSUED";
+  if (lineCount > 0 && fullyReceivedCount >= lineCount) nextStatus = "FULLY_RECEIVED";
+  else if (receivedCount > 0) nextStatus = "PARTIALLY_RECEIVED";
+  await client.query(`
+    update purchase_orders
+    set status = $2,
+        issued_at = case when $2 in ('ISSUED', 'PARTIALLY_RECEIVED', 'FULLY_RECEIVED') and issued_at is null then now() else issued_at end,
+        closed_at = case when $2 = 'FULLY_RECEIVED' then now() else null end,
+        updated_at = now()
+    where id = $1
+  `, [poId, nextStatus]);
+}
+
+async function getJobNumber(client = null) {
+  const runner = client || { query };
+  const result = await runner.query("select value from app_settings where key = 'job_number'");
+  return String(result.rows[0]?.value || "0000").trim() || "0000";
+}
+
+async function getJobSettings(jobId, client = null) {
+  const runner = client || { query };
+  const normalizedJobId = Number(jobId || 0);
+  if (!Number.isFinite(normalizedJobId) || normalizedJobId <= 0) {
+    return {
+      job_number: await getJobNumber(client),
+      plant_name: await getAppSettingValue("plant_name", "", client),
+      performance_job_number: await getAppSettingValue("performance_job_number", "", client),
+      is_active: true
+    };
+  }
+  const row = (await runner.query(`
+    select job_number, plant_name, performance_job_number, is_active
+    from jobs
+    where id = $1
+  `, [normalizedJobId])).rows[0];
+  if (!row) {
+    return {
+      job_number: await getJobNumber(client),
+      plant_name: await getAppSettingValue("plant_name", "", client),
+      performance_job_number: await getAppSettingValue("performance_job_number", "", client),
+      is_active: true
+    };
+  }
+  return row;
+}
+
+async function getAppSettingValue(key, fallback = "", client = null) {
+  const runner = client || { query };
+  const result = await runner.query("select value from app_settings where key = $1", [key]);
+  return String(result.rows[0]?.value || fallback).trim() || fallback;
+}
+
+async function refreshHeaderSettings(client = null) {
+  headerJobNumber = await getJobNumber(client);
+  headerPlantName = await getAppSettingValue("plant_name", "", client);
+  headerPerformanceJobNumber = await getAppSettingValue("performance_job_number", "", client);
+}
+
+async function getNextInventoryAuditReportNumber(client = null, jobId = null) {
+  const runner = client || { query };
+  const jobSettings = await getJobSettings(jobId, client);
+  const jobNumber = String(jobSettings.job_number || "0000").trim() || "0000";
+  const result = await runner.query(`
+    select coalesce(max(cast(right(report_no, 5) as integer)), 0) as max_no
+    from inventory_audit_reports
+    where report_no ~ '-INV-[0-9]{5}$'
+      ${jobId ? "and job_id = $1" : ""}
+  `, jobId ? [jobId] : []);
+  const nextNumber = num(result.rows[0]?.max_no) + 1;
+  return `${jobNumber}-INV-${String(nextNumber).padStart(5, "0")}`;
+}
+
+async function saveInventoryAuditReport(client, { userId, jobId = null, warehouseFilter = "", locationFilter = "", identFilter = "", desiredRows = [] }) {
+  if (!desiredRows.length) throw new Error("No inventory rows were provided for this audit.");
+  const currentRows = await getCurrentOnHandRows(client, { jobId });
+  const currentMap = new Map(currentRows.map((row) => [buildInventoryEntryKey(row), row]));
+  const reportNo = await getNextInventoryAuditReportNumber(client, jobId);
+  const reportInsert = await client.query(`
+    insert into inventory_audit_reports (
+      job_id, report_no, created_by, warehouse_filter, location_filter, ident_filter
+    ) values ($1,$2,$3,$4,$5,$6)
+    returning id
+  `, [jobId, reportNo, userId || null, String(warehouseFilter || ""), String(locationFilter || ""), String(identFilter || "")]);
+  const reportId = Number(reportInsert.rows[0]?.id || 0);
+  for (const desiredRow of desiredRows) {
+    await assertValidWarehouseLocation(client, desiredRow.warehouse, desiredRow.location, jobId);
+    const key = buildInventoryEntryKey(desiredRow);
+    const currentRow = currentMap.get(key);
+    const bookQty = parseQtyValue(currentRow?.qty_on_hand || 0);
+    const actualQty = parseQtyValue(desiredRow.actual_qty || 0);
+    const adjustmentQty = parseQtyValue(actualQty - bookQty);
+    const lineInsert = await client.query(`
+      insert into inventory_audit_report_lines (
+        job_id, report_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, book_qty, actual_qty, adjustment_qty
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      returning id
+    `, [
+      jobId,
+      reportId,
+      String(desiredRow.item_code || ""),
+      String(desiredRow.description || currentRow?.description || ""),
+      String(desiredRow.size_1 || ""),
+      String(desiredRow.size_2 || ""),
+      String(desiredRow.thk_1 || ""),
+      String(desiredRow.thk_2 || ""),
+      String(desiredRow.warehouse || ""),
+      String(desiredRow.location || ""),
+      bookQty,
+      actualQty,
+      adjustmentQty
+    ]);
+    if (adjustmentQty !== 0) {
+      await client.query(`
+        insert into inventory_adjustment_lines (
+          job_id, report_id, report_line_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, qty_adjustment, created_by
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      `, [
+        jobId,
+        reportId,
+        Number(lineInsert.rows[0]?.id || 0),
+        String(desiredRow.item_code || ""),
+        String(desiredRow.description || currentRow?.description || ""),
+        String(desiredRow.size_1 || ""),
+        String(desiredRow.size_2 || ""),
+        String(desiredRow.thk_1 || ""),
+        String(desiredRow.thk_2 || ""),
+        String(desiredRow.warehouse || ""),
+        String(desiredRow.location || ""),
+        adjustmentQty,
+        userId || null
+      ]);
+    }
+    await client.query(`
+      insert into inventory_audit_counts (
+        job_id, item_code, description, size_1, size_2, thk_1, thk_2, warehouse, location, actual_qty, updated_by, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+      on conflict (job_id, item_code, size_1, size_2, thk_1, thk_2, warehouse, location)
+      do update set
+        description = excluded.description,
+        actual_qty = excluded.actual_qty,
+        updated_by = excluded.updated_by,
+        updated_at = now()
+    `, [
+      jobId,
+      String(desiredRow.item_code || ""),
+      String(desiredRow.description || currentRow?.description || ""),
+      String(desiredRow.size_1 || ""),
+      String(desiredRow.size_2 || ""),
+      String(desiredRow.thk_1 || ""),
+      String(desiredRow.thk_2 || ""),
+      String(desiredRow.warehouse || ""),
+      String(desiredRow.location || ""),
+      actualQty,
+      userId || null
+    ]);
+    await auditLog(client, userId, "update", "inventory_audit_counts", `${desiredRow.item_code}|${desiredRow.warehouse}|${desiredRow.location}`, `actual_qty=${actualQty};report=${reportNo};delta=${adjustmentQty}`);
+  }
+  if (Number.isFinite(Number(jobId))) {
+    await rebuildUnallocatedBom(client, Number(jobId));
+  }
+  return { reportId, reportNo };
+}
+
+async function getNextRfqNumber(client = null, jobId = null) {
+  const runner = client || { query };
+  const jobSettings = await getJobSettings(jobId, client);
+  const jobNumber = String(jobSettings.job_number || "0000").trim() || "0000";
+  const result = await runner.query(`
+    select coalesce(max(cast(right(rfq_no, 5) as integer)), 0) as max_no
+    from rfqs
+    where rfq_no ~ '-RFQ-[0-9]{5}$'
+      ${jobId ? "and job_id = $1" : ""}
+  `, jobId ? [jobId] : []);
+  const nextNumber = num(result.rows[0]?.max_no) + 1;
+  return `${jobNumber}-RFQ-${String(nextNumber).padStart(5, "0")}`;
+}
+
+async function getNextRequisitionNumber(client = null, jobId = null) {
+  const runner = client || { query };
+  const jobSettings = await getJobSettings(jobId, client);
+  const jobNumber = String(jobSettings.job_number || "0000").trim() || "0000";
+  const result = await runner.query(`
+    select coalesce(max(cast(right(requisition_no, 5) as integer)), 0) as max_no
+    from material_requisitions
+    where requisition_no ~ '-MR-[0-9]{5}$'
+      ${jobId ? "and job_id = $1" : ""}
+  `, jobId ? [jobId] : []);
+  const nextNumber = num(result.rows[0]?.max_no) + 1;
+  return `${jobNumber}-MR-${String(nextNumber).padStart(5, "0")}`;
+}
+
+async function getNextBomNumber(client = null, jobId = null) {
+  const runner = client || { query };
+  const jobSettings = await getJobSettings(jobId, client);
+  const jobNumber = String(jobSettings.job_number || "0000").trim() || "0000";
+  const result = await runner.query(`
+    select coalesce(max(cast(right(bom_no, 5) as integer)), 0) as max_no
+    from bom_headers
+    where bom_no ~ '-BOM-[0-9]{5}$'
+      ${jobId ? "and job_id = $1" : ""}
+  `, jobId ? [jobId] : []);
+  const nextNumber = num(result.rows[0]?.max_no) + 1;
+  return `${jobNumber}-BOM-${String(nextNumber).padStart(5, "0")}`;
 }
 
 function loginPage(error = "") {
   return layout("Login", `
-    ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
-    <div class="card">
-      <h2>Sign In</h2>
-      <p class="muted">Default admin login: <strong>admin</strong> / <strong>admin123</strong></p>
-      <form method="post" action="/login" class="stack">
-        <div class="grid">
-          <div><label>Username</label><input name="username" required /></div>
-          <div><label>Password</label><input type="password" name="password" required /></div>
-        </div>
-        <div class="actions"><button type="submit">Sign In</button></div>
-      </form>
-    </div>
-  `, null);
+      ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
+      <div class="card">
+        <h2>Sign In</h2>
+        <p class="muted">Default admin login: <strong>admin</strong> / <strong>admin123</strong></p>
+        <form method="post" action="/login" class="stack">
+          <div class="stack">
+            <div><label>Username</label><input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></div>
+            <div><label>Password</label><input type="password" name="password" autocomplete="current-password" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Sign In</button></div>
+        </form>
+      </div>
+    `, null);
 }
 
 app.get("/login", (req, res) => {
-  res.send(loginPage());
-});
-
-app.post("/login", async (req, res) => {
-  const { username = "", password = "" } = req.body;
-  const result = await query("select id, username, role, password_hash from users where username = $1", [username.trim()]);
-  const user = result.rows[0];
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-    res.status(401).send(loginPage("Invalid username or password."));
+  if (currentUser(req)) {
+    res.redirect("/dashboard");
     return;
   }
-  const token = signSession({ id: user.id, username: user.username, role: user.role });
-  res.cookie("session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
-  res.redirect("/");
+  const errorMap = {
+    invalid: "Invalid username or password.",
+    inactive: "This user is inactive. Contact an administrator."
+  };
+  const error = errorMap[String(req.query.error || "").trim()] || "";
+  res.send(loginPage(error));
 });
+
+app.post("/login", asyncHandler(async (req, res) => {
+  const { username = "", password = "" } = req.body;
+  const result = await query("select id, username, role, password_hash, is_active from users where username = $1", [username.trim()]);
+  const user = result.rows[0];
+  if (user && !user.is_active) {
+    res.redirect("/login?error=inactive");
+    return;
+  }
+  if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    res.redirect("/login?error=invalid");
+    return;
+  }
+  const { activeJobs } = await resolveJobContextForUser(user);
+  try {
+    await auditLog(pool, user.id, "login", "auth", user.id, user.username);
+  } catch (error) {
+    console.error("Failed to write login audit log", error);
+  }
+  if (user.role === "admin") {
+    setSessionCookie(res, buildSessionPayload(user, null));
+    res.redirect("/jobs/select");
+    return;
+  }
+  if (activeJobs.length === 1) {
+    setSessionCookie(res, buildSessionPayload(user, activeJobs[0].id));
+    res.redirect("/dashboard");
+    return;
+  }
+  setSessionCookie(res, buildSessionPayload(user, null));
+  res.redirect(activeJobs.length > 1 ? "/jobs/select" : "/jobs/no-access");
+}));
 
 app.get("/logout", (req, res) => {
   res.clearCookie("session_token", { path: "/" });
   res.redirect("/login");
 });
 
-app.get("/", requireAuth, async (req, res) => {
-  const [rfqs, pos, receipts, vendors, osd] = await Promise.all([
-    query("select count(*) from rfqs"),
-    query("select count(*) from purchase_orders"),
-    query("select count(*) from receipts"),
-    query("select count(*) from vendors"),
-    query("select count(*) from receipts where osd_status <> 'OK'")
-  ]);
-  res.send(layout("Dashboard", `
-    <h1>Operations Dashboard</h1>
-    <div class="stats">
-      <div class="stat"><div>RFQs</div><strong>${rfqs.rows[0].count}</strong></div>
-      <div class="stat"><div>POs</div><strong>${pos.rows[0].count}</strong></div>
-      <div class="stat"><div>Receipts</div><strong>${receipts.rows[0].count}</strong></div>
-      <div class="stat"><div>OS&D Cases</div><strong>${osd.rows[0].count}</strong></div>
+app.get("/", async (req, res) => {
+  if (currentUser(req)) {
+    res.redirect("/dashboard");
+    return;
+  }
+  res.send(landingPage());
+});
+
+app.get("/jobs/no-access", requireAuth, (req, res) => {
+  res.status(403).send(layout("No Job Access", `
+    <div class="card error">
+      <h3>No Job Access Assigned</h3>
+      <p>Your user account does not currently have any active job numbers assigned. Contact an administrator to assign job access.</p>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/logout">Logout</a>
+      </div>
     </div>
   `, req.user));
 });
 
-app.get("/vendors", requireAuth, async (req, res) => {
-  const vendors = (await query("select * from vendors order by name")).rows;
-  const checks = vendorCategories.map((category) => `<label><input type="checkbox" name="categories" value="${esc(category)}" /> ${esc(category)}</label>`).join("");
-  const rows = vendors.map((vendor) => `<tr>
-    <td>${esc(vendor.name)}</td>
-    <td>${esc(vendor.email || "")}</td>
-    <td>${esc(vendor.phone || "")}</td>
-    <td>${esc((vendor.categories || "").split(",").filter(Boolean).join(", "))}</td>
-    <td><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a></td>
+app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
+  const jobs = req.user.role === "admin"
+    ? req.user.accessibleJobs
+    : req.user.activeJobs;
+  if (req.user.role !== "admin" && jobs.length === 0) {
+    res.redirect("/jobs/no-access");
+    return;
+  }
+  if (req.user.role !== "admin" && jobs.length === 1) {
+    setSessionCookie(res, buildSessionPayload(req.user, jobs[0].id));
+    res.redirect("/dashboard");
+    return;
+  }
+  const rows = jobs.map((job) => `
+    <tr>
+      <td>${esc(job.job_number)}</td>
+      <td>${esc(job.plant_name || "")}</td>
+      <td>${esc(job.performance_job_number || "")}</td>
+      <td>${job.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>
+        ${job.is_active ? `
+          <form method="post" action="/jobs/select">
+            <input type="hidden" name="job_id" value="${job.id}" />
+            <button type="submit">Open Job</button>
+          </form>
+        ` : `<span class="muted">Inactive job</span>`}
+      </td>
+    </tr>
+  `).join("");
+  res.send(layout("Select Job", `
+    <h1>Select Job</h1>
+    <div class="card">
+      <p>${req.user.role === "admin" ? "Choose the job you want to work in." : "Choose one of your assigned jobs to continue."}</p>
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Job Number</th><th>Plant</th><th>Performance #</th><th>Status</th><th>Action</th></tr>
+        ${rows || `<tr><td colspan="5" class="muted">No jobs available.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+}));
+
+app.post("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
+  const requestedJobId = Number(req.body.job_id || 0);
+  const availableJobs = req.user.role === "admin" ? req.user.accessibleJobs : req.user.activeJobs;
+  const selectedJob = availableJobs.find((job) => Number(job.id) === requestedJobId && job.is_active);
+  if (!selectedJob) {
+    throw new Error("Choose a valid active job.");
+  }
+  setSessionCookie(res, buildSessionPayload(req.user, selectedJob.id));
+  res.redirect(getSafeReturnPath(req, "/dashboard"));
+}));
+
+app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboard", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const [rfqs, pos, receipts, vendors, osd, jobNumber, pendingAccessRequests, rfqStatusCounts] = await Promise.all([
+    query("select count(*) from rfqs where job_id = $1", [jobId]),
+    query("select count(*) from purchase_orders where job_id = $1", [jobId]),
+    query("select count(*) from receipts where job_id = $1", [jobId]),
+    query("select count(*) from vendors"),
+    query("select count(*) from receipts where job_id = $1 and osd_status <> 'OK'", [jobId]),
+    Promise.resolve(req.user.activeJob?.job_number || ""),
+    req.user.role === "admin"
+      ? query("select count(*) from access_requests where status = 'PENDING'").catch(() => ({ rows: [{ count: 0 }] }))
+      : Promise.resolve({ rows: [{ count: 0 }] }),
+    ["admin", "buyer"].includes(req.user.role)
+      ? query(`
+          select status, count(*)::int as count
+          from rfqs
+          where job_id = $1
+          group by status
+        `, [jobId])
+      : Promise.resolve({ rows: [] })
+  ]);
+  const rfqStatusMap = Object.fromEntries(rfqStatusCounts.rows.map((row) => [row.status, Number(row.count || 0)]));
+  const rfqStatusCards = ["admin", "buyer"].includes(req.user.role)
+    ? `<div class="card"><h3>RFQ Status</h3><div class="stats">${
+        rfqStatuses.map((status) => `<div class="stat"><div>${esc(status.label)}</div><strong>${rfqStatusMap[status.value] || 0}</strong></div>`).join("")
+      }</div></div>`
+    : "";
+  res.send(layout("Dashboard", `
+    <h1>Operations Dashboard</h1>
+    ${req.user.role === "admin" && Number(pendingAccessRequests.rows[0].count) > 0 ? `<div class="card error"><strong>${pendingAccessRequests.rows[0].count} pending access request(s)</strong><div class="actions" style="margin-top:10px;"><a class="btn btn-primary" href="/settings">Review Requests</a></div></div>` : ""}
+    <div class="card"><strong>Job Number:</strong> ${esc(jobNumber)}</div>
+    <div class="dashboard-sections">
+      <div class="card">
+        <div class="stats">
+          <div class="stat"><div>RFQs</div><strong>${rfqs.rows[0].count}</strong></div>
+          <div class="stat"><div>POs</div><strong>${pos.rows[0].count}</strong></div>
+          <div class="stat"><div>POs Received</div><strong>${receipts.rows[0].count}</strong></div>
+          <div class="stat"><div>Open OS&amp;Ds</div><strong>${osd.rows[0].count}</strong></div>
+        </div>
+      </div>
+      ${rfqStatusCards}
+    </div>
+  `, req.user));
+});
+
+app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const [unverifiedRes, verifiedRes] = await Promise.all([
+    query("select count(*) from material_requisitions where job_id = $1 and status = 'REQUESTED'", [jobId]),
+    query("select count(*) from material_requisitions where job_id = $1 and status = 'VERIFIED'", [jobId])
+  ]);
+  const unverifiedCount = Number(unverifiedRes.rows[0]?.count || 0);
+  const verifiedCount = Number(verifiedRes.rows[0]?.count || 0);
+  res.send(layout("Yard", `
+    <h1>Yard</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-primary" href="/inventory">Inventory</a>
+        <a class="btn btn-primary" href="/yard/locations">Locations</a>
+        <a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>
+        ${req.user.role === "admin" ? `<a class="btn btn-primary" href="/yard/item-history">Item History</a>` : ""}
+      </div>
+    </div>
+    <div class="stats">
+      <a class="stat" href="/requisitions?status=REQUESTED" style="text-decoration:none;color:inherit;">
+        <div>Unverified Requests</div>
+        <strong>${unverifiedCount}</strong>
+      </a>
+      <a class="stat" href="/requisitions?status=VERIFIED" style="text-decoration:none;color:inherit;">
+        <div>Verified Requests</div>
+        <strong>${verifiedCount}</strong>
+      </a>
+    </div>
+  `, req.user));
+});
+
+function getInventoryAuditQueryString(source = {}) {
+  return new URLSearchParams({
+    warehouse_filter: String(source.warehouse_filter || ""),
+    location_filter: String(source.location_filter || ""),
+    ident_filter: String(source.ident_filter || "")
+  }).toString();
+}
+
+function getSafeReturnPath(req, fallback = "/settings") {
+  const returnTo = String(req.body?.return_to || req.query?.return_to || "").trim();
+  if (returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//")) return returnTo;
+  return fallback;
+}
+
+app.get("/settings", requireAuth, requirePermission("settings", "view"), async (req, res) => {
+  const resetComplete = String(req.query.reset || "").trim() === "1";
+  const [accessRequestsRes, jobsRes] = await Promise.all([
+    query("select * from access_requests where status = 'PENDING' order by created_at asc"),
+    query("select id, job_number, plant_name, is_active from jobs where is_active = true order by job_number asc")
+  ]);
+  const jobChecks = jobsRes.rows.map((job) => `<label class="check-option"><input type="checkbox" name="job_ids" value="${job.id}" /><span>${esc(job.job_number)}${job.plant_name ? ` - ${esc(job.plant_name)}` : ""}</span></label>`).join("");
+  const accessRequestRows = accessRequestsRes.rows.map((record) => `
+    <tr>
+      <td>${esc(record.email)}</td>
+              <td>${esc(formatShortDateTime(record.created_at))}</td>
+      <td>
+        <form id="access-request-${record.id}" method="post" action="/settings/access-requests/${record.id}/approve" class="stack" data-password-form="access-approve" data-password-message-id="access-request-${record.id}-password-error">
+          <input type="hidden" name="return_to" value="/settings" />
+          <div class="grid">
+            <div><input name="username" placeholder="Username" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+            <div><input name="first_name" placeholder="First name" autocomplete="off" /></div>
+            <div><input name="last_name" placeholder="Last name" autocomplete="off" /></div>
+          </div>
+          <div class="grid">
+            <div><input name="email" placeholder="Email" value="${esc(normalizeEmail(record.email || ""))}" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+            <div><input name="phone" placeholder="Phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /></div>
+            <div><input name="temp_password" placeholder="Temp Password" required autocomplete="new-password" autocapitalize="off" spellcheck="false" /></div>
+            <div>
+              <select name="role">
+                <option value="buyer">buyer</option>
+                <option value="warehouse">warehouse</option>
+                <option value="field" selected>field</option>
+                <option value="supervisor">supervisor</option>
+                <option value="admin">admin</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label>Assigned Jobs</label>
+            <div class="check-grid">${jobChecks || `<span class="muted">No active jobs available.</span>`}</div>
+          </div>
+          <div class="actions">
+            <button type="submit">Approve</button>
+            <button class="btn btn-danger" type="submit" formaction="/settings/access-requests/${record.id}/deny">Deny</button>
+          </div>
+          <div id="access-request-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
+        </form>
+      </td>
+    </tr>
+  `).join("");
+  res.send(layout("Settings", `
+    <h1>Settings</h1>
+    ${resetComplete ? `<div class="card success"><strong>App reset complete.</strong> Operational data was deleted, and the app is ready for a fresh setup/import.</div>` : ""}
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-primary" href="/settings/job-setup">Job Setup</a>
+        <a class="btn btn-primary" href="/settings/warehouse-setup">Warehouse Setup</a>
+        <a class="btn btn-primary" href="/settings/user-management">User Management</a>
+        ${req.user.role === "admin" ? `<a class="btn btn-primary" href="/settings/audit-log">Audit Log</a>` : ""}
+      </div>
+      <p class="muted" style="margin-top:12px;">Use these setup pages to manage job settings, warehouse/location setup, and users without crowding the main settings screen.</p>
+    </div>
+    ${req.user.role === "admin" ? `
+      <div class="card error">
+        <h3 style="margin-top:0;">Danger Zone</h3>
+        <p>This admin-only page lets you delete specific data sections or run a broader reset with verification.</p>
+        <div class="actions">
+          <a class="btn btn-danger" href="/settings/reset-app">Open Reset Controls</a>
+        </div>
+      </div>
+    ` : ""}
+    <div class="card scroll">
+      <h3>Access Requests</h3>
+      <table>
+        <tr><th>Email</th><th>Requested</th><th>Approve / Deny</th></tr>
+        ${accessRequestRows || `<tr><td colspan="3" class="muted">No pending access requests.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+});
+
+app.get("/settings/audit-log", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const userFilter = String(req.query.user || "").trim();
+  const actionFilter = String(req.query.action || "").trim();
+  const entityFilter = String(req.query.entity_type || "").trim();
+  const limit = Math.max(25, Math.min(500, Number(req.query.limit || 100) || 100));
+  const whereClauses = [];
+  const params = [];
+  if (userFilter) {
+    params.push(userFilter);
+    whereClauses.push(`coalesce(u.username, '') ilike $${params.length}`);
+  }
+  if (actionFilter) {
+    params.push(actionFilter);
+    whereClauses.push(`a.action ilike $${params.length}`);
+  }
+  if (entityFilter) {
+    params.push(entityFilter);
+    whereClauses.push(`a.entity_type ilike $${params.length}`);
+  }
+  params.push(limit);
+  const whereSql = whereClauses.length ? `where ${whereClauses.join(" and ")}` : "";
+  const [entriesRes, actionOptionsRes, entityOptionsRes] = await Promise.all([
+    query(`
+      select
+        a.id,
+        a.created_at,
+        a.action,
+        a.entity_type,
+        a.entity_id,
+        a.details,
+        u.username
+      from audit_log a
+      left join users u on u.id = a.user_id
+      ${whereSql}
+      order by a.created_at desc, a.id desc
+      limit $${params.length}
+    `, params),
+    query("select distinct action from audit_log where coalesce(action, '') <> '' order by action asc"),
+    query("select distinct entity_type from audit_log where coalesce(entity_type, '') <> '' order by entity_type asc")
+  ]);
+  const actionOptions = actionOptionsRes.rows.map((row) => {
+    const value = String(row.action || "");
+    return `<option value="${esc(value)}" ${value === actionFilter ? "selected" : ""}>${esc(value)}</option>`;
+  }).join("");
+  const entityOptions = entityOptionsRes.rows.map((row) => {
+    const value = String(row.entity_type || "");
+    return `<option value="${esc(value)}" ${value === entityFilter ? "selected" : ""}>${esc(value)}</option>`;
+  }).join("");
+  const entryRows = entriesRes.rows.map((entry) => `
+    <tr>
+      <td>${esc(formatShortDateTime(entry.created_at))}</td>
+      <td>${esc(entry.username || "-")}</td>
+      <td>${esc(entry.action || "")}</td>
+      <td>${esc(entry.entity_type || "")}</td>
+      <td>${esc(entry.entity_id || "")}</td>
+      <td style="white-space:pre-wrap; word-break:break-word; min-width:280px;">${esc(entry.details || "")}</td>
+    </tr>
+  `).join("");
+  res.send(layout("Audit Log", `
+    <h1>Audit Log</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
+    </div>
+    <div class="card">
+      <form method="get" action="/settings/audit-log" class="stack">
+        <div class="grid">
+          <div>
+            <label>Username</label>
+            <input name="user" value="${esc(userFilter)}" placeholder="admin" />
+          </div>
+          <div>
+            <label>Action</label>
+            <select name="action">
+              <option value="">All actions</option>
+              ${actionOptions}
+            </select>
+          </div>
+          <div>
+            <label>Entity Type</label>
+            <select name="entity_type">
+              <option value="">All entity types</option>
+              ${entityOptions}
+            </select>
+          </div>
+          <div>
+            <label>Rows</label>
+            <select name="limit">
+              ${[50, 100, 250, 500].map((value) => `<option value="${value}" ${value === limit ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
+          </div>
+        </div>
+        <div class="actions">
+          <button type="submit">Filter Audit Log</button>
+          <a class="btn btn-secondary" href="/settings/audit-log">Clear</a>
+          <span class="muted">${entriesRes.rows.length} row(s)</span>
+        </div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Time</th><th>User</th><th>Action</th><th>Entity Type</th><th>Entity ID</th><th>Details</th></tr>
+        ${entryRows || `<tr><td colspan="6" class="muted">No audit log rows matched the current filters.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+}));
+
+app.get("/settings/reset-app", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const completedTarget = String(req.query.done || "").trim();
+  const completedConfig = getResetTargetConfig(completedTarget);
+  const sectionMarkup = resetTargetSections.map((section) => `
+    <div class="card">
+      <h3 style="margin-top:0;">${esc(section.heading)}</h3>
+      <div class="stack">
+        ${section.targets.map((target) => {
+          const config = getResetTargetConfig(target);
+          return `
+            <div style="border:1px solid #b7c3d0; padding:12px; border-radius:4px;">
+              <div style="display:flex; justify-content:space-between; gap:16px; align-items:flex-start; flex-wrap:wrap;">
+                <div style="flex:1 1 420px;">
+                  <strong>${esc(config.label)}</strong>
+                  <div class="muted" style="margin-top:6px;">${esc(config.description)}</div>
+                </div>
+                <div class="actions">
+                  <a class="btn btn-danger" href="/settings/reset-app/${encodeURIComponent(target)}">Open Delete Confirmation</a>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
+  `).join("");
+  res.send(layout("Reset App Data", `
+    <h1>Reset App Data</h1>
+    ${completedConfig ? `<div class="card success"><strong>${esc(completedConfig.label)} complete.</strong> The selected reset action finished successfully.</div>` : ""}
+    <div class="card error">
+      <h3 style="margin-top:0;">Admin-only reset controls</h3>
+      <p>Each action below has its own confirmation step. Use the broader reset options only if you are intentionally clearing large parts of the app.</p>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
+    </div>
+    ${sectionMarkup}
+  `, req.user));
+}));
+
+app.get("/settings/reset-app/:target", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const config = getResetTargetConfig(String(req.params.target || "").trim());
+  if (!config) throw new Error("Reset target not found.");
+  res.send(layout(config.label, `
+    <h1>${esc(config.label)}</h1>
+    <div class="card error">
+      <h3 style="margin-top:0;">Verification required</h3>
+      <p>${esc(config.description)}</p>
+      <p>To continue, type <code>${esc(config.confirmText)}</code> and your current username <code>${esc(req.user.username)}</code>.</p>
+    </div>
+    <div class="card">
+      <form method="post" action="/settings/reset-app/${encodeURIComponent(String(req.params.target || "").trim())}" class="stack">
+        <div class="grid">
+          <div><label>Confirmation Phrase</label><input name="confirm_text" autocomplete="off" required /></div>
+          <div><label>Current Username</label><input name="confirm_username" autocomplete="off" required /></div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-danger" type="submit">Confirm ${esc(config.label)}</button>
+          <a class="btn btn-secondary" href="/settings/reset-app">Cancel</a>
+        </div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/settings/reset-app/:target", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const target = String(req.params.target || "").trim();
+  const config = getResetTargetConfig(target);
+  if (!config) throw new Error("Reset target not found.");
+  const confirmText = String(req.body.confirm_text || "").trim();
+  const confirmUsername = String(req.body.confirm_username || "").trim();
+  if (confirmText !== config.confirmText) throw new Error(`Type ${config.confirmText} to confirm this reset.`);
+  if (confirmUsername !== String(req.user.username || "").trim()) throw new Error("Enter your current username exactly to confirm the reset.");
+  await withTransaction(async (client) => {
+    await runResetTarget(client, target, req.user);
+  });
+  if (target === "full_reset" || target === "job_number") {
+    await query(`
+      insert into app_settings (key, value, updated_at)
+      values ('job_number', $1, now())
+      on conflict (key) do update
+      set value = excluded.value, updated_at = now()
+    `, [defaultJobNumberValue]);
+  }
+  res.redirect(`/settings/reset-app?done=${encodeURIComponent(target)}`);
+}));
+
+app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"), async (req, res) => {
+  const jobsRes = await query(`
+    select id, job_number, plant_name, performance_job_number, is_active, created_at
+    from jobs
+    order by job_number asc, id asc
+  `);
+  const jobs = jobsRes.rows;
+  const currentJob = req.user.activeJob || jobs[0] || null;
+  const vendorCategoryText = vendorCategories.join("\n");
+  const permissionRows = permissionSections.map((section) => {
+    const cells = permissionRoles.map((role) => {
+      const perms = {
+        ...(defaultPermissionMatrix[role]?.[section.key] || {}),
+        ...(permissionMatrix[role]?.[section.key] || {})
+      };
+      const viewChecked = perms.view ? "checked" : "";
+      const editChecked = perms.edit ? "checked" : "";
+      const createChecked = perms.create ? "checked" : "";
+      const verifyChecked = perms.verify ? "checked" : "";
+      const issueChecked = perms.issue ? "checked" : "";
+      const unverifyChecked = perms.unverify ? "checked" : "";
+      const deleteChecked = perms.delete ? "checked" : "";
+      return `<td>
+        <div class="stack">
+          <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__view" ${viewChecked} /><span>View</span></label>
+          <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__edit" ${editChecked} /><span>Edit</span></label>
+          ${section.key === "requisitions" ? `
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__create" ${createChecked} /><span>Create</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__verify" ${verifyChecked} /><span>Verify</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__issue" ${issueChecked} /><span>Issue</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__unverify" ${unverifyChecked} /><span>Unverify</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__delete" ${deleteChecked} /><span>Delete</span></label>
+          ` : ""}
+        </div>
+      </td>`;
+    }).join("");
+    return `<tr><td><strong>${esc(section.label)}</strong></td>${cells}</tr>`;
+  }).join("");
+  const jobRows = jobs.map((job) => `
+    <tr>
+      <td>${esc(job.job_number)}</td>
+      <td>${esc(job.plant_name || "")}</td>
+      <td>${esc(job.performance_job_number || "")}</td>
+      <td>${job.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>${esc(formatShortDateTime(job.created_at))}</td>
+      <td>
+        ${req.user.role === "admin" ? `
+          <form method="post" action="/settings/jobs/${job.id}/edit" class="stack">
+            <input type="hidden" name="return_to" value="/settings/job-setup" />
+            <div class="grid">
+              <div><input name="job_number" value="${esc(job.job_number)}" required /></div>
+              <div><input name="plant_name" value="${esc(job.plant_name || "")}" placeholder="Plant name" /></div>
+              <div><input name="performance_job_number" value="${esc(job.performance_job_number || "")}" placeholder="Performance #" /></div>
+            </div>
+            <div class="actions">
+              <button type="submit">Save Job</button>
+              <button class="${job.is_active ? "btn btn-danger" : "btn btn-primary"}" type="submit" formaction="/settings/jobs/${job.id}/toggle">${job.is_active ? "Deactivate" : "Activate"}</button>
+            </div>
+          </form>
+        ` : `${currentJob && Number(currentJob.id) === Number(job.id) ? `<span class="chip">Current</span>` : `<span class="muted">Assigned by admin</span>`}`}
+      </td>
+    </tr>
+  `).join("");
+  res.send(layout("Job Setup", `
+    <h1>Job Setup</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Jobs</h3>
+      <div class="muted">Each job now runs as its own working area. Users can be assigned to one or more jobs, and admins can switch between them after login.</div>
+      ${req.user.role === "admin" ? `
+        <form method="post" action="/settings/jobs/add" class="stack" style="margin-top:12px;">
+          <input type="hidden" name="return_to" value="/settings/job-setup" />
+          <div class="grid">
+            <div><label>Job Number</label><input name="job_number" required placeholder="KEQ3" /></div>
+            <div><label>Plant Name</label><input name="plant_name" placeholder="Novelis" /></div>
+            <div><label>Performance Job Number</label><input name="performance_job_number" placeholder="8613" /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Job</button></div>
+        </form>
+      ` : ""}
+      <div class="card scroll" style="margin-top:12px;">
+        <table>
+          <tr><th>Job Number</th><th>Plant</th><th>Performance #</th><th>Status</th><th>Created</th><th>Action</th></tr>
+          ${jobRows || `<tr><td colspan="6" class="muted">No jobs configured yet.</td></tr>`}
+        </table>
+      </div>
+      ${currentJob ? `<p class="muted">Current header preview: <strong>${esc([currentJob.plant_name, currentJob.job_number, "Material Control", currentJob.performance_job_number].filter(Boolean).join(" - "))}</strong></p>` : ""}
+    </div>
+    <div class="card">
+      <h3>Vendor Categories</h3>
+      <form method="post" action="/settings/vendor-categories" class="stack">
+        <input type="hidden" name="return_to" value="/settings/job-setup" />
+        <div><label>One Category Per Line</label><textarea name="vendor_categories">${esc(vendorCategoryText)}</textarea></div>
+        <div class="muted">These values control the category checkboxes on vendor screens.</div>
+        <div class="actions"><button type="submit">Save Vendor Categories</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Material Log Imports</h3>
+      <div class="muted">Import receiving, MRR, and FMR workbook data from a separate admin page.</div>
+      <div class="actions" style="margin-top:12px;"><a class="btn btn-primary" href="/settings/material-log-imports">Open Material Log Imports</a></div>
+    </div>
+    ${req.user.role === "admin" ? `
+      <div class="card scroll">
+        <h3>Sheet Permissions</h3>
+        <form method="post" action="/settings/permissions" class="stack">
+          <input type="hidden" name="return_to" value="/settings/job-setup" />
+          <table>
+            <tr><th>Sheet</th><th>Admin</th><th>Buyer</th><th>Warehouse</th><th>Field</th><th>Supervisor</th></tr>
+            ${permissionRows}
+          </table>
+          <div class="actions"><button type="submit">Save Permissions</button></div>
+        </form>
+      </div>
+    ` : ""}
+  `, req.user));
+});
+
+app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePermission("settings", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const warehousesRes = req.user.role === "admin"
+    ? await query("select id, name, is_active from warehouses where job_id = $1 order by name", [jobId])
+    : { rows: [] };
+  const warehouseLocationsRes = req.user.role === "admin"
+    ? await query(`
+        select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
+        from warehouse_locations wl
+        join warehouses w on w.id = wl.warehouse_id
+        where wl.job_id = $1
+        order by w.name, wl.name
+      `, [jobId])
+    : { rows: [] };
+  const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
+  const warehouseRows = warehousesRes.rows.map((row) => `
+    <tr>
+      <td>${esc(normalizeWarehouseName(row.name))}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>
+        <form method="post" action="/settings/warehouses/${row.id}/toggle">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
+        </form>
+      </td>
+    </tr>
+  `).join("");
+  const warehouseLocationRows = warehouseLocationsRes.rows.map((row) => `
+    <tr>
+      <td>${esc(normalizeWarehouseName(row.warehouse_name))}</td>
+      <td>${esc(normalizeLocationName(row.name))}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>
+        <form method="post" action="/settings/warehouse-locations/${row.id}/toggle">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
+        </form>
+      </td>
+    </tr>
+  `).join("");
+  res.send(layout("Warehouse Setup", `
+    <h1>Warehouse Setup</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
+    </div>
+    ${req.user.role === "admin" ? `
+      <div class="card">
+        <h3>Warehouses</h3>
+        <form method="post" action="/settings/warehouses/add" class="stack">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <div class="grid">
+            <div><label>Warehouse Name</label><input name="name" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Warehouse</button></div>
+        </form>
+      </div>
+      <div class="card scroll">
+        <table>
+          <tr><th>Warehouse</th><th>Status</th><th>Action</th></tr>
+          ${warehouseRows || `<tr><td colspan="3" class="muted">No warehouses saved yet.</td></tr>`}
+        </table>
+      </div>
+      <div class="card">
+        <h3>Warehouse Locations</h3>
+        <form method="post" action="/settings/warehouse-locations/add" class="stack">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <div class="grid">
+            <div><label>Warehouse</label><select name="warehouse_id" required><option value="">Select warehouse</option>${warehouseOptions}</select></div>
+            <div><label>Location Name</label><input name="name" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Location</button></div>
+        </form>
+        <form method="post" enctype="multipart/form-data" action="/settings/warehouse-locations/import" class="stack" style="margin-top:16px;">
+          <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
+          <div><label>Import Warehouses / Locations From .xlsx</label><input type="file" name="sheet" accept=".xlsx,.csv" required /></div>
+          <div class="muted">Supported columns: <code>warehouse</code> and <code>location</code>. Export first if you want an update-friendly workbook with IDs and active status.</div>
+          <div class="actions"><button type="submit">Import Warehouse Locations</button><a class="btn btn-secondary" href="/settings/warehouse-locations/export.xlsx">Export Warehouses / Locations (.xlsx)</a></div>
+        </form>
+      </div>
+      <div class="card scroll">
+        <table>
+          <tr><th>Warehouse</th><th>Location</th><th>Status</th><th>Action</th></tr>
+          ${warehouseLocationRows || `<tr><td colspan="4" class="muted">No warehouse locations saved yet.</td></tr>`}
+        </table>
+      </div>
+    ` : `<div class="card error"><p>You do not have access to warehouse setup.</p></div>`}
+  `, req.user));
+});
+
+app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const [usersRes, jobsRes, assignmentsRes, loginHistoryRes] = await Promise.all([
+    query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username"),
+    query("select id, job_number, plant_name, is_active from jobs order by job_number asc"),
+    query(`
+      select uj.user_id, uj.job_id, j.job_number, j.plant_name
+      from user_jobs uj
+      join jobs j on j.id = uj.job_id
+      order by j.job_number asc
+    `),
+    query(`
+      select
+        a.id,
+        a.user_id,
+        a.created_at,
+        coalesce(nullif(a.details, ''), u.username, concat('User #', a.entity_id)) as login_name,
+        u.first_name,
+        u.last_name,
+        u.role
+      from audit_log a
+      left join users u on u.id = a.user_id
+      where a.action = 'login'
+        and a.entity_type = 'auth'
+      order by a.created_at desc, a.id desc
+      limit 100
+    `)
+  ]);
+  const jobs = jobsRes.rows;
+  const assignmentsByUser = new Map();
+  for (const row of assignmentsRes.rows) {
+    const list = assignmentsByUser.get(Number(row.user_id)) || [];
+    list.push(row);
+    assignmentsByUser.set(Number(row.user_id), list);
+  }
+  const renderJobChecks = (selectedJobIds = [], fieldName = "job_ids") => jobs.map((job) => `
+    <label class="check-option">
+      <input type="checkbox" name="${fieldName}" value="${job.id}" ${selectedJobIds.includes(Number(job.id)) ? "checked" : ""} ${!job.is_active ? "disabled" : ""} />
+      <span>${esc(job.job_number)}${job.plant_name ? ` - ${esc(job.plant_name)}` : ""}${!job.is_active ? " (inactive)" : ""}</span>
+    </label>
+  `).join("");
+  const userRows = usersRes.rows.map((record) => `
+    <tr>
+      <td>${esc(record.username)}</td>
+      <td>${esc(record.first_name || "")}</td>
+      <td>${esc(record.last_name || "")}</td>
+      <td>${esc(normalizeEmail(record.email || ""))}</td>
+      <td>${esc(normalizePhone(record.phone || ""))}</td>
+      <td>${(assignmentsByUser.get(Number(record.id)) || []).map((job) => `<span class="chip">${esc(job.job_number)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
+      <td>${esc(record.role)}</td>
+      <td>${record.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>${esc(formatShortDateTime(record.created_at))}</td>
+      <td>
+        <div class="stack">
+          <form id="edit-user-${record.id}" method="post" action="/settings/users/${record.id}/edit" class="stack" data-password-form="edit-user" data-password-message-id="edit-user-${record.id}-password-error">
+            <input type="hidden" name="return_to" value="/settings/user-management" />
+            <div class="grid">
+              <div><input name="username" value="${esc(record.username)}" required /></div>
+              <div><input name="first_name" value="${esc(record.first_name || "")}" placeholder="First name" autocomplete="off" /></div>
+              <div><input name="last_name" value="${esc(record.last_name || "")}" placeholder="Last name" autocomplete="off" /></div>
+            </div>
+            <div class="grid">
+              <div><input name="email" value="${esc(normalizeEmail(record.email || ""))}" placeholder="Email" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+              <div><input name="phone" value="${esc(normalizePhone(record.phone || ""))}" placeholder="Phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /></div>
+              <div>
+                <select name="role">
+                  <option value="admin" ${record.role === "admin" ? "selected" : ""}>admin</option>
+                  <option value="buyer" ${record.role === "buyer" ? "selected" : ""}>buyer</option>
+                  <option value="warehouse" ${record.role === "warehouse" ? "selected" : ""}>warehouse</option>
+                  <option value="field" ${record.role === "field" ? "selected" : ""}>field</option>
+                  <option value="supervisor" ${record.role === "supervisor" ? "selected" : ""}>supervisor</option>
+                </select>
+              </div>
+              <div>
+                <select name="is_active">
+                  <option value="true" ${record.is_active ? "selected" : ""}>active</option>
+                  <option value="false" ${!record.is_active ? "selected" : ""}>inactive</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label>Assigned Jobs</label>
+              <div class="check-grid">${renderJobChecks((assignmentsByUser.get(Number(record.id)) || []).map((job) => Number(job.job_id)))}</div>
+            </div>
+            <div class="actions">
+              <input type="password" name="password" placeholder="Enter a new password to reset it" />
+              <button type="submit">Save User</button>
+            </div>
+            <div id="edit-user-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
+            <div class="muted">Passwords are never displayed. Enter a new password only if you want to reset it. Phone accepts 000-000-0000, 1-000-000-0000, or 0000000000.</div>
+          </form>
+          <div class="actions">
+            ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="/settings/users/${record.id}/delete?return_to=%2Fsettings%2Fuser-management">Delete</a>`}
+          </div>
+        </div>
+      </td>
+    </tr>
+  `).join("");
+  const loginRows = loginHistoryRes.rows.map((entry) => {
+    const displayName = [String(entry.first_name || "").trim(), String(entry.last_name || "").trim()].filter(Boolean).join(" ");
+    return `
+      <tr>
+        <td>${esc(entry.login_name || "")}</td>
+        <td>${esc(displayName || "-")}</td>
+        <td>${esc(entry.role || "-")}</td>
+        <td>${esc(formatShortDateTime(entry.created_at))}</td>
+      </tr>
+    `;
+  }).join("");
+  res.send(layout("User Management", `
+    <h1>User Management</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+      </div>
+    </div>
+    <div class="card">
+      <form id="new-user-form" method="post" action="/settings/users/add" class="stack">
+        <input type="hidden" name="return_to" value="/settings/user-management" />
+        <div class="grid">
+          <div><label>Username</label><input name="username" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+          <div><label>First Name</label><input name="first_name" autocomplete="off" /></div>
+          <div><label>Last Name</label><input name="last_name" autocomplete="off" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Email</label><input name="email" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+          <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
+          <div>
+            <label>Role</label>
+            <select name="role">
+              <option value="buyer">buyer</option>
+              <option value="warehouse">warehouse</option>
+              <option value="field" selected>field</option>
+              <option value="supervisor">supervisor</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label>Assigned Jobs</label>
+          <div class="check-grid">${renderJobChecks([], "job_ids")}</div>
+        </div>
+        <div class="grid">
+          <div>
+            <label>Password</label>
+            <div class="actions">
+              <input id="new-user-password" type="password" name="password" required autocomplete="new-password" autocapitalize="off" spellcheck="false" />
+              <button type="button" class="btn btn-secondary" onclick="togglePassword(this, 'new-user-password')">Show</button>
+            </div>
+            <div id="new-user-password-error" class="muted" style="color:#a23622;"></div>
+            <div class="muted">Minimum 10 characters, at least 1 uppercase letter, 1 lowercase letter, and 1 number.</div>
+          </div>
+        </div>
+        <div class="actions"><button type="submit">Add User</button></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <h3>Existing Users</h3>
+      <table>
+        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Jobs</th><th>Role</th><th>Status</th><th>Created</th><th>Edit / Delete</th></tr>
+        ${userRows || `<tr><td colspan="10" class="muted">No users found.</td></tr>`}
+      </table>
+    </div>
+    <div class="card scroll">
+      <h3>Recent Login History</h3>
+      <div class="muted">Shows the 100 most recent successful sign-ins.</div>
+      <table>
+        <tr><th>Username</th><th>Name</th><th>Role</th><th>Login Time</th></tr>
+        ${loginRows || `<tr><td colspan="4" class="muted">No login history recorded yet.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+});
+
+app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("yard", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const itemFilter = String(req.query.item || "").trim();
+  const historyRows = itemFilter ? (await query(`
+    select *
+    from (
+      select
+        r.received_at as transaction_date,
+        mi.item_code,
+        mi.description,
+        initcap(lower(coalesce(r.warehouse, ''))) as warehouse,
+        upper(coalesce(r.location, '')) as location,
+        r.qty_received as transaction_qty,
+        case when coalesce(r.osd_status, 'OK') = 'OK' then r.qty_received else 0 end as inventory_effect,
+        true as affects_on_hand,
+        'Receipt' as source_type,
+        coalesce(m.received_by, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          case when coalesce(po.po_no, '') <> '' then concat('PO ', po.po_no) else '' end,
+          case when coalesce(m.mrr_number, '') <> '' then concat('MRR ', m.mrr_number) else '' end,
+          case when coalesce(r.osd_status, 'OK') <> 'OK' then concat('OS&D ', r.osd_status) else '' end,
+          coalesce(r.osd_notes, '')
+        )) as details
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join material_items mi on mi.id = pl.material_item_id
+      left join purchase_orders po on po.id = pl.po_id
+      left join mrr_logs m on m.id = r.mrr_log_id
+      where r.job_id = $2 and (mi.item_code ilike $1 or mi.description ilike $1)
+
+      union all
+
+      select
+        ial.created_at as transaction_date,
+        ial.item_code,
+        ial.description,
+        initcap(lower(coalesce(ial.warehouse, ''))) as warehouse,
+        upper(coalesce(ial.location, '')) as location,
+        abs(ial.qty_adjustment) as transaction_qty,
+        ial.qty_adjustment as inventory_effect,
+        true as affects_on_hand,
+        'Inventory Audit' as source_type,
+        coalesce(u.username, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          case when coalesce(r.report_no, '') <> '' then concat('Report ', r.report_no) else '' end,
+          case when ial.qty_adjustment < 0 then 'Decrease' when ial.qty_adjustment > 0 then 'Increase' else '' end
+        )) as details
+      from inventory_adjustment_lines ial
+      left join inventory_audit_reports r on r.id = ial.report_id
+      left join users u on u.id = ial.created_by
+      where ial.job_id = $2 and (ial.item_code ilike $1 or ial.description ilike $1)
+
+      union all
+
+      select
+        mrl.created_at as transaction_date,
+        coalesce(nullif(mrl.item_code, ''), nullif(mrl.ident_code, ''), nullif(mrl.fluor_item_code, '')) as item_code,
+        mrl.description,
+        initcap(lower(coalesce(mrl.warehouse, ''))) as warehouse,
+        upper(coalesce(mrl.location, '')) as location,
+        mrl.received_qty as transaction_qty,
+        0::numeric as inventory_effect,
+        false as affects_on_hand,
+        'Manual Receiving Log' as source_type,
+        coalesce(mrl.received_by, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          case when coalesce(mrl.mrr_number, '') <> '' then concat('MRR ', mrl.mrr_number) else '' end,
+          case when coalesce(mrl.po_number, '') <> '' then concat('PO ', mrl.po_number) else '' end,
+          coalesce(mrl.comments, '')
+        )) as details
+      from material_receiving_logs mrl
+      where (
+        mrl.job_id = $2 and (
+        coalesce(nullif(mrl.item_code, ''), nullif(mrl.ident_code, ''), nullif(mrl.fluor_item_code, '')) ilike $1
+        or coalesce(mrl.description, '') ilike $1
+      ))
+
+      union all
+
+      select
+        coalesce(mit.created_at, mr.issued_at, mr.created_at) as transaction_date,
+        bl.item_code,
+        bl.description,
+        initcap(lower(coalesce(mit.warehouse, ''))) as warehouse,
+        upper(coalesce(mit.location, '')) as location,
+        mit.qty_issued as transaction_qty,
+        (0 - mit.qty_issued) as inventory_effect,
+        true as affects_on_hand,
+        'Material Issue' as source_type,
+        coalesce(u.username, mr.requested_by_name, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          concat('REQ ', mr.requisition_no),
+          case when coalesce(mr.iwp_no, '') <> '' then concat('IWP ', mr.iwp_no) else '' end,
+          case when coalesce(mr.iso_no, '') <> '' then concat('ISO ', mr.iso_no) else '' end
+        )) as details
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      left join users u on u.id = mr.issued_by_user_id
+      where coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and mr.job_id = $2
+        and (bl.item_code ilike $1 or bl.description ilike $1)
+
+      union all
+
+      select
+        coalesce(mr.issued_at, mr.created_at) as transaction_date,
+        bl.item_code,
+        bl.description,
+        '' as warehouse,
+        '' as location,
+        mrl.qty_issued as transaction_qty,
+        (0 - mrl.qty_issued) as inventory_effect,
+        true as affects_on_hand,
+        'Material Issue' as source_type,
+        coalesce(u.username, mr.requested_by_name, '') as actor_name,
+        trim(both ' |' from concat_ws(' | ',
+          concat('REQ ', mr.requisition_no),
+          case when coalesce(mr.iwp_no, '') <> '' then concat('IWP ', mr.iwp_no) else '' end,
+          case when coalesce(mr.iso_no, '') <> '' then concat('ISO ', mr.iso_no) else '' end
+        )) as details
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      left join users u on u.id = mr.issued_by_user_id
+      where mrl.qty_issued > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+        and mr.job_id = $2
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+        and (bl.item_code ilike $1 or bl.description ilike $1)
+      ) item_history
+    order by transaction_date desc nulls last, source_type, warehouse, location
+  `, [`%${itemFilter}%`, jobId])).rows : [];
+  const currentRows = itemFilter ? await getCurrentOnHandRows({ query }, {
+    jobId,
+    whereSql: "where coalesce(item_code, '') ilike $1 or coalesce(description, '') ilike $1",
+    params: [`%${itemFilter}%`],
+    orderSql: "inventory_by_location.warehouse, inventory_by_location.location, inventory_by_location.item_code"
+  }) : [];
+  const currentRowMarkup = currentRows.map((row) => `<tr>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.warehouse)}</td>
+    <td>${esc(row.location)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_on_hand))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_osd))}</td>
   </tr>`).join("");
+  const historyMarkup = historyRows.map((row) => {
+    const effect = Number(row.inventory_effect || 0);
+    const effectText = effect > 0 ? `+${formatQtyDisplay(effect)}` : formatQtyDisplay(effect);
+    return `<tr>
+      <td>${esc(formatShortDateTime(row.transaction_date))}</td>
+      <td>${esc(row.source_type)}</td>
+      <td>${esc(row.item_code || "")}</td>
+      <td>${esc(row.description || "")}</td>
+      <td>${esc(row.warehouse || "")}</td>
+      <td>${esc(row.location || "")}</td>
+      <td>${esc(formatQtyDisplay(row.transaction_qty))}</td>
+      <td>${row.affects_on_hand ? "Yes" : "No"}</td>
+      <td>${esc(effectText)}</td>
+      <td>${esc(row.actor_name || "")}</td>
+      <td>${esc(row.details || "")}</td>
+    </tr>`;
+  }).join("");
+  res.send(layout("Item History", `
+    <h1>Item History</h1>
+    <div class="card">
+      <form method="get" action="/yard/item-history" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto auto;">
+          <div><label>Item Filter</label><input name="item" value="${esc(itemFilter)}" placeholder="Item code or description" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+          <div style="align-self:end;"><a class="btn btn-secondary" href="/yard/item-history">Clear</a></div>
+        </div>
+      </form>
+      <div class="actions" style="margin-top:12px;">
+        <a class="btn btn-secondary" href="/yard">Back To Yard</a>
+      </div>
+      <p class="muted" style="margin-top:12px;">Negative on-hand rows usually mean the posted inventory audit adjustments drove that warehouse/location below the receipt-backed balance. This page shows the transaction trail for the filtered item so you can see the receipts and adjustments behind it.</p>
+    </div>
+    ${itemFilter ? `
+      <div class="card scroll">
+        <h3 style="margin-top:0;">Current Inventory Rows</h3>
+        <table><tr><th>Item</th><th>Description</th><th>Warehouse</th><th>Location</th><th>Qty On Hand</th><th>Qty OS&D</th></tr>${currentRowMarkup || `<tr><td colspan="6" class="muted">No current inventory rows match that filter.</td></tr>`}</table>
+      </div>
+      <div class="card scroll">
+        <h3 style="margin-top:0;">Transaction History</h3>
+        <table><tr><th>Date</th><th>Source</th><th>Item</th><th>Description</th><th>Warehouse</th><th>Location</th><th>Qty</th><th>Affects On-Hand</th><th>On-Hand Effect</th><th>User / Name</th><th>Details</th></tr>${historyMarkup || `<tr><td colspan="11" class="muted">No item history was found for that filter.</td></tr>`}</table>
+      </div>
+    ` : `<div class="card"><p class="muted">Filter by an item code or description to view the posted history for that item.</p></div>`}
+  `, req.user));
+}));
+
+app.get("/yard/locations", requireAuth, requireJobContext, requirePermission("yard", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const warehousesRes = await query("select id, name, is_active from warehouses where job_id = $1 order by name", [jobId]);
+  const warehouseLocationsRes = await query(`
+    select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
+    from warehouse_locations wl
+    join warehouses w on w.id = wl.warehouse_id
+    where wl.job_id = $1 and w.job_id = $1
+    order by w.name, wl.name
+  `, [jobId]);
+  const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
+  const canManageLocations = req.user.role === "admin" || canAccess(req.user, "settings", "edit");
+  const warehouseRows = warehousesRes.rows.map((row) => `
+    <tr>
+      <td>${esc(normalizeWarehouseName(row.name))}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>${canManageLocations ? `<form method="post" action="/settings/warehouses/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}</td>
+    </tr>
+  `).join("");
+  const locationRows = warehouseLocationsRes.rows.map((row) => `
+    <tr>
+      <td>${esc(normalizeWarehouseName(row.warehouse_name))}</td>
+      <td>${esc(normalizeLocationName(row.name))}</td>
+      <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>${canManageLocations ? `<form method="post" action="/settings/warehouse-locations/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}</td>
+    </tr>
+  `).join("");
+  res.send(layout("Locations", `
+    <h1>Locations</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/yard">Back To Yard</a>
+      </div>
+    </div>
+    ${canManageLocations ? `
+      <div class="card">
+        <h3>Warehouses</h3>
+        <form method="post" action="/settings/warehouses/add" class="stack">
+          <input type="hidden" name="return_to" value="/yard/locations" />
+          <div class="grid">
+            <div><label>Warehouse Name</label><input name="name" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Warehouse</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Locations</h3>
+        <form method="post" action="/settings/warehouse-locations/add" class="stack">
+          <input type="hidden" name="return_to" value="/yard/locations" />
+          <div class="grid">
+            <div><label>Warehouse</label><select name="warehouse_id" required><option value="">Select warehouse</option>${warehouseOptions}</select></div>
+            <div><label>Location Name</label><input name="name" required /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Location</button></div>
+        </form>
+      </div>
+    ` : ""}
+    <div class="card scroll">
+      <h3>Warehouse List</h3>
+      <table>
+        <tr><th>Warehouse</th><th>Status</th><th>Action</th></tr>
+        ${warehouseRows || `<tr><td colspan="3" class="muted">No warehouses saved yet.</td></tr>`}
+      </table>
+    </div>
+    <div class="card scroll">
+      <h3>Location List</h3>
+      <table>
+        <tr><th>Warehouse</th><th>Location</th><th>Status</th><th>Action</th></tr>
+        ${locationRows || `<tr><td colspan="4" class="muted">No warehouse locations saved yet.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+});
+
+app.get("/request-access", (req, res) => {
+  res.send(requestAccessPage());
+});
+
+app.post("/request-access", async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  if (!email) {
+    res.status(400).send(requestAccessPage("Email address is required."));
+    return;
+  }
+  const existing = (await query(
+    "select id from access_requests where email = $1 and status = 'PENDING' order by id desc limit 1",
+    [email]
+  )).rows[0];
+  if (existing) {
+    res.send(requestAccessPage("", "Your request is already pending review."));
+    return;
+  }
+  await withTransaction(async (client) => {
+    await client.query("insert into access_requests (email, status) values ($1, 'PENDING')", [email]);
+    await auditLog(client, null, "create", "access_request", email, "pending");
+  });
+  res.send(requestAccessPage("", "Request submitted. An administrator will review it."));
+});
+
+app.post("/settings/job-number", requireAuth, requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  if (!req.user.activeJob) throw new Error("Choose a job before saving job settings.");
+  const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
+  const plantName = String(req.body.plant_name || "").trim();
+  const performanceJobNumber = String(req.body.performance_job_number || "").trim();
+  if (!jobNumber) throw new Error("Job number is required.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      update jobs
+      set job_number = $2,
+          plant_name = $3,
+          performance_job_number = $4,
+          updated_at = now()
+      where id = $1
+    `, [req.user.activeJob.id, jobNumber, plantName, performanceJobNumber]);
+    await auditLog(client, req.user.id, "update", "job", req.user.activeJob.id, `${jobNumber}|${plantName}|${performanceJobNumber}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+}));
+
+app.post("/settings/jobs/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
+  const plantName = String(req.body.plant_name || "").trim();
+  const performanceJobNumber = String(req.body.performance_job_number || "").trim();
+  if (!jobNumber) throw new Error("Job number is required.");
+  await withTransaction(async (client) => {
+    const insert = await client.query(`
+      insert into jobs (job_number, plant_name, performance_job_number, is_active, updated_at)
+      values ($1, $2, $3, true, now())
+      returning id
+    `, [jobNumber, plantName, performanceJobNumber]);
+    await auditLog(client, req.user.id, "create", "job", insert.rows[0].id, `${jobNumber}|${plantName}|${performanceJobNumber}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+}));
+
+app.post("/settings/jobs/:id/edit", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = Number(req.params.id || 0);
+  const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
+  const plantName = String(req.body.plant_name || "").trim();
+  const performanceJobNumber = String(req.body.performance_job_number || "").trim();
+  if (!jobId) throw new Error("Job not found.");
+  if (!jobNumber) throw new Error("Job number is required.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      update jobs
+      set job_number = $2,
+          plant_name = $3,
+          performance_job_number = $4,
+          updated_at = now()
+      where id = $1
+    `, [jobId, jobNumber, plantName, performanceJobNumber]);
+    await auditLog(client, req.user.id, "update", "job", jobId, `${jobNumber}|${plantName}|${performanceJobNumber}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+}));
+
+app.post("/settings/jobs/:id/toggle", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = Number(req.params.id || 0);
+  if (!jobId) throw new Error("Job not found.");
+  await withTransaction(async (client) => {
+    const current = (await client.query("select id, job_number, is_active from jobs where id = $1", [jobId])).rows[0];
+    if (!current) throw new Error("Job not found.");
+    await client.query("update jobs set is_active = $2, updated_at = now() where id = $1", [jobId, !current.is_active]);
+    await auditLog(client, req.user.id, !current.is_active ? "activate" : "deactivate", "job", jobId, current.job_number);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+}));
+
+app.post("/settings/vendor-categories", requireAuth, requirePermission("settings", "edit"), async (req, res) => {
+  const categories = normalizeCategoryList(req.body.vendor_categories);
+  if (categories.length === 0) throw new Error("At least one vendor category is required.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      insert into app_settings (key, value, updated_at)
+      values ('vendor_categories', $1, now())
+      on conflict (key) do update
+      set value = excluded.value, updated_at = now()
+    `, [categories.join(",")]);
+    await auditLog(client, req.user.id, "update", "app_setting", "vendor_categories", categories.join(", "));
+  });
+  setVendorCategories(categories);
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+});
+
+app.post("/settings/warehouses/add", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const name = normalizeWarehouseName(req.body.name);
+  if (!name) throw new Error("Warehouse name is required.");
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const insert = await client.query(`
+      insert into warehouses (job_id, name, is_active)
+      values ($1, $2, true)
+      on conflict (job_id, name) do update
+      set is_active = true
+      returning id
+    `, [jobId, name]);
+    await auditLog(client, req.user.id, "create", "warehouse", insert.rows[0].id, name);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
+}));
+
+app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const current = (await client.query("select * from warehouses where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!current) throw new Error("Warehouse not found.");
+    const nextState = !current.is_active;
+    await client.query("update warehouses set is_active = $2 where id = $1", [req.params.id, nextState]);
+    await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse", req.params.id, current.name);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
+}));
+
+app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const warehouseId = Number(req.body.warehouse_id);
+  const name = normalizeLocationName(req.body.name);
+  const jobId = currentJobId(req);
+  if (!warehouseId) throw new Error("Warehouse is required.");
+  if (!name) throw new Error("Location name is required.");
+  await withTransaction(async (client) => {
+    const warehouse = (await client.query("select name from warehouses where id = $1 and job_id = $2", [warehouseId, jobId])).rows[0];
+    if (!warehouse) throw new Error("Warehouse not found.");
+    const insert = await client.query(`
+      insert into warehouse_locations (job_id, warehouse_id, name, is_active)
+      values ($1, $2, $3, true)
+      on conflict (warehouse_id, name) do update
+      set is_active = true
+      returning id
+    `, [jobId, warehouseId, name]);
+    await auditLog(client, req.user.id, "create", "warehouse_location", insert.rows[0].id, `${warehouse.name}:${name}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
+}));
+
+app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const current = (await client.query(`
+      select wl.id, wl.name, wl.is_active, w.name as warehouse_name
+      from warehouse_locations wl
+      join warehouses w on w.id = wl.warehouse_id
+      where wl.id = $1 and wl.job_id = $2
+    `, [req.params.id, jobId])).rows[0];
+    if (!current) throw new Error("Warehouse location not found.");
+    const nextState = !current.is_active;
+    await client.query("update warehouse_locations set is_active = $2 where id = $1", [req.params.id, nextState]);
+    await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse_location", req.params.id, `${current.warehouse_name}:${current.name}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
+}));
+
+app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeWarehouseLocationImportRow);
+  if (rows.length === 0) throw new Error("No rows found.");
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    let importedCount = 0;
+    for (const row of rows) {
+      const warehouseId = Number(row.warehouse_id || 0);
+      const warehouseName = normalizeWarehouseName(row.warehouse_name);
+      const locationId = Number(row.location_id || 0);
+      const locationName = normalizeLocationName(row.location_name);
+      const isActive = parseImportActiveFlag(row.is_active, true);
+      if (!warehouseId && !warehouseName) continue;
+      let warehouse;
+      if (warehouseId > 0) {
+        warehouse = (await client.query(`
+          update warehouses
+          set name = coalesce(nullif($2, ''), name), is_active = $3
+          where id = $1 and job_id = $4
+          returning id, name
+        `, [warehouseId, warehouseName, isActive, jobId])).rows[0];
+        if (!warehouse) throw new Error(`Warehouse id ${warehouseId} was not found in the import file.`);
+      } else {
+        warehouse = (await client.query(`
+          insert into warehouses (job_id, name, is_active)
+          values ($1, $2, $3)
+          on conflict (job_id, name) do update
+          set is_active = excluded.is_active
+          returning id, name
+        `, [jobId, warehouseName, isActive])).rows[0];
+      }
+      if (!locationId && !locationName) {
+        importedCount += 1;
+        continue;
+      }
+      if (locationId > 0) {
+        const updated = await client.query(`
+          update warehouse_locations
+          set warehouse_id = $2, name = coalesce(nullif($3, ''), name), is_active = $4
+          where id = $1 and job_id = $5
+        `, [locationId, warehouse.id, locationName, isActive, jobId]);
+        if (!updated.rowCount) throw new Error(`Location id ${locationId} was not found in the import file.`);
+      } else {
+        await client.query(`
+          insert into warehouse_locations (job_id, warehouse_id, name, is_active)
+          values ($1, $2, $3, $4)
+          on conflict (warehouse_id, name) do update
+          set is_active = excluded.is_active
+        `, [jobId, warehouse.id, locationName, isActive]);
+      }
+      importedCount += 1;
+    }
+    if (!importedCount) throw new Error("No valid warehouse/location rows were found. Use columns named warehouse and location, or export the current workbook first.");
+    await auditLog(client, req.user.id, "import", "warehouse_locations", "settings", `rows=${importedCount}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
+}));
+
+app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const rows = (await query(`
+    select
+      w.id as warehouse_id,
+      w.name as warehouse,
+      wl.id as location_id,
+      coalesce(wl.name, '') as location,
+      case when w.is_active and coalesce(wl.is_active, true) then 'active' else 'inactive' end as is_active
+    from warehouses w
+    left join warehouse_locations wl on wl.warehouse_id = w.id
+    where w.job_id = $1
+    order by w.name, wl.name
+  `, [jobId])).rows;
+  const worksheetRows = rows.length ? rows : [{
+    warehouse_id: "",
+    warehouse: "",
+    location_id: "",
+    location: "",
+    is_active: "active"
+  }];
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.json_to_sheet(worksheetRows, {
+    header: ["warehouse_id", "warehouse", "location_id", "location", "is_active"]
+  });
+  worksheet["!cols"] = [
+    { wch: 14 },
+    { wch: 28 },
+    { wch: 14 },
+    { wch: 28 },
+    { wch: 12 }
+  ];
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Warehouse Locations");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  await auditLog(pool, req.user.id, "export", "warehouse_locations", "settings", `rows=${rows.length}`);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="warehouse-locations.xlsx"');
+  res.send(buffer);
+}));
+
+app.post("/settings/permissions", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const nextMatrix = {};
+  for (const role of permissionRoles) {
+    nextMatrix[role] = {};
+    for (const section of permissionSections) {
+      const currentDefaults = defaultPermissionMatrix[role]?.[section.key] || {};
+      nextMatrix[role][section.key] = {
+        ...currentDefaults,
+        view: String(req.body[`perm__${role}__${section.key}__view`] || "") === "on",
+        edit: String(req.body[`perm__${role}__${section.key}__edit`] || "") === "on"
+      };
+      if (section.key === "requisitions") {
+        nextMatrix[role][section.key].create = String(req.body[`perm__${role}__${section.key}__create`] || "") === "on";
+        nextMatrix[role][section.key].verify = String(req.body[`perm__${role}__${section.key}__verify`] || "") === "on";
+        nextMatrix[role][section.key].issue = String(req.body[`perm__${role}__${section.key}__issue`] || "") === "on";
+        nextMatrix[role][section.key].unverify = String(req.body[`perm__${role}__${section.key}__unverify`] || "") === "on";
+        nextMatrix[role][section.key].delete = String(req.body[`perm__${role}__${section.key}__delete`] || "") === "on";
+      }
+    }
+  }
+  await withTransaction(async (client) => {
+    await client.query(`
+      insert into app_settings (key, value, updated_at)
+      values ('permission_matrix', $1, now())
+      on conflict (key) do update
+      set value = excluded.value, updated_at = now()
+    `, [JSON.stringify(nextMatrix)]);
+    await auditLog(client, req.user.id, "update", "app_setting", "permission_matrix", "updated");
+  });
+  setPermissionMatrix(nextMatrix);
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+}));
+
+app.get("/settings/material-log-imports", requireAuth, requireJobContext, requirePermission("settings", "view"), async (req, res) => {
+  res.send(layout("Material Log Imports", `
+    <h1>Material Log Imports</h1>
+    <div class="card">
+      <p class="muted">Upload one of your current workbook files to refresh the Material Logs module.</p>
+      <form method="post" enctype="multipart/form-data" action="/material-logs/import" class="stack">
+        <div class="grid">
+          <div><label>Log Type</label><select name="log_type"><option value="receiving">Issue Report</option><option value="mrr">MRR Log</option><option value="fmr">Vendor FMR Log</option></select></div>
+          <div><label>Workbook File</label><input type="file" name="sheet" required /></div>
+        </div>
+        <div class="actions"><button type="submit">Import Workbook</button><a class="btn btn-secondary" href="/settings/job-setup">Back To Job Setup</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const requestId = Number(req.params.id);
+  const username = String(req.body.username || "").trim();
+  const tempPassword = String(req.body.temp_password || "");
+  const role = String(req.body.role || "field").trim();
+  const firstName = String(req.body.first_name || "").trim();
+  const lastName = String(req.body.last_name || "").trim();
+  const email = normalizeEmail(req.body.email);
+  const phone = normalizePhone(req.body.phone);
+  const assignedJobIds = parseSelectedIdList(req.body.job_ids);
+  if (!username) throw new Error("Username is required.");
+  if (!tempPassword) throw new Error("Temporary password is required.");
+  if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
+  const passwordError = validatePasswordRules(tempPassword);
+  if (passwordError) throw new Error(passwordError);
+  const passwordHash = await bcrypt.hash(tempPassword, 8);
+  await withTransaction(async (client) => {
+    const requestRecord = (await client.query("select * from access_requests where id = $1 and status = 'PENDING'", [requestId])).rows[0];
+    if (!requestRecord) throw new Error("Access request not found.");
+    const insert = await client.query(
+      "insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true) returning id",
+      [username, passwordHash, role, firstName, lastName, email || normalizeEmail(requestRecord.email), phone]
+    );
+    if (role !== "admin") {
+      for (const jobId of assignedJobIds) {
+        await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [insert.rows[0].id, jobId]);
+      }
+    }
+    await client.query(`
+      update access_requests
+      set status = 'APPROVED',
+          approved_by_user_id = $2,
+          assigned_username = $3,
+          approved_at = now()
+      where id = $1
+    `, [requestId, req.user.id, username]);
+    await auditLog(client, req.user.id, "approve", "access_request", requestId, `${requestRecord.email}|${username}|${role}|jobs=${assignedJobIds.join(",")}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
+}));
+
+app.post("/settings/access-requests/:id/deny", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const requestId = Number(req.params.id);
+  await withTransaction(async (client) => {
+    const requestRecord = (await client.query("select * from access_requests where id = $1 and status = 'PENDING'", [requestId])).rows[0];
+    if (!requestRecord) throw new Error("Access request not found.");
+    await client.query(`
+      update access_requests
+      set status = 'DENIED',
+          approved_by_user_id = $2,
+          approved_at = now()
+      where id = $1
+    `, [requestId, req.user.id]);
+    await auditLog(client, req.user.id, "deny", "access_request", requestId, requestRecord.email);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings"));
+});
+
+app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const username = String(req.body.username || "").trim();
+  const password = String(req.body.password || "");
+  const role = String(req.body.role || "field").trim();
+  const firstName = String(req.body.first_name || "").trim();
+  const lastName = String(req.body.last_name || "").trim();
+  const email = normalizeEmail(req.body.email);
+  const phone = normalizePhone(req.body.phone);
+  const assignedJobIds = parseSelectedIdList(req.body.job_ids);
+  if (!username) throw new Error("Username is required.");
+  if (!password) throw new Error("Password is required.");
+  if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
+  const passwordError = validatePasswordRules(password);
+  if (passwordError) throw new Error(passwordError);
+  const passwordHash = await bcrypt.hash(password, 8);
+  await withTransaction(async (client) => {
+    const insert = await client.query("insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true) returning id", [username, passwordHash, role, firstName, lastName, email, phone]);
+    if (role !== "admin") {
+      for (const jobId of assignedJobIds) {
+        await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [insert.rows[0].id, jobId]);
+      }
+    }
+    await auditLog(client, req.user.id, "create", "user", username, `${role}|${firstName}|${lastName}|${email}|${phone}|jobs=${assignedJobIds.join(",")}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings"));
+}));
+
+app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const userId = Number(req.params.id);
+  const username = String(req.body.username || "").trim();
+  const password = String(req.body.password || "");
+  const role = String(req.body.role || "field").trim();
+  const firstName = String(req.body.first_name || "").trim();
+  const lastName = String(req.body.last_name || "").trim();
+  const email = normalizeEmail(req.body.email);
+  const phone = normalizePhone(req.body.phone);
+  const isActive = String(req.body.is_active || "true") === "true";
+  const assignedJobIds = parseSelectedIdList(req.body.job_ids);
+  if (!username) throw new Error("Username is required.");
+  if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
+  let passwordHash = "";
+  if (password) {
+    const passwordError = validatePasswordRules(password);
+    if (passwordError) throw new Error(passwordError);
+    passwordHash = await bcrypt.hash(password, 8);
+  }
+  await withTransaction(async (client) => {
+    const current = (await client.query("select id, username, role, is_active from users where id = $1", [userId])).rows[0];
+    if (!current) throw new Error("User not found.");
+    if (current.role === "admin" && role !== "admin") {
+      const adminCount = Number((await client.query("select count(*) from users where role = 'admin'")).rows[0].count);
+      if (adminCount <= 1) throw new Error("At least one admin user is required.");
+    }
+    if (current.role === "admin" && !isActive) {
+      const activeAdminCount = Number((await client.query("select count(*) from users where role = 'admin' and is_active = true")).rows[0].count);
+      if (activeAdminCount <= 1) throw new Error("At least one active admin user is required.");
+    }
+    if (req.user.id === userId && !isActive) throw new Error("You cannot deactivate your own user.");
+    if (passwordHash) {
+      await client.query("update users set username = $2, role = $3, password_hash = $4, is_active = $5, first_name = $6, last_name = $7, email = $8, phone = $9 where id = $1", [userId, username, role, passwordHash, isActive, firstName, lastName, email, phone]);
+    } else {
+      await client.query("update users set username = $2, role = $3, is_active = $4, first_name = $5, last_name = $6, email = $7, phone = $8 where id = $1", [userId, username, role, isActive, firstName, lastName, email, phone]);
+    }
+    await client.query("delete from user_jobs where user_id = $1", [userId]);
+    if (role !== "admin") {
+      for (const jobId of assignedJobIds) {
+        await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [userId, jobId]);
+      }
+    }
+    await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}|${isActive ? "active" : "inactive"}|${firstName}|${lastName}|${email}|${phone}|jobs=${assignedJobIds.join(",")}`);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/user-management"));
+}));
+
+app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const userId = Number(req.params.id);
+  const current = (await query("select id, username, role, is_active, created_at from users where id = $1", [userId])).rows[0];
+  if (!current) throw new Error("User not found.");
+  if (req.user.id === userId) throw new Error("You cannot deactivate your own user.");
+  res.send(layout("Confirm User Deactivation", `
+    <h1>Confirm User Deactivation</h1>
+    <div class="card">
+      <p><strong>User:</strong> ${esc(current.username)}</p>
+      <p><strong>Role:</strong> ${esc(current.role)}</p>
+      <p><strong>Status:</strong> ${current.is_active ? "Active" : "Inactive"}</p>
+      <p class="muted">This will mark the user inactive. They will no longer be able to sign in, but their history will remain in the system.</p>
+      <div class="actions">
+        <form method="post" action="/settings/users/${current.id}/delete">
+          <input type="hidden" name="return_to" value="${esc(getSafeReturnPath(req, "/settings/user-management"))}" />
+          <button class="btn btn-danger" type="submit">Confirm Deactivate</button>
+        </form>
+        <a class="btn btn-secondary" href="${esc(getSafeReturnPath(req, "/settings/user-management"))}">Cancel</a>
+      </div>
+    </div>
+  `, req.user));
+}));
+
+app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const userId = Number(req.params.id);
+  if (req.user.id === userId) throw new Error("You cannot deactivate your own user.");
+  await withTransaction(async (client) => {
+    const current = (await client.query("select id, username, role, is_active from users where id = $1", [userId])).rows[0];
+    if (!current) throw new Error("User not found.");
+    if (current.role === "admin" && current.is_active) {
+      const activeAdminCount = Number((await client.query("select count(*) from users where role = 'admin' and is_active = true")).rows[0].count);
+      if (activeAdminCount <= 1) throw new Error("At least one active admin user is required.");
+    }
+    await client.query("update users set is_active = false where id = $1", [userId]);
+    await auditLog(client, req.user.id, "deactivate", "user", userId, current.username);
+  });
+  res.redirect(getSafeReturnPath(req, "/settings/user-management"));
+}));
+
+app.get("/bom", requireAuth, requireJobContext, requirePermission("bom", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    await rebuildUnallocatedBom(client, jobId);
+  });
+  const bomNo = String(req.query.bom_no || "").trim();
+  const bomName = String(req.query.bom_name || "").trim();
+  const bomType = String(req.query.bom_type || "").trim();
+  const area = String(req.query.area || "").trim();
+  const systemName = String(req.query.system || req.query.system_name || "").trim();
+  const status = String(req.query.status || "").trim();
+  const jobSettings = await getJobSettings(jobId);
+  const jobNumber = String(jobSettings.job_number || "").trim();
+  const nextBomNumber = await getNextBomNumber(null, jobId);
+  const where = ["bh.job_id = $1"];
+  const params = [jobId];
+  if (bomNo) { params.push(`%${bomNo}%`); where.push(`bh.bom_no ilike $${params.length}`); }
+  if (bomName) { params.push(`%${bomName}%`); where.push(`coalesce(bh.bom_name, bh.description, '') ilike $${params.length}`); }
+  if (bomType) { params.push(bomType); where.push(`bh.bom_type = $${params.length}`); }
+  if (area) { params.push(`%${area}%`); where.push(`bh.area ilike $${params.length}`); }
+  if (systemName) { params.push(`%${systemName}%`); where.push(`bh.system_name ilike $${params.length}`); }
+  if (status) { params.push(status); where.push(`bh.status = $${params.length}`); }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const boms = (await query(`
+    select bh.*, coalesce((select count(*) from bom_lines bl where bl.bom_id = bh.id), 0) as line_count
+    from bom_headers bh
+    ${whereSql}
+    order by bh.id desc
+    limit 300
+  `, params)).rows;
+  const filterTypeOptions = [`<option value="">All Types</option>`].concat(
+    bomTypes.map((value) => `<option value="${esc(value)}" ${bomType === value ? "selected" : ""}>${esc(value)}</option>`)
+  ).join("");
+  const filterStatusOptions = [`<option value="">All Statuses</option>`].concat(
+    bomStatuses.map((value) => `<option value="${esc(value)}" ${status === value ? "selected" : ""}>${esc(value)}</option>`)
+  ).join("");
+  const createTypeOptions = bomTypes.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join("");
+  const createStatusOptions = bomStatuses.map((value) => `<option value="${esc(value)}" ${value === "DRAFT" ? "selected" : ""}>${esc(value)}</option>`).join("");
+  const rows = boms.map((bom) => `<tr>
+    <td><a href="/bom/${bom.id}">${esc(bom.bom_name || bom.description || bom.bom_no)}</a></td>
+    <td>${esc(bom.bom_no)}</td>
+    <td>${esc(bom.job_number)}</td>
+    <td>${esc(bom.bom_type)}</td>
+    <td>${esc(bom.area || "")}</td>
+    <td>${esc(bom.system_name || "")}</td>
+    <td>${esc(bom.revision || "")}</td>
+    <td>${bom.line_count}</td>
+    <td><span class="chip">${esc(bom.status)}</span></td>
+  </tr>`).join("");
+  res.send(layout("BOMs", `
+    <h1>BOM Planning</h1>
+    <div class="card">
+      <form method="get" action="/bom" class="stack">
+        <div class="grid-4">
+          <div><label>BOM #</label><input name="bom_no" value="${esc(bomNo)}" /></div>
+          <div><label>BOM Name</label><input name="bom_name" value="${esc(bomName)}" /></div>
+          <div><label>Type</label><select name="bom_type">${filterTypeOptions}</select></div>
+          <div><label>Area</label><input name="area" value="${esc(area)}" /></div>
+        </div>
+        <div class="grid">
+          <div><label>System</label><input name="system" value="${esc(systemName)}" /></div>
+          <div><label>Status</label><select name="status">${filterStatusOptions}</select></div>
+        </div>
+        <div class="actions"><button type="submit">Filter BOMs</button><a class="btn btn-secondary" href="/bom">Clear</a><span class="muted">${boms.length} result(s), max 300 shown</span></div>
+      </form>
+    </div>
+    <div class="card">
+      <form method="post" action="/bom" class="stack">
+        <div class="grid-4">
+          <div><label>Job Number</label><input name="job_number" value="${esc(jobNumber)}" readonly /></div>
+          <div><label>BOM Number</label><input name="bom_no" value="${esc(nextBomNumber)}" readonly /></div>
+          <div><label>BOM Name</label><input name="bom_name" required /></div>
+          <div><label>BOM Type</label><select name="bom_type">${createTypeOptions}</select></div>
+        </div>
+        <div class="grid">
+          <div><label>Status</label><select name="status">${createStatusOptions}</select></div>
+          <div><label>Area</label><input name="area" /></div>
+          <div><label>System</label><input name="system" /></div>
+          <div><label>Revision</label><input name="revision" value="0" /></div>
+        </div>
+        <div><label>Description</label><input name="description" /></div>
+        <div><label>Notes</label><textarea name="notes"></textarea></div>
+        <div class="actions"><button type="submit">Create BOM</button></div>
+      </form>
+    </div>
+    <div class="card scroll"><table><tr><th>BOM Name</th><th>BOM #</th><th>Job</th><th>Type</th><th>Area</th><th>System</th><th>Revision</th><th>Lines</th><th>Status</th></tr>${rows || `<tr><td colspan="9" class="muted">No BOMs match the current filter.</td></tr>`}</table></div>
+  `, req.user));
+});
+
+app.post("/bom", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const bomId = await withTransaction(async (client) => {
+    const jobSettings = await getJobSettings(jobId, client);
+    const jobNumber = String((req.body.job_number || jobSettings.job_number || "")).trim().toUpperCase();
+    const bomNo = String(req.body.bom_no || "").trim() || await getNextBomNumber(client, jobId);
+    const bomName = String(req.body.bom_name || "").trim();
+    if (!bomName) throw new Error("BOM name is required.");
+    const insert = await client.query(`
+      insert into bom_headers (job_id, job_number, bom_no, bom_name, bom_type, area, system_name, revision, status, description, notes, updated_at)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+      returning id
+    `, [
+      jobId,
+      jobNumber,
+      bomNo,
+      bomName,
+      req.body.bom_type || "misc",
+      req.body.area || "",
+      req.body.system || req.body.system_name || "",
+      req.body.revision || "0",
+      req.body.status || "DRAFT",
+      req.body.description || "",
+      req.body.notes || ""
+    ]);
+    await auditLog(client, req.user.id, "create", "bom_header", insert.rows[0].id, bomNo);
+    return insert.rows[0].id;
+  });
+  res.redirect(`/bom/${bomId}`);
+});
+
+app.get("/bom/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
+  if (!bom) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
+    return;
+  }
+  assertBomAllowsManualChanges(bom, "edit");
+  const typeOptions = bomTypes.map((value) => `<option value="${esc(value)}" ${bom.bom_type === value ? "selected" : ""}>${esc(value)}</option>`).join("");
+  const statusOptions = bomStatuses.map((value) => `<option value="${esc(value)}" ${bom.status === value ? "selected" : ""}>${esc(value)}</option>`).join("");
+  res.send(layout("Edit BOM", `
+    <h1>Edit BOM</h1>
+    <div class="card">
+      <form method="post" action="/bom/${bom.id}/edit" class="stack">
+        <div class="grid-4">
+          <div><label>Job Number</label><input name="job_number" value="${esc(bom.job_number)}" required /></div>
+          <div><label>BOM Number</label><input name="bom_no" value="${esc(bom.bom_no)}" required /></div>
+          <div><label>BOM Name</label><input name="bom_name" value="${esc(bom.bom_name || "")}" required /></div>
+          <div><label>BOM Type</label><select name="bom_type">${typeOptions}</select></div>
+        </div>
+        <div class="grid">
+          <div><label>Status</label><select name="status">${statusOptions}</select></div>
+          <div><label>Area</label><input name="area" value="${esc(bom.area || "")}" /></div>
+          <div><label>System</label><input name="system" value="${esc(bom.system_name || "")}" /></div>
+          <div><label>Revision</label><input name="revision" value="${esc(bom.revision || "")}" /></div>
+        </div>
+        <div><label>Description</label><input name="description" value="${esc(bom.description || "")}" /></div>
+        <div><label>Notes</label><textarea name="notes">${esc(bom.notes || "")}</textarea></div>
+        <div class="actions"><button type="submit">Save BOM</button><a class="btn btn-secondary" href="/bom/${bom.id}">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/bom/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    assertBomAllowsManualChanges(bom, "edit");
+    await client.query(`
+      update bom_headers
+      set job_number = $2, bom_no = $3, bom_name = $4, bom_type = $5, area = $6, system_name = $7, revision = $8, status = $9, description = $10, notes = $11, updated_at = now()
+      where id = $1 and job_id = $12
+    `, [
+      req.params.id,
+      String(req.body.job_number || "").trim().toUpperCase(),
+      String(req.body.bom_no || "").trim(),
+      String(req.body.bom_name || "").trim(),
+      req.body.bom_type || "misc",
+      req.body.area || "",
+      req.body.system || req.body.system_name || "",
+      req.body.revision || "0",
+      req.body.status || "DRAFT",
+      req.body.description || "",
+      req.body.notes || "",
+      jobId
+    ]);
+    await auditLog(client, req.user.id, "update", "bom_header", req.params.id, req.body.bom_no || "");
+  });
+  res.redirect(`/bom/${req.params.id}`);
+});
+
+app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
+  const jobId = currentJobId(req);
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+  if (!bom) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM not found.</h3></div>`, req.user));
+    return;
+  }
+  const manualBom = !isSystemGeneratedBom(bom);
+  const inventoryMarked = Number(req.query.inventory_marked || 0);
+  const inventoryEligible = Number(req.query.inventory_eligible || 0);
+  const inventoryAlready = Number(req.query.inventory_already || 0);
+  const inventoryUntouched = Number(req.query.inventory_untouched || 0);
+  const [importsRes, coverageRes, requisitionSummaryRes] = await Promise.all([
+    query(`
+      select ib.id, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
+             coalesce((select count(*) from import_batch_errors ibe where ibe.batch_id = ib.id), 0) as error_count
+      from import_batches ib
+      where ib.entity_type = 'bom_lines' and ib.rfq_id = $1 and ib.job_id = $2
+      order by ib.id desc
+      limit 5
+    `, [req.params.id, jobId]),
+    query(`
+      select
+        count(*) as line_count,
+        coalesce(sum(qty_required), 0) as qty_required,
+        coalesce(sum(qty_issued), 0) as qty_issued,
+        count(*) filter (where planning_status = 'ON_RFQ') as on_rfq_count,
+        count(*) filter (where planning_status in ('ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'ISSUED_TO_FIELD', 'CLOSED')) as ordered_count,
+        count(*) filter (where planning_status in ('PARTIALLY_RECEIVED', 'RECEIVED', 'ISSUED_TO_FIELD', 'CLOSED')) as received_count
+      from bom_lines
+      where bom_id = $1
+    `, [req.params.id]),
+    query(`
+      select count(*) as requisition_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
+      from material_requisitions mr
+      join material_requisition_lines mrl on mrl.requisition_id = mr.id
+      where mr.bom_id = $1 and mr.job_id = $2 and mrl.job_id = $2
+    `, [req.params.id, jobId])
+  ]);
+  const coverage = coverageRes.rows[0];
+  const requisitionSummary = requisitionSummaryRes.rows[0];
+  const importRows = importsRes.rows.length > 0
+      ? importsRes.rows.map((batch) => `<tr><td><a href="/imports/${batch.id}">${batch.id}</a></td><td>${esc(formatShortDateTime(batch.created_at))}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
+    : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
+  res.send(layout(`BOM ${bom.bom_name || bom.description || bom.bom_no}`, `
+    <h1>${esc(bom.bom_name || bom.description || bom.bom_no)}</h1>
+    ${inventoryMarked || inventoryEligible || inventoryAlready || inventoryUntouched ? `
+      <div class="card success">
+        <strong>One-time inventory receive complete.</strong>
+        Updated ${esc(String(inventoryMarked))} line(s).
+        Filled from inventory: ${esc(String(inventoryEligible))}.
+        Already received: ${esc(String(inventoryAlready))}.
+        Left unchanged: ${esc(String(inventoryUntouched))}.
+      </div>
+    ` : ""}
+    <div class="card">
+      <p class="muted">BOM #: ${esc(bom.bom_no)} | Job: ${esc(bom.job_number)} | Type: ${esc(bom.bom_type)} | Area: ${esc(bom.area || "")} | System: ${esc(bom.system_name || "")} | Revision: ${esc(bom.revision || "")} | Status: ${esc(bom.status)}${manualBom ? "" : " | System Generated"}</p>
+      <p>${esc(bom.description || "")}</p>
+      ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
+      ${manualBom
+        ? `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a>${req.user.role === "admin" ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>`
+        : `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a><a class="btn btn-primary" href="/requisitions/new?bom_id=${bom.id}">Create Requisition</a></div><p class="muted">This BOM is generated automatically from item-code inventory balances and cannot be edited manually.</p>`
+      }
+    </div>
+    <div class="stats">
+      <div class="stat"><div>Lines</div><strong>${coverage.line_count}</strong></div>
+      <div class="stat"><div>Qty Required</div><strong>${esc(formatQtyDisplay(coverage.qty_required))}</strong></div>
+      <div class="stat"><div>Qty Issued</div><strong>${esc(formatQtyDisplay(coverage.qty_issued))}</strong></div>
+      <div class="stat"><div>Requisitioned</div><strong>${esc(formatQtyDisplay(requisitionSummary.qty_requested))}</strong></div>
+    </div>
+    ${manualBom ? `
+      <div class="card">
+        <h3>Create RFQ From BOM</h3>
+          <p class="muted">Creates an RFQ for BOM lines that are still in planning and marks those lines as <code>ON_RFQ</code>.</p>
+        <form method="post" action="/bom/${bom.id}/to-rfq" class="stack">
+          <div class="grid">
+            <div><label>Project</label><input name="project_name" value="${esc(bom.bom_name || bom.description || bom.bom_no)}" required /></div>
+            <div><label>Due Date</label><input type="date" name="due_date" /></div>
+          </div>
+          <div class="actions"><button type="submit">Create RFQ From BOM Lines</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Upload BOM Lines</h3>
+        <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes</p>
+          <form id="bom-lines-import-form" method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
+            <div><label>CSV/XLSX File</label><input id="bom-lines-import-file" type="file" name="sheet" /></div>
+            <div><label>Or Paste CSV</label><textarea id="bom-lines-import-text" name="csv_text"></textarea></div>
+            <div class="actions"><button type="submit">Import BOM Lines</button></div>
+          </form>
+          <script>
+            (() => {
+              const form = document.getElementById("bom-lines-import-form");
+              const fileInput = document.getElementById("bom-lines-import-file");
+              const textInput = document.getElementById("bom-lines-import-text");
+              if (!form || !fileInput || !textInput) return;
+              form.addEventListener("submit", (event) => {
+                const hasFile = fileInput.files && fileInput.files.length > 0;
+                const hasText = textInput.value.trim().length > 0;
+                if (hasFile || hasText) return;
+                event.preventDefault();
+                window.alert("Upload BOM lines or paste CSV before importing.");
+              });
+            })();
+          </script>
+        </div>
+    ` : ""}
+    <div class="card scroll"><table><tr><th>Batch</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>${importRows}</table></div>
+  `, req.user));
+});
+
+app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const rfqId = await withTransaction(async (client) => {
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    assertBomAllowsManualChanges(bom, "convert to RFQ");
+    const lines = (await client.query(`
+      select *
+      from bom_lines
+      where bom_id = $1 and planning_status = 'PLANNED'
+      order by line_no, id
+    `, [bomId])).rows;
+    if (lines.length === 0) throw new Error("No BOM lines are available to move onto an RFQ.");
+    const rfqNo = await getNextRfqNumber(client, jobId);
+    const rfqInsert = await client.query(`
+      insert into rfqs (job_id, rfq_no, project_name, due_date, status)
+      values ($1, $2, $3, $4, 'OPEN')
+      returning id
+    `, [jobId, rfqNo, req.body.project_name?.trim() || bom.bom_name || bom.description || bom.bom_no, req.body.due_date || null]);
+    const newRfqId = rfqInsert.rows[0].id;
+    for (const line of lines) {
+      let materialItemId;
+      const existingItem = await client.query("select id from material_items where job_id = $1 and item_code = $2", [jobId, line.item_code]);
+      if (existingItem.rows[0]) {
+        materialItemId = existingItem.rows[0].id;
+        await client.query(
+          "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
+          [materialItemId, line.description, line.material_type || "misc", line.uom || "EA"]
+        );
+      } else {
+        const inserted = await client.query(
+          "insert into material_items (job_id, item_code, description, material_type, uom) values ($1, $2, $3, $4, $5) returning id",
+          [jobId, line.item_code, line.description, line.material_type || "misc", line.uom || "EA"]
+        );
+        materialItemId = inserted.rows[0].id;
+      }
+      await client.query(`
+        insert into rfq_items (job_id, rfq_id, bom_line_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+      `, [jobId, newRfqId, line.id, materialItemId, line.spec || "", line.commodity_code || "", line.tag_number || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty_required, line.notes || ""]);
+      await client.query(`
+        update bom_lines
+        set planning_status = 'ON_RFQ', qty_quoted = qty_required, updated_at = now()
+        where id = $1
+      `, [line.id]);
+    }
+    await client.query(`
+      update bom_headers
+      set status = case when status = 'DRAFT' then 'ISSUED_FOR_RFQ' else status end, updated_at = now()
+      where id = $1 and job_id = $2
+    `, [bomId, jobId]);
+    await auditLog(client, req.user.id, "create", "rfq", newRfqId, rfqNo);
+    await auditLog(client, req.user.id, "generate_rfq", "bom_header", bomId, rfqNo);
+    return newRfqId;
+  });
+  res.redirect(`/rfq/${rfqId}`);
+});
+
+app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const selectedLineQtys = new Map();
+  try {
+    const stagedSelection = JSON.parse(String(req.body.staged_selection || "{}"));
+    if (stagedSelection && typeof stagedSelection === "object" && !Array.isArray(stagedSelection)) {
+      for (const [lineId, qty] of Object.entries(stagedSelection)) {
+        const numericLineId = Number(lineId);
+        const qtyRequested = parseQtyValue(qty, NaN);
+        if (Number.isFinite(numericLineId) && numericLineId > 0 && Number.isFinite(qtyRequested) && qtyRequested > 0) {
+          selectedLineQtys.set(numericLineId, qtyRequested);
+        }
+      }
+    }
+  } catch {
+    // fall back to visible checkbox submission
+  }
+  for (const value of [].concat(req.body.selected_line_ids || [])) {
+    const lineId = Number(value);
+    const qtyRequested = parseQtyValue(req.body[`request_qty_${lineId}`], NaN);
+    if (Number.isFinite(lineId) && lineId > 0 && Number.isFinite(qtyRequested) && qtyRequested > 0) {
+      selectedLineQtys.set(lineId, qtyRequested);
+    }
+  }
+  const selectedLineIds = Array.from(selectedLineQtys.keys());
+  if (selectedLineIds.length === 0) throw new Error("Select at least one BOM line for the requisition.");
+  const requisitionId = await withTransaction(async (client) => {
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    const requisitionNo = await getNextRequisitionNumber(client, jobId);
+      const insertReq = await client.query(`
+        insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, iwp_no, iso_no, status, notes)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        returning id
+    `, [jobId, requisitionNo, bomId, req.user.id, getUserDisplayName(req.user), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
+      let createdLineCount = 0;
+    for (const lineId of selectedLineIds) {
+      const qtyRequested = selectedLineQtys.get(lineId);
+      const line = (await client.query(`
+        select
+          bl.id,
+          bl.item_code,
+          bl.qty_required,
+          bl.qty_issued,
+          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+        from bom_lines bl
+        left join (
+          ${getInventoryTotalsByItemSubquery(jobId)}
+        ) inv
+          on inv.item_code = bl.item_code
+        left join (
+          ${getIssuedInventoryTotalsByItemSubquery(jobId)}
+        ) issued
+          on issued.item_code = bl.item_code
+        left join (
+          ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
+        ) alloc
+          on alloc.item_code = bl.item_code
+        where bl.id = $1 and bl.bom_id = $2
+      `, [lineId, bomId])).rows[0];
+      if (!line) continue;
+      const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
+      if (qtyRequested <= 0 || qtyRequested > remaining) {
+        throw new Error(`Requested qty for ${line.item_code} must be greater than zero and cannot exceed the remaining BOM qty.`);
+      }
+      if (qtyRequested > num(line.qty_available)) {
+        throw new Error(`Requested qty for ${line.item_code} exceeds available received stock.`);
+      }
+        await client.query(`
+          insert into material_requisition_lines (job_id, requisition_id, bom_line_id, qty_requested)
+          values ($1, $2, $3, $4)
+        `, [jobId, insertReq.rows[0].id, lineId, qtyRequested]);
+        createdLineCount += 1;
+      }
+    if (createdLineCount === 0) throw new Error("No valid requisition lines were created.");
+    await auditLog(client, req.user.id, "create", "material_requisition", insertReq.rows[0].id, requisitionNo);
+    return insertReq.rows[0].id;
+  });
+  res.redirect(`/requisitions/${requisitionId}`);
+}));
+
+app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermission("bom", "edit"), upload.single("sheet"), async (req, res) => {
+  const bomId = Number(req.params.id);
+  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeBomImportRow);
+  if (rows.length === 0) throw new Error("No rows found.");
+  const batchId = await withTransaction(async (client) => {
+    const jobId = currentJobId(req);
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    assertBomAllowsManualChanges(bom, "import");
+    const batchId = await createImportBatch(client, {
+      entityType: "bom_lines",
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || "",
+      jobId
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    const validRowsBySourceUid = new Map();
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 2;
+      const lineNo = String(row.line_no || "").trim();
+      const itemCode = String(row.item_code || "").trim();
+      const qtyRequired = parseQtyValue(row.qty_required);
+      if (!lineNo || !itemCode || qtyRequired <= 0) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, and qty_required are required.", row);
+        continue;
+      }
+      const sourceUid = `${lineNo}|${itemCode}`;
+      if (validRowsBySourceUid.has(sourceUid)) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "duplicate_bom_line", "Duplicate line no and item code found in the import. The last row was kept.", row);
+      }
+      validRowsBySourceUid.set(sourceUid, {
+        lineNo,
+        itemCode,
+        description: row.description || itemCode,
+        materialType: row.material_type || "misc",
+        uom: row.uom || "EA",
+        spec: row.spec || "",
+        commodityCode: row.commodity_code || "",
+        tagNumber: row.tag_number || "",
+        iwpNo: row.iwp_no || row.iwp || "",
+        isoNo: row.iso_no || row.iso || "",
+        size1: row.size_1 || "",
+        size2: row.size_2 || "",
+        thk1: row.thk_1 || "",
+        thk2: row.thk_2 || "",
+        qtyRequired,
+        notes: row.notes || ""
+      });
+    }
+    const validRows = Array.from(validRowsBySourceUid.values());
+    if (validRows.length) {
+      const existingSourceUids = new Set((await client.query(
+        "select source_uid from bom_lines where bom_id = $1 and source_uid = any($2::text[])",
+        [bomId, validRows.map((row) => `${row.lineNo}|${row.itemCode}`)]
+      )).rows.map((row) => String(row.source_uid || "")));
+      const existingCount = validRows.filter((row) => existingSourceUids.has(`${row.lineNo}|${row.itemCode}`)).length;
+      updatedCount += existingCount;
+      insertedCount += validRows.length - existingCount;
+      const chunkSize = 250;
+      for (let index = 0; index < validRows.length; index += chunkSize) {
+        const chunk = validRows.slice(index, index + chunkSize);
+        await client.query(`
+          insert into bom_lines (
+            bom_id, line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
+            iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes, updated_at
+          )
+          select
+            $1,
+            data.line_no,
+            data.item_code,
+            data.description,
+            data.material_type,
+            data.uom,
+            data.spec,
+            data.commodity_code,
+            data.tag_number,
+            data.iwp_no,
+            data.iso_no,
+            data.size_1,
+            data.size_2,
+            data.thk_1,
+            data.thk_2,
+            data.qty_required,
+            data.notes,
+            now()
+          from unnest(
+            $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[],
+            $10::text[], $11::text[], $12::text[], $13::text[], $14::text[], $15::text[], $16::numeric[], $17::text[]
+          ) as data(
+            line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number,
+            iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes
+          )
+          on conflict (bom_id, source_uid) do update
+          set description = excluded.description,
+              material_type = excluded.material_type,
+              uom = excluded.uom,
+              spec = excluded.spec,
+              commodity_code = excluded.commodity_code,
+              tag_number = excluded.tag_number,
+              iwp_no = excluded.iwp_no,
+              iso_no = excluded.iso_no,
+              size_1 = excluded.size_1,
+              size_2 = excluded.size_2,
+              thk_1 = excluded.thk_1,
+              thk_2 = excluded.thk_2,
+              qty_required = excluded.qty_required,
+              notes = excluded.notes,
+              updated_at = now()
+        `, [
+          bomId,
+          chunk.map((row) => row.lineNo),
+          chunk.map((row) => row.itemCode),
+          chunk.map((row) => row.description),
+          chunk.map((row) => row.materialType),
+          chunk.map((row) => row.uom),
+          chunk.map((row) => row.spec),
+          chunk.map((row) => row.commodityCode),
+          chunk.map((row) => row.tagNumber),
+          chunk.map((row) => row.iwpNo),
+          chunk.map((row) => row.isoNo),
+          chunk.map((row) => row.size1),
+          chunk.map((row) => row.size2),
+          chunk.map((row) => row.thk1),
+          chunk.map((row) => row.thk2),
+          chunk.map((row) => row.qtyRequired),
+          chunk.map((row) => row.notes)
+        ]);
+      }
+    }
+    await rebuildUnallocatedBom(client, jobId);
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "bom_lines", bomId, `rows=${rows.length};batch=${batchId}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.get("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  assertBomAllowsManualChanges(bom, "receive");
+  res.send(layout("Confirm One-Time Receive", `
+    <h1>One-Time BOM Receive From Inventory</h1>
+    <div class="card error">
+      <p><strong>BOM:</strong> ${esc(bom.bom_name || bom.description || bom.bom_no)}</p>
+      <p class="muted">This temporary admin utility will mark BOM lines as <code>RECEIVED</code> only when current available inventory can fully cover the remaining required quantity for that item code. It does not create receipts and it does not partially fill lines.</p>
+      <div class="actions">
+        <form method="post" action="/bom/${bom.id}/receive-from-inventory">
+          <button class="btn btn-primary" type="submit">Confirm One-Time Receive Update</button>
+        </form>
+        <a class="btn btn-secondary" href="/bom/${bom.id}">Cancel</a>
+      </div>
+    </div>
+  `, req.user));
+}));
+
+app.post("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const result = await withTransaction(async (client) => {
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    assertBomAllowsManualChanges(bom, "receive");
+    return markBomLinesReceivedFromInventory(client, bomId, jobId, req.user.id || null);
+  });
+  const params = new URLSearchParams({
+    inventory_marked: String(result.updatedCount || 0),
+    inventory_eligible: String(result.fullyReceivedCount || 0),
+    inventory_already: String(result.alreadyReceivedCount || 0),
+    inventory_untouched: String(result.untouchedCount || 0)
+  });
+  res.redirect(`/bom/${bomId}?${params.toString()}`);
+}));
+
+async function getBomLineEntryAutocomplete(bomId, jobId) {
+  const [lineNoRes, materialItemRes, bomItemDetailRes] = await Promise.all([
+    query(`
+      select distinct line_no
+      from bom_lines
+      where bom_id = $1
+        and coalesce(line_no, '') <> ''
+      order by line_no
+    `, [bomId]),
+    query(`
+      select item_code, description, material_type, uom
+      from material_items
+      where job_id = $1
+        and coalesce(item_code, '') <> ''
+      order by item_code
+      limit 1000
+    `, [jobId]),
+    query(`
+      select distinct on (bl.item_code)
+        bl.item_code,
+        bl.description,
+        bl.material_type,
+        bl.uom,
+        coalesce(bl.spec, '') as spec,
+        coalesce(bl.size_1, '') as size_1,
+        coalesce(bl.size_2, '') as size_2,
+        coalesce(bl.thk_1, '') as thk_1,
+        coalesce(bl.thk_2, '') as thk_2
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bh.job_id = $1
+        and coalesce(bl.item_code, '') <> ''
+      order by bl.item_code, bl.updated_at desc, bl.id desc
+    `, [jobId])
+  ]);
+  const itemDetails = {};
+  for (const row of materialItemRes.rows) {
+    const itemCode = String(row.item_code || "").trim();
+    if (!itemCode) continue;
+    itemDetails[itemCode.toLowerCase()] = {
+      item_code: itemCode,
+      description: String(row.description || "").trim(),
+      material_type: String(row.material_type || "").trim(),
+      uom: String(row.uom || "").trim(),
+      spec: "",
+      size_1: "",
+      size_2: "",
+      thk_1: "",
+      thk_2: ""
+    };
+  }
+  for (const row of bomItemDetailRes.rows) {
+    const itemCode = String(row.item_code || "").trim();
+    const key = itemCode.toLowerCase();
+    if (!key) continue;
+    itemDetails[key] = {
+      item_code: itemCode || itemDetails[key]?.item_code || "",
+      description: String(row.description || itemDetails[key]?.description || "").trim(),
+      material_type: String(row.material_type || itemDetails[key]?.material_type || "").trim(),
+      uom: String(row.uom || itemDetails[key]?.uom || "").trim(),
+      spec: String(row.spec || "").trim(),
+      size_1: String(row.size_1 || "").trim(),
+      size_2: String(row.size_2 || "").trim(),
+      thk_1: String(row.thk_1 || "").trim(),
+      thk_2: String(row.thk_2 || "").trim()
+    };
+  }
+  return {
+    lineNoOptions: lineNoRes.rows.map((row) => `<option value="${esc(row.line_no)}"></option>`).join(""),
+    itemCodeOptions: Array.from(new Set([
+      ...materialItemRes.rows.map((row) => String(row.item_code || "").trim()),
+      ...bomItemDetailRes.rows.map((row) => String(row.item_code || "").trim())
+    ].filter(Boolean)))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+      .map((itemCode) => `<option value="${esc(itemCode)}"></option>`).join(""),
+    itemDetails
+  };
+}
+
+function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], autocomplete = {}) {
+  const lineNoOptions = autocomplete.lineNoOptions || "";
+  const itemCodeOptions = autocomplete.itemCodeOptions || "";
+  const itemDetailsJson = JSON.stringify(autocomplete.itemDetails || {}).replace(/</g, "\\u003c");
+  const normalizedRows = Array.from({ length: Math.max(rowValues.length, 8) }, (_, index) => ({
+    line_no: String(rowValues[index]?.line_no || "").trim(),
+    item_code: String(rowValues[index]?.item_code || "").trim(),
+    description: String(rowValues[index]?.description || "").trim(),
+    material_type: String(rowValues[index]?.material_type || "misc").trim() || "misc",
+    uom: String(rowValues[index]?.uom || "EA").trim() || "EA",
+    qty_required: String(rowValues[index]?.qty_required || "").trim(),
+    spec: String(rowValues[index]?.spec || "").trim(),
+    commodity_code: String(rowValues[index]?.commodity_code || "").trim(),
+    tag_number: String(rowValues[index]?.tag_number || "").trim(),
+    iwp_no: String(rowValues[index]?.iwp_no || "").trim(),
+    iso_no: String(rowValues[index]?.iso_no || "").trim(),
+    size_1: String(rowValues[index]?.size_1 || "").trim(),
+    size_2: String(rowValues[index]?.size_2 || "").trim(),
+    thk_1: String(rowValues[index]?.thk_1 || "").trim(),
+    thk_2: String(rowValues[index]?.thk_2 || "").trim(),
+    notes: String(rowValues[index]?.notes || "").trim()
+  }));
+  const gridRows = normalizedRows.map((row, index) => `
+    <tr>
+      <td><input name="line_no_${index}" value="${esc(row.line_no)}" list="bom-line-no-options-${bom.id}" /></td>
+      <td><input name="item_code_${index}" value="${esc(row.item_code)}" list="bom-item-code-options-${bom.id}" /></td>
+      <td><input name="description_${index}" value="${esc(row.description)}" /></td>
+      <td><input name="material_type_${index}" value="${esc(row.material_type)}" /></td>
+      <td><input name="uom_${index}" value="${esc(row.uom)}" /></td>
+      <td><input name="qty_required_${index}" value="${esc(row.qty_required)}" /></td>
+      <td><input name="spec_${index}" value="${esc(row.spec)}" /></td>
+      <td><input name="commodity_code_${index}" value="${esc(row.commodity_code)}" /></td>
+      <td><input name="tag_number_${index}" value="${esc(row.tag_number)}" /></td>
+      <td><input name="iwp_no_${index}" value="${esc(row.iwp_no)}" /></td>
+      <td><input name="iso_no_${index}" value="${esc(row.iso_no)}" /></td>
+      <td><input name="size_1_${index}" value="${esc(row.size_1)}" /></td>
+      <td><input name="size_2_${index}" value="${esc(row.size_2)}" /></td>
+      <td><input name="thk_1_${index}" value="${esc(row.thk_1)}" /></td>
+      <td><input name="thk_2_${index}" value="${esc(row.thk_2)}" /></td>
+      <td><input name="notes_${index}" value="${esc(row.notes)}" /></td>
+    </tr>
+  `).join("");
+  return layout(`Add BOM Lines ${bom.bom_name || bom.description || bom.bom_no}`, `
+    <h1>Add BOM Lines</h1>
+    <div class="card"><strong>BOM:</strong> ${esc(bom.bom_name || bom.description || bom.bom_no)} | <strong>BOM #:</strong> ${esc(bom.bom_no)}</div>
+    ${errorMessages.length ? `<div class="card error"><strong>Could not save all BOM lines.</strong><ul>${errorMessages.map((message) => `<li>${esc(message)}</li>`).join("")}</ul></div>` : ""}
+    <div class="card">
+      <p class="muted">Use this like an Excel grid. Leave blank rows blank. Each saved row needs Line No, Item Code, Description, UOM, and Qty Required.</p>
+      <style>
+        #bom-grid-form-${bom.id} table td { padding: 0; }
+        #bom-grid-form-${bom.id} table td input,
+        #bom-grid-form-${bom.id} table td select {
+          width: 100%;
+          min-width: 0;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+          box-shadow: none;
+          padding: 8px 10px;
+        }
+        #bom-grid-form-${bom.id} table td input:focus,
+        #bom-grid-form-${bom.id} table td select:focus {
+          outline: 2px solid #7ea5c8;
+          outline-offset: -2px;
+          background: #f7fbff;
+        }
+      </style>
+      <form id="bom-grid-form-${bom.id}" method="post" action="/bom/${bom.id}/lines/grid" class="stack">
+        <datalist id="bom-line-no-options-${bom.id}">${lineNoOptions}</datalist>
+        <datalist id="bom-item-code-options-${bom.id}">${itemCodeOptions}</datalist>
+        <div class="scroll">
+          <table class="data-grid">
+            <colgroup>
+              <col style="width:180px" />
+              <col style="width:120px" />
+              <col style="width:360px" />
+              <col style="width:120px" />
+              <col style="width:80px" />
+              <col style="width:110px" />
+              <col style="width:130px" />
+              <col style="width:120px" />
+              <col style="width:120px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:90px" />
+              <col style="width:160px" />
+            </colgroup>
+            <thead><tr><th>Line No</th><th>Item Code</th><th>Description</th><th>Material Type</th><th>UOM</th><th>Qty Required</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>IWP</th><th>ISO</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th></tr></thead>
+            <tbody>${gridRows}</tbody>
+          </table>
+        </div>
+        <div class="actions"><button type="submit">Save BOM Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Back To BOM Lines</a></div>
+      </form>
+      <script>
+        (function () {
+          const itemDetails = ${itemDetailsJson};
+          const form = document.getElementById("bom-grid-form-${bom.id}");
+          if (!form) return;
+          function fillRowFromItemCode(index) {
+            const itemCodeInput = form.querySelector('[name="item_code_' + index + '"]');
+            if (!itemCodeInput) return;
+            const detail = itemDetails[String(itemCodeInput.value || "").trim().toLowerCase()];
+            if (!detail) return;
+            const fieldMap = {
+              description: detail.description || "",
+              material_type: detail.material_type || "",
+              uom: detail.uom || "",
+              spec: detail.spec || "",
+              size_1: detail.size_1 || "",
+              size_2: detail.size_2 || "",
+              thk_1: detail.thk_1 || "",
+              thk_2: detail.thk_2 || ""
+            };
+            Object.entries(fieldMap).forEach(([field, value]) => {
+              const input = form.querySelector('[name="' + field + '_' + index + '"]');
+              if (input) input.value = value;
+            });
+          }
+          Array.from({ length: ${Math.max(rowValues.length, 8)} }, (_, index) => index).forEach((index) => {
+            const itemCodeInput = form.querySelector('[name="item_code_' + index + '"]');
+            if (!itemCodeInput) return;
+            itemCodeInput.addEventListener("change", () => fillRowFromItemCode(index));
+            itemCodeInput.addEventListener("blur", () => fillRowFromItemCode(index));
+          });
+        }());
+      </script>
+    </div>
+  `, req.user);
+}
+
+app.get("/bom/:id/lines/new", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  assertBomAllowsManualChanges(bom, "add line");
+  const autocomplete = await getBomLineEntryAutocomplete(bom.id, jobId);
+  res.send(buildBomLineGridPage(req, bom, [], [], autocomplete));
+}));
+
+app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  assertBomAllowsManualChanges(bom, "add line");
+  const rowCount = 8;
+  const rows = Array.from({ length: rowCount }, (_, index) => ({
+    line_no: String(req.body[`line_no_${index}`] || "").trim(),
+    item_code: String(req.body[`item_code_${index}`] || "").trim(),
+    description: String(req.body[`description_${index}`] || "").trim(),
+    material_type: String(req.body[`material_type_${index}`] || "misc").trim() || "misc",
+    uom: String(req.body[`uom_${index}`] || "EA").trim() || "EA",
+    qty_required: String(req.body[`qty_required_${index}`] || "").trim(),
+    spec: String(req.body[`spec_${index}`] || "").trim(),
+    commodity_code: String(req.body[`commodity_code_${index}`] || "").trim(),
+    tag_number: String(req.body[`tag_number_${index}`] || "").trim(),
+    iwp_no: String(req.body[`iwp_no_${index}`] || "").trim(),
+    iso_no: String(req.body[`iso_no_${index}`] || "").trim(),
+    size_1: String(req.body[`size_1_${index}`] || "").trim(),
+    size_2: String(req.body[`size_2_${index}`] || "").trim(),
+    thk_1: String(req.body[`thk_1_${index}`] || "").trim(),
+    thk_2: String(req.body[`thk_2_${index}`] || "").trim(),
+    notes: String(req.body[`notes_${index}`] || "").trim()
+  }));
+  const nonBlankRows = rows
+    .map((row, index) => ({ ...row, rowNumber: index + 1 }))
+    .filter((row) => String(row.line_no || "").trim());
+  const autocomplete = await getBomLineEntryAutocomplete(bom.id, jobId);
+  if (!nonBlankRows.length) {
+    res.status(400).send(buildBomLineGridPage(req, bom, rows, ["Enter at least one BOM line before saving."], autocomplete));
+    return;
+  }
+  const errors = [];
+  const seenKeys = new Set();
+  const validRows = [];
+  for (const row of nonBlankRows) {
+    const rowLabel = `Row ${row.rowNumber}`;
+    if (!row.line_no || !row.item_code || !row.description || !row.uom || !row.qty_required) {
+      errors.push(`${rowLabel}: Line No, Item Code, Description, UOM, and Qty Required are required.`);
+      continue;
+    }
+    const qtyRequired = parseQtyValue(row.qty_required, NaN);
+    if (!Number.isFinite(qtyRequired) || qtyRequired <= 0) {
+      errors.push(`${rowLabel}: Qty Required must be greater than zero.`);
+      continue;
+    }
+    const sourceUid = `${row.line_no}|${row.item_code}`;
+    if (seenKeys.has(sourceUid)) {
+      errors.push(`${rowLabel}: Duplicate line/item combination in this save batch.`);
+      continue;
+    }
+    seenKeys.add(sourceUid);
+    validRows.push({ ...row, qtyRequired, sourceUid });
+  }
+  if (validRows.length) {
+    const existingRows = (await query("select source_uid from bom_lines where bom_id = $1 and source_uid = any($2::text[])", [bomId, validRows.map((row) => row.sourceUid)])).rows;
+    const existingSet = new Set(existingRows.map((row) => String(row.source_uid || "")));
+    validRows.forEach((row) => {
+      if (existingSet.has(row.sourceUid)) {
+        errors.push(`Row ${row.rowNumber}: ${row.line_no} / ${row.item_code} already exists on this BOM.`);
+      }
+    });
+  }
+  const insertRows = validRows.filter((row) => !errors.some((message) => message.startsWith(`Row ${row.rowNumber}:`)));
+  if (!insertRows.length) {
+    res.status(400).send(buildBomLineGridPage(req, bom, rows, errors, autocomplete));
+    return;
+  }
+  await withTransaction(async (client) => {
+    for (const row of insertRows) {
+      await client.query(`
+        insert into bom_lines (
+          bom_id, line_no, item_code, description, material_type, uom, qty_required,
+          spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2,
+          planning_status, notes, updated_at
+        ) values (
+          $1, $2, $3, $4, $5, $6, $7,
+          $8, $9, $10, $11, $12, $13, $14, $15, $16,
+          $17, $18, now()
+        )
+      `, [
+        bomId,
+        row.line_no,
+        row.item_code,
+        row.description,
+        row.material_type || "misc",
+        row.uom || "EA",
+        row.qtyRequired,
+        row.spec,
+        row.commodity_code,
+        row.tag_number,
+        row.iwp_no,
+        row.iso_no,
+        row.size_1,
+        row.size_2,
+        row.thk_1,
+        row.thk_2,
+        "PLANNED",
+        row.notes
+      ]);
+      await auditLog(client, req.user.id, "create", "bom_line", `${bomId}:${row.sourceUid}`, row.item_code);
+    }
+    await rebuildUnallocatedBom(client, jobId);
+  });
+  const params = new URLSearchParams({
+    added_lines: String(insertRows.length),
+    skipped_lines: String(errors.length)
+  });
+  if (errors.length) params.set("line_save_errors", errors.join(" | "));
+  res.redirect(`/bom/${bomId}/lines?${params.toString()}`);
+}));
+
+app.get("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const line = (await query("select bl.*, bh.bom_no, bh.is_system_generated, bh.system_key from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
+  if (!line) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>BOM line not found.</h3></div>`, req.user));
+    return;
+  }
+  assertBomAllowsManualChanges(line, "edit");
+  res.send(layout("Edit BOM Line", `
+    <h1>Edit BOM Line</h1>
+    <div class="card"><strong>BOM:</strong> ${esc(line.bom_no)} | <strong>Line:</strong> ${esc(line.line_no)}</div>
+    <div class="card">
+      <form method="post" action="/bom-line/${line.id}/edit" class="stack">
+        <div class="grid">
+          <div><label>Line No</label><input name="line_no" value="${esc(line.line_no)}" required /></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(line.item_code)}" required /></div>
+          <div><label>Description</label><input name="description" value="${esc(line.description)}" required /></div>
+          <div><label>Material Type</label><input name="material_type" value="${esc(line.material_type)}" /></div>
+          <div><label>UOM</label><input name="uom" value="${esc(line.uom)}" required /></div>
+          <div><label>Qty Required</label><input name="qty_required" value="${esc(formatQtyDisplay(line.qty_required))}" required /></div>
+          <div><label>Spec</label><input name="spec" value="${esc(line.spec || "")}" /></div>
+          <div><label>Commodity Code</label><input name="commodity_code" value="${esc(line.commodity_code || "")}" /></div>
+          <div><label>Tag Number</label><input name="tag_number" value="${esc(line.tag_number || "")}" /></div>
+          <div><label>IWP</label><input name="iwp_no" value="${esc(line.iwp_no || "")}" /></div>
+          <div><label>ISO</label><input name="iso_no" value="${esc(line.iso_no || "")}" /></div>
+          <div><label>Size 1</label><input name="size_1" value="${esc(line.size_1 || "")}" /></div>
+          <div><label>Size 2</label><input name="size_2" value="${esc(line.size_2 || "")}" /></div>
+          <div><label>Thk 1</label><input name="thk_1" value="${esc(line.thk_1 || "")}" /></div>
+          <div><label>Thk 2</label><input name="thk_2" value="${esc(line.thk_2 || "")}" /></div>
+        </div>
+        <div><label>Notes</label><textarea name="notes">${esc(line.notes || "")}</textarea></div>
+        <div class="actions"><button type="submit">Save BOM Line</button><a class="btn btn-secondary" href="/bom/${line.bom_id}">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const lineId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const bomId = await withTransaction(async (client) => {
+    const current = (await client.query("select bl.bom_id, bl.planning_status, bh.is_system_generated, bh.system_key from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
+    if (!current) throw new Error("BOM line not found.");
+    assertBomAllowsManualChanges(current, "edit");
+    await client.query(`
+      update bom_lines
+      set line_no = $2, item_code = $3, description = $4, material_type = $5, uom = $6, qty_required = $7,
+          spec = $8, commodity_code = $9, tag_number = $10, iwp_no = $11, iso_no = $12, size_1 = $13, size_2 = $14, thk_1 = $15, thk_2 = $16,
+          planning_status = $17, notes = $18, updated_at = now()
+      where id = $1
+    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", current.planning_status || "PLANNED", req.body.notes || ""]);
+    await rebuildUnallocatedBom(client, jobId);
+    await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
+    return current.bom_id;
+  });
+  res.redirect(`/bom/${bomId}`);
+});
+
+app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+  const lineId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const bomId = await withTransaction(async (client) => {
+    const current = (await client.query("select bl.bom_id, bh.is_system_generated, bh.system_key from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
+    if (!current) throw new Error("BOM line not found.");
+    assertBomAllowsManualChanges(current, "delete");
+    await client.query("delete from bom_lines where id = $1", [lineId]);
+    await rebuildUnallocatedBom(client, jobId);
+    await auditLog(client, req.user.id, "delete", "bom_line", lineId, "");
+    return current.bom_id;
+  });
+  res.redirect(`/bom/${bomId}`);
+});
+
+app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("requisitions", "create"), async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    await rebuildUnallocatedBom(client, jobId);
+  });
+  const availableBoms = (await query(`
+    select id, bom_no, bom_name, description, status, is_system_generated, system_key
+    from bom_headers
+    where job_id = $1
+      and (bom_type = 'pipe' or system_key = $2)
+    order by
+      case when system_key = $2 then 0 else 1 end,
+      id desc
+  `, [jobId, unallocatedBomSystemKey])).rows;
+  const selectedBomId = Number(req.query.bom_id || 0);
+  const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
+  const clearFilters = String(req.query.clear_filters || "") === "1";
+  const lineFilter = {
+    iwp: clearFilters ? "" : String(req.query.iwp || "").trim(),
+    itemCode: clearFilters ? "" : String(req.query.item_code || "").trim(),
+    lineNo: clearFilters ? "" : String(req.query.line_no || "").trim(),
+    limit: Math.min(Math.max(num(req.query.limit, 250), 50), 1000)
+  };
+  let stagedSelection = {};
+  try {
+    const parsed = JSON.parse(String(req.query.staged_selection || "{}"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      stagedSelection = Object.fromEntries(
+        Object.entries(parsed)
+          .map(([lineId, qty]) => [String(num(lineId, 0)), parseQtyValue(qty, NaN)])
+          .filter(([lineId, qty]) => num(lineId, 0) > 0 && Number.isFinite(qty) && qty > 0)
+      );
+    }
+  } catch {
+    stagedSelection = {};
+  }
+  let filteredCount = 0;
+  let lineRows = "";
+  let lineNumberOptionsHtml = "";
+  if (selectedBom) {
+    const lineWhere = ["bom_id = $1"];
+    const lineParams = [selectedBom.id];
+    if (lineFilter.iwp) { lineParams.push(`%${lineFilter.iwp}%`); lineWhere.push(`coalesce(iwp_no, '') ilike $${lineParams.length}`); }
+    if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
+    if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
+    const lineWhereSql = lineWhere.join(" and ");
+    const [linesRes, filteredCountRes, lineNumberOptionsRes] = await Promise.all([
+      query(`
+        select
+          bl.*,
+          greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining,
+          coalesce(inv.qty_on_hand, 0) as qty_on_hand,
+          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+        from bom_lines bl
+        left join (
+          ${getInventoryTotalsByItemSubquery(jobId)}
+        ) inv
+          on inv.item_code = bl.item_code
+        left join (
+          ${getIssuedInventoryTotalsByItemSubquery(jobId)}
+        ) issued
+          on issued.item_code = bl.item_code
+        left join (
+          ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
+        ) alloc
+          on alloc.item_code = bl.item_code
+        where ${lineWhereSql.replace(/\bbom_id\b/g, "bl.bom_id").replace(/\bitem_code\b/g, "bl.item_code").replace(/\bline_no\b/g, "bl.line_no")}
+        order by coalesce(bl.iwp_no, ''), bl.line_no, bl.id
+        limit ${lineFilter.limit}
+      `, lineParams),
+      query(`select count(*) as filtered_count from bom_lines where ${lineWhereSql}`, lineParams),
+      query(`
+        select distinct line_no
+        from bom_lines
+        where bom_id = $1
+          and coalesce(line_no, '') <> ''
+        order by line_no
+      `, [selectedBom.id])
+    ]);
+    filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
+    lineNumberOptionsHtml = lineNumberOptionsRes.rows.map((row) => `<option value="${esc(row.line_no)}"></option>`).join("");
+    const selectedBomAllowsManualLineEdits = !isSystemGeneratedBom(selectedBom);
+    lineRows = linesRes.rows.map((line) => `<tr>
+      <td><input type="checkbox" name="selected_line_ids" value="${line.id}" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
+      <td>${esc(line.line_no)}</td>
+      <td>${esc(line.iwp_no || "")}</td>
+      <td>${esc(line.item_code)}</td>
+      <td>${esc(line.description)}</td>
+      <td>${esc(formatQtyDisplay(line.qty_required))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_remaining))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_available))}</td>
+      <td><input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(stagedSelection[String(line.id)] ?? Math.min(num(line.qty_remaining), num(line.qty_available))))}" /></td>
+      <td>${esc(line.uom)}</td>
+      <td>${esc(line.tag_number || "")}</td>
+      <td>${esc(line.size_1 || "")}</td>
+      <td>${esc(line.size_2 || "")}</td>
+      <td>${esc(line.thk_1 || "")}</td>
+      <td>${esc(line.thk_2 || "")}</td>
+      <td>${esc(line.notes || "")}</td>
+      <td><span class="chip">${esc(line.planning_status)}</span></td>
+      <td><div class="actions">${selectedBomAllowsManualLineEdits ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a>` : `<span class="muted">System BOM</span>`}</div></td>
+    </tr>`).join("");
+  }
+  const bomOptions = availableBoms.map((row) => `<option value="${row.id}" ${Number(row.id) === selectedBomId ? "selected" : ""}>${esc(row.bom_name || row.description || row.bom_no)} | ${esc(row.bom_no)}</option>`).join("");
+  const stagedSelectionJson = escAttr(JSON.stringify(stagedSelection));
+  res.send(layout("New Request", `
+    <h1>New Material Request</h1>
+    ${selectedBom ? `
+      <div class="card">
+        <form method="get" action="/requisitions/new" class="stack" id="requisition-filter-form">
+          <input type="hidden" name="bom_id" value="${selectedBom.id}" />
+          <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
+          <div class="grid">
+            <div><label>Piping BOM</label><input value="${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}" readonly /></div>
+            <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
+            <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
+            <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
+            <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" list="requisition-line-no-options" /></div>
+          </div>
+          <datalist id="requisition-line-no-options">${lineNumberOptionsHtml}</datalist>
+          <div class="actions">
+            <button type="submit">Load Lines</button>
+            <button class="btn btn-secondary" type="submit" name="clear_filters" value="1">Clear Filter</button>
+            <a class="btn btn-secondary" href="/requisitions/new">Change BOM</a>
+            <a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Create Material Requisition</h3>
+        <p class="muted">BOM: ${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
+        <form method="post" action="/bom/${selectedBom.id}/requisitions" class="stack" id="requisition-create-form">
+          <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
+          <div class="grid">
+            <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
+            <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
+          </div>
+          <div><label>Notes</label><input name="notes" /></div>
+          <div class="actions">
+            <button type="submit">Create Material Requisition</button>
+          </div>
+          <style>
+            body .shell {
+              max-width: calc(90vw - 24px);
+            }
+            #requisition-builder-scroll {
+              max-height: calc(100vh - 240px);
+              overflow: auto;
+            }
+            #requisition-builder-table thead th {
+              position: sticky;
+              top: 0;
+              z-index: 2;
+              background: #dbe4ee;
+            }
+          </style>
+          <div class="scroll" id="requisition-builder-scroll">
+            <table id="requisition-builder-table" class="data-grid">
+              <colgroup>
+                <col style="width:80px" />
+                <col style="width:150px" />
+                <col style="width:100px" />
+                <col style="width:100px" />
+                <col style="width:360px" />
+                <col style="width:72px" />
+                <col style="width:72px" />
+                <col style="width:84px" />
+                <col style="width:84px" />
+                <col style="width:90px" />
+                <col style="width:56px" />
+                <col style="width:110px" />
+                <col style="width:80px" />
+                <col style="width:80px" />
+                <col style="width:80px" />
+                <col style="width:80px" />
+                <col style="width:150px" />
+                <col style="width:100px" />
+                <col style="width:120px" />
+              </colgroup>
+              <thead>
+              <tr>
+                <th class="nowrap" data-resizable="true"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="requisition-select-all-visible" /> Pick</label></th>
+                <th class="wrap" data-resizable="true">Line</th>
+                <th class="nowrap" data-resizable="true">IWP</th>
+                <th class="nowrap" data-resizable="true">Item</th>
+                <th class="wrap" data-resizable="true">Description</th>
+                <th class="nowrap" data-resizable="true">Req Qty</th>
+                <th class="nowrap" data-resizable="true">Issued</th>
+                <th class="nowrap" data-resizable="true">Remaining</th>
+                <th class="nowrap" data-resizable="true">Available</th>
+                <th class="nowrap" data-resizable="true">Request</th>
+                <th class="nowrap" data-resizable="true">UOM</th>
+                <th class="wrap" data-resizable="true">Tag Number</th>
+                <th class="nowrap" data-resizable="true">Size 1</th>
+                <th class="nowrap" data-resizable="true">Size 2</th>
+                <th class="nowrap" data-resizable="true">Thk 1</th>
+                <th class="nowrap" data-resizable="true">Thk 2</th>
+                <th class="wrap" data-resizable="true">Notes</th>
+                <th class="nowrap" data-resizable="true">Status</th>
+                <th class="nowrap" data-resizable="true">Actions</th>
+              </tr>
+              </thead>
+              <tbody>
+              ${lineRows || `<tr><td colspan="19" class="muted">No BOM lines match the current filter.</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+        </form>
+      </div>
+      <script>
+        enableResizableTable("requisition-builder-table");
+        (function () {
+          const stagedSelection = ${JSON.stringify(stagedSelection)};
+          const rowCheckboxes = Array.from(document.querySelectorAll('input[name="selected_line_ids"]'));
+          const filterInput = document.getElementById("requisition-filter-staged-selection");
+          const createInput = document.getElementById("requisition-create-staged-selection");
+          const selectAllVisible = document.getElementById("requisition-select-all-visible");
+          function syncSelectAllVisible() {
+            if (!selectAllVisible || rowCheckboxes.length === 0) return;
+            const checkedCount = rowCheckboxes.filter((checkbox) => checkbox.checked).length;
+            selectAllVisible.checked = checkedCount > 0 && checkedCount === rowCheckboxes.length;
+            selectAllVisible.indeterminate = checkedCount > 0 && checkedCount < rowCheckboxes.length;
+          }
+          function syncStagedSelection() {
+            rowCheckboxes.forEach((checkbox) => {
+              const lineId = String(checkbox.value || "");
+              const qtyInput = document.querySelector('input[name="request_qty_' + lineId + '"]');
+              delete stagedSelection[lineId];
+              if (checkbox.checked && qtyInput) {
+                const qty = parseFloat(String(qtyInput.value || "").trim());
+                if (Number.isFinite(qty) && qty > 0) stagedSelection[lineId] = qty;
+              }
+            });
+            const payload = JSON.stringify(stagedSelection);
+            if (filterInput) filterInput.value = payload;
+            if (createInput) createInput.value = payload;
+            syncSelectAllVisible();
+          }
+          rowCheckboxes.forEach((checkbox) => {
+            checkbox.addEventListener("change", syncStagedSelection);
+            const lineId = String(checkbox.value || "");
+            const qtyInput = document.querySelector('input[name="request_qty_' + lineId + '"]');
+            if (qtyInput) qtyInput.addEventListener("input", syncStagedSelection);
+          });
+          if (selectAllVisible) {
+            selectAllVisible.addEventListener("change", () => {
+              rowCheckboxes.forEach((checkbox) => {
+                checkbox.checked = selectAllVisible.checked;
+              });
+              syncStagedSelection();
+            });
+          }
+          const filterForm = document.getElementById("requisition-filter-form");
+          const createForm = document.getElementById("requisition-create-form");
+          if (filterForm) filterForm.addEventListener("submit", syncStagedSelection);
+          if (createForm) createForm.addEventListener("submit", syncStagedSelection);
+          syncSelectAllVisible();
+        }());
+        </script>
+    ` : `<div class="card">
+      <form method="get" action="/requisitions/new" class="stack">
+        <div><label>Select Piping BOM</label><select name="bom_id" required><option value="">Choose BOM</option>${bomOptions || ""}</select></div>
+        <div class="actions">
+          <button type="submit">Continue</button>
+          <a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a>
+        </div>
+      </form>
+      ${availableBoms.length ? `<p class="muted" style="margin-top:12px;">Choose the BOM first, then we’ll take you to the request builder for that BOM.</p>` : `<div class="error" style="margin-top:12px;"><h3>No Piping BOM Found</h3><p>Select or create a piping BOM first.</p></div>`}
+    </div>`}
+  `, req.user));
+});
+
+app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const iwp = String(req.query.iwp || "").trim();
+  const status = String(req.query.status || "").trim();
+  const where = ["mr.job_id = $1"];
+  const params = [jobId];
+  if (iwp) { params.push(`%${iwp}%`); where.push(`coalesce(mr.iwp_no, '') ilike $${params.length}`); }
+  if (status) { params.push(status); where.push(`mr.status = $${params.length}`); }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const rows = (await query(`
+    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description, count(mrl.id) as line_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
+    from material_requisitions mr
+    join bom_headers bh on bh.id = mr.bom_id
+    left join material_requisition_lines mrl on mrl.requisition_id = mr.id
+    ${whereSql}
+    group by mr.id, bh.bom_no, bh.bom_name, bh.description
+    order by mr.id desc
+    limit 300
+  `, params)).rows;
+  const tableRows = rows.map((row) => `<tr>
+    <td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
+    <td>${esc(row.bom_name || row.bom_description || row.bom_no)}</td>
+    <td>${esc(row.bom_no)}</td>
+    <td>${esc(row.requested_by_name)}</td>
+    <td>${esc(row.iwp_no || "")}</td>
+    <td>${row.line_count}</td>
+    <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
+    <td><span class="chip">${esc(row.status)}</span></td>
+    <td>${esc(formatShortDateTime(row.created_at))}</td>
+    <td><div class="actions">${
+      hasLoggedRequisitionSignature(row)
+        ? `<a class="btn btn-secondary" href="/requisitions/${row.id}#warehouse-sign-off">Issued</a>`
+        : row.status === "VERIFIED"
+        ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">Sign</a>` : ""}`
+        : row.status === "ISSUED" && canSignRequisition(req.user, row)
+          ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
+        : row.status === "CANCELLED" && req.user?.role === "admin"
+          ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
+          : ""
+    }</div></td>
+  </tr>`).join("");
+  res.send(layout("Requisitions", `
+    <h1>Material Requisitions</h1>
+    ${canAccess(req.user, "requisitions", "create") ? `<div class="card">
+      <div class="actions"><a class="btn btn-primary" href="/requisitions/new">New Request</a></div>
+    </div>` : ""}
+    <div class="card">
+      <form method="get" action="/requisitions" class="stack">
+        <div class="grid">
+          <div><label>IWP</label><input name="iwp" value="${esc(iwp)}" /></div>
+          <div><label>Status</label><select name="status"><option value="">All Statuses</option>${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${status === value ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
+        </div>
+        <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
+      </form>
+    </div>
+    <div class="card scroll"><table><tr><th>Req #</th><th>BOM Name</th><th>BOM #</th><th>Requested By</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="10" class="muted">No requisitions yet.</td></tr>`}</table></div>
+  `, req.user));
+});
+
+app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  const manualBom = !isSystemGeneratedBom(bom);
+  const addedLines = Number(req.query.added_lines || 0);
+  const skippedLines = Number(req.query.skipped_lines || 0);
+  const lineSaveErrors = String(req.query.line_save_errors || "").trim();
+  const search = String(req.query.search || "").trim();
+  const iwp = String(req.query.iwp || "").trim();
+  const lineNo = String(req.query.line_no || "").trim();
+  const where = ["bl.bom_id = $1"];
+  const params = [req.params.id];
+  if (search) {
+    params.push(`%${search}%`);
+    where.push(`(bl.item_code ilike $${params.length} or coalesce(bl.description, '') ilike $${params.length})`);
+  }
+  if (iwp) {
+    params.push(`%${iwp}%`);
+    where.push(`coalesce(bl.iwp_no, '') ilike $${params.length}`);
+  }
+  if (lineNo) {
+    params.push(`%${lineNo}%`);
+    where.push(`coalesce(bl.line_no, '') ilike $${params.length}`);
+  }
+  const lines = (await query(`
+    select
+      bl.*,
+      coalesce(inv.qty_on_hand, 0) as qty_on_hand,
+      coalesce(need.qty_needed, 0) as qty_needed
+    from bom_lines bl
+    left join (
+      select item_code, sum(qty_on_hand) as qty_on_hand
+      from (${getInventoryTotalsSubquery(jobId)}) inventory_totals
+      group by item_code
+    ) inv on inv.item_code = bl.item_code
+    left join (
+      select bl2.item_code, sum(greatest(bl2.qty_required - bl2.qty_issued, 0)) as qty_needed
+      from bom_lines bl2
+      join bom_headers bh2 on bh2.id = bl2.bom_id
+      where bh2.job_id = ${jobId}
+        and coalesce(bh2.system_key, '') <> '${unallocatedBomSystemKey}'
+      group by bl2.item_code
+    ) need on need.item_code = bl.item_code
+    where ${where.join(" and ")}
+    order by coalesce(bl.iwp_no, ''), coalesce(bl.line_no, ''), bl.id
+  `, params)).rows;
+  const lineRows = lines.map((line) => `<tr>
+    <td>${esc(line.line_no)}</td>
+    <td>${esc(line.iwp_no || "")}</td>
+    <td>${esc(line.item_code)}</td>
+    <td>${esc(line.description)}</td>
+    <td>${esc(line.material_type || "")}</td>
+    <td>${esc(formatQtyDisplay(line.qty_required))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_on_hand))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_needed))}</td>
+    <td>${esc(line.uom || "")}</td>
+    <td>${esc(line.spec || "")}</td>
+    <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
+    <td><div class="actions">${manualBom ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a>` : ""}</div></td>
+  </tr>`).join("");
+  res.send(layout(`BOM Lines ${bom.bom_name || bom.description || bom.bom_no}`, `
+    <h1>BOM Lines</h1>
+    <div class="card">
+      <p class="muted">BOM: <a href="/bom/${bom.id}">${esc(bom.bom_name || bom.description || bom.bom_no)}</a> | BOM #: ${esc(bom.bom_no)} | Type: ${esc(bom.bom_type)} | Status: ${esc(bom.status)}</p>
+      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}">Back to BOM</a>${canAccess(req.user, "bom", "edit") && manualBom ? `<a class="btn btn-primary" href="/bom/${bom.id}/lines/new">Add BOM Line</a>` : ""}</div>
+    </div>
+    ${addedLines ? `<div class="card success"><strong>Added ${addedLines} BOM line${addedLines === 1 ? "" : "s"}.</strong>${skippedLines ? ` ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.` : ""}</div>` : ""}
+    ${!addedLines && skippedLines ? `<div class="card error"><strong>No BOM lines were added.</strong> ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.</div>` : ""}
+    ${lineSaveErrors ? `<div class="card error"><strong>Manual BOM line issues:</strong><pre>${esc(lineSaveErrors.split(" | ").join("\n"))}</pre></div>` : ""}
+    <div class="card">
+      <form method="get" action="/bom/${bom.id}/lines" class="stack">
+        <div class="grid">
+          <div><label>Search</label><input name="search" value="${esc(search)}" /></div>
+          <div><label>IWP</label><input name="iwp" value="${esc(iwp)}" /></div>
+          <div><label>Line No</label><input name="line_no" value="${esc(lineNo)}" /></div>
+        </div>
+        <div class="actions"><button type="submit">Filter Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Clear</a><span class="muted">${lines.length} line(s)</span></div>
+      </form>
+    </div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Needed Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="13" class="muted">No BOM lines found.</td></tr>`}</table></div>
+  `, req.user));
+}));
+
+app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("requisitions", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const header = (await query(`
+    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
+    from material_requisitions mr
+    join bom_headers bh on bh.id = mr.bom_id
+    where mr.id = $1 and mr.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
+  if (!header) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Requisition not found.</h3></div>`, req.user));
+    return;
+  }
+  const lines = (await query(`
+    select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mrl.requisition_id = $1 and mrl.job_id = $2
+    order by bl.line_no, bl.id
+  `, [req.params.id, jobId])).rows;
+  const lineRows = lines.map((line) => `<tr>
+    <td>${esc(line.line_no)}</td>
+    <td>${esc(line.iwp_no || "")}</td>
+    <td>${esc(line.item_code)}</td>
+    <td>${esc(line.description)}</td>
+    <td>${esc(formatQtyDisplay(line.qty_requested))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+    <td>${esc(line.uom)}</td>
+    <td>${esc(line.spec || "")}</td>
+    <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
+  </tr>`).join("");
+  const headerActions = [];
+  if (canEditRequisition(req.user, header)) {
+    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Edit Request</a>`);
+  }
+  if (header.status === "REQUESTED" && canAccess(req.user, "requisitions", "verify")) {
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Verify Request</button></form>`);
+  }
+  if (header.status === "VERIFIED") {
+    headerActions.push(`<a class="btn btn-secondary" target="_blank" href="/requisitions/${header.id}/pick-ticket.pdf">Open Pick Ticket PDF</a>`);
+    if (canAccess(req.user, "requisitions", "unverify")) {
+      headerActions.push(`<form method="post" action="/requisitions/${header.id}/unverify"><button class="btn btn-secondary" type="submit">Set To Un-Verified</button></form>`);
+    }
+    if (canAccess(req.user, "requisitions", "issue")) {
+      headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
+    }
+  }
+  if (canSignRequisition(req.user, header)) {
+    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${hasLoggedRequisitionSignature(header) ? "Update Sign-Off" : "Sign Requisition"}</a>`);
+  }
+  if (req.user?.role === "admin" && header.status !== "CANCELLED") {
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/cancel" onsubmit="return confirm('Cancel this requisition? The record will be kept. If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Cancel Requisition</button></form>`);
+  }
+  if (req.user?.role === "admin" && header.status === "CANCELLED") {
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore Requisition</button></form>`);
+  }
+  res.send(layout(`Requisition ${header.requisition_no}`, `
+    <h1>Requisition ${esc(header.requisition_no)}</h1>
+    <div class="card">
+      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(formatShortDateTime(header.created_at))}</p>
+      <p class="muted">IWP: ${esc(header.iwp_no || "")}</p>
+      ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
+      ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}
+    </div>
+    <div class="card" id="warehouse-sign-off">
+      <h3>Warehouse Sign-Off</h3>
+      <p class="muted">Use either a signed paper copy upload or an electronic signature from an iPad. Both stay attached to this requisition.</p>
+      <p class="muted">Signed By: ${esc(header.signed_by_name || "") || `<span class="muted">Not signed yet</span>`} ${header.signed_at ? `| Signed At: ${esc(formatShortDateTime(header.signed_at))}` : ""}</p>
+      <div class="actions">
+        ${canSignRequisition(req.user, header) ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${hasLoggedRequisitionSignature(header) ? "Open Sign-Off Page" : "Capture Sign-Off"}</a>` : ""}
+        ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/signed-copy" target="_blank">Open Uploaded Signed Copy</a>` : ""}
+      </div>
+      ${header.signed_signature_data ? `<div style="margin-top:12px;"><label>Electronic Signature</label><div class="card" style="padding:12px; background:#fff;"><img src="${escAttr(header.signed_signature_data)}" alt="Electronic requisition signature" style="max-width:100%; max-height:180px; display:block;" /></div></div>` : `<p class="muted">No electronic signature saved yet.</p>`}
+      ${header.signed_copy_filename ? `<p class="muted">Uploaded signed copy: ${esc(header.signed_copy_filename)}</p>` : `<p class="muted">No signed paper copy uploaded yet.</p>`}
+    </div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="9" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+  `, req.user));
+});
+
+app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const [header, requesterNameRows] = await Promise.all([
+    query(`
+      select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
+      from material_requisitions mr
+      join bom_headers bh on bh.id = mr.bom_id
+      where mr.id = $1 and mr.job_id = $2
+    `, [req.params.id, jobId]).then((result) => result.rows[0]),
+    query(`
+      select distinct requested_by_name
+      from material_requisitions
+      where job_id = $1
+        and coalesce(requested_by_name, '') <> ''
+      order by requested_by_name
+    `, [jobId]).then((result) => result.rows)
+  ]);
+  if (!header) throw new Error("Requisition not found.");
+  if (!canSignRequisition(req.user, header)) throw new Error("Only verified or issued requisitions can be signed.");
+  const signerNames = Array.from(new Set([
+    ...requesterNameRows.map((row) => String(row.requested_by_name || "").trim()).filter(Boolean),
+    String(header.signed_by_name || "").trim(),
+    String(header.requested_by_name || "").trim(),
+    getUserDisplayName(req.user)
+  ].filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const defaultSigner = String(header.signed_by_name || header.requested_by_name || getUserDisplayName(req.user)).trim();
+  const signerOptionsHtml = signerNames.map((name) => `<option value="${esc(name)}" ${name === defaultSigner ? "selected" : ""}>${esc(name)}</option>`).join("");
+  res.send(layout(`Sign ${header.requisition_no}`, `
+    <h1>Sign Requisition ${esc(header.requisition_no)}</h1>
+    <div class="card">
+      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | Status: ${esc(header.status)} | Requested By: ${esc(header.requested_by_name)}</p>
+      <div class="actions">
+        ${header.status === "VERIFIED" ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${header.id}/pick-ticket.pdf">Open Pick Ticket PDF</a>` : ""}
+        <a class="btn btn-secondary" href="/requisitions/${header.id}">Back To Requisition</a>
+      </div>
+    </div>
+    <div class="grid" style="align-items:start;">
+      <div class="card">
+        <h3>Electronic Signature</h3>
+        <p class="muted">This works well on iPads and touch screens.</p>
+        <form method="post" action="/requisitions/${header.id}/sign" class="stack" onsubmit="return submitRequisitionSignature();">
+          <div><label>Signed By</label><select id="requisition-signed-by-name" name="signed_by_name" required>${signerOptionsHtml}</select></div>
+          <input type="hidden" id="requisition-signature-data" name="signature_data" />
+          <div>
+            <label>Draw Signature</label>
+            <div class="card" style="padding:12px; background:#fff;">
+              <canvas id="requisition-signature-canvas" style="width:100%; height:220px; border:1px solid #8da0b3; background:#fff; touch-action:none; display:block;"></canvas>
+            </div>
+          </div>
+          <div class="actions">
+            <button type="submit">${header.signed_signature_data ? "Update Electronic Signature" : "Save Electronic Signature"}</button>
+            <button type="button" class="btn btn-secondary" onclick="clearRequisitionSignaturePad()">Clear Signature</button>
+          </div>
+        </form>
+        ${header.signed_signature_data ? `<div style="margin-top:12px;"><label>Current Saved Signature</label><div class="card" style="padding:12px; background:#fff;"><img src="${escAttr(header.signed_signature_data)}" alt="Saved requisition signature" style="max-width:100%; max-height:180px; display:block;" /></div></div>` : ""}
+      </div>
+      <div class="card">
+        <h3>Signed Paper Copy</h3>
+        <p class="muted">Upload a photo, scan, or PDF of a physically signed pick ticket.</p>
+        <form method="post" action="/requisitions/${header.id}/signed-copy" enctype="multipart/form-data" class="stack">
+          <div><label>Signed By</label><select name="signed_by_name" required>${signerOptionsHtml}</select></div>
+          <div><label>Signed Copy File</label><input type="file" name="signed_copy" accept=".pdf,image/png,image/jpeg,image/jpg" required /></div>
+          <div class="actions">
+            <button type="submit">${header.signed_copy_filename ? "Replace Uploaded Copy" : "Upload Signed Copy"}</button>
+            ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/signed-copy" target="_blank">Open Current Upload</a>` : ""}
+          </div>
+        </form>
+        ${header.signed_copy_filename ? `<p class="muted" style="margin-top:12px;">Current file: ${esc(header.signed_copy_filename)}</p>` : ""}
+      </div>
+    </div>
+    <script>
+      (function () {
+        const canvas = document.getElementById("requisition-signature-canvas");
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        let drawing = false;
+        let hasSignature = false;
+        function resizeCanvas() {
+          const ratio = Math.max(window.devicePixelRatio || 1, 1);
+          const bounds = canvas.getBoundingClientRect();
+          canvas.width = Math.floor(bounds.width * ratio);
+          canvas.height = Math.floor(bounds.height * ratio);
+          ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          ctx.strokeStyle = "#17324d";
+          ctx.lineWidth = 2;
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, bounds.width, bounds.height);
+        }
+        function pointFromEvent(event) {
+          const rect = canvas.getBoundingClientRect();
+          const source = event.touches && event.touches[0] ? event.touches[0] : event;
+          return { x: source.clientX - rect.left, y: source.clientY - rect.top };
+        }
+        function start(event) {
+          event.preventDefault();
+          const point = pointFromEvent(event);
+          drawing = true;
+          hasSignature = true;
+          ctx.beginPath();
+          ctx.moveTo(point.x, point.y);
+        }
+        function move(event) {
+          if (!drawing) return;
+          event.preventDefault();
+          const point = pointFromEvent(event);
+          ctx.lineTo(point.x, point.y);
+          ctx.stroke();
+        }
+        function end(event) {
+          if (!drawing) return;
+          event.preventDefault();
+          drawing = false;
+        }
+        canvas.addEventListener("mousedown", start);
+        canvas.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", end);
+        canvas.addEventListener("touchstart", start, { passive: false });
+        canvas.addEventListener("touchmove", move, { passive: false });
+        canvas.addEventListener("touchend", end, { passive: false });
+        window.addEventListener("resize", resizeCanvas);
+        resizeCanvas();
+        window.clearRequisitionSignaturePad = function () {
+          hasSignature = false;
+          resizeCanvas();
+        };
+        window.submitRequisitionSignature = function () {
+          const signer = document.getElementById("requisition-signed-by-name");
+          const input = document.getElementById("requisition-signature-data");
+          if (!signer || !String(signer.value || "").trim()) {
+            alert("Enter the signer name first.");
+            return false;
+          }
+          if (!hasSignature) {
+            alert("Draw a signature before saving.");
+            return false;
+          }
+          input.value = canvas.toDataURL("image/png");
+          return true;
+        };
+      }());
+    </script>
+  `, req.user));
+}));
+
+app.post("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const signedByName = String(req.body.signed_by_name || "").trim();
+  const signatureData = String(req.body.signature_data || "").trim();
+  if (!signedByName) throw new Error("Signer name is required.");
+  if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signatureData)) throw new Error("A valid signature image is required.");
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (!canSignRequisition(req.user, header)) throw new Error("Only verified or issued requisitions can be signed.");
+    await client.query(`
+      update material_requisitions
+      set signed_at = now(),
+          signed_by_name = $2,
+          signed_signature_data = $3
+      where id = $1 and job_id = $4
+    `, [req.params.id, signedByName, signatureData, jobId]);
+    await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|electronic|${signedByName}`);
+    if (header.status === "VERIFIED") {
+      await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+    }
+  });
+  res.redirect("/requisitions");
+}));
+
+app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), upload.single("signed_copy"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const signedByName = String(req.body.signed_by_name || "").trim();
+  const file = req.file;
+  if (!signedByName) throw new Error("Signer name is required.");
+  if (!file?.buffer?.length) throw new Error("Select a signed copy file to upload.");
+  const allowedTypes = new Set(["application/pdf", "image/png", "image/jpeg"]);
+  if (!allowedTypes.has(String(file.mimetype || "").toLowerCase())) {
+    throw new Error("Signed copy must be a PDF, PNG, or JPEG file.");
+  }
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (!canSignRequisition(req.user, header)) throw new Error("Only verified or issued requisitions can be signed.");
+    await client.query(`
+      update material_requisitions
+      set signed_at = now(),
+          signed_by_name = $2,
+          signed_copy_filename = $3,
+          signed_copy_mime = $4,
+          signed_copy_data = $5
+      where id = $1 and job_id = $6
+    `, [req.params.id, signedByName, String(file.originalname || "signed-copy").slice(0, 255), file.mimetype, file.buffer, jobId]);
+    await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|upload|${signedByName}|${file.originalname || "signed-copy"}`);
+    if (header.status === "VERIFIED") {
+      await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+    }
+  });
+  res.redirect("/requisitions");
+}));
+
+app.get("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const header = (await query(`
+    select requisition_no, signed_copy_filename, signed_copy_mime, signed_copy_data
+    from material_requisitions
+    where id = $1 and job_id = $2
+  `, [req.params.id, jobId])).rows[0];
+  if (!header) throw new Error("Requisition not found.");
+  if (!header.signed_copy_data) throw new Error("No signed copy has been uploaded for this requisition.");
+  res.setHeader("Content-Type", String(header.signed_copy_mime || "application/octet-stream"));
+  res.setHeader("Content-Disposition", `inline; filename="${String(header.signed_copy_filename || `${header.requisition_no}-signed-copy`).replace(/[^A-Za-z0-9._-]/g, "_")}"`);
+  res.send(header.signed_copy_data);
+}));
+
+app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const header = (await query(`
+    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
+    from material_requisitions mr
+    join bom_headers bh on bh.id = mr.bom_id
+    where mr.id = $1 and mr.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
+  if (!header) throw new Error("Requisition not found.");
+  if (header.status !== "VERIFIED") throw new Error("Pick tickets are only available for verified requisitions.");
+  const lines = (await query(`
+    select mrl.qty_requested, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom,
+           coalesce(bl.size_1, '') as size_1, coalesce(bl.size_2, '') as size_2,
+           coalesce(bl.thk_1, '') as thk_1, coalesce(bl.thk_2, '') as thk_2
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mrl.requisition_id = $1 and mrl.job_id = $2
+    order by bl.line_no, bl.id
+  `, [req.params.id, jobId])).rows;
+
+  const inventoryRows = (await query(`
+    select
+      item_code,
+      coalesce(size_1, '') as size_1,
+      coalesce(size_2, '') as size_2,
+      coalesce(thk_1, '') as thk_1,
+      coalesce(thk_2, '') as thk_2,
+      warehouse,
+      location,
+      qty_on_hand
+    from (${getInventoryByLocationSubquery(jobId)}) inventory_by_location
+    order by warehouse, location
+  `)).rows;
+  const issuedRows = (await query(`
+    select
+      item_code,
+      coalesce(size_1, '') as size_1,
+      coalesce(size_2, '') as size_2,
+      coalesce(thk_1, '') as thk_1,
+      coalesce(thk_2, '') as thk_2,
+      sum(qty_issued) as qty_issued_total
+    from bom_lines bl
+    join bom_headers bh on bh.id = bl.bom_id
+    where bh.job_id = $1
+    group by bl.item_code, coalesce(bl.size_1, ''), coalesce(bl.size_2, ''), coalesce(bl.thk_1, ''), coalesce(bl.thk_2, '')
+  `, [jobId])).rows;
+
+  const inventoryMap = new Map();
+  for (const row of inventoryRows) {
+    const key = [row.item_code, row.size_1, row.size_2, row.thk_1, row.thk_2].join("|");
+    if (!inventoryMap.has(key)) inventoryMap.set(key, []);
+    inventoryMap.get(key).push({
+      warehouse: row.warehouse,
+      location: row.location,
+      qty_available: parseQtyValue(row.qty_on_hand || 0)
+    });
+  }
+  const issuedMap = new Map();
+  for (const row of issuedRows) {
+    issuedMap.set([row.item_code, row.size_1, row.size_2, row.thk_1, row.thk_2].join("|"), Number(row.qty_issued_total || 0));
+  }
+
+  for (const [key, locations] of inventoryMap.entries()) {
+    let issuedRemaining = issuedMap.get(key) || 0;
+    for (const location of locations) {
+      if (issuedRemaining <= 0) break;
+      const consumed = Math.min(issuedRemaining, location.qty_available);
+      location.qty_available -= consumed;
+      issuedRemaining -= consumed;
+    }
+  }
+
+  const groupedLines = [];
+  const groupedLineMap = new Map();
+  for (const line of lines) {
+    const groupKey = [
+      line.item_code || "",
+      line.description || "",
+      line.uom || "",
+      line.size_1 || "",
+      line.size_2 || "",
+      line.thk_1 || "",
+      line.thk_2 || ""
+    ].join("|");
+    if (!groupedLineMap.has(groupKey)) {
+      const grouped = {
+        item_code: line.item_code || "",
+        description: line.description || "",
+        uom: line.uom || "",
+        size_1: line.size_1 || "",
+        size_2: line.size_2 || "",
+        thk_1: line.thk_1 || "",
+        thk_2: line.thk_2 || "",
+        qty_requested: 0
+      };
+      groupedLineMap.set(groupKey, grouped);
+      groupedLines.push(grouped);
+    }
+    groupedLineMap.get(groupKey).qty_requested += Number(line.qty_requested || 0);
+  }
+
+  const printableLines = groupedLines.map((line) => {
+    const key = [line.item_code, line.size_1, line.size_2, line.thk_1, line.thk_2].join("|");
+    const locationRows = inventoryMap.get(key) || [];
+    const pickLocation = buildPickLocationPlan(locationRows, line.qty_requested);
+    let qtyToReserve = Number(line.qty_requested || 0);
+    for (const location of locationRows) {
+      if (qtyToReserve <= 0) break;
+      const consumed = Math.min(qtyToReserve, location.qty_available);
+      location.qty_available -= consumed;
+      qtyToReserve -= consumed;
+    }
+    return { ...line, pick_location: pickLocation };
+  });
+
+  const pdfBuffer = buildPickTicketPdf(header, printableLines);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename=\"${String(header.requisition_no || "pick-ticket").replace(/[^A-Za-z0-9._-]/g, "_")}-pick-ticket.pdf\"`);
+  res.send(pdfBuffer);
+}));
+
+app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requireJobContext, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const [headerRes, poReceiptLines, manualLines, linkedFmrRes] = await Promise.all([
+    query(`
+      select
+        m.*,
+        coalesce(po.po_no, m.po_number) as effective_po_number
+      from mrr_logs m
+      left join purchase_orders po on po.id = m.app_po_id
+      where m.id = $1
+        and m.job_id = $2
+    `, [req.params.id, jobId]),
+    query(`
+      select
+        r.id,
+        coalesce(pl.po_line, '') as po_line,
+        coalesce(mi.item_code, '') as item_code,
+        coalesce(mi.description, '') as description,
+        coalesce(pl.qty_ordered, 0) as ordered_qty,
+        coalesce(r.qty_received, 0) as received_qty,
+        coalesce(r.warehouse, '') as warehouse,
+        coalesce(r.location, '') as location,
+        coalesce(r.osd_status, '') as osd_status,
+        coalesce(r.osd_notes, '') as notes
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join material_items mi on mi.id = pl.material_item_id
+      where r.mrr_log_id = $1
+        and r.job_id = $2
+      order by r.id
+    `, [req.params.id, jobId]),
+    query(`
+      select
+        mrl.id,
+        coalesce(mrl.po_position, '') as po_line,
+        coalesce(mrl.item_code, '') as item_code,
+        coalesce(mrl.description, '') as description,
+        0 as ordered_qty,
+        coalesce(mrl.received_qty, 0) as received_qty,
+        coalesce(mrl.warehouse, '') as warehouse,
+        coalesce(mrl.location, '') as location,
+        coalesce(mrl.received_status, '') as osd_status,
+        coalesce(mrl.comments, '') as notes
+      from material_receiving_logs mrl
+      where coalesce(mrl.mrr_number, '') = (
+        select coalesce(mrr_number, '') from mrr_logs where id = $1 and job_id = $2
+      )
+        and mrl.job_id = $2
+      order by coalesce(mrl.legacy_row_id, mrl.id)
+    `, [req.params.id, jobId]),
+    query(`
+      select fmr_number, container_no
+      from fmr_logs
+      where job_id = $2
+        and coalesce(mrr_number, '') = (
+        select coalesce(mrr_number, '') from mrr_logs where id = $1 and job_id = $2
+      )
+      order by id
+      limit 1
+    `, [req.params.id, jobId])
+  ]);
+  const header = headerRes.rows[0];
+  if (!header) throw new Error("MRR log row not found.");
+  const linkedFmr = linkedFmrRes.rows[0] || {};
+  const deliveryMatch = String(linkedFmr.fmr_number || "").match(/^FMR-([A-Z0-9]+)-/i);
+  const printableLines = [...poReceiptLines.rows, ...manualLines.rows].map((row) => ({
+    item_code: row.item_code || "",
+    description: row.description || "",
+    qty: formatQtyDisplay(row.received_qty),
+    location: [row.warehouse, row.location].filter(Boolean).join(" / "),
+    grid: "",
+    status: row.osd_status || "",
+    ordered: row.ordered_qty ? formatQtyDisplay(row.ordered_qty) : "",
+    shipped: row.ordered_qty ? formatQtyDisplay(row.ordered_qty) : "",
+    received: formatQtyDisplay(row.received_qty),
+    discrepancy: [row.osd_status && row.osd_status !== "OK" ? row.osd_status : "", row.notes || ""].filter(Boolean).join(" | ")
+  }));
+  const pdfBuffer = buildMrrFormPdf({
+    mrr_number: header.mrr_number || "",
+    vendor_name: header.vendor_name || "",
+    po_number: header.effective_po_number || "",
+    pick_ticket: header.pick_ticket || "",
+    received_date: header.received_date || "",
+    received_by: header.received_by || "",
+    load_number: header.load_number || "",
+    notes: header.notes || "",
+    container_type: "",
+    material_description: header.material_description || ""
+  }, printableLines, {
+    jobNumber: req.user.activeJob?.performance_job_number || req.user.activeJob?.job_number || "",
+    deliveryLocation: deliveryMatch?.[1] || "",
+    fmrNumber: linkedFmr.fmr_number || ""
+  });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${String(header.mrr_number || "MRR").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
+  res.send(pdfBuffer);
+}));
+
+app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "REQUESTED") throw new Error("Only requested requisitions can be verified.");
+    await client.query(`
+      update material_requisitions
+      set status = 'VERIFIED',
+          verified_at = now(),
+          verified_by_user_id = $2
+      where id = $1 and job_id = $3
+    `, [req.params.id, req.user.id, jobId]);
+    await auditLog(client, req.user.id, "verify", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const header = (await query(`
+    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
+    from material_requisitions mr
+    join bom_headers bh on bh.id = mr.bom_id
+    where mr.id = $1 and mr.job_id = $2 and bh.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
+  if (!header) throw new Error("Requisition not found.");
+  if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
+  const availableMap = await getAvailableInventoryByItemMap({ query }, jobId);
+  const lines = (await query(`
+    select
+      mrl.id as requisition_line_id,
+      mrl.qty_requested,
+      bl.id as bom_line_id,
+      bl.line_no,
+      bl.iwp_no,
+      bl.item_code,
+      bl.description,
+      bl.uom,
+      coalesce(bl.size_1, '') as size_1,
+      coalesce(bl.size_2, '') as size_2,
+      coalesce(bl.thk_1, '') as thk_1,
+      coalesce(bl.thk_2, '') as thk_2,
+      bl.qty_required,
+      bl.qty_issued
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mrl.requisition_id = $1 and mrl.job_id = $2
+    order by bl.line_no, bl.id
+  `, [req.params.id, jobId])).rows.map((line) => ({
+    ...line,
+    qty_available: parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0)
+  }));
+  const lineRows = lines.map((line) => {
+    const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_available) + num(line.qty_requested));
+    return `<tr>
+      <td>${esc(line.line_no)}</td>
+      <td>${esc(line.iwp_no || "")}</td>
+      <td>${esc(line.item_code)}</td>
+      <td>${esc(line.description)}</td>
+      <td>${esc(formatQtyDisplay(line.qty_required))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_available))}</td>
+      <td>${esc(line.uom)}</td>
+      <td><input name="qty_requested_${line.requisition_line_id}" value="${esc(formatQtyDisplay(line.qty_requested))}" /></td>
+      <td><button class="btn btn-danger" type="submit" name="remove_line_id" value="${line.requisition_line_id}">Remove</button></td>
+      <td class="muted">Max ${esc(formatQtyDisplay(maxQty))}</td>
+    </tr>`;
+  }).join("");
+  res.send(layout(`Edit ${header.requisition_no}`, `
+    <h1>Edit Requisition ${esc(header.requisition_no)}</h1>
+    <div class="card">
+      <p class="muted">BOM: ${esc(header.bom_name || header.bom_description || header.bom_no)} | BOM #: ${esc(header.bom_no)} | Status: ${esc(header.status)}</p>
+      <form method="post" action="/requisitions/${header.id}/edit" class="stack">
+        <div class="grid">
+          <div><label>Requested By</label><input value="${esc(header.requested_by_name)}" readonly /></div>
+          <div><label>IWP</label><input name="iwp_no" value="${esc(header.iwp_no || "")}" /></div>
+        </div>
+        <div><label>Notes</label><textarea name="notes">${esc(header.notes || "")}</textarea></div>
+        <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Available</th><th>UOM</th><th>New Qty</th><th>Remove</th><th>Limit</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+        <div class="actions"><button type="submit">Save Requisition</button><a class="btn btn-secondary" href="/requisitions/${header.id}">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
+    const availableMap = await getAvailableInventoryByItemMap(client, jobId);
+    await client.query(`
+      update material_requisitions
+      set requested_by_name = $2, iwp_no = $3, notes = $4
+      where id = $1 and job_id = $5
+    `, [req.params.id, getUserDisplayName(req.user), req.body.iwp_no || "", req.body.notes || "", jobId]);
+    const lines = (await client.query(`
+      select
+        mrl.id as requisition_line_id,
+        mrl.qty_requested,
+        bl.id as bom_line_id,
+        bl.item_code,
+        coalesce(bl.size_1, '') as size_1,
+        coalesce(bl.size_2, '') as size_2,
+        coalesce(bl.thk_1, '') as thk_1,
+        coalesce(bl.thk_2, '') as thk_2,
+        bl.qty_required,
+        bl.qty_issued
+      from material_requisition_lines mrl
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where mrl.requisition_id = $1 and mrl.job_id = $2
+    `, [req.params.id, jobId])).rows;
+    const removeLineId = Number(req.body.remove_line_id || 0);
+    for (const line of lines) {
+      if (removeLineId && line.requisition_line_id === removeLineId) {
+        await client.query("delete from material_requisition_lines where id = $1 and job_id = $2", [removeLineId, jobId]);
+        continue;
+      }
+      const requestedQty = parseQtyValue(req.body[`qty_requested_${line.requisition_line_id}`]);
+      if (requestedQty <= 0) throw new Error(`Requested qty for ${line.item_code} must be greater than zero.`);
+      const qtyAvailable = parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0);
+      const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), qtyAvailable + num(line.qty_requested));
+      if (requestedQty > maxQty) throw new Error(`Requested qty for ${line.item_code} exceeds available stock.`);
+      await client.query("update material_requisition_lines set qty_requested = $2 where id = $1 and job_id = $3", [line.requisition_line_id, requestedQty, jobId]);
+    }
+    const remainingCount = Number((await client.query("select count(*) from material_requisition_lines where requisition_id = $1 and job_id = $2", [req.params.id, jobId])).rows[0].count);
+    if (remainingCount <= 0) throw new Error("At least one line is required on the requisition.");
+    await auditLog(client, req.user.id, "update", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/unverify", requireAuth, requireJobContext, requirePermission("requisitions", "unverify"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "VERIFIED") throw new Error("Only verified requisitions can be set to un-verified.");
+    await client.query(`
+      update material_requisitions
+      set status = 'REQUESTED',
+          verified_at = null,
+          verified_by_user_id = null
+      where id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
+    await auditLog(client, req.user.id, "unverify", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+async function issueRequisitionToField(client, requisitionId, jobId, userId) {
+  const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [requisitionId, jobId])).rows[0];
+  if (!header) throw new Error("Requisition not found.");
+  if (header.status !== "VERIFIED") throw new Error("Requisition must be verified before issue.");
+  const currentRows = await getCurrentOnHandRows(client, { jobId });
+  const inventoryMap = new Map();
+  for (const row of currentRows) {
+    const key = buildInventoryItemKey(row);
+    if (!inventoryMap.has(key)) inventoryMap.set(key, []);
+    inventoryMap.get(key).push({
+      warehouse: row.warehouse,
+      location: row.location,
+      qty_available: parseQtyValue(row.qty_on_hand || 0)
+    });
+  }
+  const lines = (await client.query(`
+    select
+      mrl.id as requisition_line_id,
+      mrl.qty_requested,
+      bl.id as bom_line_id,
+      bl.item_code,
+      coalesce(bh.system_key, '') as system_key,
+      coalesce(bl.size_1, '') as size_1,
+      coalesce(bl.size_2, '') as size_2,
+      coalesce(bl.thk_1, '') as thk_1,
+      coalesce(bl.thk_2, '') as thk_2,
+      bl.qty_required,
+      bl.qty_issued
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    join bom_headers bh on bh.id = bl.bom_id
+    where mrl.requisition_id = $1 and mrl.job_id = $2
+    order by bl.line_no, bl.id
+  `, [requisitionId, jobId])).rows;
+  const currentReqAllocMap = new Map();
+  for (const line of lines) {
+    const key = buildInventoryItemKey(line);
+    currentReqAllocMap.set(key, parseQtyValue(currentReqAllocMap.get(key) || 0) + parseQtyValue(line.qty_requested || 0));
+  }
+  const availableTotalsMap = await getAvailableInventoryByItemMap(client, jobId, { allocatedOffsetMap: currentReqAllocMap });
+  if (lines.length === 0) throw new Error("No requisition lines found.");
+  const lineAllocations = new Map();
+  for (const line of lines) {
+    const itemKey = buildInventoryItemKey(line);
+    const qtyAvailable = parseQtyValue(availableTotalsMap.get(itemKey) || 0, 0);
+    if (num(line.qty_requested) > qtyAvailable) {
+      throw new Error(`Cannot issue ${line.item_code}; requested qty exceeds available stock.`);
+    }
+    const locationRows = (inventoryMap.get(itemKey) || []).map((row) => ({ ...row }));
+    const allocations = buildPickLocationAllocations(locationRows, line.qty_requested);
+    const allocatedQty = allocations.reduce((sum, row) => parseQtyValue(sum + parseQtyValue(row.qty_issued || 0), 0), 0);
+    if (allocatedQty < num(line.qty_requested)) {
+      throw new Error(`Cannot issue ${line.item_code}; not enough warehouse/location inventory is available.`);
+    }
+    lineAllocations.set(Number(line.requisition_line_id), allocations);
+    let qtyToReserve = parseQtyValue(line.qty_requested || 0);
+    const currentLocationRows = inventoryMap.get(itemKey) || [];
+    for (const location of currentLocationRows) {
+      if (qtyToReserve <= 0) break;
+      const availableQty = parseQtyValue(location.qty_available || 0);
+      if (availableQty <= 0) continue;
+      const consumed = Math.min(availableQty, qtyToReserve);
+      location.qty_available = parseQtyValue(availableQty - consumed, 0);
+      qtyToReserve = parseQtyValue(qtyToReserve - consumed, 0);
+    }
+  }
+  await client.query("delete from material_issue_transactions where requisition_id = $1 and job_id = $2", [requisitionId, jobId]);
+  for (const line of lines) {
+    await client.query(`
+      update material_requisition_lines
+      set qty_issued = qty_requested
+      where id = $1 and job_id = $2
+    `, [line.requisition_line_id, jobId]);
+    const allocations = lineAllocations.get(Number(line.requisition_line_id)) || [];
+    for (const allocation of allocations) {
+      await client.query(`
+        insert into material_issue_transactions (job_id, requisition_id, requisition_line_id, source_bom_line_id, issue_source, warehouse, location, qty_issued, created_by)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `, [
+        jobId,
+        requisitionId,
+        line.requisition_line_id,
+        line.bom_line_id,
+        String(line.system_key || "").trim().toUpperCase() === unallocatedBomSystemKey ? issueSourceTypes.unallocated : issueSourceTypes.bom,
+        allocation.warehouse,
+        allocation.location,
+        allocation.qty_issued,
+        userId || null
+      ]);
+    }
+  }
+  await client.query(`
+    update material_requisitions
+    set status = 'ISSUED',
+        issued_at = now(),
+        issued_by_user_id = $2
+    where id = $1 and job_id = $3
+  `, [requisitionId, userId, jobId]);
+  await recomputeBomIssuedSummaries(client, jobId);
+  await rebuildUnallocatedBom(client, jobId);
+  await auditLog(client, userId, "issue", "material_requisition", requisitionId, header.requisition_no);
+  return header;
+}
+
+app.post("/requisitions/:id/issue", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
+  if (req.user?.role !== "admin") throw new Error("Only admins can cancel requisitions.");
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status === "CANCELLED") return;
+    await client.query(`delete from material_issue_transactions where requisition_id = $1 and job_id = $2`, [req.params.id, jobId]);
+    await client.query(`
+      update material_requisition_lines
+      set qty_issued = 0
+      where requisition_id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
+    await client.query(`
+      update material_requisitions
+      set status = 'CANCELLED'
+      where id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
+    await recomputeBomIssuedSummaries(client, jobId);
+    await rebuildUnallocatedBom(client, jobId);
+    await auditLog(client, req.user.id, "cancel", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/restore", requireAuth, requireJobContext, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
+  if (req.user?.role !== "admin") throw new Error("Only admins can restore cancelled requisitions.");
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "CANCELLED") throw new Error("Only cancelled requisitions can be restored.");
+    await client.query(`
+      update material_requisitions
+      set status = 'REQUESTED',
+          verified_at = null,
+          verified_by_user_id = null,
+          issued_at = null,
+          issued_by_user_id = null
+      where id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
+    await auditLog(client, req.user.id, "restore", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.get("/vendors", requireAuth, requireJobContext, requirePermission("vendors", "view"), async (req, res) => {
+  const search = String(req.query.search || "").trim();
+  const category = String(req.query.category || "").trim();
+  const showInactive = String(req.query.show_inactive || "").trim() === "1";
+  const sort = String(req.query.sort || "name").trim().toLowerCase();
+  const dir = String(req.query.dir || "asc").trim().toLowerCase() === "desc" ? "desc" : "asc";
+  const vendorSortColumns = {
+    name: "name",
+    contact_name: "contact_name",
+    website: "website",
+    email: "email",
+    phone: "phone",
+    categories: "categories"
+  };
+  const sortColumn = vendorSortColumns[sort] || "name";
+  const where = [];
+  const params = [];
+  if (!showInactive) {
+    where.push("v.is_active = true");
+  }
+  if (search) {
+    params.push(`%${search}%`);
+    where.push(`(v.name ilike $${params.length} or coalesce(v.contact_name, '') ilike $${params.length} or coalesce(v.website, '') ilike $${params.length} or coalesce(v.email, '') ilike $${params.length} or coalesce(v.phone, '') ilike $${params.length})`);
+  }
+  if (category) {
+    params.push(`%${category}%`);
+    where.push(`coalesce(v.categories, '') ilike $${params.length}`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const vendors = (await query(`
+    select v.*,
+           coalesce(vc.contact_count, 0) as contact_count
+    from vendors v
+    left join (
+      select vendor_id, count(*) as contact_count
+      from vendor_contacts
+      group by vendor_id
+    ) vc on vc.vendor_id = v.id
+    ${whereSql}
+    order by coalesce(v.${sortColumn}, '') ${dir}, v.name asc
+  `, params)).rows;
+  const sortLink = (column) => `/vendors?search=${encodeURIComponent(search)}&category=${encodeURIComponent(category)}&show_inactive=${showInactive ? "1" : ""}&sort=${encodeURIComponent(column)}&dir=${encodeURIComponent(nextSortDir(sort, dir, column))}`;
+  const rows = vendors.map((vendor) => `<tr>
+        <td>${esc(vendor.name)}</td>
+        <td>${esc(vendor.contact_name || "")}</td>
+        <td>${vendor.website ? `<a href="${esc(vendor.website)}" target="_blank" rel="noopener noreferrer">${esc(vendor.website)}</a>` : ""}</td>
+        <td>${esc(vendor.email || "")}</td>
+        <td>${esc(normalizePhone(vendor.phone || ""))}</td>
+        <td>${(vendor.categories || "").split(",").filter(Boolean).map((value) => `<span class="chip">${esc(value)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
+        <td>${esc(vendor.contact_count)}</td>
+        <td>${vendor.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+        <td><div class="actions"><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit#contacts">Contacts</a></div></td>
+      </tr>`).join("");
+  const categoryOptions = [`<option value="">All Categories</option>`]
+    .concat(vendorCategories.map((value) => `<option value="${esc(value)}" ${category === value ? "selected" : ""}>${esc(value)}</option>`))
+    .join("");
   res.send(layout("Vendors", `
-    <h1>Vendors</h1>
+        <h1>Vendors</h1>
+        <div class="card">
+          <div class="actions"><a class="btn btn-primary" href="/vendors/new">Add Vendor</a></div>
+        </div>
+        <div class="card">
+          <form method="get" action="/vendors" class="stack">
+            <div class="grid">
+              <div><label>Search</label><input name="search" value="${esc(search)}" placeholder="Name, contact, website, email, or phone" /></div>
+              <div><label>Category</label><select name="category">${categoryOptions}</select></div>
+            </div>
+            <div class="actions"><label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;text-transform:none;"><input type="checkbox" name="show_inactive" value="1" ${showInactive ? "checked" : ""} style="width:auto;" /> Show inactive</label><button type="submit">Filter Vendors</button><a class="btn btn-secondary" href="/vendors">Clear</a><span class="muted">${vendors.length} vendor(s)</span></div>
+          </form>
+        </div>
+        <div class="card scroll"><table><tr><th><a href="${sortLink("name")}">Name</a></th><th><a href="${sortLink("contact_name")}">Primary Contact</a></th><th><a href="${sortLink("website")}">Website</a></th><th><a href="${sortLink("email")}">Email</a></th><th><a href="${sortLink("phone")}">Phone</a></th><th><a href="${sortLink("categories")}">Categories</a></th><th>Contacts</th><th>Status</th><th>Action</th></tr>${rows}</table></div>
+      `, req.user));
+});
+
+app.get("/vendors/new", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const checks = vendorCategories.map((category) => `<label class="check-option"><input type="checkbox" name="categories" value="${esc(category)}" /><span>${esc(category)}</span></label>`).join("");
+  res.send(layout("Add Vendor", `
+    <h1>Add Vendor</h1>
     <div class="card">
       <form method="post" action="/vendors/add" class="stack">
         <div class="grid">
           <div><label>Name</label><input name="name" required /></div>
+          <div><label>Contact Name</label><input name="contact_name" /></div>
+          <div><label>Website</label><input name="website" placeholder="https://example.com" /></div>
           <div><label>Email</label><input name="email" /></div>
-          <div><label>Phone</label><input name="phone" /></div>
+          <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
         </div>
-        <div><label>Categories</label><div class="grid-4">${checks}</div></div>
-        <div class="actions"><button type="submit">Add Vendor</button></div>
+        <div><label>Categories</label><div class="check-grid">${checks}</div></div>
+        <div class="actions"><button type="submit">Add Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Name</th><th>Email</th><th>Phone</th><th>Categories</th><th>Action</th></tr>${rows}</table></div>
   `, req.user));
 });
 
-app.post("/vendors/add", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/vendors/add", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
-    const result = await client.query(
-      "insert into vendors (name, email, phone, categories) values ($1, $2, $3, $4) returning id",
-      [req.body.name?.trim(), req.body.email?.trim() || "", req.body.phone?.trim() || "", normalizeCategories(req.body.categories)]
-    );
+      const result = await client.query(
+        "insert into vendors (job_id, name, contact_name, website, email, phone, categories) values (null, $1, $2, $3, $4, $5, $6) returning id",
+      [req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+      );
+    await syncLegacyVendorContact(client, result.rows[0].id);
     await auditLog(client, req.user.id, "create", "vendor", result.rows[0].id, req.body.name?.trim() || "");
   });
   res.redirect("/vendors");
 });
 
-app.get("/vendors/:id/edit", requireAuth, async (req, res) => {
-  const vendor = (await query("select * from vendors where id = $1", [req.params.id])).rows[0];
+app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const [vendorRes, contactsRes] = await Promise.all([
+    query("select * from vendors where id = $1", [req.params.id]),
+    query("select * from vendor_contacts where vendor_id = $1 order by is_primary desc, contact_name asc, id asc", [req.params.id])
+  ]);
+  const vendor = vendorRes.rows[0];
   if (!vendor) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Vendor not found.</h3></div>`, req.user));
     return;
   }
+  const contacts = contactsRes.rows;
   const selected = new Set((vendor.categories || "").split(",").filter(Boolean));
-  const checks = vendorCategories.map((category) => `<label><input type="checkbox" name="categories" value="${esc(category)}" ${selected.has(category) ? "checked" : ""}/> ${esc(category)}</label>`).join("");
+  const checks = vendorCategories.map((category) => `<label class="check-option"><input type="checkbox" name="categories" value="${esc(category)}" ${selected.has(category) ? "checked" : ""}/><span>${esc(category)}</span></label>`).join("");
+  const contactRows = contacts.map((contact) => `<tr>
+    <td>${esc(contact.contact_name)}</td>
+    <td>${esc(contact.email || "")}</td>
+    <td>${esc(normalizePhone(contact.phone || ""))}</td>
+    <td>${contact.is_primary ? `<span class="chip">Primary</span>` : ""}</td>
+    <td>
+      <div class="actions">
+        ${!contact.is_primary ? `<form method="post" action="/vendors/${vendor.id}/contacts/${contact.id}/primary"><button type="submit" class="btn btn-secondary">Make Primary</button></form>` : ""}
+        <form method="post" action="/vendors/${vendor.id}/contacts/${contact.id}/delete"><button type="submit" class="btn btn-danger">Delete</button></form>
+      </div>
+    </td>
+  </tr>`).join("");
   res.send(layout("Edit Vendor", `
-    <h1>Edit Vendor</h1>
-    <div class="card">
-      <form method="post" action="/vendors/${vendor.id}/edit" class="stack">
-        <div class="grid">
-          <div><label>Name</label><input name="name" value="${esc(vendor.name)}" required /></div>
-          <div><label>Email</label><input name="email" value="${esc(vendor.email || "")}" /></div>
-          <div><label>Phone</label><input name="phone" value="${esc(vendor.phone || "")}" /></div>
-        </div>
-        <div><label>Categories</label><div class="grid-4">${checks}</div></div>
-        <div class="actions"><button type="submit">Save Vendor</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
-      </form>
-    </div>
-  `, req.user));
+      <h1>Edit Vendor</h1>
+      <div class="card">
+        <form method="post" action="/vendors/${vendor.id}/edit" class="stack">
+          <div class="grid">
+            <div><label>Name</label><input name="name" value="${esc(vendor.name)}" required /></div>
+            <div><label>Contact Name</label><input name="contact_name" value="${esc(vendor.contact_name || "")}" /></div>
+            <div><label>Website</label><input name="website" value="${esc(vendor.website || "")}" placeholder="https://example.com" /></div>
+            <div><label>Email</label><input name="email" value="${esc(vendor.email || "")}" /></div>
+            <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(vendor.phone || ""))}" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
+          </div>
+          <div><label>Categories</label><div class="check-grid">${checks}</div></div>
+          <div class="actions">
+            <button type="submit">Save Vendor</button>
+            <a class="btn btn-secondary" href="/vendors">Back</a>
+            ${vendor.is_active
+              ? `<form method="post" action="/vendors/${vendor.id}/deactivate"><button class="btn btn-danger" type="submit">Deactivate</button></form>`
+              : `<form method="post" action="/vendors/${vendor.id}/activate"><button class="btn btn-primary" type="submit">Activate</button></form>`}
+          </div>
+        </form>
+      </div>
+      <div class="card" id="contacts">
+        <h3>Vendor Contacts</h3>
+        <form method="post" action="/vendors/${vendor.id}/contacts/add" class="stack">
+          <div class="grid">
+            <div><label>Contact Name</label><input name="contact_name" required /></div>
+            <div><label>Email</label><input name="email" /></div>
+            <div><label>Phone</label><input name="phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
+          </div>
+          <div class="actions"><button type="submit">Add Contact</button></div>
+        </form>
+        <div class="scroll" style="margin-top:12px;"><table><tr><th>Contact</th><th>Email</th><th>Phone</th><th>Primary</th><th>Action</th></tr>${contactRows || `<tr><td colspan="5" class="muted">No contacts yet.</td></tr>`}</table></div>
+      </div>
+    `, req.user));
 });
 
-app.post("/vendors/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
   await withTransaction(async (client) => {
-    await client.query(
-      "update vendors set name = $2, email = $3, phone = $4, categories = $5 where id = $1",
-      [req.params.id, req.body.name?.trim(), req.body.email?.trim() || "", req.body.phone?.trim() || "", normalizeCategories(req.body.categories)]
-    );
+      await client.query(
+        "update vendors set name = $2, contact_name = $3, website = $4, email = $5, phone = $6, categories = $7 where id = $1",
+      [req.params.id, req.body.name?.trim(), req.body.contact_name?.trim(), req.body.website?.trim(), normalizeEmail(req.body.email), normalizePhone(req.body.phone), normalizeCategories(req.body.categories)]
+      );
+    await syncLegacyVendorContact(client, req.params.id);
     await auditLog(client, req.user.id, "update", "vendor", req.params.id, req.body.name?.trim() || "");
   });
   res.redirect("/vendors");
 });
 
-app.get("/rfq", requireAuth, async (req, res) => {
-  const rfqs = (await query("select * from rfqs order by id desc")).rows;
+app.post("/vendors/:id/contacts/add", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  await withTransaction(async (client) => {
+    const vendorId = Number(req.params.id);
+    const vendor = (await client.query("select id from vendors where id = $1", [vendorId])).rows[0];
+    if (!vendor) throw new Error("Vendor not found.");
+    const contactName = String(req.body.contact_name || "").trim();
+    if (!contactName) throw new Error("Contact name is required.");
+    await client.query(`
+      insert into vendor_contacts (job_id, vendor_id, contact_name, email, phone, is_primary)
+      values (null, $1, $2, $3, $4, false)
+    `, [vendorId, contactName, normalizeEmail(req.body.email), normalizePhone(req.body.phone)]);
+    await auditLog(client, req.user.id, "create", "vendor_contact", vendorId, contactName);
+  });
+  res.redirect(`/vendors/${req.params.id}/edit`);
+});
+
+app.post("/vendors/:id/deactivate", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  await withTransaction(async (client) => {
+    await client.query("update vendors set is_active = false where id = $1", [req.params.id]);
+    await auditLog(client, req.user.id, "deactivate", "vendor", req.params.id, "");
+  });
+  res.redirect("/vendors");
+});
+
+app.post("/vendors/:id/activate", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  await withTransaction(async (client) => {
+    await client.query("update vendors set is_active = true where id = $1", [req.params.id]);
+    await auditLog(client, req.user.id, "activate", "vendor", req.params.id, "");
+  });
+  res.redirect("/vendors");
+});
+
+app.post("/vendors/:id/contacts/:contactId/primary", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  await withTransaction(async (client) => {
+    const vendorId = Number(req.params.id);
+    const contactId = Number(req.params.contactId);
+    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2", [contactId, vendorId])).rows[0];
+    if (!contact) throw new Error("Vendor contact not found.");
+    await client.query("update vendor_contacts set is_primary = false where vendor_id = $1", [vendorId]);
+    await client.query("update vendor_contacts set is_primary = true where id = $1", [contactId]);
+    await client.query(`
+      update vendors
+      set contact_name = $2, email = $3, phone = $4
+      where id = $1
+    `, [vendorId, contact.contact_name, normalizeEmail(contact.email), normalizePhone(contact.phone)]);
+    await auditLog(client, req.user.id, "set_primary", "vendor_contact", contactId, contact.contact_name);
+  });
+  res.redirect(`/vendors/${req.params.id}/edit`);
+});
+
+app.post("/vendors/:id/contacts/:contactId/delete", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  await withTransaction(async (client) => {
+    const vendorId = Number(req.params.id);
+    const contactId = Number(req.params.contactId);
+    const contact = (await client.query("select * from vendor_contacts where id = $1 and vendor_id = $2", [contactId, vendorId])).rows[0];
+    if (!contact) throw new Error("Vendor contact not found.");
+    if (contact.is_primary) throw new Error("Set another primary contact before deleting this one.");
+    await client.query("delete from vendor_contacts where id = $1", [contactId]);
+    await auditLog(client, req.user.id, "delete", "vendor_contact", contactId, contact.contact_name);
+  });
+  res.redirect(`/vendors/${req.params.id}/edit`);
+});
+
+app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const rfqNo = String(req.query.rfq_no || "").trim();
+  const project = String(req.query.project || "").trim();
+  const status = String(req.query.status || "").trim();
+  const itemCode = String(req.query.item_code || "").trim();
+  const vendorId = String(req.query.vendor_id || "").trim();
+  const vendors = (await query("select id, name from vendors order by name")).rows;
+  const where = ["r.job_id = $1"];
+  const params = [jobId];
+  if (rfqNo) {
+    params.push(`%${rfqNo}%`);
+    where.push(`r.rfq_no ilike $${params.length}`);
+  }
+  if (project) {
+    params.push(`%${project}%`);
+    where.push(`r.project_name ilike $${params.length}`);
+  }
+  if (status) {
+    params.push(status);
+    where.push(`r.status = $${params.length}`);
+  }
+  if (itemCode) {
+    params.push(`%${itemCode}%`);
+    where.push(`exists (
+      select 1
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.rfq_id = r.id and ri.job_id = r.job_id and mi.item_code ilike $${params.length}
+    )`);
+  }
+  if (vendorId) {
+    params.push(num(vendorId));
+    where.push(`exists (
+      select 1
+      from rfq_items ri
+      join quotes q on q.rfq_item_id = ri.id
+      where ri.rfq_id = r.id and ri.job_id = r.job_id and q.vendor_id = $${params.length}
+    )`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const [rfqsRes] = await Promise.all([
+    query(`
+    select
+      r.*,
+      coalesce((
+        select string_agg(distinct v.name, ', ' order by v.name)
+        from rfq_items ri
+        join vendors v on v.id = ri.awarded_vendor_id
+        where ri.rfq_id = r.id and ri.job_id = r.job_id and ri.award_status = 'AWARDED' and ri.awarded_vendor_id is not null
+      ), '') as awarded_vendor_refs,
+      coalesce((
+        select string_agg(distinct po.po_no, ', ' order by po.po_no)
+        from purchase_orders po
+        where po.rfq_id = r.id and po.job_id = r.job_id
+      ), '') as issued_po_refs
+    from rfqs r
+    ${whereSql}
+    order by r.id desc
+    limit 300
+  `, params)
+  ]);
+  const rfqs = rfqsRes.rows;
+  const vendorOptions = [`<option value="">All Vendors</option>`]
+    .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === vendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
+    .join("");
+  const rfqStatusOptions = [`<option value="">All Statuses</option>`]
+    .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
+    .join("");
   const rows = rfqs.map((rfq) => `<tr>
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
+    <td>${esc(rfq.client_request_no || "")}</td>
     <td>${esc(rfq.project_name)}</td>
-    <td>${esc(rfq.due_date || "")}</td>
-    <td><span class="chip">${esc(rfq.status)}</span></td>
+    <td>${esc(rfq.requestor_name || "")}</td>
+    <td>${esc(rfq.awarded_vendor_refs || "")}</td>
+    <td>${esc(rfq.issued_po_refs || "")}</td>
+    <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
+    <td><span class="chip">${esc((rfqStatuses.find((item) => item.value === rfq.status) || { label: rfq.status }).label)}</span></td>
   </tr>`).join("");
   res.send(layout("RFQs", `
     <h1>RFQs</h1>
     <div class="card">
-      <form method="post" action="/rfq" class="stack">
-        <div class="grid">
-          <div><label>RFQ Number</label><input name="rfq_no" required /></div>
-          <div><label>Project</label><input name="project_name" required /></div>
-          <div><label>Due Date</label><input type="date" name="due_date" /></div>
+      <form method="get" action="/rfq" class="stack">
+        <div class="grid-4">
+          <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
+          <div><label>Description</label><input name="project" value="${esc(project)}" /></div>
+          <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(itemCode)}" /></div>
         </div>
-        <div class="actions"><button type="submit">Create RFQ</button></div>
+        <div class="grid">
+          <div><label>Quoted Vendor</label><select name="vendor_id">${vendorOptions}</select></div>
+        </div>
+        <div class="actions">
+          <button type="submit">Filter RFQs</button>
+          <a class="btn btn-secondary" href="/rfq">Clear</a>
+          <a class="btn btn-primary" href="/rfq/new">Create RFQ</a>
+          <span class="muted">${rfqs.length} result(s), max 300 shown</span>
+        </div>
       </form>
+      <div class="scroll" style="margin-top:12px;">
+        <table><tr><th>RFQ</th><th>Client Request #</th><th>Description</th><th>Requestor</th><th>Awarded Vendor(s)</th><th>Issued PO(s)</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="8" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+      </div>
     </div>
-    <div class="card scroll"><table><tr><th>RFQ</th><th>Project</th><th>Due</th><th>Status</th></tr>${rows}</table></div>
   `, req.user));
 });
 
-app.post("/rfq", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const [nextRfqNo, jobNumber, vendorsRes] = await Promise.all([
+    getNextRfqNumber(null, jobId),
+    Promise.resolve(String(req.user.activeJob?.job_number || "")),
+    query("select id, name from vendors where is_active = true order by name")
+  ]);
+  const vendors = vendorsRes.rows;
+  const rfqStatusOptions = rfqStatuses.map((status) => `<option value="${status.value}" ${status.value === "SEND_FOR_QUOTES" ? "selected" : ""}>${esc(status.label)}</option>`).join("");
+  res.send(layout("Create RFQ", `
+    <h1>Create RFQ</h1>
+    <div class="card">
+      <div class="actions"><a class="btn btn-secondary" href="/rfq/import/template">Download RFQ Import Template</a></div>
+    </div>
+    <div class="card">
+      <form id="rfq-create-form" method="post" action="/rfq" class="stack">
+        <div class="grid">
+          <div><label>Job Number</label><input value="${esc(jobNumber)}" readonly /></div>
+          <div><label>Next RFQ Number</label><input value="${esc(nextRfqNo)}" readonly /></div>
+        </div>
+        <div class="grid">
+          <div><label>Description</label><input name="project_name" required /></div>
+          <div><label>Due Date</label><input type="date" name="due_date" required /></div>
+        </div>
+        <div class="grid">
+          <div><label>Client Request #</label><input name="client_request_no" /></div>
+          <div><label>Requestor</label><input name="requestor_name" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
+        </div>
+        ${renderVendorPicker(vendors, [], {
+          dialogId: "rfq-create-vendor-dialog",
+          inputId: "rfq-create-vendor-input",
+          selectedListId: "rfq-create-vendor-list",
+          hiddenContainerId: "rfq-create-vendor-hidden",
+          datalistId: "rfq-create-vendor-options",
+          addButtonLabel: "Add Vendor",
+          formId: "rfq-create-form"
+        })}
+        <div class="actions">
+          <button type="submit">Create RFQ</button>
+          <a class="btn btn-secondary" href="/rfq">Back</a>
+        </div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.get("/rfq/import/template", requireAuth, requirePermission("rfqs", "edit"), async (_req, res) => {
+  const csv = [
+    "item_code,po_line,description,material_type,uom,spec,commodity_code,tag_number,size_1,size_2,thk_1,thk_2,qty,notes",
+    "100001,10,Sample item,misc,EA,ASTM A106,B31.3,TAG-001,2,,SCH 40,,5,Optional notes"
+  ].join("\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="rfq-import-template.csv"');
+  res.send(csv);
+});
+
+app.post("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const projectName = String(req.body.project_name || "").trim();
+  const clientRequestNo = String(req.body.client_request_no || "").trim();
+  const requestorName = String(req.body.requestor_name || "").trim();
+  const dueDate = String(req.body.due_date || "").trim();
+  if (!projectName) throw new Error("Description is required.");
+  if (!dueDate) throw new Error("Due date is required.");
   const id = await withTransaction(async (client) => {
+    const rfqNo = await getNextRfqNumber(client, jobId);
+    const requestedStatus = String(req.body.status || "SEND_FOR_QUOTES").trim();
+    const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "SEND_FOR_QUOTES";
+    const selectedVendorIds = parseSelectedIdList(req.body.vendor_ids);
     const insert = await client.query(
-      "insert into rfqs (rfq_no, project_name, due_date, status) values ($1, $2, $3, 'OPEN') returning id",
-      [req.body.rfq_no?.trim(), req.body.project_name?.trim(), req.body.due_date || null]
+      "insert into rfqs (job_id, rfq_no, project_name, client_request_no, requestor_name, due_date, status) values ($1, $2, $3, $4, $5, $6, $7) returning id",
+      [jobId, rfqNo, projectName, clientRequestNo, requestorName, dueDate, status]
     );
-    await auditLog(client, req.user.id, "create", "rfq", insert.rows[0].id, req.body.rfq_no?.trim() || "");
+    await syncRfqVendors(client, insert.rows[0].id, selectedVendorIds);
+    await auditLog(client, req.user.id, "create", "rfq", insert.rows[0].id, `${rfqNo}|${clientRequestNo}|${requestorName}`);
     return insert.rows[0].id;
   });
   res.redirect(`/rfq/${id}`);
 });
 
-app.get("/rfq/:id", requireAuth, async (req, res) => {
+app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
-  const rfq = (await query("select * from rfqs where id = $1", [rfqId])).rows[0];
-  if (!rfq) {
-    res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
-    return;
-  }
-  const [itemsRes, vendorsRes, quoteVendorsRes, poCountRes] = await Promise.all([
-    query(`
-      select ri.id, ri.qty, ri.notes, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
-             mi.item_code, mi.description, mi.material_type, mi.uom
-      from rfq_items ri
-      join material_items mi on mi.id = ri.material_item_id
-      where ri.rfq_id = $1
-      order by ri.id desc
-    `, [rfqId]),
-    query("select id, name from vendors order by name"),
-    query(`
-      select distinct v.id, v.name
-      from quotes q
-      join rfq_items ri on ri.id = q.rfq_item_id
-      join vendors v on v.id = q.vendor_id
-      where ri.rfq_id = $1
-      order by v.name
-    `, [rfqId]),
-    query("select count(*) from purchase_orders where rfq_id = $1", [rfqId])
-  ]);
-
-  const items = itemsRes.rows;
-  const vendors = vendorsRes.rows;
-  const quoteVendors = quoteVendorsRes.rows;
-  const poCount = Number(poCountRes.rows[0].count);
-
-  const itemRows = [];
-  for (const item of items) {
-    const [quotesRes, poRefsRes] = await Promise.all([
-      query("select vendor_id, unit_price, lead_days from quotes where rfq_item_id = $1", [item.id]),
-      query(`
-        select distinct po.po_no
-        from purchase_orders po
-        join po_lines pl on pl.po_id = po.id
-        join rfq_items ri on ri.rfq_id = po.rfq_id
-        where ri.id = $1 and pl.material_item_id = ri.material_item_id
-        order by po.po_no
-      `, [item.id])
-    ]);
-    const qMap = new Map(quotesRes.rows.map((row) => [row.vendor_id, `$${Number(row.unit_price).toFixed(2)} | ${row.lead_days}d`]));
-    const vendorCells = quoteVendors.map((vendor) => `<td>${esc(qMap.get(vendor.id) || "-")}</td>`).join("");
-    const poRefs = poRefsRes.rows.map((row) => row.po_no).join(", ") || "Not Issued";
-    itemRows.push(`<tr>
-      <td>${esc(item.item_code)}</td>
-      <td>${esc(item.description)}</td>
-      <td>${esc(item.material_type)}</td>
-      <td>${esc(item.qty)}</td>
-      <td>${esc(item.uom)}</td>
-      <td>${esc(item.size_1 || "")}</td>
-      <td>${esc(item.size_2 || "")}</td>
-      <td>${esc(item.thk_1 || "")}</td>
-      <td>${esc(item.thk_2 || "")}</td>
-      <td>${esc(item.notes || "")}</td>
-      ${vendorCells}
-      <td>${esc(poRefs)}</td>
-      <td><div class="actions">
-        <a class="btn btn-secondary" href="/rfq-item/${item.id}/quotes">Quotes</a>
-        <a class="btn btn-secondary" href="/rfq-item/${item.id}/edit">Edit</a>
-        <form method="post" action="/rfq-item/${item.id}/delete"><button class="btn btn-danger" type="submit">Delete</button></form>
-      </div></td>
-    </tr>`);
-  }
-
-  const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
-  const vendorHeaders = quoteVendors.map((vendor) => `<th>${esc(vendor.name)}</th>`).join("");
-  const uploadItemsCard = `
-    <div class="card">
-      <h3>Upload RFQ Items</h3>
-      <p class="muted">CSV/XLSX columns: item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty, notes</p>
-      <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/items/import" class="stack">
-        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
-        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
-        <div class="actions"><button type="submit">Import Items</button></div>
-      </form>
-    </div>`;
-  const importQuotesCard = `
-    <div class="card">
-      <h3>Import Vendor Quotes</h3>
-      <p class="muted">CSV/XLSX columns: vendor_name, item_code, unit_price, lead_days</p>
-      <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/quotes/import" class="stack">
-        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
-        <div><label>Or Paste Quote CSV</label><textarea name="csv_text"></textarea></div>
-        <div class="actions"><button type="submit">Import Quotes</button></div>
-      </form>
-    </div>`;
-  const issuePoCard = `
-    <div class="card">
-      <h3>Issue PO From This RFQ</h3>
-      <form method="post" action="/po/create" class="stack">
-        <input type="hidden" name="rfq_id" value="${rfqId}" />
-        <div class="grid">
-          <div><label>PO Number</label><input name="po_no" required /></div>
-          <div><label>Vendor</label><select name="vendor_id">${vendorOptions}</select></div>
-        </div>
-        <div class="actions"><button type="submit">Create PO Using Vendor Quotes</button></div>
-      </form>
-    </div>`;
-
-  res.send(layout(`RFQ ${rfq.rfq_no}`, `
-    <h1>RFQ ${esc(rfq.rfq_no)}</h1>
-    ${items.length === 0 && poCount === 0 ? uploadItemsCard : ""}
-    ${poCount === 0 ? importQuotesCard : ""}
-    ${poCount === 0 ? issuePoCard : ""}
-    <div class="card scroll">
-      <h3>RFQ Items</h3>
-      <table>
-        <tr><th>Item</th><th>Description</th><th>Type</th><th>Qty</th><th>UOM</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Notes</th>${vendorHeaders}<th>Issued PO</th><th>Actions</th></tr>
-        ${itemRows.join("")}
-      </table>
-    </div>
-    ${items.length > 0 && poCount === 0 ? uploadItemsCard : ""}
-  `, req.user));
-});
-
-app.post("/rfq/:id/items/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
-  const rfqId = Number(req.params.id);
-  const rows = parseUploadedRows(req.file, req.body.csv_text);
-  if (rows.length === 0) throw new Error("No rows found.");
+  const jobId = currentJobId(req);
+  const projectName = String(req.body.project_name || "").trim();
+  const clientRequestNo = String(req.body.client_request_no || "").trim();
+  const requestorName = String(req.body.requestor_name || "").trim();
+  const dueDate = String(req.body.due_date || "").trim();
+  const requestedStatus = String(req.body.status || "").trim();
+  const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "";
+  if (!projectName) throw new Error("Description is required.");
+  if (!dueDate) throw new Error("Due date is required.");
+  if (!status) throw new Error("Choose a valid RFQ status.");
   await withTransaction(async (client) => {
-    for (const row of rows) {
-      const itemCode = String(row.item_code || "").trim();
-      const qty = Number(row.qty || 0);
-      if (!itemCode || qty <= 0) continue;
-      let materialItemId;
-      const existing = await client.query("select id from material_items where item_code = $1", [itemCode]);
-      if (existing.rows[0]) {
-        materialItemId = existing.rows[0].id;
-      } else {
-        const insert = await client.query(
-          "insert into material_items (item_code, description, material_type, uom) values ($1, $2, $3, $4) returning id",
-          [itemCode, row.description || itemCode, row.material_type || "misc", row.uom || "EA"]
-        );
-        materialItemId = insert.rows[0].id;
-      }
-      await client.query(`
-        insert into rfq_items (rfq_id, material_item_id, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, now())
-      `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
-    }
-    await auditLog(client, req.user.id, "import", "rfq_items", rfqId, `rows=${rows.length}`);
+    const rfq = (await client.query("select rfq_no, project_name, client_request_no, requestor_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    if (!rfq) throw new Error("RFQ not found.");
+    await client.query("update rfqs set project_name = $2, client_request_no = $3, requestor_name = $4, due_date = $5, status = $6 where id = $1 and job_id = $7", [rfqId, projectName, clientRequestNo, requestorName, dueDate, status, jobId]);
+    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${clientRequestNo}:${requestorName}:${dueDate}:${status}`);
   });
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/rfq/:id/quotes/import", requireAuth, requireRole(["admin", "buyer"]), upload.single("sheet"), async (req, res) => {
+app.post("/rfq/:id/vendors", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const selectedVendorIds = parseSelectedIdList(req.body.vendor_ids);
+  await withTransaction(async (client) => {
+    const rfq = (await client.query("select rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    if (!rfq) throw new Error("RFQ not found.");
+    await syncRfqVendors(client, rfqId, selectedVendorIds);
+    await auditLog(client, req.user.id, "update", "rfq_vendors", rfqId, `count=${selectedVendorIds.length}`);
+  });
+  res.redirect(`/rfq/${rfqId}`);
+}));
+
+app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "view"), async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await backfillRfqVendors(pool, rfqId);
+  const selectedVendorId = String(req.query.vendor_tab_id || "").trim();
+  const rfq = (await query("select * from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+  if (!rfq) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
+    return;
+  }
+  const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes, quoteFilesRes] = await Promise.all([
+    query(`
+      select ri.id, ri.po_line, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
+             ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
+             mi.item_code, mi.description, mi.material_type, mi.uom
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.rfq_id = $1
+      order by
+        case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
+        case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
+        ri.id
+    `, [rfqId]),
+    query("select id, name from vendors where is_active = true order by name"),
+    query(`
+      select rv.vendor_id, v.name
+      from rfq_vendors rv
+      join vendors v on v.id = rv.vendor_id
+      where rv.rfq_id = $1 and rv.job_id = $2
+      order by v.name
+    `, [rfqId, jobId]),
+    query("select count(*) from purchase_orders where rfq_id = $1 and job_id = $2", [rfqId, jobId]),
+    query(`
+      select ib.id, ib.entity_type, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
+             coalesce((select count(*) from import_batch_errors ibe where ibe.batch_id = ib.id), 0) as error_count
+      from import_batches ib
+      where ib.rfq_id = $1 and ib.job_id = $2
+      order by ib.id desc
+      limit 5
+    `, [rfqId, jobId]),
+    query("select item_code, description, material_type, uom from material_items where job_id = $1 order by item_code limit 500", [jobId]),
+    query(`
+      select q.rfq_item_id, q.vendor_id, q.unit_price, q.lead_days, q.quoted_at, v.name as vendor_name
+      from quotes q
+      join rfq_items ri on ri.id = q.rfq_item_id
+      join vendors v on v.id = q.vendor_id
+      where ri.rfq_id = $1 and ri.job_id = $2
+    `, [rfqId, jobId]),
+    query(`
+      select pl.rfq_item_id, string_agg(distinct po.po_no, ', ' order by po.po_no) as po_refs
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id
+      where po.rfq_id = $1 and po.job_id = $2 and pl.rfq_item_id is not null
+      group by pl.rfq_item_id
+    `, [rfqId, jobId]),
+    query(`
+      select qf.id, qf.vendor_id, qf.filename, qf.content_type, qf.size_bytes, qf.created_at, v.name as vendor_name, u.username as uploaded_by_name
+      from rfq_quote_files qf
+      left join vendors v on v.id = qf.vendor_id
+      left join users u on u.id = qf.uploaded_by
+      where qf.rfq_id = $1 and qf.job_id = $2
+      order by qf.created_at desc, qf.id desc
+    `, [rfqId, jobId])
+  ]);
+
+  const items = itemsRes.rows;
+  const vendors = vendorsRes.rows;
+  const selectedVendors = selectedVendorsRes.rows;
+  const poCount = Number(poCountRes.rows[0].count);
+  const recentImports = recentImportsRes.rows;
+  const quoteFiles = quoteFilesRes.rows;
+  const materialItems = materialItemsRes.rows;
+  const allQuotes = quotesRes.rows;
+  const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
+  const selectedVendorIds = selectedVendors.map((vendor) => Number(vendor.vendor_id));
+  const activeQuoteVendorId = selectedVendorIds.includes(Number(selectedVendorId))
+    ? String(selectedVendorId)
+    : String(selectedVendors[0]?.vendor_id || "");
+  const quoteMap = new Map();
+  const quoteCountsByVendor = new Map();
+  for (const quote of allQuotes) {
+    const itemKey = Number(quote.rfq_item_id);
+    const vendorKey = Number(quote.vendor_id);
+    if (!quoteMap.has(itemKey)) quoteMap.set(itemKey, new Map());
+    quoteMap.get(itemKey).set(vendorKey, quote);
+    quoteCountsByVendor.set(vendorKey, (quoteCountsByVendor.get(vendorKey) || 0) + 1);
+  }
+  const poRefMap = new Map(poRefsRes.rows.map((row) => [Number(row.rfq_item_id), row.po_refs]));
+  const awardedItems = items.filter((item) => item.award_status === "AWARDED" && item.awarded_vendor_id);
+  const awardedVendorSet = new Set(awardedItems.map((item) => Number(item.awarded_vendor_id)));
+  const awardedVendorId = items.length > 0 && awardedItems.length === items.length && awardedVendorSet.size === 1
+    ? Number(awardedItems[0].awarded_vendor_id)
+    : 0;
+  const awardedVendorName = awardedVendorId ? (vendorNameMap.get(awardedVendorId) || `Vendor ${awardedVendorId}`) : "";
+  const awardedTotal = awardedItems.reduce((sum, item) => sum + (Number(item.awarded_unit_price || 0) * Number(item.qty || 0)), 0);
+  const activeVendor = selectedVendors.find((vendor) => String(vendor.vendor_id) === activeQuoteVendorId) || null;
+  const materialItemRows = materialItems
+    .map((item) => `<tr>
+      <td>${esc(item.item_code)}</td>
+      <td>${esc(item.description)}</td>
+      <td>${esc(item.material_type)}</td>
+      <td>${esc(item.uom)}</td>
+      <td>
+        <form method="post" action="/rfq/${rfqId}/items/add">
+          <input type="hidden" name="item_code" value="${esc(item.item_code)}" />
+          <input type="hidden" name="description" value="${esc(item.description)}" />
+          <input type="hidden" name="material_type" value="${esc(item.material_type)}" />
+          <input type="hidden" name="uom" value="${esc(item.uom)}" />
+          <input type="hidden" name="qty" value="1" />
+          <button type="submit">Add</button>
+        </form>
+      </td>
+    </tr>`)
+    .join("");
+  const newItemRows = Array.from({ length: 8 }, (_, index) => `
+    <tr>
+      <td><input name="item_code_${index}" /></td>
+      <td><input name="description_${index}" /></td>
+      <td><input name="material_type_${index}" /></td>
+      <td><input name="uom_${index}" /></td>
+      <td><input name="po_line_${index}" /></td>
+      <td><input name="spec_${index}" /></td>
+      <td><input name="commodity_code_${index}" /></td>
+      <td><input name="tag_number_${index}" /></td>
+      <td><input name="size_1_${index}" /></td>
+      <td><input name="size_2_${index}" /></td>
+      <td><input name="thk_1_${index}" /></td>
+      <td><input name="thk_2_${index}" /></td>
+      <td><input name="qty_${index}" /></td>
+      <td><input name="notes_${index}" /></td>
+    </tr>
+  `).join("");
+
+  const itemRows = [];
+  for (const item of items) {
+    const itemQuotes = quoteMap.get(Number(item.id)) || new Map();
+    const selectedQuote = itemQuotes.get(Number(activeQuoteVendorId));
+    const poRefs = poRefMap.get(Number(item.id)) || "Not Issued";
+    const awardedVendor = item.awarded_vendor_id ? (vendorNameMap.get(item.awarded_vendor_id) || `Vendor ${item.awarded_vendor_id}`) : "";
+    const awardSummary = item.award_status === "AWARDED"
+      ? `${awardedVendor} | $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d`
+      : "Open";
+    itemRows.push(`<tr data-rfq-item-id="${item.id}">
+      <td style="width:1%; white-space:nowrap;">${esc(item.po_line || "")}</td>
+      <td style="width:1%; white-space:nowrap;"><input type="hidden" name="rfq_item_id_${item.id}" value="${item.id}" />${esc(item.item_code)}</td>
+      <td style="width:auto; min-width:260px;">${esc(item.description)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(item.qty))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.uom)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.spec || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc([item.size_1, item.size_2].filter(Boolean).join(" x "))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc([item.thk_1, item.thk_2].filter(Boolean).join(" x "))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.notes || "")}</td>
+      <td style="width:96px; white-space:nowrap;"><input name="unit_price_${item.id}" value="${esc(formatCurrencyInput(selectedQuote?.unit_price))}" inputmode="decimal" /></td>
+      <td style="width:88px; white-space:nowrap;"><input name="lead_days_${item.id}" value="${esc(selectedQuote?.lead_days || "")}" inputmode="numeric" /></td>
+      <td style="width:1%; white-space:nowrap;">${esc(item.award_status)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(awardSummary)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(poRefs)}</td>
+      <td><div class="actions">
+        <a class="btn btn-secondary" href="/rfq-item/${item.id}/quotes">Quotes / History</a>
+        <a class="btn btn-secondary" href="/rfq-item/${item.id}/edit">Edit</a>
+        ${item.award_status === "AWARDED" ? `<button class="btn btn-secondary" type="submit" formaction="/rfq-item/${item.id}/award/clear" formmethod="post">Clear Award</button>` : ""}
+        <button class="btn btn-danger" type="submit" formaction="/rfq-item/${item.id}/delete" formmethod="post" onclick="return confirm('Delete RFQ line ${escAttr(String(item.po_line || item.item_code || item.id))}?');">Delete</button>
+      </div></td>
+    </tr>`);
+  }
+
+  const soleAwardVendor = selectedVendors.length === 1 ? selectedVendors[0] : null;
+  const awardVendorOptions = [`<option value="">Select vendor</option>`]
+    .concat(selectedVendors.map((vendor) => `<option value="${vendor.vendor_id}" ${Number(vendor.vendor_id) === awardedVendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
+    .join("");
+  const rfqStatusOptions = rfqStatuses
+    .map((status) => `<option value="${status.value}" ${rfq.status === status.value ? "selected" : ""}>${esc(status.label)}</option>`)
+    .join("");
+  const rfqStatusLabel = (rfqStatuses.find((status) => status.value === rfq.status) || { label: rfq.status }).label;
+  const selectedVendorChips = selectedVendors.length > 0
+    ? selectedVendors.map((vendor) => `<span class="chip">${esc(vendor.name)}</span>`).join(" ")
+    : `<span class="muted">No participating vendors selected yet.</span>`;
+  const vendorTabs = selectedVendors.length > 0
+    ? selectedVendors.map((vendor) => `<a class="tab-link ${String(vendor.vendor_id) === activeQuoteVendorId ? "active" : ""}" href="/rfq/${rfqId}?vendor_tab_id=${vendor.vendor_id}">${esc(vendor.name)} (${quoteCountsByVendor.get(Number(vendor.vendor_id)) || 0})</a>`).join("")
+    : "";
+  const importRows = recentImports.length > 0
+    ? recentImports.map((batch) => `<tr><td><a href="/imports/${batch.id}">${esc(batch.entity_type)}</a></td><td>${esc(formatShortDateTime(batch.created_at))}</td><td>${esc(batch.status)}</td><td>${batch.inserted_count}</td><td>${batch.updated_count}</td><td>${batch.skipped_count}</td><td>${batch.error_count}</td></tr>`).join("")
+    : `<tr><td colspan="7" class="muted">No imports logged yet.</td></tr>`;
+  const workspaceActions = `
+    <div class="actions">
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/existing">Add Existing</a>` : ""}
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/new">Add New</a>` : ""}
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Values</a>` : ""}
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Import Quotes</a>` : ""}
+      <a class="btn btn-primary" target="_blank" href="/rfq/${rfqId}/sheet.pdf" onclick="return openRfqPdfWithOrder(this, 'rfq-quote-table-${rfqId}');">Open RFQ PDF</a>
+    </div>`;
+  const quoteFileRows = quoteFiles.length > 0
+    ? quoteFiles.map((file) => `<tr>
+      <td>${esc(file.filename)}</td>
+      <td>${esc(file.vendor_name || "RFQ")}</td>
+      <td>${esc(formatBytes(file.size_bytes))}</td>
+      <td>${esc(file.uploaded_by_name || "")}</td>
+      <td>${esc(formatShortDateTime(file.created_at))}</td>
+      <td>
+        <div class="actions">
+          <a class="btn btn-secondary" target="_blank" href="/rfq/${rfqId}/quote-files/${file.id}/open">Open</a>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}/quote-files/${file.id}/download">Download</a>
+          <form method="post" action="/rfq/${rfqId}/quote-files/${file.id}/delete" onsubmit="return confirm('Delete quote file ${escAttr(file.filename)}?');">
+            <button class="btn btn-danger" type="submit">Delete</button>
+          </form>
+        </div>
+      </td>
+    </tr>`).join("")
+    : `<tr><td colspan="6" class="muted">No quote files uploaded yet.</td></tr>`;
+  const quoteFileCard = `
+    <div class="card">
+      <h3>Quote Files</h3>
+      <form id="rfq-quote-file-form-${rfqId}" method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/quote-files" class="stack">
+        <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
+        <label id="rfq-quote-drop-${rfqId}" for="rfq-quote-file-${rfqId}" style="display:grid; place-items:center; min-height:112px; border:2px dashed var(--line); border-radius:12px; background:#f8fafc; cursor:pointer; text-align:center; padding:18px;">
+          <span><strong>Drop quote file here</strong><br /><span class="muted">${activeVendor ? `Saved to ${esc(activeVendor.name)}` : "Select a vendor tab before uploading"}</span></span>
+          <input id="rfq-quote-file-${rfqId}" type="file" name="quote_file" style="position:absolute; opacity:0; width:1px; height:1px;" ${activeQuoteVendorId ? "" : "disabled"} />
+        </label>
+        <div class="actions">
+          <button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Upload Quote File</button>
+        </div>
+      </form>
+      <div class="scroll" style="margin-top:16px;">
+        <table><tr><th>File</th><th>Vendor</th><th>Size</th><th>Uploaded By</th><th>Uploaded</th><th>Actions</th></tr>${quoteFileRows}</table>
+      </div>
+      <script>
+        (() => {
+          const form = document.getElementById("rfq-quote-file-form-${rfqId}");
+          const drop = document.getElementById("rfq-quote-drop-${rfqId}");
+          const input = document.getElementById("rfq-quote-file-${rfqId}");
+          if (!form || !drop || !input) return;
+          const highlight = (on) => {
+            drop.style.borderColor = on ? "var(--brand)" : "var(--line)";
+            drop.style.background = on ? "rgba(14,90,109,.08)" : "#f8fafc";
+          };
+          ["dragenter", "dragover"].forEach((eventName) => drop.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            if (!input.disabled) highlight(true);
+          }));
+          ["dragleave", "drop"].forEach((eventName) => drop.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            highlight(false);
+          }));
+          drop.addEventListener("drop", (event) => {
+            if (input.disabled || !event.dataTransfer?.files?.length) return;
+            input.files = event.dataTransfer.files;
+            form.submit();
+          });
+        })();
+      </script>
+    </div>`;
+  const awardSummaryCard = `
+    <div class="card">
+      <h3>Award Summary</h3>
+      <div class="summary-grid">
+        <div class="stat"><div>RFQ Status</div><strong>${esc(rfqStatusLabel)}</strong></div>
+        <div class="stat"><div>Lines</div><strong>${items.length}</strong></div>
+        <div class="stat"><div>Participating Vendors</div><strong>${selectedVendors.length}</strong></div>
+        <div class="stat"><div>Issued POs</div><strong>${poCount}</strong></div>
+      </div>
+      <div style="margin-top:12px;">${selectedVendorChips}</div>
+      <form method="post" action="/rfq/${rfqId}/award" class="stack" style="margin-top:12px;">
+        <div class="grid" style="grid-template-columns: minmax(0, 280px) 1fr;">
+          <div><label>Award RFQ To Vendor</label>${soleAwardVendor
+            ? `<input value="${esc(soleAwardVendor.name)}" readonly /><input type="hidden" name="vendor_id" value="${soleAwardVendor.vendor_id}" />`
+            : `<select id="rfq-award-vendor-${rfqId}" name="vendor_id">${awardVendorOptions}</select>`}</div>
+          <div><label>Award Notes</label><input name="award_notes" value="${esc(items.find((item) => item.award_notes)?.award_notes || "")}" /></div>
+        </div>
+        <div class="actions">
+          <button type="submit" ${selectedVendors.length === 0 ? "disabled" : ""}>Award Whole RFQ</button>
+          ${awardedItems.length > 0 ? `<button class="btn btn-secondary" type="submit" formaction="/rfq/${rfqId}/award/clear">Clear Whole RFQ Award</button>` : ""}
+          ${awardedVendorId ? `<button type="button" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}')">Create Draft PO</button>` : ""}
+          <a class="btn btn-secondary" href="/rfq/${rfqId}/export.xlsx">Export AX XLSX</a>
+        </div>
+        ${awardedVendorId ? `<div class="muted">Current award: <strong>${esc(awardedVendorName)}</strong> | ${awardedItems.length} line(s) | Estimated total $${awardedTotal.toFixed(2)}</div>` : `<div class="muted">Award the full RFQ to one vendor once the selected vendor has quotes on every RFQ line.</div>`}
+      </form>
+      <form id="rfq-po-create-form-${rfqId}" method="post" action="/po/create" style="display:none;">
+        <input type="hidden" name="rfq_id" value="${rfqId}" />
+        <input type="hidden" name="po_no" value="" />
+        <input type="hidden" id="rfq-awarded-vendor-${rfqId}" name="vendor_id" value="${awardedVendorId ? esc(String(awardedVendorId)) : ""}" />
+      </form>
+    </div>`;
+  res.send(layout(`RFQ ${rfq.rfq_no}`, `
+    <h1>${esc(rfq.rfq_no)}${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</h1>
+    <div class="card">
+      <form id="rfq-${rfqId}-header-form" method="post" action="/rfq/${rfqId}/header" class="stack">
+        <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+          <div><label>RFQ Number</label><input value="${esc(rfq.rfq_no)}" readonly /></div>
+          <div><label>Description</label><input name="project_name" value="${esc(rfq.project_name || "")}" required /></div>
+          <div><label>Due Date</label><input type="date" name="due_date" value="${esc(textValue(rfq.due_date))}" required /></div>
+          <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
+        </div>
+        <div class="grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+          <div><label>Client Request #</label><input name="client_request_no" value="${esc(rfq.client_request_no || "")}" /></div>
+          <div><label>Requestor</label><input name="requestor_name" value="${esc(rfq.requestor_name || "")}" /></div>
+        </div>
+      </form>
+      <form id="rfq-${rfqId}-vendors-form" method="post" action="/rfq/${rfqId}/vendors" class="stack" style="margin-top:12px;">
+        ${renderVendorPicker(vendors, selectedVendors.map((vendor) => ({ id: vendor.vendor_id, name: vendor.name })), {
+          dialogId: `rfq-${rfqId}-vendor-dialog`,
+          inputId: `rfq-${rfqId}-vendor-input`,
+          selectedListId: `rfq-${rfqId}-vendor-list`,
+          hiddenContainerId: `rfq-${rfqId}-vendor-hidden`,
+          datalistId: `rfq-${rfqId}-vendor-options`,
+          addButtonLabel: "Add Vendor",
+          formId: `rfq-${rfqId}-vendors-form`,
+          showAddButton: false
+        })}
+      </form>
+      <div class="actions">
+        <button type="submit" form="rfq-${rfqId}-header-form">Save Header</button>
+        <button type="button" onclick='openVendorPicker("rfq-${rfqId}-vendor-dialog", "rfq-${rfqId}-vendor-input")'>Add Vendor</button>
+        <a class="btn btn-danger" href="/rfq/${rfqId}/delete">Delete RFQ</a>
+      </div>
+      <div class="muted">Choose the vendors for this RFQ once, then enter quotes vendor-by-vendor in the tabs below.</div>
+    </div>
+    <div class="card scroll">
+      <h3>Vendor Quote Workspace</h3>
+      ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted" style="margin-bottom:10px;">Save at least one selected vendor to unlock quote tabs.</div>`}
+      ${workspaceActions}
+      <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack" onsubmit="return captureRfqQuoteOrder(this);">
+        <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
+        <input type="hidden" name="rfq_item_order" value="" />
+        <div class="actions" style="margin-top:6px;">
+          <button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Save ${esc(activeVendor?.name || "Vendor")} Quotes</button>
+        </div>
+        <table id="rfq-quote-table-${rfqId}">
+          <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:260px;">Description</th><th style="width:1%; white-space:nowrap;">Qty</th><th style="width:1%; white-space:nowrap;">UOM</th><th style="width:1%; white-space:nowrap;">Spec</th><th style="width:1%; white-space:nowrap;">Size</th><th style="width:1%; white-space:nowrap;">Thk</th><th style="width:1%; white-space:nowrap;">Notes</th><th style="width:96px; white-space:nowrap;">Unit Price</th><th style="width:88px; white-space:nowrap;">Lead Days</th><th style="width:1%; white-space:nowrap;">Award Status</th><th style="width:1%; white-space:nowrap;">Award Summary</th><th style="width:1%; white-space:nowrap;">Issued PO</th><th>Actions</th></tr>
+          ${itemRows.join("") || `<tr><td colspan="15" class="muted">No RFQ items loaded yet.</td></tr>`}
+        </table>
+      </form>
+    </div>
+    ${quoteFileCard}
+    ${awardSummaryCard}
+    <div class="card scroll">
+      <h3>Recent Imports</h3>
+      <table>
+        <tr><th>Type</th><th>Created</th><th>Status</th><th>Inserted</th><th>Updated</th><th>Skipped</th><th>Errors</th></tr>
+        ${importRows}
+      </table>
+    </div>
+  `, req.user));
+});
+
+app.post("/rfq/:id/quote-files", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("quote_file"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const vendorId = Number(req.body.vendor_id || 0);
+  const file = req.file;
+  if (!file?.buffer?.length) throw new Error("Choose a quote file to upload.");
+  if (!vendorId) throw new Error("Select a vendor tab before uploading a quote file.");
+  if (file.size > 20 * 1024 * 1024) throw new Error("Quote file exceeds the 20 MB upload limit.");
+  if (!process.env.BLOB_READ_WRITE_TOKEN) throw new Error("BLOB_READ_WRITE_TOKEN is not set. Add a Vercel Blob store to the project and pull the env vars locally.");
+
+  const activeVendorId = await withTransaction(async (client) => {
+    const rfq = (await client.query("select rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    if (!rfq) throw new Error("RFQ not found.");
+    const vendor = (await client.query("select v.name from rfq_vendors rv join vendors v on v.id = rv.vendor_id where rv.rfq_id = $1 and rv.vendor_id = $2 and rv.job_id = $3", [rfqId, vendorId, jobId])).rows[0];
+    if (!vendor) throw new Error("Choose a vendor from the RFQ vendor list before uploading.");
+
+    const pathname = [
+      "rfq-quotes",
+      `job-${jobId}`,
+      `rfq-${safeBlobPathSegment(rfq.rfq_no, String(rfqId))}`,
+      `vendor-${safeBlobPathSegment(vendor.name, String(vendorId))}`,
+      `${Date.now()}-${safeBlobPathSegment(file.originalname, "quote-file")}`
+    ].join("/");
+    const blob = await put(pathname, file.buffer, {
+      access: "private",
+      addRandomSuffix: true,
+      contentType: file.mimetype || "application/octet-stream"
+    });
+    const insert = await client.query(`
+      insert into rfq_quote_files (job_id, rfq_id, vendor_id, filename, content_type, size_bytes, blob_url, blob_download_url, blob_pathname, uploaded_by)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      returning vendor_id
+    `, [jobId, rfqId, vendorId, file.originalname || "quote-file", file.mimetype || "", file.size || file.buffer.length, blob.url, blob.downloadUrl || "", blob.pathname, req.user.id]);
+    await auditLog(client, req.user.id, "upload", "rfq_quote_file", rfqId, `${vendor.name}:${file.originalname || "quote-file"}`);
+    return insert.rows[0].vendor_id;
+  });
+  res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(activeVendorId))}`);
+}));
+
+app.get("/rfq/:id/quote-files/:fileId/:mode(open|download)", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const fileId = Number(req.params.fileId);
+  const jobId = currentJobId(req);
+  const file = (await query(`
+    select qf.*
+    from rfq_quote_files qf
+    join rfqs r on r.id = qf.rfq_id and r.job_id = qf.job_id
+    where qf.id = $1 and qf.rfq_id = $2 and qf.job_id = $3
+  `, [fileId, rfqId, jobId])).rows[0];
+  if (!file) throw new Error("Quote file not found.");
+
+  const blob = await get(file.blob_pathname || file.blob_url, { access: "private" });
+  if (!blob.stream) throw new Error("Quote file is not available.");
+  const filename = safeBlobPathSegment(file.filename, "quote-file");
+  res.setHeader("Content-Type", file.content_type || blob.blob?.contentType || "application/octet-stream");
+  res.setHeader("Content-Disposition", `${req.params.mode === "download" ? "attachment" : "inline"}; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(file.filename || filename)}`);
+  if (file.size_bytes) res.setHeader("Content-Length", String(file.size_bytes));
+  Readable.fromWeb(blob.stream).pipe(res);
+}));
+
+app.post("/rfq/:id/quote-files/:fileId/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const fileId = Number(req.params.fileId);
+  const jobId = currentJobId(req);
+  const file = (await query(`
+    select qf.*, v.name as vendor_name
+    from rfq_quote_files qf
+    left join vendors v on v.id = qf.vendor_id
+    where qf.id = $1 and qf.rfq_id = $2 and qf.job_id = $3
+  `, [fileId, rfqId, jobId])).rows[0];
+  if (!file) throw new Error("Quote file not found.");
+  if (file.blob_pathname || file.blob_url) {
+    await del(file.blob_pathname || file.blob_url);
+  }
+  await withTransaction(async (client) => {
+    await client.query("delete from rfq_quote_files where id = $1 and rfq_id = $2 and job_id = $3", [fileId, rfqId, jobId]);
+    await auditLog(client, req.user.id, "delete", "rfq_quote_file", rfqId, `${file.vendor_name || "RFQ"}:${file.filename || fileId}`);
+  });
+  res.redirect(`/rfq/${rfqId}${file.vendor_id ? `?vendor_tab_id=${encodeURIComponent(String(file.vendor_id))}` : ""}`);
+}));
+
+app.get("/rfq/:id/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const [rfqRes, poCountRes] = await Promise.all([
+    query("select id, rfq_no, project_name, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
+    query("select count(*) as count from purchase_orders where rfq_id = $1 and job_id = $2", [rfqId, jobId])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
+    return;
+  }
+  const poCount = Number(poCountRes.rows[0]?.count || 0);
+  res.send(layout("Delete RFQ", `
+    <h1>Delete RFQ</h1>
+    <div class="card error">
+      <h3>Confirm RFQ Deletion</h3>
+      <p><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</p>
+      <p class="muted">Status: ${esc(rfq.status)} | Issued POs: ${poCount}</p>
+      ${poCount > 0 ? `<p>This RFQ cannot be deleted because it already has purchase orders tied to it.</p>` : `<p>This will remove the RFQ, its vendor list, its items, quotes, quote history, and related import logs.</p>`}
+      <div class="actions">
+        ${poCount === 0 ? `<form method="post" action="/rfq/${rfqId}/delete" onsubmit="return confirm('Delete RFQ ${esc(String(rfq.rfq_no || ""))}? This cannot be undone.');"><button class="btn btn-danger" type="submit">Confirm Delete RFQ</button></form>` : ""}
+        <a class="btn btn-secondary" href="/rfq/${rfqId}">Back</a>
+      </div>
+    </div>
+  `, req.user));
+}));
+
+app.post("/rfq/:id/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const rfq = (await client.query("select id, rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    if (!rfq) throw new Error("RFQ not found.");
+    const poCount = Number((await client.query("select count(*) as count from purchase_orders where rfq_id = $1 and job_id = $2", [rfqId, jobId])).rows[0]?.count || 0);
+    if (poCount > 0) throw new Error("Cannot delete an RFQ that already has purchase orders.");
+    await client.query(`
+      delete from import_batch_errors
+      where batch_id in (select id from import_batches where rfq_id = $1 and job_id = $2)
+    `, [rfqId, jobId]);
+    await client.query("delete from import_batches where rfq_id = $1 and job_id = $2", [rfqId, jobId]);
+    await client.query(`
+      delete from quote_revisions
+      where job_id = $2
+        and rfq_item_id in (select id from rfq_items where rfq_id = $1 and job_id = $2)
+    `, [rfqId, jobId]);
+    await client.query(`
+      delete from quotes
+      where job_id = $2
+        and rfq_item_id in (select id from rfq_items where rfq_id = $1 and job_id = $2)
+    `, [rfqId, jobId]);
+    await client.query("delete from rfq_vendors where rfq_id = $1 and job_id = $2", [rfqId, jobId]);
+    await client.query("delete from rfq_items where rfq_id = $1 and job_id = $2", [rfqId, jobId]);
+    await client.query("delete from rfqs where id = $1 and job_id = $2", [rfqId, jobId]);
+    await auditLog(client, req.user.id, "delete", "rfq", rfqId, rfq.rfq_no || "");
+  });
+  res.redirect("/rfq");
+}));
+
+app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const [rfqRes, itemsRes] = await Promise.all([
+    query("select * from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
+    query(`
+      select
+        ri.id,
+        ri.po_line,
+        ri.qty,
+        ri.notes,
+        ri.spec,
+        ri.size_1,
+        ri.size_2,
+        ri.thk_1,
+        ri.thk_2,
+        mi.item_code,
+        mi.description,
+        mi.uom
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.rfq_id = $1 and ri.job_id = $2 and mi.job_id = $2
+      order by
+        case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
+        case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
+        ri.id
+    `, [rfqId, jobId])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const requestedOrder = String(req.query.order || "")
+    .split(",")
+    .map((value) => Number(String(value || "").trim()))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  let pdfItems = itemsRes.rows;
+  if (requestedOrder.length) {
+    const orderIndex = new Map(requestedOrder.map((itemId, index) => [itemId, index]));
+    pdfItems = itemsRes.rows.slice().sort((a, b) => {
+      const aIndex = orderIndex.has(Number(a.id)) ? orderIndex.get(Number(a.id)) : Number.MAX_SAFE_INTEGER;
+      const bIndex = orderIndex.has(Number(b.id)) ? orderIndex.get(Number(b.id)) : Number.MAX_SAFE_INTEGER;
+      if (aIndex !== bIndex) return aIndex - bIndex;
+      return Number(a.id || 0) - Number(b.id || 0);
+    });
+  }
+  const pdfBuffer = buildRfqSheetPdf(rfq, pdfItems);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
+  res.send(pdfBuffer);
+}));
+
+app.get("/rfq/:id/export.xlsx", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const [rfqRes, itemsRes] = await Promise.all([
+    query("select * from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
+    query(`
+      select
+        ri.id,
+        ri.po_line,
+        ri.qty,
+        ri.awarded_unit_price,
+        ri.size_1,
+        ri.size_2,
+        ri.thk_1,
+        ri.thk_2,
+        mi.item_code,
+        mi.description
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.rfq_id = $1 and ri.job_id = $2 and mi.job_id = $2
+      order by
+        case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
+        case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
+        ri.id
+    `, [rfqId, jobId])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  if (!fs.existsSync(axImportTemplatePath)) {
+    throw new Error("AX import template workbook is missing from the server.");
+  }
+  const workbook = XLSX.read(fs.readFileSync(axImportTemplatePath), { type: "buffer", cellStyles: true });
+  const worksheet = workbook.Sheets.Sheet1;
+  if (!worksheet) throw new Error("AX import template sheet 'Sheet1' was not found.");
+  const headerMap = getWorksheetHeaderColumnMap(worksheet, 1);
+  const productNameCol = headerMap.get("product_name");
+  const quantityCol = headerMap.get("quantity");
+  const unitPriceCol = headerMap.get("unit_price");
+  const procurementCategoryCol = headerMap.get("procurement_category");
+  if (![productNameCol, quantityCol, unitPriceCol, procurementCategoryCol].every((value) => Number.isInteger(value))) {
+    throw new Error("AX import template is missing one or more required columns.");
+  }
+
+  const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1:Q1");
+  const templateLastRowNumber = range.e.r + 1;
+  const dataStartRowNumber = 2;
+  const lastDataRowNumber = Math.max(templateLastRowNumber, dataStartRowNumber + itemsRes.rows.length - 1);
+
+  for (let rowNumber = dataStartRowNumber; rowNumber <= lastDataRowNumber; rowNumber += 1) {
+    if (rowNumber > templateLastRowNumber) {
+      cloneWorksheetRowLayout(worksheet, rowNumber, dataStartRowNumber, range);
+    } else {
+      for (let col = range.s.c; col <= range.e.c; col += 1) {
+        const ref = XLSX.utils.encode_cell({ r: rowNumber - 1, c: col });
+        clearWorksheetCellValue(worksheet[ref]);
+      }
+    }
+  }
+
+  itemsRes.rows.forEach((item, index) => {
+    const rowNumber = dataStartRowNumber + index;
+    writeWorksheetValue(worksheet, rowNumber, productNameCol, buildRfqAxProductName(item));
+    writeWorksheetValue(worksheet, rowNumber, quantityCol, num(item.qty));
+    writeWorksheetValue(worksheet, rowNumber, unitPriceCol, item.awarded_unit_price === null || item.awarded_unit_price === undefined || String(item.awarded_unit_price).trim() === "" ? "" : num(item.awarded_unit_price));
+    writeWorksheetValue(worksheet, rowNumber, procurementCategoryCol, "Field Material");
+  });
+
+  range.e.r = Math.max(range.e.r, lastDataRowNumber - 1);
+  worksheet["!ref"] = XLSX.utils.encode_range(range);
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer", cellStyles: true });
+  await auditLog(pool, req.user.id, "export", "rfq_ax_workbook", rfqId, `rows=${itemsRes.rows.length}|${rfq.rfq_no || ""}`);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}-ax-import.xlsx"`);
+  res.send(buffer);
+}));
+
+app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const [rfqRes, materialItemsRes] = await Promise.all([
+    query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
+    query(`
+      select
+        mi.item_code,
+        mi.description,
+        mi.material_type,
+        mi.uom,
+        coalesce(dimensions.size_1, '') as size_1,
+        coalesce(dimensions.size_2, '') as size_2,
+        coalesce(dimensions.thk_1, '') as thk_1,
+        coalesce(dimensions.thk_2, '') as thk_2
+      from material_items mi
+      left join lateral (
+        select distinct
+          coalesce(bl.size_1, '') as size_1,
+          coalesce(bl.size_2, '') as size_2,
+          coalesce(bl.thk_1, '') as thk_1,
+          coalesce(bl.thk_2, '') as thk_2
+        from bom_lines bl
+        join bom_headers bh on bh.id = bl.bom_id
+        where bh.job_id = $1 and bl.item_code = mi.item_code
+      ) dimensions on true
+      where mi.job_id = $1
+      order by
+        mi.item_code,
+        coalesce(dimensions.size_1, ''),
+        coalesce(dimensions.size_2, ''),
+        coalesce(dimensions.thk_1, ''),
+        coalesce(dimensions.thk_2, '')
+      limit 500
+    `, [jobId])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const materialItemRows = materialItemsRes.rows
+    .map((item) => `<tr>
+      <td>${esc(item.item_code)}</td>
+      <td>${esc(item.description)}</td>
+      <td>${esc(item.size_1 || "")}</td>
+      <td>${esc(item.size_2 || "")}</td>
+      <td>${esc(item.thk_1 || "")}</td>
+      <td>${esc(item.thk_2 || "")}</td>
+      <td>${esc(item.material_type)}</td>
+      <td>${esc(item.uom)}</td>
+      <td>
+        <button
+          type="button"
+          data-item-code="${escAttr(item.item_code)}"
+          data-description="${escAttr(item.description)}"
+          data-size-1="${escAttr(item.size_1 || "")}"
+          data-size-2="${escAttr(item.size_2 || "")}"
+          data-thk-1="${escAttr(item.thk_1 || "")}"
+          data-thk-2="${escAttr(item.thk_2 || "")}"
+          data-material-type="${escAttr(item.material_type)}"
+          data-uom="${escAttr(item.uom)}"
+          onclick="openExistingRfqItemDialog(this, '${rfqId}')"
+        >Add</button>
+      </td>
+    </tr>`).join("");
+  res.send(layout(`Add Existing Items`, `
+    <h1>Add Existing Items</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
+      <div class="grid" style="grid-template-columns: 1fr auto;">
+        <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" placeholder="Search item code, description, size, thickness, type, or UOM" /></div>
+        <div style="align-self:end;"><button type="button" onclick="filterTableRows('existing-items-filter-${rfqId}', 'existing-items-table-${rfqId}')">Apply Filter</button></div>
+      </div>
+      <div class="scroll">
+        <table id="existing-items-table-${rfqId}">
+          <thead><tr><th>Item Code</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Add</th></tr></thead>
+          <tbody>${materialItemRows || `<tr><td colspan="9" class="muted">No existing items found.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="actions"><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
+    </div>
+    <dialog id="rfq-existing-item-dialog-${rfqId}" class="modal-card">
+      <form method="post" action="/rfq/${rfqId}/items/add" class="stack">
+        <input type="hidden" name="item_code" id="rfq-existing-item-code-${rfqId}" />
+        <input type="hidden" name="description" id="rfq-existing-item-description-${rfqId}" />
+        <input type="hidden" name="size_1" id="rfq-existing-item-size-1-${rfqId}" />
+        <input type="hidden" name="size_2" id="rfq-existing-item-size-2-${rfqId}" />
+        <input type="hidden" name="thk_1" id="rfq-existing-item-thk-1-${rfqId}" />
+        <input type="hidden" name="thk_2" id="rfq-existing-item-thk-2-${rfqId}" />
+        <input type="hidden" name="material_type" id="rfq-existing-item-type-${rfqId}" />
+        <h3>Add Existing RFQ Item</h3>
+        <div class="card" style="margin:0;">
+          <div><strong id="rfq-existing-item-title-${rfqId}"></strong></div>
+          <div class="muted" id="rfq-existing-item-summary-${rfqId}" style="margin-top:6px;"></div>
+        </div>
+        <div class="grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+          <div><label>Qty</label><input name="qty" id="rfq-existing-item-qty-${rfqId}" value="1" inputmode="decimal" required /></div>
+          <div><label>UOM</label><input name="uom" id="rfq-existing-item-uom-${rfqId}" required /></div>
+        </div>
+        <div class="actions">
+          <button type="submit">Add Item</button>
+          <button type="button" class="btn btn-secondary" onclick="closeExistingRfqItemDialog('${rfqId}')">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    <script>
+      function closeExistingRfqItemDialog(rfqId) {
+        const dialog = document.getElementById('rfq-existing-item-dialog-' + rfqId);
+        if (!dialog) return false;
+        if (typeof dialog.close === 'function') dialog.close();
+        else dialog.removeAttribute('open');
+        return false;
+      }
+      function openExistingRfqItemDialog(button, rfqId) {
+        const dialog = document.getElementById('rfq-existing-item-dialog-' + rfqId);
+        if (!dialog || !button) return false;
+        const itemCode = String(button.getAttribute('data-item-code') || '');
+        const description = String(button.getAttribute('data-description') || '');
+        const size1 = String(button.getAttribute('data-size-1') || '');
+        const size2 = String(button.getAttribute('data-size-2') || '');
+        const thk1 = String(button.getAttribute('data-thk-1') || '');
+        const thk2 = String(button.getAttribute('data-thk-2') || '');
+        const materialType = String(button.getAttribute('data-material-type') || '');
+        const uom = String(button.getAttribute('data-uom') || '');
+        const sizeText = [size1, size2].filter(Boolean).join(' x ');
+        const thkText = [thk1, thk2].filter(Boolean).join(' x ');
+        const summaryBits = [];
+        if (sizeText) summaryBits.push('Size ' + sizeText);
+        if (thkText) summaryBits.push('Thk ' + thkText);
+        if (materialType) summaryBits.push('Type ' + materialType);
+        const setValue = (id, value) => {
+          const input = document.getElementById(id);
+          if (input) input.value = value;
+        };
+        setValue('rfq-existing-item-code-' + rfqId, itemCode);
+        setValue('rfq-existing-item-description-' + rfqId, description);
+        setValue('rfq-existing-item-size-1-' + rfqId, size1);
+        setValue('rfq-existing-item-size-2-' + rfqId, size2);
+        setValue('rfq-existing-item-thk-1-' + rfqId, thk1);
+        setValue('rfq-existing-item-thk-2-' + rfqId, thk2);
+        setValue('rfq-existing-item-type-' + rfqId, materialType);
+        setValue('rfq-existing-item-qty-' + rfqId, '1');
+        setValue('rfq-existing-item-uom-' + rfqId, uom);
+        const title = document.getElementById('rfq-existing-item-title-' + rfqId);
+        const summary = document.getElementById('rfq-existing-item-summary-' + rfqId);
+        if (title) title.textContent = itemCode;
+        if (summary) summary.textContent = [description].concat(summaryBits).filter(Boolean).join(' | ');
+        if (typeof dialog.showModal === 'function') dialog.showModal();
+        else dialog.setAttribute('open', 'open');
+        const qtyInput = document.getElementById('rfq-existing-item-qty-' + rfqId);
+        if (qtyInput) window.setTimeout(() => qtyInput.focus(), 0);
+        return false;
+      }
+    </script>
+  `, req.user));
+}));
+
+app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, currentJobId(req)])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const newItemRows = Array.from({ length: 8 }, (_, index) => `
+    <tr>
+      <td><input name="item_code_${index}" /></td>
+      <td><input name="description_${index}" /></td>
+      <td><input name="material_type_${index}" /></td>
+      <td><input name="uom_${index}" /></td>
+      <td><input name="spec_${index}" /></td>
+      <td><input name="commodity_code_${index}" /></td>
+      <td><input name="tag_number_${index}" /></td>
+      <td><input name="size_1_${index}" /></td>
+      <td><input name="size_2_${index}" /></td>
+      <td><input name="thk_1_${index}" /></td>
+      <td><input name="thk_2_${index}" /></td>
+      <td><input name="qty_${index}" /></td>
+      <td><input name="notes_${index}" /></td>
+    </tr>
+  `).join("");
+  res.send(layout(`Add New RFQ Items`, `
+    <h1>Add New RFQ Items</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
+    <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
+    <style>
+      #rfq-grid-form-${rfqId} table td { padding: 0; }
+      #rfq-grid-form-${rfqId} table td input {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        border: 0;
+        border-radius: 0;
+        padding: 10px 8px;
+        background: transparent;
+        box-shadow: none;
+      }
+      #rfq-grid-form-${rfqId} table td input:focus {
+        outline: 2px solid #6d8fb8;
+        outline-offset: -2px;
+        background: #f7fbff;
+      }
+    </style>
+    <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
+      <div class="scroll">
+        <table class="data-grid rfq-entry-grid">
+          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
+          <tbody>${newItemRows}</tbody>
+        </table>
+      </div>
+      <div class="actions"><button type="submit">Save Grid Rows</button><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
+    </form>
+  `, req.user));
+}));
+
+app.get("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, currentJobId(req)])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  res.send(layout(`Paste RFQ Values`, `
+    <h1>Paste RFQ Values</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      <p class="muted">Paste columns in this order: <strong>Ident Code</strong>, <strong>Description</strong>, <strong>Size_1</strong>, <strong>Size_2</strong>, <strong>Thk</strong>, <strong>Qty</strong>, <strong>Unit</strong>. Header row is optional. Tab-delimited spreadsheet paste works best. Shorter layouts like <strong>Ident Code</strong>, <strong>Description</strong>, <strong>Size_1</strong>, <strong>Qty</strong>, <strong>Unit</strong> also work. <strong>Size</strong> still works if you are using one combined size column, and thickness can be blank.</p>
+      <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
+        <div><label>Pasted Values</label><textarea name="paste_text" style="min-height:220px;" placeholder="IDENT CODE\tDESCRIPTION\tSIZE_1\tSIZE_2\tTHK\tQTY\tUNIT"></textarea></div>
+        <div class="actions">
+          <button type="submit" name="paste_action" value="preview">Preview Paste</button>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
+        </div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+
+  const pasteAction = String(req.body.paste_action || "preview").trim();
+  const allowMissingItemCodes = String(req.body.allow_missing_item_codes || "").trim() === "1";
+  let rows = [];
+  const payload = String(req.body.rows_payload || "").trim();
+  const pastedText = String(req.body.paste_text || "").trim();
+  if (payload) {
+    rows = JSON.parse(Buffer.from(payload, "base64").toString("utf8"));
+  } else {
+    rows = parseRfqPasteRows(pastedText);
+  }
+  if (!rows.length) throw new Error("Paste at least one RFQ value row first.");
+
+  const missingCodeRows = rows.filter((row) => !String(row.item_code || "").trim() && rfqRowHasAnyEnteredValues(row));
+  if (!payload && pasteAction === "preview" && missingCodeRows.length > 0 && !allowMissingItemCodes) {
+    const escapedPasteText = esc(pastedText);
+    res.send(layout(`Paste RFQ Values`, `
+      <h1>Paste RFQ Values</h1>
+      <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
+      <div class="card">
+        <p class="muted">${missingCodeRows.length} row(s) do not have an item code.</p>
+        <form id="rfq-missing-item-code-confirm-${rfqId}" method="post" action="/rfq/${rfqId}/items/paste" class="stack">
+          <input type="hidden" name="paste_action" value="preview" />
+          <input type="hidden" name="allow_missing_item_codes" value="1" />
+          <textarea name="paste_text" style="display:none;">${escapedPasteText}</textarea>
+          <noscript>
+            <div class="actions">
+              <button type="submit">Continue</button>
+              <a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Back</a>
+            </div>
+          </noscript>
+        </form>
+      </div>
+      <script>
+        (function () {
+          const proceed = window.confirm("No item codes, Do you want to continue?");
+          if (proceed) {
+            document.getElementById("rfq-missing-item-code-confirm-${rfqId}").submit();
+          } else {
+            if (window.history.length > 1) {
+              window.history.back();
+            } else {
+              window.location.href = "/rfq/${rfqId}/items/paste";
+            }
+          }
+        }());
+      </script>
+    `, req.user));
+    return;
+  }
+
+  if (missingCodeRows.length > 0 || rows.some((row) => row.generated_item_code)) {
+    const generated = await assignGeneratedRfqItemCodes({ query }, rows);
+    rows = generated.rows;
+  }
+
+  const normalizedCodes = Array.from(new Set(rows.map((row) => String(row.item_code || "").trim().toLowerCase()).filter(Boolean)));
+  const existingCodeSet = new Set((await query(
+    "select lower(item_code) as item_code from material_items where job_id = $1 and lower(item_code) = any($2::text[])",
+    [jobId, normalizedCodes]
+  )).rows.map((row) => String(row.item_code || "").trim().toLowerCase()));
+  const matchedRows = rows.filter((row) => existingCodeSet.has(String(row.item_code || "").trim().toLowerCase()));
+  const unmatchedRows = rows.filter((row) => !existingCodeSet.has(String(row.item_code || "").trim().toLowerCase()));
+  const previewMeta = rows.map((row) => {
+    const matched = existingCodeSet.has(String(row.item_code || "").trim().toLowerCase());
+    return { row, matched, issues: getRfqPasteRowIssues(row, { matched }) };
+  });
+  const invalidPreviewRows = previewMeta.filter((entry) => entry.issues.length > 0);
+  const validMatchedRows = previewMeta.filter((entry) => entry.matched && entry.issues.length === 0).map((entry) => entry.row);
+  const validAllRows = previewMeta.filter((entry) => entry.issues.length === 0).map((entry) => entry.row);
+  const generatedCodeCount = rows.filter((row) => row.generated_item_code).length;
+
+  if (pasteAction === "import_matched" || pasteAction === "import_all") {
+    const rowsToImport = pasteAction === "import_matched" ? validMatchedRows : validAllRows;
+    if (!rowsToImport.length) {
+      throw new Error(pasteAction === "import_matched" ? "No pasted idents matched the current item list." : "No rows were available to import.");
+    }
+    if ((pasteAction === "import_all" && invalidPreviewRows.length > 0)
+      || (pasteAction === "import_matched" && matchedRows.length !== validMatchedRows.length)) {
+      throw new Error("Fix the missing required paste values before importing.");
+    }
+    const batchId = await withTransaction(async (client) => {
+      const batchId = await createImportBatch(client, {
+        entityType: "rfq_items",
+        rfqId,
+        uploadedBy: req.user.id,
+        filename: pasteAction === "import_all" ? "pasted-values-add-missing" : "pasted-values-matched-only",
+        jobId
+      });
+      let insertedCount = 0;
+      let updatedCount = 0;
+      let skippedCount = 0;
+      for (let index = 0; index < rowsToImport.length; index += 1) {
+        const result = await upsertRfqItemRow(client, rfqId, rowsToImport[index], jobId);
+        if (result.status === "inserted") insertedCount += 1;
+        else if (result.status === "updated") updatedCount += 1;
+        else {
+          skippedCount += 1;
+          await addImportBatchError(client, batchId, index + 1, result.errorCode, result.message, rowsToImport[index]);
+        }
+      }
+      await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+      await auditLog(client, req.user.id, pasteAction === "import_all" ? "paste_add_missing" : "paste_match_only", "rfq_items", rfqId, `rows=${rowsToImport.length};batch=${batchId}`);
+      return batchId;
+    });
+    res.redirect(`/imports/${batchId}`);
+    return;
+  }
+
+  const rowsPayload = Buffer.from(JSON.stringify(rows), "utf8").toString("base64");
+  const previewRows = previewMeta.map(({ row, matched, issues }) => {
+    const thk = [row.thk_1, row.thk_2].filter(Boolean).join(" x ");
+    const statusLabel = matched ? "Match" : "New Item";
+    const statusChip = matched
+      ? `<span class="chip">Match</span>`
+      : `<span class="chip" style="background:#fff3cd;border-color:#f4d58d;color:#7a5a00;">New Item</span>`;
+    return `<tr>
+      <td>${esc(row.item_code || "")}</td>
+      <td>${esc(row.description || "")}</td>
+      <td>${esc(row.size_1 || "")}</td>
+      <td>${esc(row.size_2 || "")}</td>
+      <td>${esc(thk)}</td>
+      <td>${esc(formatQtyDisplay(row.qty))}</td>
+      <td>${esc(row.uom || "")}</td>
+      <td>${statusChip}${issues.length ? `<div class="muted" style="margin-top:4px;color:#b42318;">${esc(issues.join("; "))}</div>` : `<div class="muted" style="margin-top:4px;">${statusLabel}</div>`}</td>
+    </tr>`;
+  }).join("");
+
+  res.send(layout(`Paste RFQ Values`, `
+    <h1>Paste RFQ Values</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      <div class="stats" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+        <div class="stat"><div>Pasted Rows</div><strong>${rows.length}</strong></div>
+        <div class="stat"><div>Matched Idents</div><strong>${matchedRows.length}</strong></div>
+        <div class="stat"><div>Missing Idents</div><strong>${unmatchedRows.length}</strong></div>
+      </div>
+      ${generatedCodeCount > 0 ? `<p class="muted" style="margin-top:10px;">${generatedCodeCount} row(s) were assigned generated 5-digit item codes.</p>` : ""}
+      ${unmatchedRows.length > 0 ? `<p class="muted" style="margin-top:10px;">${unmatchedRows.length} ident(s) are not on the current item list yet. Do you want to add them with the pasted description, size, thickness, and quantity values?</p>` : `<p class="muted" style="margin-top:10px;">All pasted idents already exist on the current item list.</p>`}
+      ${invalidPreviewRows.length > 0 ? `<p class="muted" style="margin-top:10px;color:#b42318;">${invalidPreviewRows.length} row(s) are missing required values. Fix them and paste again before importing.</p>` : ""}
+    </div>
+    <div class="card scroll">
+      <table>
+        <thead><tr><th>Ident</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk</th><th>Qty</th><th>UOM</th><th>Status</th></tr></thead>
+        <tbody>${previewRows}</tbody>
+      </table>
+    </div>
+    <div class="card">
+      <form method="post" action="/rfq/${rfqId}/items/paste" class="stack">
+        <input type="hidden" name="rows_payload" value="${esc(rowsPayload)}" />
+        <div class="actions">
+          ${validMatchedRows.length > 0 ? `<button type="submit" name="paste_action" value="import_matched">Import Matched Only</button>` : ""}
+          ${invalidPreviewRows.length === 0 ? `<button type="submit" name="paste_action" value="import_all">${unmatchedRows.length > 0 ? "Yes, Add Missing Items Too" : "Import Rows"}</button>` : ""}
+          <a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Again</a>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
+        </div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.get("/rfq/:id/quotes/import-page", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await backfillRfqVendors(pool, rfqId);
+  const selectedVendorId = String(req.query.vendor_tab_id || "").trim();
+  const [rfqRes, selectedVendorsRes] = await Promise.all([
+    query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
+    query(`
+      select rv.vendor_id, v.name
+      from rfq_vendors rv
+      join vendors v on v.id = rv.vendor_id
+      where rv.rfq_id = $1 and rv.job_id = $2
+      order by v.name
+    `, [rfqId, jobId])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const selectedVendors = selectedVendorsRes.rows;
+  const selectedVendorIds = selectedVendors.map((vendor) => Number(vendor.vendor_id));
+  const activeQuoteVendorId = selectedVendorIds.includes(Number(selectedVendorId))
+    ? String(selectedVendorId)
+    : String(selectedVendors[0]?.vendor_id || "");
+  const activeVendor = selectedVendors.find((vendor) => String(vendor.vendor_id) === activeQuoteVendorId) || null;
+  const vendorTabs = selectedVendors.length > 0
+    ? selectedVendors.map((vendor) => `<a class="tab-link ${String(vendor.vendor_id) === activeQuoteVendorId ? "active" : ""}" href="/rfq/${rfqId}/quotes/import-page?vendor_tab_id=${vendor.vendor_id}">${esc(vendor.name)}</a>`).join("")
+    : "";
+  res.send(layout(`Import RFQ Quotes`, `
+    <h1>Import Quotes</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted">Save at least one selected vendor first.</div>`}
+      <p class="muted">CSV/XLSX columns: item_code, unit_price, lead_days. If you include vendor_name, it must match one of the selected RFQ vendors.</p>
+      <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/quotes/import" class="stack">
+        <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
+        <div><label>Active Quote Vendor</label><input value="${esc(activeVendor?.name || "Select a participating vendor")}" readonly /></div>
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>Or Paste Quote CSV</label><textarea name="csv_text"></textarea></div>
+        <div class="actions"><button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Import Quotes</button><a class="btn btn-secondary" href="/rfq/${rfqId}${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Back To RFQ</a></div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
   const rfqId = Number(req.params.id);
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (rows.length === 0) throw new Error("No rows found.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "rfq_items",
+      rfqId,
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || "",
+      jobId: currentJobId(req)
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 2;
+      const result = await upsertRfqItemRow(client, rfqId, row, currentJobId(req));
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, result.errorCode, result.message, row);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "rfq_items", rfqId, `rows=${rows.length};batch=${batchId}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const qtyText = String(req.body.qty || "").trim();
+  const uom = String(req.body.uom || "").trim();
+  if (!qtyText) throw new Error("Qty is required.");
+  if (!uom) throw new Error("UOM is required.");
   await withTransaction(async (client) => {
-    for (const row of rows) {
-      const vendorName = String(row.vendor_name || "").trim();
+    const result = await upsertRfqItemRow(client, rfqId, req.body, currentJobId(req));
+    if (result.status === "skipped") throw new Error(result.message);
+    await auditLog(client, req.user.id, "upsert", "rfq_item", rfqId, `item=${req.body.item_code || ""}`);
+  });
+  res.redirect(`/rfq/${rfqId}`);
+});
+
+app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const allowMissingItemCodes = String(req.body.allow_missing_item_codes || "").trim() === "1";
+  const rows = Array.from({ length: 8 }, (_, index) => ({
+    item_code: req.body[`item_code_${index}`],
+    description: req.body[`description_${index}`],
+    material_type: req.body[`material_type_${index}`],
+    uom: req.body[`uom_${index}`],
+    spec: req.body[`spec_${index}`],
+    commodity_code: req.body[`commodity_code_${index}`],
+    tag_number: req.body[`tag_number_${index}`],
+    size_1: req.body[`size_1_${index}`],
+    size_2: req.body[`size_2_${index}`],
+    thk_1: req.body[`thk_1_${index}`],
+    thk_2: req.body[`thk_2_${index}`],
+    qty: req.body[`qty_${index}`],
+    notes: req.body[`notes_${index}`]
+  })).filter((row) => String(row.item_code || "").trim() || rfqRowHasAnyEnteredValues(row));
+  if (rows.some((row) => !String(row.item_code || "").trim() && rfqRowHasAnyEnteredValues(row)) && !allowMissingItemCodes) {
+    throw new Error("Missing item codes require confirmation.");
+  }
+  if (rows.length === 0) throw new Error("No grid rows were entered.");
+  const batchId = await withTransaction(async (client) => {
+    const preparedRows = rows.some((row) => !String(row.item_code || "").trim() && rfqRowHasAnyEnteredValues(row))
+      ? (await assignGeneratedRfqItemCodes(client, rows)).rows
+      : rows;
+    const batchId = await createImportBatch(client, {
+      entityType: "rfq_items",
+      rfqId,
+      uploadedBy: req.user.id,
+      filename: "manual-grid",
+      jobId: currentJobId(req)
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < preparedRows.length; index += 1) {
+      const result = await upsertRfqItemRow(client, rfqId, preparedRows[index], currentJobId(req));
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 1, result.errorCode, result.message, preparedRows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "grid_add", "rfq_items", rfqId, `rows=${preparedRows.length};batch=${batchId}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.post("/rfq/:id/quotes/import", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const rows = parseUploadedRows(req.file, req.body.csv_text);
+  if (rows.length === 0) throw new Error("No rows found.");
+  const scopedVendorId = Number(req.body.vendor_id || 0);
+  const batchId = await withTransaction(async (client) => {
+    await backfillRfqVendors(client, rfqId);
+    const batchId = await createImportBatch(client, {
+      entityType: "quotes",
+      rfqId,
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || "",
+      jobId: currentJobId(req)
+    });
+    const selectedVendorIds = new Set((await client.query("select vendor_id from rfq_vendors where rfq_id = $1 and job_id = $2", [rfqId, currentJobId(req)])).rows.map((row) => Number(row.vendor_id)));
+    if (scopedVendorId && !selectedVendorIds.has(scopedVendorId)) {
+      throw new Error("Choose a vendor from the RFQ vendor tabs before importing.");
+    }
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 2;
+      const vendorName = scopedVendorId ? "" : String(row.vendor_name || "").trim();
       const itemCode = String(row.item_code || "").trim();
-      if (!vendorName || !itemCode || !row.unit_price) continue;
-      let vendorId;
-      const vendorRes = await client.query("select id from vendors where name = $1", [vendorName]);
-      if (vendorRes.rows[0]) {
-        vendorId = vendorRes.rows[0].id;
-      } else {
-        const insertVendor = await client.query("insert into vendors (name, email, phone, categories) values ($1, '', '', '') returning id", [vendorName]);
-        vendorId = insertVendor.rows[0].id;
+      const unitPrice = num(row.unit_price, NaN);
+      const leadDays = num(row.lead_days);
+      if ((!scopedVendorId && !vendorName) || !itemCode || !Number.isFinite(unitPrice) || unitPrice <= 0) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "invalid_quote", "Vendor, item code, and unit price are required.", row);
+        continue;
+      }
+      let vendorId = scopedVendorId;
+      if (!vendorId) {
+        const vendorRes = await client.query("select id from vendors where lower(name) = lower($1)", [vendorName]);
+        if (vendorRes.rows[0]) {
+          vendorId = vendorRes.rows[0].id;
+        } else {
+          skippedCount += 1;
+          await addImportBatchError(client, batchId, rowNumber, "vendor_not_selected", "Vendor is not available on this RFQ.", row);
+          continue;
+        }
+      }
+      if (!selectedVendorIds.has(Number(vendorId))) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "vendor_not_selected", "Vendor is not selected on this RFQ.", row);
+        continue;
       }
       const rfqItemRes = await client.query(`
         select ri.id
         from rfq_items ri
         join material_items mi on mi.id = ri.material_item_id
-        where ri.rfq_id = $1 and mi.item_code = $2
-      `, [rfqId, itemCode]);
-      if (!rfqItemRes.rows[0]) continue;
+        where ri.rfq_id = $1 and ri.job_id = $3 and mi.job_id = $3 and mi.item_code = $2
+      `, [rfqId, itemCode, currentJobId(req)]);
+      if (!rfqItemRes.rows[0]) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "rfq_item_not_found", "Item code does not exist on this RFQ.", row);
+        continue;
+      }
+      const rfqItemId = rfqItemRes.rows[0].id;
+      const existingQuote = await client.query(
+        "select id from quotes where rfq_item_id = $1 and vendor_id = $2 and job_id = $3",
+        [rfqItemId, vendorId, currentJobId(req)]
+      );
       await client.query(`
-        insert into quotes (rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
-        values ($1, $2, $3, $4, now())
+        insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+        values ($1, $2, $3, $4, $5, now())
         on conflict (rfq_item_id, vendor_id)
         do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-      `, [rfqItemRes.rows[0].id, vendorId, Number(row.unit_price), Number(row.lead_days || 0)]);
+      `, [currentJobId(req), rfqItemId, vendorId, unitPrice, leadDays]);
+      await client.query(`
+        update rfq_items
+        set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
+        where id = $1 and job_id = $5 and award_status = 'AWARDED' and awarded_vendor_id = $2
+      `, [rfqItemId, vendorId, unitPrice, leadDays, currentJobId(req)]);
+      await writeQuoteRevision(client, {
+        rfqItemId,
+        vendorId,
+        unitPrice,
+        leadDays,
+        sourceType: "import",
+        sourceBatchId: batchId,
+        createdBy: req.user.id,
+        jobId: currentJobId(req)
+      });
+      if (existingQuote.rows[0]) updatedCount += 1;
+      else insertedCount += 1;
     }
-    await auditLog(client, req.user.id, "import", "quotes", rfqId, `rows=${rows.length}`);
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await recalcRfqStatus(client, rfqId);
+    await auditLog(client, req.user.id, "import", "quotes", rfqId, `rows=${rows.length};batch=${batchId}`);
+    return batchId;
   });
-  res.redirect(`/rfq/${rfqId}`);
+  res.redirect(`/imports/${batchId}`);
 });
 
-app.post("/po/create", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.get("/imports/:id", requireAuth, requireJobContext, async (req, res) => {
+  const jobId = currentJobId(req);
+  const batch = (await query(`
+    select ib.*, r.rfq_no
+    from import_batches ib
+    left join rfqs r on r.id = ib.rfq_id
+    where ib.id = $1 and ib.job_id = $2 and (r.id is null or r.job_id = $2)
+  `, [req.params.id, jobId])).rows[0];
+  if (!batch) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Import batch not found.</h3></div>`, req.user));
+    return;
+  }
+  const errors = (await query(`
+    select row_number, error_code, message, raw_payload
+    from import_batch_errors
+    where batch_id = $1
+    order by row_number, id
+  `, [req.params.id])).rows;
+  const errorRows = errors.length > 0
+    ? errors.map((error) => `<tr><td>${error.row_number}</td><td>${esc(error.error_code)}</td><td>${esc(error.message)}</td><td><code>${esc(JSON.stringify(error.raw_payload))}</code></td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">No row-level errors.</td></tr>`;
+  const importBackHref = batch.rfq_id ? `/rfq/${batch.rfq_id}` : "/po";
+  const importBackLabel = batch.rfq_id ? "Back To RFQ" : "Back To POs";
+  res.send(layout("Import Results", `
+    <h1>Import Results</h1>
+    <div class="card">
+      <div class="grid">
+        <div><label>RFQ</label><div>${esc(batch.rfq_no || "N/A")}</div></div>
+        <div><label>Import Type</label><div>${esc(batch.entity_type)}</div></div>
+        <div><label>File</label><div>${esc(batch.filename || "Pasted data")}</div></div>
+        <div><label>Status</label><div>${esc(batch.status)}</div></div>
+      </div>
+      <div class="stats" style="margin-top:18px;">
+        <div class="stat"><div>Inserted</div><strong>${batch.inserted_count}</strong></div>
+        <div class="stat"><div>Updated</div><strong>${batch.updated_count}</strong></div>
+        <div class="stat"><div>Skipped</div><strong>${batch.skipped_count}</strong></div>
+        <div class="stat"><div>Errors</div><strong>${errors.length}</strong></div>
+      </div>
+      <div class="actions" style="margin-top:18px;"><a class="btn btn-secondary" href="${importBackHref}">${importBackLabel}</a></div>
+    </div>
+    <div class="card scroll">
+      <h3>Row Results</h3>
+      <table><tr><th>Row</th><th>Code</th><th>Message</th><th>Payload</th></tr>${errorRows}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/rfq/:id/award", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  let awardedVendorId = 0;
+  await withTransaction(async (client) => {
+    const selectedVendorRows = (await client.query(`
+      select rv.vendor_id, v.name
+      from rfq_vendors rv
+      join vendors v on v.id = rv.vendor_id
+      where rv.rfq_id = $1 and rv.job_id = $2
+      order by v.name
+    `, [rfqId, jobId])).rows;
+    const vendorId = Number(req.body.vendor_id) || (selectedVendorRows.length === 1 ? Number(selectedVendorRows[0].vendor_id) : 0);
+    if (!vendorId) throw new Error("Select a participating vendor to award this RFQ.");
+    awardedVendorId = vendorId;
+    const isSelectedVendor = selectedVendorRows.find((vendor) => Number(vendor.vendor_id) === vendorId);
+    if (!isSelectedVendor) throw new Error("Choose a vendor from the RFQ vendor list.");
+    const items = (await client.query(`
+      select ri.id, mi.item_code, mi.description, q.unit_price, q.lead_days
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      left join quotes q on q.rfq_item_id = ri.id and q.vendor_id = $2
+      where ri.rfq_id = $1 and ri.job_id = $3 and mi.job_id = $3
+      order by ri.id
+    `, [rfqId, vendorId, jobId])).rows;
+    if (items.length === 0) throw new Error("Add RFQ items before awarding.");
+    const missingItems = items.filter((item) => !Number.isFinite(Number(item.unit_price)) || Number(item.unit_price) <= 0);
+    if (missingItems.length > 0) {
+      const missingList = missingItems.slice(0, 8).map((item) => item.item_code || `Line ${item.id}`).join(", ");
+      throw new Error(`Cannot award this RFQ yet. The selected vendor is missing quotes for: ${missingList}${missingItems.length > 8 ? ", ..." : ""}`);
+    }
+    await client.query(`
+      update rfq_items
+      set award_status = 'OPEN',
+          awarded_vendor_id = null,
+          awarded_unit_price = null,
+          awarded_lead_days = null,
+          awarded_at = null,
+          awarded_by = null,
+          award_notes = null,
+          updated_at = now()
+      where rfq_id = $1 and job_id = $2
+    `, [rfqId, jobId]);
+    for (const item of items) {
+      await client.query(`
+        update rfq_items
+        set award_status = 'AWARDED',
+            awarded_vendor_id = $2,
+            awarded_unit_price = $3,
+            awarded_lead_days = $4,
+            awarded_at = now(),
+            awarded_by = $5,
+            award_notes = $6,
+            updated_at = now()
+        where id = $1 and job_id = $7
+      `, [item.id, vendorId, item.unit_price, item.lead_days, req.user.id, String(req.body.award_notes || "").trim(), jobId]);
+      await auditLog(client, req.user.id, "award", "rfq_item", item.id, `vendor=${vendorId};rfq=${rfqId}`);
+    }
+    await client.query("update rfqs set status = 'AWARDED' where id = $1 and job_id = $2", [rfqId, jobId]);
+    await auditLog(client, req.user.id, "award", "rfq", rfqId, `vendor=${vendorId}`);
+  });
+  res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(awardedVendorId || ""))}`);
+}));
+
+app.post("/rfq/:id/award/clear", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const issued = await client.query(`
+      select 1
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id
+      where po.rfq_id = $1 and po.job_id = $2 and pl.job_id = $2
+      limit 1
+    `, [rfqId, jobId]);
+    if (issued.rows[0]) throw new Error("Cannot clear the RFQ award after a PO has been created.");
+    await client.query(`
+      update rfq_items
+      set award_status = 'OPEN',
+          awarded_vendor_id = null,
+          awarded_unit_price = null,
+          awarded_lead_days = null,
+          awarded_at = null,
+          awarded_by = null,
+          award_notes = null,
+          updated_at = now()
+      where rfq_id = $1 and job_id = $2
+    `, [rfqId, jobId]);
+    await recalcRfqStatus(client, rfqId);
+    await auditLog(client, req.user.id, "clear_award", "rfq", rfqId, "");
+  });
+  res.redirect(`/rfq/${rfqId}`);
+}));
+
+app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   const rfqId = Number(req.body.rfq_id);
   const vendorId = Number(req.body.vendor_id);
   const poNo = String(req.body.po_no || "").trim();
+  const jobId = currentJobId(req);
+  if (!vendorId) throw new Error("Select a vendor with awarded RFQ lines.");
   await withTransaction(async (client) => {
+    const rfq = (await client.query("select project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    const awardTotals = (await client.query(`
+      select
+        count(*) as total_count,
+        count(*) filter (where award_status = 'AWARDED' and awarded_vendor_id = $2) as vendor_awarded_count
+      from rfq_items
+      where rfq_id = $1 and job_id = $3
+    `, [rfqId, vendorId, jobId])).rows[0];
+    const totalCount = Number(awardTotals?.total_count || 0);
+    const vendorAwardedCount = Number(awardTotals?.vendor_awarded_count || 0);
+    if (totalCount === 0) throw new Error("Add RFQ items before creating a PO.");
+    if (vendorAwardedCount !== totalCount) throw new Error("Award the whole RFQ to one vendor before creating the draft PO.");
     const poInsert = await client.query(
-      "insert into purchase_orders (po_no, vendor_id, rfq_id, status, updated_at) values ($1, $2, $3, 'OPEN', now()) returning id",
-      [poNo, vendorId, rfqId]
+      "insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, description, status, updated_at) values ($1, $2, $3, $4, $5, 'OPEN', now()) returning id",
+      [jobId, poNo, vendorId, rfqId, rfq?.project_name || ""]
     );
     const poId = poInsert.rows[0].id;
     const lines = await client.query(`
-      select ri.material_item_id, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.qty, q.unit_price
+      select ri.id as rfq_item_id, ri.material_item_id, ri.po_line, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.qty,
+             ri.awarded_unit_price as unit_price, ri.awarded_lead_days as lead_days
       from rfq_items ri
-      join quotes q on q.rfq_item_id = ri.id
-      where ri.rfq_id = $1 and q.vendor_id = $2
-    `, [rfqId, vendorId]);
-    if (lines.rows.length === 0) throw new Error("Selected vendor has no quoted lines on this RFQ.");
+      where ri.rfq_id = $1 and ri.job_id = $3 and ri.award_status = 'AWARDED' and ri.awarded_vendor_id = $2
+        and not exists (
+          select 1
+          from po_lines pl
+          join purchase_orders po on po.id = pl.po_id
+          where po.rfq_id = ri.rfq_id and po.job_id = $3 and pl.job_id = $3 and pl.rfq_item_id = ri.id
+        )
+    `, [rfqId, vendorId, jobId]);
+    if (lines.rows.length === 0) throw new Error("Selected vendor has no unissued awarded lines on this RFQ.");
     for (const line of lines.rows) {
       await client.query(`
-        insert into po_lines (po_id, material_item_id, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, now())
-      `, [poId, line.material_item_id, line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price]);
+        insert into po_lines (job_id, po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, lead_days, updated_at)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+      `, [jobId, poId, line.rfq_item_id, line.material_item_id, line.po_line || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price, num(line.lead_days)]);
     }
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
@@ -615,14 +10761,118 @@ app.post("/po/create", requireAuth, requireRole(["admin", "buyer"]), async (req,
   res.redirect("/po");
 });
 
-app.get("/rfq-item/:id/edit", requireAuth, async (req, res) => {
+app.get("/rfq-item/:id/award", requireAuth, requireJobContext, async (req, res) => {
+  const jobId = currentJobId(req);
+  const [itemRes, quotesRes] = await Promise.all([
+    query(`
+      select ri.id, ri.rfq_id, ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
+             mi.item_code, mi.description
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
+    `, [req.params.id, jobId]),
+    query(`
+      select v.id as vendor_id, v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
+      from quotes q
+      join vendors v on v.id = q.vendor_id
+      where q.rfq_item_id = $1 and q.job_id = $2
+      order by q.unit_price, q.lead_days, v.name
+    `, [req.params.id, jobId])
+  ]);
+  const item = itemRes.rows[0];
+  if (!item) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ item not found.</h3></div>`, req.user));
+    return;
+  }
+  const quoteOptions = quotesRes.rows.map((quote) => `<option value="${quote.vendor_id}" ${quote.vendor_id === item.awarded_vendor_id ? "selected" : ""}>${esc(quote.vendor_name)} | ${quoteCell(quote.unit_price, quote.lead_days)}</option>`).join("");
+  const quoteRows = quotesRes.rows.length > 0
+    ? quotesRes.rows.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(formatShortDateTime(quote.quoted_at))}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">Add quotes before awarding this line.</td></tr>`;
+  res.send(layout("Award RFQ Item", `
+    <h1>Award RFQ Item</h1>
+    <div class="card"><strong>${esc(item.item_code)}</strong> | ${esc(item.description)}</div>
+    <div class="card">
+      <form method="post" action="/rfq-item/${item.id}/award" class="stack">
+        <div class="grid">
+          <div><label>Quoted Vendor</label><select name="vendor_id" ${quotesRes.rows.length === 0 ? "disabled" : ""}>${quoteOptions}</select></div>
+          <div><label>Award Notes</label><input name="award_notes" value="${esc(item.award_notes || "")}" /></div>
+        </div>
+        <div class="actions"><button type="submit" ${quotesRes.rows.length === 0 ? "disabled" : ""}>Save Award</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
+      </form>
+    </div>
+    <div class="card scroll"><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Updated</th></tr>${quoteRows}</table></div>
+  `, req.user));
+});
+
+app.post("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const rfqId = await withTransaction(async (client) => {
+    const quote = (await client.query(`
+      select ri.rfq_id, q.vendor_id, q.unit_price, q.lead_days
+      from rfq_items ri
+      join quotes q on q.rfq_item_id = ri.id
+      where ri.id = $1 and q.vendor_id = $2 and ri.job_id = $3 and q.job_id = $3
+    `, [itemId, Number(req.body.vendor_id), jobId])).rows[0];
+    if (!quote) throw new Error("Select a quoted vendor before awarding.");
+    await client.query(`
+      update rfq_items
+      set award_status = 'AWARDED',
+          awarded_vendor_id = $2,
+          awarded_unit_price = $3,
+          awarded_lead_days = $4,
+          awarded_at = now(),
+          awarded_by = $5,
+          award_notes = $6,
+          updated_at = now()
+      where id = $1 and job_id = $7
+    `, [itemId, quote.vendor_id, quote.unit_price, quote.lead_days, req.user.id, req.body.award_notes || "", jobId]);
+    await auditLog(client, req.user.id, "award", "rfq_item", itemId, `vendor=${quote.vendor_id}`);
+    return quote.rfq_id;
+  });
+  res.redirect(`/rfq/${rfqId}`);
+});
+
+app.post("/rfq-item/:id/award/clear", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const rfqId = await withTransaction(async (client) => {
+    const current = (await client.query("select rfq_id from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
+    if (!current) throw new Error("RFQ item not found.");
+    const issued = await client.query(`
+      select 1
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id
+      where pl.rfq_item_id = $1 and pl.job_id = $2 and po.job_id = $2
+      limit 1
+    `, [itemId, jobId]);
+    if (issued.rows[0]) throw new Error("Cannot clear an award after a PO line has been issued.");
+    await client.query(`
+      update rfq_items
+      set award_status = 'OPEN',
+          awarded_vendor_id = null,
+          awarded_unit_price = null,
+          awarded_lead_days = null,
+          awarded_at = null,
+          awarded_by = null,
+          award_notes = null,
+          updated_at = now()
+      where id = $1 and job_id = $2
+    `, [itemId, jobId]);
+    await auditLog(client, req.user.id, "clear_award", "rfq_item", itemId, "");
+    return current.rfq_id;
+  });
+  res.redirect(`/rfq/${rfqId}`);
+});
+
+app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const item = (await query(`
-    select ri.id, ri.rfq_id, ri.qty, ri.notes, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
+    select ri.id, ri.rfq_id, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
            mi.item_code, mi.description, mi.material_type, mi.uom
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
-    where ri.id = $1
-  `, [req.params.id])).rows[0];
+    where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
+  `, [req.params.id, currentJobId(req)])).rows[0];
   if (!item) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ item not found.</h3></div>`, req.user));
     return;
@@ -632,17 +10882,18 @@ app.get("/rfq-item/:id/edit", requireAuth, async (req, res) => {
     <div class="card">
       <form method="post" action="/rfq-item/${item.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(item.updated_token)}" />
-        <div class="grid">
-          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" required /></div>
-          <div><label>Description</label><input name="description" value="${esc(item.description)}" /></div>
-          <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
-          <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
-          <div><label>Qty</label><input name="qty" value="${esc(item.qty)}" required /></div>
-          <div><label>Size 1</label><input name="size_1" value="${esc(item.size_1 || "")}" /></div>
-          <div><label>Size 2</label><input name="size_2" value="${esc(item.size_2 || "")}" /></div>
-          <div><label>Thk 1</label><input name="thk_1" value="${esc(item.thk_1 || "")}" /></div>
-          <div><label>Thk 2</label><input name="thk_2" value="${esc(item.thk_2 || "")}" /></div>
-        </div>
+        <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" required /></div>
+        <div><label>Description</label><input name="description" value="${esc(item.description)}" /></div>
+        <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
+        <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
+        <div><label>Qty</label><input name="qty" value="${esc(item.qty)}" required /></div>
+        <div><label>Spec</label><input name="spec" value="${esc(item.spec || "")}" /></div>
+        <div><label>Commodity Code</label><input name="commodity_code" value="${esc(item.commodity_code || "")}" /></div>
+        <div><label>Tag Number</label><input name="tag_number" value="${esc(item.tag_number || "")}" /></div>
+        <div><label>Size 1</label><input name="size_1" value="${esc(item.size_1 || "")}" /></div>
+        <div><label>Size 2</label><input name="size_2" value="${esc(item.size_2 || "")}" /></div>
+        <div><label>Thk 1</label><input name="thk_1" value="${esc(item.thk_1 || "")}" /></div>
+        <div><label>Thk 2</label><input name="thk_2" value="${esc(item.thk_2 || "")}" /></div>
         <div><label>Notes</label><textarea name="notes">${esc(item.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save Item</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
       </form>
@@ -650,20 +10901,21 @@ app.get("/rfq-item/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/rfq-item/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
-    const current = (await client.query("select rfq_id, material_item_id from rfq_items where id = $1", [itemId])).rows[0];
+    const current = (await client.query("select rfq_id, material_item_id from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
     if (!current) throw new Error("RFQ item not found.");
     await client.query(
-      "update material_items set item_code = $2, description = $3, material_type = $4, uom = $5 where id = $1",
-      [current.material_item_id, req.body.item_code?.trim(), req.body.description?.trim() || req.body.item_code?.trim(), req.body.material_type?.trim() || "misc", req.body.uom?.trim() || "EA"]
+      "update material_items set item_code = $2, description = $3, material_type = $4, uom = $5 where id = $1 and job_id = $6",
+      [current.material_item_id, req.body.item_code?.trim(), req.body.description?.trim() || req.body.item_code?.trim(), req.body.material_type?.trim() || "misc", req.body.uom?.trim() || "EA", jobId]
     );
     const update = await client.query(`
       update rfq_items
-      set size_1 = $2, size_2 = $3, thk_1 = $4, thk_2 = $5, qty = $6, notes = $7, updated_at = now()
-      where id = $1 and extract(epoch from updated_at)::text = $8
-    `, [itemId, req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", Number(req.body.qty || 0), req.body.notes || "", req.body.updated_token || ""]);
+      set spec = $2, commodity_code = $3, tag_number = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, qty = $9, notes = $10, updated_at = now()
+      where id = $1 and job_id = $11 and extract(epoch from updated_at)::text = $12
+    `, [itemId, req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", parseQtyValue(req.body.qty || 0), req.body.notes || "", jobId, req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This RFQ item was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "rfq_item", itemId, req.body.item_code?.trim() || "");
     return current.rfq_id;
@@ -671,40 +10923,65 @@ app.post("/rfq-item/:id/edit", requireAuth, requireRole(["admin", "buyer"]), asy
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.post("/rfq-item/:id/delete", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/rfq-item/:id/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
-    const current = (await client.query("select rfq_id from rfq_items where id = $1", [itemId])).rows[0];
+    const current = (await client.query("select rfq_id from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
     if (!current) throw new Error("RFQ item not found.");
-    await client.query("delete from rfq_items where id = $1", [itemId]);
+    await client.query("delete from rfq_items where id = $1 and job_id = $2", [itemId, jobId]);
     await auditLog(client, req.user.id, "delete", "rfq_item", itemId, "");
     return current.rfq_id;
   });
   res.redirect(`/rfq/${rfqId}`);
 });
 
-app.get("/rfq-item/:id/quotes", requireAuth, async (req, res) => {
+app.get("/rfq-item/:id/quotes", requireAuth, requireJobContext, async (req, res) => {
+  const jobId = currentJobId(req);
   const item = (await query(`
-    select ri.id, ri.rfq_id, mi.item_code, mi.description
+    select ri.id, ri.rfq_id, ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days,
+           mi.item_code, mi.description
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
-    where ri.id = $1
-  `, [req.params.id])).rows[0];
-  const vendors = (await query("select id, name from vendors order by name")).rows;
+    where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
+  if (!item) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ item not found.</h3></div>`, req.user));
+    return;
+  }
+  await backfillRfqVendors(pool, item.rfq_id);
+  const vendors = (await query(`
+    select rv.vendor_id as id, v.name
+    from rfq_vendors rv
+    join vendors v on v.id = rv.vendor_id
+    where rv.rfq_id = $1 and rv.job_id = $2
+    order by v.name
+  `, [item.rfq_id, jobId])).rows;
   const quotes = (await query(`
-    select v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
+    select v.id as vendor_id, v.name as vendor_name, q.unit_price, q.lead_days, q.quoted_at
     from quotes q
     join vendors v on v.id = q.vendor_id
-    where q.rfq_item_id = $1
+    where q.rfq_item_id = $1 and q.job_id = $2
     order by q.unit_price, q.lead_days
-  `, [req.params.id])).rows;
+  `, [req.params.id, jobId])).rows;
+  const revisions = (await query(`
+    select v.name as vendor_name, qr.unit_price, qr.lead_days, qr.source_type, qr.created_at
+    from quote_revisions qr
+    join vendors v on v.id = qr.vendor_id
+    where qr.rfq_item_id = $1 and qr.job_id = $2
+    order by qr.id desc
+    limit 20
+  `, [req.params.id, jobId])).rows;
   const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
   const quoteRows = quotes.length > 0
-    ? quotes.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(quote.quoted_at)}</td></tr>`).join("")
-    : `<tr><td colspan="4" class="muted">No quotes yet</td></tr>`;
+    ? quotes.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(formatShortDateTime(quote.quoted_at))}</td>${item.awarded_vendor_id === quote.vendor_id ? `<td><span class="chip">Awarded</span></td>` : `<td></td>`}</tr>`).join("")
+    : `<tr><td colspan="5" class="muted">No quotes yet</td></tr>`;
+  const revisionRows = revisions.length > 0
+    ? revisions.map((revision) => `<tr><td>${esc(revision.vendor_name)}</td><td>$${Number(revision.unit_price).toFixed(2)}</td><td>${revision.lead_days} days</td><td>${esc(revision.source_type)}</td><td>${esc(formatShortDateTime(revision.created_at))}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="muted">No quote revisions yet</td></tr>`;
   res.send(layout("Manage Quotes", `
     <h1>Manage Quotes</h1>
-    <div class="card"><strong>${esc(item.item_code)}</strong> | ${esc(item.description)}</div>
+    <div class="card"><strong>${esc(item.item_code)}</strong> | ${esc(item.description)} | <strong>Award:</strong> ${item.award_status === "AWARDED" ? `${esc(quotes.find((quote) => quote.vendor_id === item.awarded_vendor_id)?.vendor_name || "Awarded")} @ $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d` : "Open"}</div>
     <div class="card">
       <form method="post" action="/quotes" class="stack">
         <input type="hidden" name="rfq_item_id" value="${item.id}" />
@@ -717,73 +10994,189 @@ app.get("/rfq-item/:id/quotes", requireAuth, async (req, res) => {
         <div class="actions"><button type="submit">Save Quote</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Updated</th></tr>${quoteRows}</table></div>
+    <div class="card scroll"><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Updated</th><th>Award</th></tr>${quoteRows}</table></div>
+    <div class="card scroll"><h3>Quote Revision History</h3><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Source</th><th>Logged</th></tr>${revisionRows}</table></div>
   `, req.user));
 });
 
-app.post("/quotes", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/quotes", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    const rfqItemId = Number(req.body.rfq_item_id);
+    const vendorId = Number(req.body.vendor_id);
+    const unitPrice = num(req.body.unit_price, NaN);
+    const leadDays = num(req.body.lead_days);
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0) throw new Error("Unit price must be greater than zero.");
+    const item = (await client.query("select rfq_id from rfq_items where id = $1 and job_id = $2", [rfqItemId, jobId])).rows[0];
+    if (!item) throw new Error("RFQ item not found.");
+    const vendorRow = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2 and job_id = $3", [item.rfq_id, vendorId, jobId])).rows[0];
+    if (!vendorRow) throw new Error("Select a vendor from the RFQ vendor list.");
     await client.query(`
-      insert into quotes (rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
-      values ($1, $2, $3, $4, now())
+      insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+      values ($1, $2, $3, $4, $5, now())
       on conflict (rfq_item_id, vendor_id)
       do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-    `, [Number(req.body.rfq_item_id), Number(req.body.vendor_id), Number(req.body.unit_price), Number(req.body.lead_days || 0)]);
+    `, [jobId, rfqItemId, vendorId, unitPrice, leadDays]);
+    await client.query(`
+      update rfq_items
+      set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
+      where id = $1 and job_id = $5 and award_status = 'AWARDED' and awarded_vendor_id = $2
+    `, [rfqItemId, vendorId, unitPrice, leadDays, jobId]);
+      await writeQuoteRevision(client, {
+        rfqItemId,
+        vendorId,
+        unitPrice,
+        leadDays,
+        sourceType: "manual",
+        createdBy: req.user.id,
+        jobId
+      });
     await auditLog(client, req.user.id, "upsert", "quote", req.body.rfq_item_id, `vendor=${req.body.vendor_id}`);
+    await recalcRfqStatus(client, item.rfq_id);
   });
-  res.redirect(`/rfq/${req.body.rfq_id}`);
+  res.redirect(`/rfq/${req.body.rfq_id}?vendor_tab_id=${encodeURIComponent(String(req.body.vendor_id || ""))}`);
 });
 
-app.get("/po", requireAuth, async (req, res) => {
+app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const vendorId = Number(req.body.vendor_id);
+  if (!vendorId) throw new Error("Select a vendor tab first.");
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const vendorRow = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2 and job_id = $3", [rfqId, vendorId, jobId])).rows[0];
+    if (!vendorRow) throw new Error("Choose a vendor from the RFQ vendor list.");
+    const items = (await client.query("select id, awarded_vendor_id, award_status from rfq_items where rfq_id = $1 and job_id = $2", [rfqId, jobId])).rows;
+    const existingQuoteCount = Number((await client.query(`
+      select count(*) as count
+      from quotes q
+      join rfq_items ri on ri.id = q.rfq_item_id
+      where ri.rfq_id = $1 and ri.job_id = $2
+    `, [rfqId, jobId])).rows[0]?.count || 0);
+    const requestedOrder = String(req.body.rfq_item_order || "")
+      .split(",")
+      .map((value) => Number(String(value || "").trim()))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    const hasSubmittedQuotes = items.some((item) => {
+      const unitPriceRaw = String(req.body[`unit_price_${item.id}`] || "").trim();
+      const leadDaysRaw = String(req.body[`lead_days_${item.id}`] || "").trim();
+      return Boolean(unitPriceRaw || leadDaysRaw);
+    });
+    const seenOrderIds = new Set();
+    const orderedItemIds = [];
+    for (const itemId of requestedOrder) {
+      if (seenOrderIds.has(itemId)) continue;
+      if (!items.some((item) => Number(item.id) === itemId)) continue;
+      seenOrderIds.add(itemId);
+      orderedItemIds.push(itemId);
+    }
+    if (existingQuoteCount === 0 && hasSubmittedQuotes) {
+      for (const item of items) {
+        const itemId = Number(item.id);
+        if (seenOrderIds.has(itemId)) continue;
+        seenOrderIds.add(itemId);
+        orderedItemIds.push(itemId);
+      }
+      for (let index = 0; index < orderedItemIds.length; index += 1) {
+        await client.query(`
+          update rfq_items
+          set po_line = $2, updated_at = now()
+          where id = $1 and rfq_id = $3 and job_id = $4
+        `, [orderedItemIds[index], String(index + 1), rfqId, jobId]);
+      }
+    }
+    for (const item of items) {
+      const unitPriceRaw = String(req.body[`unit_price_${item.id}`] || "").trim();
+      const leadDaysRaw = String(req.body[`lead_days_${item.id}`] || "").trim();
+      if (!unitPriceRaw && !leadDaysRaw) continue;
+      const unitPrice = num(unitPriceRaw, NaN);
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+        throw new Error(`Unit price for RFQ item ${item.id} must be greater than zero.`);
+      }
+      const leadDays = leadDaysRaw ? num(leadDaysRaw) : 0;
+      await client.query(`
+        insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+        values ($1, $2, $3, $4, $5, now())
+        on conflict (rfq_item_id, vendor_id)
+        do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
+      `, [jobId, item.id, vendorId, unitPrice, leadDays]);
+      await client.query(`
+        update rfq_items
+        set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
+        where id = $1 and job_id = $5 and award_status = 'AWARDED' and awarded_vendor_id = $2
+      `, [item.id, vendorId, unitPrice, leadDays, jobId]);
+      await writeQuoteRevision(client, {
+        rfqItemId: item.id,
+        vendorId,
+        unitPrice,
+        leadDays,
+        sourceType: "manual",
+        createdBy: req.user.id,
+        jobId
+      });
+      await auditLog(client, req.user.id, "upsert", "quote", item.id, `vendor=${vendorId}`);
+    }
+    await recalcRfqStatus(client, rfqId);
+  });
+  res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(vendorId))}`);
+});
+
+app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
   const poNo = String(req.query.po_no || "").trim();
   const rfqNo = String(req.query.rfq_no || "").trim();
   const vendorId = String(req.query.vendor_id || "").trim();
   const status = String(req.query.status || "").trim();
-  const where = [];
-  const params = [];
+  const where = ["po.job_id = $1"];
+  const params = [jobId];
   if (poNo) { params.push(`%${poNo}%`); where.push(`po.po_no ilike $${params.length}`); }
   if (rfqNo) { params.push(`%${rfqNo}%`); where.push(`r.rfq_no ilike $${params.length}`); }
   if (vendorId) { params.push(Number(vendorId)); where.push(`po.vendor_id = $${params.length}`); }
   if (status) { params.push(status); where.push(`po.status = $${params.length}`); }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const pos = (await query(`
-        select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token, v.name as vendor, coalesce(r.rfq_no, '') as rfq_no
+        select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
+               v.name as vendor, coalesce(r.rfq_no, '') as rfq_no, coalesce(po.description, '') as description, coalesce(po.vendor_contact, '') as vendor_contact,
+               coalesce(po.freight_terms, '') as freight_terms, coalesce(po.ship_to, '') as ship_to, coalesce(po.buyer_name, '') as buyer_name,
+               coalesce(open_counts.open_items, 0) as open_items
     from purchase_orders po
     join vendors v on v.id = po.vendor_id
     left join rfqs r on r.id = po.rfq_id
+    left join (
+      select
+        pl.po_id,
+        count(*) filter (where coalesce(rcv.qty_received, 0) < pl.qty_ordered) as open_items
+      from po_lines pl
+      left join (
+        select po_line_id, sum(qty_received) as qty_received
+        from receipts
+        group by po_line_id
+      ) rcv on rcv.po_line_id = pl.id
+      group by pl.po_id
+    ) open_counts on open_counts.po_id = po.id
     ${whereSql}
     order by po.id desc
     limit 300
   `, params)).rows;
   const vendors = (await query("select id, name from vendors order by name")).rows;
-  const blocks = [];
-  for (const po of pos) {
-    const lines = (await query(`
-      select pl.id, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, pl.qty_ordered, pl.unit_price, pl.updated_at,
-             mi.item_code, mi.description,
-             coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as qty_received
-      from po_lines pl
-      join material_items mi on mi.id = pl.material_item_id
-      where pl.po_id = $1
-      order by pl.id
-    `, [po.id])).rows;
-    const lineRows = lines.map((line) => `<tr>
-      <td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(line.size_1 || "")}</td><td>${esc(line.size_2 || "")}</td>
-      <td>${esc(line.thk_1 || "")}</td><td>${esc(line.thk_2 || "")}</td><td>${esc(line.qty_ordered)}</td><td>$${Number(line.unit_price).toFixed(2)}</td>
-      <td>${esc(line.qty_received)}</td><td><a class="btn btn-secondary" href="/po-line/${line.id}/edit">Edit</a></td>
-    </tr>`).join("");
-    blocks.push(`
-      <div class="card">
-        <h3>${esc(po.po_no)} - ${esc(po.vendor)}</h3>
-        <p class="muted">RFQ: ${esc(po.rfq_no || "N/A")} | Status: ${esc(po.status)} | Created: ${esc(po.created_at)}</p>
-        <div class="actions" style="margin-bottom:12px;">
-          <a class="btn btn-secondary" href="/po/${po.id}/edit">Edit PO</a>
-          <form method="post" action="/po/${po.id}/delete"><button class="btn btn-danger" type="submit">Delete PO</button></form>
-        </div>
-        <div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty Ordered</th><th>Unit Price</th><th>Qty Received</th><th>Action</th></tr>${lineRows}</table></div>
+  const poRows = pos.map((po) => `<tr>
+    <td>${esc(po.po_no)}</td>
+    <td>${esc(po.vendor)}</td>
+    <td>${esc(po.rfq_no || "")}</td>
+    <td>${esc(po.description || "")}</td>
+    <td>${esc(po.vendor_contact || "")}</td>
+    <td>${esc(po.freight_terms || "")}</td>
+    <td>${esc(po.ship_to || "")}</td>
+    <td>${esc(po.buyer_name || "")}</td>
+    <td>${esc(po.status)}</td>
+    <td>${esc(po.open_items)}</td>
+    <td>${esc(formatShortDateTime(po.created_at))}</td>
+    <td>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/po/${po.id}/receive">Receive</a>
+        <a class="btn btn-secondary" href="/po/${po.id}/edit">Edit</a>
       </div>
-    `);
-  }
+    </td>
+  </tr>`).join("");
   const vendorOptions = [`<option value="">All Vendors</option>`]
     .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === vendorId ? "selected" : ""}>${esc(vendor.name)}</option>`)).join("");
   res.send(layout("POs", `
@@ -799,26 +11192,677 @@ app.get("/po", requireAuth, async (req, res) => {
         <div class="actions"><button type="submit">Filter POs</button><a class="btn btn-secondary" href="/po">Clear</a><span class="muted">${pos.length} result(s), max 300 shown</span></div>
       </form>
     </div>
-    ${blocks.join("") || `<div class="card"><p class="muted">No POs match the current filter.</p></div>`}
+    <div class="card">
+      <div class="actions"><a class="btn btn-primary" href="/po/new">Add PO</a></div>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Contact</th><th>Freight</th><th>Ship To</th><th>Buyer</th><th>Status</th><th>Open Items</th><th>Created</th><th>Actions</th></tr>${poRows || `<tr><td colspan="12" class="muted">No POs match the current filter.</td></tr>`}</table>
+    </div>
   `, req.user));
 });
 
-app.get("/po/:id/edit", requireAuth, async (req, res) => {
-  const [po, vendors] = await Promise.all([
+app.get("/po/import", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  res.send(layout("Import PO", `
+    <h1>Import PO</h1>
+    <div class="card">
+      <h3>Import PO Headers</h3>
+      <p class="muted">Use this import for PO header data only. It now matches the AX export layout and also accepts the app's shorter field names. Missing vendors are added automatically.</p>
+      <div class="actions"><a class="btn btn-secondary" href="/po/import/headers/template">Download Header Template</a></div>
+      <form method="post" enctype="multipart/form-data" action="/po/import/headers/preview" class="stack">
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
+        <div class="actions"><button type="submit">Preview Header Import</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Import PO Lines</h3>
+      <p class="muted">Use this import after the PO headers already exist. Missing items are added automatically. Supported columns: po_no, po_line, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price.</p>
+      <div class="actions"><a class="btn btn-secondary" href="/po/import/lines/template">Download Line Template</a></div>
+      <form method="post" enctype="multipart/form-data" action="/po/import/lines/preview" class="stack">
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
+        <div class="actions"><button type="submit">Preview Line Import</button><a class="btn btn-secondary" href="/po/new">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.get("/po/import/headers/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
+  const csv = [
+    "Purchase order,Vendor reference,Project,Vendor account,Name,Invoice account,Purchase type,Approval status,Status,Purchase agreement ID,Total amount,Invoice date,Invoice,Open Payable,Vendor terms & conditions,Date signed",
+    "507647,,8617.001.97.8200,1035894,Deep South Tool & Supply LLC,1035894,Purchase order,Finalized,Invoiced,,217417.73,2025-06-30,1007PER,0,,"
+  ].join("\\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="po-header-import-template.csv"');
+  res.send(csv);
+});
+
+app.get("/po/import/lines/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
+  const csv = [
+    "po_no,po_line,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price",
+    "PO-00001,0010,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75"
+  ].join("\\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="po-line-import-template.csv"');
+  res.send(csv);
+});
+
+app.post("/po/import/headers/preview", requireAuth, requireJobContext, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
+  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizePoImportRow);
+  if (rows.length === 0) throw new Error("No rows found.");
+  const previewRows = rows.slice(0, 100).map((row) => `<tr>
+    <td>${esc(row.po_no)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_description)}</td>
+    <td>${esc(row.vendor_contact)}</td>
+    <td>${esc(row.approval_status || "")}</td>
+    <td>${esc(row.status || "OPEN")}</td>
+  </tr>`).join("");
+  res.send(layout("Preview PO Header Import", `
+    <h1>Preview PO Header Import</h1>
+    <div class="card">
+      <p class="muted">${rows.length} row(s) parsed. Review the mapped values below, then confirm the import.</p>
+      <form method="post" action="/po/import/headers/commit" class="stack">
+        <input type="hidden" name="rows_json" value="${esc(JSON.stringify(rows))}" />
+        <div class="actions"><button type="submit">Confirm Header Import</button><a class="btn btn-secondary" href="/po/import">Back</a></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>PO #</th><th>Vendor</th><th>Project</th><th>Comments</th><th>Approval Status</th><th>Status</th></tr>${previewRows}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/po/import/lines/preview", requireAuth, requireJobContext, requirePermission("pos", "edit"), upload.single("sheet"), async (req, res) => {
+  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizePoImportRow);
+  if (rows.length === 0) throw new Error("No rows found.");
+  const previewRows = rows.slice(0, 100).map((row) => `<tr>
+    <td>${esc(row.po_no)}</td>
+    <td>${esc(row.po_line)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.material_type)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_ordered))}</td>
+    <td>${esc(row.unit_price)}</td>
+  </tr>`).join("");
+  res.send(layout("Preview PO Line Import", `
+    <h1>Preview PO Line Import</h1>
+    <div class="card">
+      <p class="muted">${rows.length} row(s) parsed. Review the mapped values below, then confirm the import.</p>
+      <form method="post" action="/po/import/lines/commit" class="stack">
+        <input type="hidden" name="rows_json" value="${esc(JSON.stringify(rows))}" />
+        <div class="actions"><button type="submit">Confirm Line Import</button><a class="btn btn-secondary" href="/po/import">Back</a></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>PO #</th><th>PO Line</th><th>Item Code</th><th>Description</th><th>Type</th><th>Qty Ordered</th><th>Unit Price</th></tr>${previewRows}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/po/import/headers/commit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const rows = JSON.parse(String(req.body.rows_json || "[]"));
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error("No rows found.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "purchase_order_headers",
+      rfqId: null,
+      uploadedBy: req.user.id,
+      filename: "PO Header Import",
+      jobId: currentJobId(req)
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertPurchaseOrderHeaderRow(client, rows[index], currentJobId(req));
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 2, result.errorCode, result.message, rows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "purchase_order_headers", batchId, `rows=${rows.length}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.post("/po/import/lines/commit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const rows = JSON.parse(String(req.body.rows_json || "[]"));
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error("No rows found.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "purchase_order_lines",
+      rfqId: null,
+      uploadedBy: req.user.id,
+      filename: "PO Line Import",
+      jobId: currentJobId(req)
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertPurchaseOrderLineRow(client, rows[index], currentJobId(req));
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 2, result.errorCode, result.message, rows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "purchase_order_lines", batchId, `rows=${rows.length}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.post("/po/import/lines/manual", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const poId = Number(req.body.po_id || 0);
+  if (!poId) throw new Error("Choose a PO header before adding manual lines.");
+  const poHeader = (await query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [poId, jobId])).rows[0];
+  if (!poHeader) throw new Error("Selected PO header was not found. Refresh and try again.");
+  const poNo = String(poHeader.po_no || "").trim();
+  const rows = parseManualPoLineRows(req.body, poId, poNo);
+  if (rows.length === 0) throw new Error("Enter at least one manual PO line.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "purchase_order_lines",
+      rfqId: null,
+      uploadedBy: req.user.id,
+      filename: `Manual PO Lines - ${poNo}`,
+      jobId
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertPurchaseOrderLineRow(client, rows[index], jobId);
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 2, result.errorCode, result.message, rows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "purchase_order_lines", batchId, `rows=${rows.length};manual=true;po=${poNo}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+});
+
+app.get("/po/new", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  res.send(layout("Add PO", `
+    <h1>Add PO</h1>
+    <div class="card">
+      <p class="muted">Choose how you want to add this purchase order.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="/po/new/manual">Manual Entry</a>
+        <a class="btn btn-secondary" href="/po/import">Import PO</a>
+        <a class="btn btn-secondary" href="/po">Back</a>
+      </div>
+    </div>
+  `, req.user));
+});
+
+app.get("/po/new/manual", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const vendors = (await query("select id, name from vendors where is_active = true order by name")).rows;
+  const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
+  const poHeaders = (await query(`
+    select po.id, po.po_no, coalesce(po.description, '') as description, coalesce(v.name, '') as vendor_name
+    from purchase_orders po
+    left join vendors v on v.id = po.vendor_id
+    where po.job_id = $1
+    order by po.po_no, po.id desc
+  `, [jobId])).rows;
+  const poOptions = poHeaders.length > 0
+    ? poHeaders.map((po) => `<option value="${po.id}">${esc(po.po_no)}${po.vendor_name ? ` | ${esc(po.vendor_name)}` : ""}${po.description ? ` | ${esc(po.description)}` : ""}</option>`).join("")
+    : `<option value="">No PO headers available</option>`;
+  const manualRows = Array.from({ length: 12 }, (_value, index) => `<tr>
+    <td><input name="po_line_${index}" /></td>
+    <td><input name="item_code_${index}" /></td>
+    <td><input name="description_${index}" /></td>
+    <td><input name="material_type_${index}" value="misc" /></td>
+    <td><input name="uom_${index}" value="EA" /></td>
+    <td><input name="size_1_${index}" /></td>
+    <td><input name="size_2_${index}" /></td>
+    <td><input name="thk_1_${index}" /></td>
+    <td><input name="thk_2_${index}" /></td>
+    <td><input name="qty_ordered_${index}" inputmode="decimal" /></td>
+    <td><input name="unit_price_${index}" inputmode="decimal" /></td>
+  </tr>`).join("");
+  res.send(layout("Manual PO Entry", `
+    <h1>Manual PO Entry</h1>
+    <div class="card">
+      <h3>PO Header</h3>
+      <form method="post" action="/po/add" class="stack">
+        <div class="grid">
+          <div><label>PO Number</label><input name="po_no" required /></div>
+          <div><label>Vendor</label><select name="vendor_id" required><option value="">Select vendor</option>${vendorOptions}</select></div>
+          <div><label>Status</label><select name="status"><option value="OPEN">OPEN</option><option value="CLOSED">CLOSED</option></select></div>
+        </div>
+        <div class="grid">
+          <div><label>Description</label><input name="description" /></div>
+        </div>
+        <div class="actions"><button type="submit">Add PO Header</button><a class="btn btn-secondary" href="/po/new">Back</a></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Manual PO Lines</h3>
+      <p class="muted">Create the PO header first, then pick it below and enter the line details.</p>
+      <form method="post" action="/po/import/lines/manual" class="stack">
+        <input type="hidden" name="row_count" value="12" />
+        <div class="grid">
+          <div><label>PO Header</label><select name="po_id" ${poHeaders.length === 0 ? "disabled" : ""}>${poOptions}</select></div>
+        </div>
+        <div class="card scroll" style="padding:0;">
+          <table>
+            <tr><th>PO Line</th><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Size 1</th><th>Size 2</th><th>THK 1</th><th>THK 2</th><th>Qty Ordered</th><th>Unit Price</th></tr>
+            ${manualRows}
+          </table>
+        </div>
+        <div class="actions"><button type="submit" ${poHeaders.length === 0 ? "disabled" : ""}>Add Manual PO Lines</button><a class="btn btn-secondary" href="/po/new">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.post("/po/add", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const result = await client.query(`
+      insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, description, status, updated_at)
+      values ($1, $2, $3, null, $4, $5, now())
+      returning id
+    `, [jobId, String(req.body.po_no || "").trim(), Number(req.body.vendor_id), String(req.body.description || "").trim(), req.body.status || "OPEN"]);
+    await auditLog(client, req.user.id, "create", "purchase_order", result.rows[0].id, String(req.body.po_no || "").trim());
+  });
+  res.redirect("/po");
+});
+
+app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
+  const poId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const [po, warehouseOptions, locationMap, nextMrrNumber, receivedByOptions] = await Promise.all([
     query(`
-      select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token, coalesce(r.rfq_no, '') as rfq_no
+      select po.id, po.po_no, coalesce(po.description, '') as description, v.name as vendor_name
+      from purchase_orders po
+      join vendors v on v.id = po.vendor_id
+      where po.id = $1 and po.job_id = $2
+    `, [poId, jobId]),
+    getWarehouseOptions(jobId),
+    getWarehouseLocationMap(jobId),
+    getNextMrrNumber(null, jobId),
+    getMaterialLogLookupOptions("received_by", jobId)
+  ]);
+  const record = po.rows[0];
+  if (!record) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>PO not found.</h3></div>`, req.user));
+    return;
+  }
+  const poLines = (await query(`
+    select
+      pl.id,
+      coalesce(pl.po_line, '') as po_line,
+      mi.item_code,
+      mi.description,
+      pl.qty_ordered,
+      pl.size_1,
+      pl.size_2,
+      pl.thk_1,
+      pl.thk_2,
+      coalesce(rcv.qty_received, 0) as qty_received,
+      coalesce(last_receipt.warehouse, '') as last_warehouse,
+      coalesce(last_receipt.location, '') as last_location
+    from po_lines pl
+    join material_items mi on mi.id = pl.material_item_id
+    left join (
+      select po_line_id, sum(qty_received) as qty_received
+      from receipts
+      group by po_line_id
+    ) rcv on rcv.po_line_id = pl.id
+    left join lateral (
+      select r.warehouse, r.location
+      from receipts r
+      where r.po_line_id = pl.id
+      order by r.id desc
+      limit 1
+    ) last_receipt on true
+    where pl.po_id = $1
+    order by
+      case when coalesce(pl.po_line, '') = '' then 1 else 0 end,
+      case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
+      pl.id
+  `, [poId])).rows;
+  const history = (await query(`
+    select r.received_at, mi.item_code, mi.description, r.qty_received, r.warehouse, r.location, r.osd_status, r.osd_notes
+    from receipts r
+    join po_lines pl on pl.id = r.po_line_id
+    join material_items mi on mi.id = pl.material_item_id
+    where pl.po_id = $1
+    order by r.id desc
+    limit 30
+  `, [poId])).rows;
+  const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
+    .join("");
+  const receivedByOptionsHtml = [`<option value="">Select received by</option>`]
+    .concat(receivedByOptions.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`))
+    .join("");
+  const today = new Date().toISOString().slice(0, 10);
+  const lineRows = poLines.map((line) => {
+    const lineId = Number(line.id);
+    const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
+    const locked = remainingQty <= 0;
+    const qtyCell = locked
+      ? `<span class="chip">Received</span><input type="hidden" name="po_line_ids" value="${lineId}" />`
+      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
+    const warehouseCell = locked
+      ? `<span>${esc(line.last_warehouse || "")}</span>`
+      : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select>`;
+    const locationCell = locked
+      ? `<span>${esc(line.last_location || "")}</span>`
+      : `<select id="po-line-location-${lineId}" name="location_${lineId}" data-placeholder="Select location"><option value="">Select location</option></select>`;
+    return `<tr>
+      <td style="width:1%; white-space:nowrap;">${esc(line.po_line || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.item_code)}</td>
+      <td style="width:auto; min-width:320px;">${esc(line.description)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.size_1 || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.size_2 || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.thk_1 || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(line.thk_2 || "")}</td>
+    <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_ordered))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_received))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(remainingQty))}</td>
+      <td style="width:84px; white-space:nowrap;">${qtyCell}</td>
+      <td>${warehouseCell}</td>
+      <td>${locationCell}</td>
+    </tr>`;
+  }).join("");
+  const historyRows = history.map((row) => `<tr>
+    <td>${esc(formatShortDateTime(row.received_at))}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_received))}</td>
+    <td>${esc(row.warehouse)}</td>
+    <td>${esc(row.location)}</td>
+    <td>${esc(row.osd_status)}</td>
+    <td>${esc(row.osd_notes || "")}</td>
+  </tr>`).join("");
+  res.send(layout("Receive PO", `
+    <h1>Receive PO ${esc(record.po_no)}</h1>
+    <div class="card">
+      <div class="stats">
+        <div class="stat"><div>Vendor</div><strong>${esc(record.vendor_name)}</strong></div>
+        <div class="stat"><div>Description</div><strong>${esc(record.description || "")}</strong></div>
+        <div class="stat"><div>PO Lines</div><strong>${poLines.length}</strong></div>
+      </div>
+    </div>
+    <div class="card">
+      <form method="post" action="/po/${record.id}/receive" class="stack" id="po-receive-form-${record.id}">
+        <div class="grid">
+          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly /></div>
+          <div><label>Received Date</label><input name="received_date" type="date" value="${esc(today)}" required /></div>
+          <div><label>Received By</label><div class="inline-field"><select name="received_by" required>${receivedByOptionsHtml}</select><input name="received_by_manual" placeholder="Or enter received by" /></div></div>
+          <div><label>Load Number</label><input name="load_number" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Default Warehouse</label><select id="po-receive-warehouse-${record.id}" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
+          <div><label>Default Location</label><select id="po-receive-location-${record.id}" data-placeholder="Select location" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'><option value="">Select location</option></select></div>
+          <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
+        </div>
+        <div class="scroll">
+          <table>
+            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Remaining</th><th style="width:84px; white-space:nowrap;">Qty</th><th>Warehouse</th><th>Location</th></tr>
+            ${lineRows || `<tr><td colspan="13" class="muted">No PO lines found.</td></tr>`}
+          </table>
+        </div>
+        <div><label>MRR Notes</label><textarea name="mrr_notes"></textarea></div>
+        <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
+        <div class="actions"><button type="submit">Post Receipt</button><a class="btn btn-secondary" href="/po">Back</a></div>
+      </form>
+      <script>
+        function applyPoHeaderDefaults(poId, optionsByWarehouse) {
+          const headerWarehouse = document.getElementById("po-receive-warehouse-" + poId);
+          const headerLocation = document.getElementById("po-receive-location-" + poId);
+          if (!headerWarehouse || !headerLocation) return;
+          syncLocationOptions(headerWarehouse.id, headerLocation.id, optionsByWarehouse, headerLocation.value || "");
+          document.querySelectorAll('select[id^="po-line-warehouse-"]').forEach(function(select) {
+            select.value = headerWarehouse.value;
+            const locationId = select.id.replace("warehouse", "location");
+            syncLocationOptions(select.id, locationId, optionsByWarehouse, "");
+            const lineLocation = document.getElementById(locationId);
+            if (lineLocation) lineLocation.value = headerLocation.value;
+          });
+        }
+        syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${JSON.stringify(locationMap)});
+        ${poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0) > 0).map((line) => `syncLocationOptions("po-line-warehouse-${line.id}", "po-line-location-${line.id}", ${JSON.stringify(locationMap)});`).join("\n")}
+        document.getElementById("po-receive-form-${record.id}").addEventListener("keydown", function(event) {
+          if (event.key !== "Enter") return;
+          const tag = (event.target.tagName || "").toUpperCase();
+          if (tag === "TEXTAREA" || tag === "BUTTON") return;
+          event.preventDefault();
+        });
+        document.getElementById("po-receive-form-${record.id}").addEventListener("submit", function(event) {
+          let hasQty = false;
+          let hasError = false;
+          const receivedBySelect = document.querySelector('select[name="received_by"]');
+          const receivedByManual = document.querySelector('input[name="received_by_manual"]');
+          if ((!receivedBySelect || !receivedBySelect.value) && (!receivedByManual || !receivedByManual.value.trim())) {
+            event.preventDefault();
+            alert("Received By is required for every new MRR.");
+            return;
+          }
+          document.querySelectorAll('input[name^="qty_received_"]').forEach(function(input) {
+            const lineId = input.name.replace("qty_received_", "");
+            const qty = Number(input.value || 0);
+            if (!Number.isFinite(qty) || qty <= 0) return;
+            hasQty = true;
+            const warehouse = document.getElementById("po-line-warehouse-" + lineId);
+            const location = document.getElementById("po-line-location-" + lineId);
+            if (!warehouse || !warehouse.value || !location || !location.value) {
+              hasError = true;
+            }
+          });
+          if (!hasQty) {
+            event.preventDefault();
+            alert("Enter a received quantity on at least one editable PO line.");
+            return;
+          }
+          if (hasError) {
+            event.preventDefault();
+            alert("Warehouse and location are required on every PO line with a received quantity.");
+          }
+        });
+      </script>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>Received</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>OS&D</th><th>Notes</th></tr>${historyRows || `<tr><td colspan="8" class="muted">No receipts posted yet for this PO.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
+  const poId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const po = (await client.query(`
+      select po.id, po.po_no, po.rfq_id, coalesce(po.description, '') as description, coalesce(v.name, '') as vendor_name
+      from purchase_orders po
+      left join vendors v on v.id = po.vendor_id
+      where po.id = $1
+        and po.job_id = $2
+    `, [poId, jobId])).rows[0];
+    if (!po) throw new Error("PO not found.");
+    const mrrNumber = String(req.body.mrr_number || "").trim();
+    const receivedBy = String(req.body.received_by_manual || req.body.received_by || "").trim();
+    const receivedDate = String(req.body.received_date || "").trim();
+    const loadNumber = String(req.body.load_number || "").trim();
+    const mrrNotes = String(req.body.mrr_notes || "").trim();
+    if (!mrrNumber) throw new Error("MRR number is required.");
+    if (!receivedBy) throw new Error("Received By is required.");
+    if (!receivedDate) throw new Error("Received Date is required.");
+    const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
+    const mrrInsert = (await client.query(`
+      insert into mrr_logs (
+        job_id, discipline, mrr_number, vendor_name, app_po_id, po_number, material_description,
+        received_date, received_by, notes, load_number, updated_at
+      )
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+      returning id
+    `, [
+      jobId,
+      "",
+      mrrNumber,
+      po.vendor_name || "",
+      po.id,
+      po.po_no || "",
+      po.description || "",
+      receivedDate,
+      receivedBy,
+      mrrNotes,
+      loadNumber
+    ])).rows[0];
+    await saveMaterialLogLookup(client, "received_by", receivedBy, jobId);
+    await saveMaterialLogLookup(client, "vendor_name", po.vendor_name || "", jobId);
+    await saveMaterialLogLookup(client, "po_number", po.po_no || "", jobId);
+    await auditLog(client, req.user.id, "create", "mrr_log", mrrInsert.id, mrrNumber);
+    let postedCount = 0;
+    for (const rawLineId of lineIds) {
+      const lineId = Number(rawLineId);
+      const qtyReceived = parseQtyValue(req.body[`qty_received_${lineId}`] || 0);
+      if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
+      const line = (await client.query(`
+        select pl.id, pl.qty_ordered, mi.item_code, mi.description, coalesce(sum(r.qty_received), 0) as qty_received
+        from po_lines pl
+        join material_items mi on mi.id = pl.material_item_id
+        left join receipts r on r.po_line_id = pl.id
+        where pl.id = $1 and pl.po_id = $2
+        group by pl.id, pl.qty_ordered, mi.item_code, mi.description
+      `, [lineId, poId])).rows[0];
+      if (!line) throw new Error("PO line not found.");
+      const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
+      if (remainingQty <= 0) throw new Error("Fully received PO lines cannot be edited.");
+      const warehouse = normalizeWarehouseName(req.body[`warehouse_${lineId}`]);
+      const location = normalizeLocationName(req.body[`location_${lineId}`]);
+      await assertValidWarehouseLocation(client, warehouse, location, jobId);
+      const enteredStatus = String(req.body.osd_status || "OK").trim() || "OK";
+      const enteredNotes = String(req.body.osd_notes || "").trim();
+      const baseQty = Math.min(qtyReceived, remainingQty);
+      const overageQty = Math.max(qtyReceived - remainingQty, 0);
+      if (baseQty > 0) {
+        const receipt = (await client.query(`
+          insert into receipts (job_id, po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
+          values ($1, $2, $3, $4, $5, $6, $7, $8)
+          returning id
+        `, [jobId, lineId, mrrInsert.id, baseQty, warehouse, location, enteredStatus, enteredNotes])).rows[0];
+        postedCount += 1;
+        if (enteredStatus !== "OK") {
+          await createOsdLog(client, {
+            job_id: jobId,
+            mrr_log_id: mrrInsert.id,
+            receipt_id: receipt.id,
+            po_id: po.id,
+            po_line_id: lineId,
+            mrr_number: mrrNumber,
+            po_number: po.po_no || "",
+            item_code: line.item_code || "",
+            description: line.description || "",
+            warehouse,
+            location,
+            expected_qty: remainingQty,
+            received_qty: baseQty,
+            osd_qty: baseQty,
+            osd_status: enteredStatus,
+            notes: enteredNotes
+          });
+        }
+      }
+      if (overageQty > 0) {
+        const overReceipt = (await client.query(`
+          insert into receipts (job_id, po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
+          values ($1, $2, $3, $4, $5, $6, 'OVERAGE', $7)
+          returning id
+        `, [jobId, lineId, mrrInsert.id, overageQty, warehouse, location, enteredNotes ? `Auto-created overage from PO receipt. ${enteredNotes}` : "Auto-created overage from PO receipt."])).rows[0];
+        postedCount += 1;
+        await createOsdLog(client, {
+          job_id: jobId,
+          mrr_log_id: mrrInsert.id,
+          receipt_id: overReceipt.id,
+          po_id: po.id,
+          po_line_id: lineId,
+          mrr_number: mrrNumber,
+          po_number: po.po_no || "",
+          item_code: line.item_code || "",
+          description: line.description || "",
+          warehouse,
+          location,
+          expected_qty: remainingQty,
+          received_qty: qtyReceived,
+          osd_qty: overageQty,
+          osd_status: "OVERAGE",
+          notes: enteredNotes ? `Auto-created from over receipt. ${enteredNotes}` : "Auto-created from over receipt."
+        });
+      }
+    }
+    if (postedCount === 0) throw new Error("Enter a received quantity on at least one editable PO line.");
+    await recalcPoStatus(client, poId);
+    if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
+    await rebuildUnallocatedBom(client, jobId);
+    await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};mrr=${mrrNumber};lines=${postedCount}`);
+  });
+  res.redirect("/dashboard");
+});
+
+app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const [po, vendors, poLines] = await Promise.all([
+    query(`
+      select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
+             coalesce(po.description, '') as description, coalesce(r.rfq_no, '') as rfq_no
       from purchase_orders po
       left join rfqs r on r.id = po.rfq_id
       where po.id = $1
-    `, [req.params.id]),
-    query("select id, name from vendors order by name")
+        and po.job_id = $2
+    `, [req.params.id, jobId]),
+    query("select id, name from vendors order by name"),
+    query(`
+      select pl.id, coalesce(pl.po_line, '') as po_line, mi.item_code, mi.description, pl.qty_ordered, pl.unit_price,
+             coalesce(pl.size_1, '') as size_1, coalesce(pl.size_2, '') as size_2, coalesce(pl.thk_1, '') as thk_1, coalesce(pl.thk_2, '') as thk_2
+      from po_lines pl
+      join material_items mi on mi.id = pl.material_item_id
+      where pl.po_id = $1
+        and pl.job_id = $2
+      order by
+        case when coalesce(pl.po_line, '') = '' then 1 else 0 end,
+        case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
+        pl.id
+    `, [req.params.id, jobId])
   ]);
   const record = po.rows[0];
   const vendorOptions = vendors.rows.map((vendor) => `<option value="${vendor.id}" ${vendor.id === record.vendor_id ? "selected" : ""}>${esc(vendor.name)}</option>`).join("");
+  const poLineRows = poLines.rows.map((line) => `<tr>
+    <td>${esc(line.po_line || "")}</td>
+    <td>${esc(line.item_code)}</td>
+    <td>${esc(line.description)}</td>
+    <td>${esc(line.size_1)}</td>
+    <td>${esc(line.size_2)}</td>
+    <td>${esc(line.thk_1)}</td>
+    <td>${esc(line.thk_2)}</td>
+      <td>${esc(formatQtyDisplay(line.qty_ordered))}</td>
+    <td>${esc(line.unit_price)}</td>
+    <td><a class="btn btn-secondary" href="/po-line/${line.id}/edit">Edit Line</a></td>
+  </tr>`).join("");
   res.send(layout("Edit PO", `
     <h1>Edit PO</h1>
     <div class="card">
-      <p class="muted">RFQ: ${esc(record.rfq_no || "N/A")} | Created: ${esc(record.created_at)}</p>
+      <p class="muted">RFQ: ${esc(record.rfq_no || "N/A")} | Created: ${esc(formatShortDateTime(record.created_at))}</p>
       <form method="post" action="/po/${record.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(record.updated_token)}" />
         <div class="grid">
@@ -826,44 +11870,61 @@ app.get("/po/:id/edit", requireAuth, async (req, res) => {
           <div><label>Vendor</label><select name="vendor_id">${vendorOptions}</select></div>
           <div><label>Status</label><select name="status"><option value="OPEN" ${record.status === "OPEN" ? "selected" : ""}>OPEN</option><option value="CLOSED" ${record.status === "CLOSED" ? "selected" : ""}>CLOSED</option></select></div>
         </div>
-        <div class="actions"><button type="submit">Save PO</button><a class="btn btn-secondary" href="/po">Back</a></div>
+        <div class="grid">
+          <div><label>Description</label><input name="description" value="${esc(record.description || "")}" /></div>
+        </div>
+        <div class="actions">
+          <button type="submit">Save PO</button>
+          <a class="btn btn-secondary" href="/po">Back</a>
+          <form method="post" action="/po/${record.id}/delete" onsubmit="return confirm('Delete PO ${escAttr(record.po_no)}? This will also remove its PO lines and receipts.');">
+            <button class="btn btn-danger" type="submit">Delete PO</button>
+          </form>
+        </div>
       </form>
+    </div>
+    <div class="card scroll">
+      <h3>PO Lines</h3>
+      <table><tr><th>PO Line</th><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Unit Price</th><th>Action</th></tr>${poLineRows || `<tr><td colspan="10" class="muted">No PO lines found.</td></tr>`}</table>
     </div>
   `, req.user));
 });
 
-app.post("/po/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const update = await client.query(`
       update purchase_orders
-      set po_no = $2, vendor_id = $3, status = $4, updated_at = now()
-      where id = $1 and extract(epoch from updated_at)::text = $5
-    `, [req.params.id, req.body.po_no?.trim(), Number(req.body.vendor_id), req.body.status || "OPEN", req.body.updated_token || ""]);
+      set po_no = $2, vendor_id = $3, status = $4, description = $5, updated_at = now()
+      where id = $1 and job_id = $6 and extract(epoch from updated_at)::text = $7
+    `, [req.params.id, req.body.po_no?.trim(), Number(req.body.vendor_id), req.body.status || "OPEN", String(req.body.description || "").trim(), jobId, req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This PO was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "purchase_order", req.params.id, req.body.po_no?.trim() || "");
   });
   res.redirect("/po");
 });
 
-app.post("/po/:id/delete", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/po/:id/delete", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const po = (await client.query("select rfq_id from purchase_orders where id = $1", [req.params.id])).rows[0];
-    await client.query("delete from purchase_orders where id = $1", [req.params.id]);
+    const po = (await client.query("select rfq_id from purchase_orders where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    await client.query("delete from purchase_orders where id = $1 and job_id = $2", [req.params.id, jobId]);
     if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
     await auditLog(client, req.user.id, "delete", "purchase_order", req.params.id, "");
   });
   res.redirect("/po");
 });
 
-app.get("/po-line/:id/edit", requireAuth, async (req, res) => {
+app.get("/po-line/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   const line = (await query(`
-    select pl.id, pl.qty_ordered, pl.unit_price, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, extract(epoch from pl.updated_at)::text as updated_token,
+    select pl.id, coalesce(pl.po_line, '') as po_line, pl.qty_ordered, pl.unit_price, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, extract(epoch from pl.updated_at)::text as updated_token,
            mi.item_code, mi.description, po.po_no
     from po_lines pl
     join material_items mi on mi.id = pl.material_item_id
     join purchase_orders po on po.id = pl.po_id
     where pl.id = $1
-  `, [req.params.id])).rows[0];
+      and pl.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
   res.send(layout("Edit PO Line", `
     <h1>Edit PO Line</h1>
     <div class="card"><strong>PO:</strong> ${esc(line.po_no)} | <strong>Item:</strong> ${esc(line.item_code)} - ${esc(line.description)}</div>
@@ -871,7 +11932,8 @@ app.get("/po-line/:id/edit", requireAuth, async (req, res) => {
       <form method="post" action="/po-line/${line.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(line.updated_token)}" />
         <div class="grid">
-          <div><label>Qty Ordered</label><input name="qty_ordered" value="${esc(line.qty_ordered)}" required /></div>
+          <div><label>PO Line</label><input name="po_line" value="${esc(line.po_line || "")}" /></div>
+          <div><label>Qty Ordered</label><input name="qty_ordered" value="${esc(formatQtyDisplay(line.qty_ordered))}" required /></div>
           <div><label>Unit Price</label><input name="unit_price" value="${esc(line.unit_price)}" required /></div>
           <div><label>Size 1</label><input name="size_1" value="${esc(line.size_1 || "")}" /></div>
           <div><label>Size 2</label><input name="size_2" value="${esc(line.size_2 || "")}" /></div>
@@ -884,275 +11946,1373 @@ app.get("/po-line/:id/edit", requireAuth, async (req, res) => {
   `, req.user));
 });
 
-app.post("/po-line/:id/edit", requireAuth, requireRole(["admin", "buyer"]), async (req, res) => {
+app.post("/po-line/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const update = await client.query(`
       update po_lines
-      set qty_ordered = $2, unit_price = $3, size_1 = $4, size_2 = $5, thk_1 = $6, thk_2 = $7, updated_at = now()
-      where id = $1 and extract(epoch from updated_at)::text = $8
-    `, [req.params.id, Number(req.body.qty_ordered), Number(req.body.unit_price), req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", req.body.updated_token || ""]);
+      set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
+      where id = $1 and job_id = $9 and extract(epoch from updated_at)::text = $10
+    `, [req.params.id, req.body.po_line || "", parseQtyValue(req.body.qty_ordered), Number(req.body.unit_price), req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", jobId, req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This PO line was modified by another user. Refresh and try again.");
     await auditLog(client, req.user.id, "update", "po_line", req.params.id, "");
   });
   res.redirect("/po");
 });
 
-app.get("/receive", requireAuth, async (req, res) => {
-  const poId = String(req.query.po_id || "").trim();
-  const poOptionsRows = (await query("select id, po_no from purchase_orders order by id desc")).rows;
-  const poOptions = [`<option value="">All POs</option>`]
-    .concat(poOptionsRows.map((row) => `<option value="${row.id}" ${String(row.id) === poId ? "selected" : ""}>${esc(row.po_no)}</option>`))
-    .join("");
-  const params = [];
-  const poFilterSql = poId ? (() => { params.push(Number(poId)); return `and po.id = $${params.length}`; })() : "";
-  const openLines = (await query(`
-    select pl.id, po.po_no, mi.item_code, mi.description, pl.qty_ordered, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2,
-           coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as qty_received
-    from po_lines pl
-    join purchase_orders po on po.id = pl.po_id
-    join material_items mi on mi.id = pl.material_item_id
-    where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) < pl.qty_ordered
-    ${poFilterSql}
-    order by po.id desc
-  `, params)).rows;
-  const receiptParams = poId ? [Number(poId)] : [];
-  const receiptFilterSql = poId ? "where po.id = $1" : "";
-  const receipts = (await query(`
-    select r.received_at, po.po_no, mi.item_code, r.qty_received, r.warehouse, r.location, r.osd_status, r.osd_notes,
-           pl.size_1, pl.size_2, pl.thk_1, pl.thk_2
-    from receipts r
-    join po_lines pl on pl.id = r.po_line_id
-    join purchase_orders po on po.id = pl.po_id
-    join material_items mi on mi.id = pl.material_item_id
-    ${receiptFilterSql}
-    order by r.id desc
-    limit 30
-  `, receiptParams)).rows;
-  const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.po_no)} | ${esc(line.item_code)} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")} | Ordered ${esc(line.qty_ordered)} | Rec ${esc(line.qty_received)}</option>`).join("");
-  const receiptRows = receipts.map((receipt) => `<tr>
-    <td>${esc(receipt.received_at)}</td><td>${esc(receipt.po_no)}</td><td>${esc(receipt.item_code)}</td><td>${esc(receipt.size_1 || "")}</td>
-    <td>${esc(receipt.size_2 || "")}</td><td>${esc(receipt.thk_1 || "")}</td><td>${esc(receipt.thk_2 || "")}</td><td>${esc(receipt.qty_received)}</td>
-    <td>${esc(receipt.warehouse)}</td><td>${esc(receipt.location)}</td><td>${esc(receipt.osd_status)}</td><td>${esc(receipt.osd_notes || "")}</td>
-  </tr>`).join("");
+app.get("/receive", requireAuth, requireJobContext, requirePermission("receiving", "view"), async (req, res) => {
   res.send(layout("Receiving", `
     <h1>Receiving</h1>
     <div class="card">
-      <form method="get" action="/receive" class="stack">
-        <div class="grid"><div><label>Filter By PO</label><select name="po_id">${poOptions}</select></div></div>
-        <div class="actions"><button type="submit">Apply Filter</button><a class="btn btn-secondary" href="/receive">Clear</a></div>
+      <div class="actions">
+        <a class="btn btn-primary" href="/receive/by-po">By PO</a>
+        <a class="btn btn-primary" href="/material-logs/mrr/new">Manual Entry</a>
+      </div>
+    </div>
+  `, req.user));
+});
+
+app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("receiving", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const q = String(req.query.q || "").trim();
+  const params = [jobId];
+  const where = ["po.job_id = $1"];
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(po.po_no ilike $2 or coalesce(po.description, '') ilike $2)`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const rows = (await query(`
+    select
+      po.id,
+      po.po_no,
+      coalesce(po.description, '') as description,
+      coalesce(v.name, '') as vendor_name,
+      po.status,
+      count(pl.id) as line_count,
+      count(pl.id) filter (
+        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) < pl.qty_ordered
+      ) as open_line_count
+    from purchase_orders po
+    left join vendors v on v.id = po.vendor_id
+    left join po_lines pl on pl.po_id = po.id
+    ${whereSql}
+    group by po.id, po.po_no, po.description, v.name, po.status
+    order by po.id desc
+    limit 300
+  `, params)).rows;
+  const poRows = rows.map((row) => `<tr>
+    <td>${esc(row.po_no)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.status)}</td>
+    <td>${esc(row.line_count)}</td>
+    <td>${esc(row.open_line_count)}</td>
+    <td><a class="btn btn-secondary" href="/po/${row.id}/receive">Receive</a></td>
+  </tr>`).join("");
+  res.send(layout("Receive By PO", `
+    <h1>Receive By PO</h1>
+    <div class="card">
+      <form method="get" action="/receive/by-po" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto auto;">
+          <div><label>Filter POs</label><input name="q" value="${esc(q)}" placeholder="PO number or description" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+          <div style="align-self:end;"><a class="btn btn-secondary" href="/receive/by-po">Clear</a></div>
+        </div>
       </form>
     </div>
+    <div class="card scroll">
+      <table><tr><th>PO #</th><th>Description</th><th>Vendor</th><th>Status</th><th>Lines</th><th>Open Lines</th><th>Action</th></tr>${poRows || `<tr><td colspan="7" class="muted">No purchase orders found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const mrrId = Number(req.params.mrrId);
+  const backHref = typeof req.query.back === "string" && req.query.back.startsWith("/") ? req.query.back : "/receive";
+  const mrr = (await query("select * from mrr_logs where id = $1 and job_id = $2", [mrrId, jobId])).rows[0];
+  if (!mrr) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR not found.</h3></div>`, req.user));
+    return;
+  }
+  const po = mrr.app_po_id
+    ? (await query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [mrr.app_po_id, jobId])).rows[0]
+    : (mrr.po_number ? (await query("select id, po_no from purchase_orders where po_no = $1 and job_id = $2 order by id desc limit 1", [mrr.po_number, jobId])).rows[0] : null);
+  const warehouseOptions = await getWarehouseOptions(jobId);
+  const locationMap = await getWarehouseLocationMap(jobId);
+  const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
+    .join("");
+  const openLines = po ? (await query(`
+    select
+      pl.id,
+      coalesce(pl.po_line, '') as po_line,
+      mi.item_code,
+      mi.description,
+      pl.qty_ordered,
+      pl.size_1,
+      pl.size_2,
+      pl.thk_1,
+      pl.thk_2,
+      coalesce(rcv.qty_received, 0) as qty_received
+    from po_lines pl
+    join material_items mi on mi.id = pl.material_item_id
+    left join (
+      select po_line_id, sum(qty_received) as qty_received
+      from receipts
+      group by po_line_id
+    ) rcv on rcv.po_line_id = pl.id
+    where pl.po_id = $1
+      and coalesce(rcv.qty_received, 0) < pl.qty_ordered
+    order by
+      case when coalesce(pl.po_line, '') = '' then 1 else 0 end,
+      case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
+      pl.id
+  `, [po.id])).rows : [];
+  const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(formatQtyDisplay(line.qty_ordered))} | Rec ${esc(formatQtyDisplay(line.qty_received))} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`).join("");
+  res.send(layout("Receive MRR", `
+    <h1>Receive ${esc(mrr.mrr_number)}</h1>
     <div class="card">
-      <form method="post" action="/receive" class="stack">
-        <input type="hidden" name="po_id" value="${esc(poId)}" />
-        <div><label>PO Line</label><select name="po_line_id">${lineOptions}</select></div>
+      <div class="stats">
+        <div class="stat"><div>PO</div><strong>${esc(mrr.po_number || "No PO")}</strong></div>
+        <div class="stat"><div>Vendor</div><strong>${esc(mrr.vendor_name || "")}</strong></div>
+        <div class="stat"><div>Received By</div><strong>${esc(mrr.received_by || "")}</strong></div>
+        <div class="stat"><div>Load #</div><strong>${esc(mrr.load_number || "")}</strong></div>
+      </div>
+      <p class="muted" style="margin-top:10px;">${esc(mrr.material_description || "")}</p>
+    </div>
+    <div class="card">
+      <h3>${po ? "Receive Against PO" : "Receive Without PO"}</h3>
+      <form method="post" action="/receive/${mrr.id}" class="stack">
+        <input type="hidden" name="mode" value="${po ? "po" : "manual"}" />
+        ${po ? `
+          <div><label>PO Line</label><select name="po_line_id" required><option value="">Select open PO line</option>${lineOptions}</select></div>
+        ` : `
+          <div class="grid">
+            <div><label>Item Code</label><input name="item_code" /></div>
+            <div><label>Qty Unit</label><input name="qty_unit" value="EA" /></div>
+          </div>
+          <div><label>Description</label><input name="description" value="${esc(mrr.material_description || "")}" /></div>
+        `}
         <div class="grid">
-          <div><label>Qty Received</label><input name="qty_received" required /></div>
-          <div><label>Warehouse</label><input name="warehouse" required /></div>
-          <div><label>Location</label><input name="location" required /></div>
+          <div><label>Qty Received</label><input name="qty_received" required inputmode="decimal" /></div>
+          <div><label>Warehouse</label><select id="receive-warehouse-${mrr.id}" name="warehouse" required onchange='syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
+          <div><label>Location</label><select id="receive-location-${mrr.id}" name="location" data-placeholder="Select location" required><option value="">Select location</option></select></div>
           <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
-        <div class="actions"><button type="submit">Receive Material</button></div>
+        <div class="actions"><button type="submit">${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="${escAttr(backHref)}">Back</a></div>
       </form>
+      <script>syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${JSON.stringify(locationMap)});</script>
+      ${po ? (openLines.length ? "" : `<p class="muted">All PO lines tied to this MRR are already fully received.</p>`) : `<p class="muted">No-PO receipts are logged for traceability, but they do not post into PO-based inventory until a PO line exists.</p>`}
     </div>
-    <div class="card scroll"><table><tr><th>Received</th><th>PO</th><th>Item</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>OS&D</th><th>Notes</th></tr>${receiptRows}</table></div>
   `, req.user));
 });
 
-app.post("/receive", requireAuth, requireRole(["admin", "warehouse"]), async (req, res) => {
+app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
+  const mrrId = Number(req.params.mrrId);
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const insert = await client.query(`
-      insert into receipts (po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
-      values ($1, $2, $3, $4, $5, $6)
-      returning id
-    `, [Number(req.body.po_line_id), Number(req.body.qty_received), req.body.warehouse?.trim(), req.body.location?.trim(), req.body.osd_status || "OK", req.body.osd_notes || ""]);
-    await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `po_line=${req.body.po_line_id}`);
+    const mrr = (await client.query("select * from mrr_logs where id = $1 and job_id = $2", [mrrId, jobId])).rows[0];
+    if (!mrr) throw new Error("MRR not found.");
+    const qtyReceived = parseQtyValue(req.body.qty_received || 0);
+    if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
+    const normalizedNames = normalizeWarehouseLocationValues(req.body.warehouse, req.body.location);
+    if (String(req.body.mode || "") === "po") {
+      const poLine = (await client.query(`
+        select po.id as po_id, po.po_no, po.rfq_id, mi.item_code, mi.description
+        from po_lines pl
+        join purchase_orders po on po.id = pl.po_id
+        join material_items mi on mi.id = pl.material_item_id
+        where pl.id = $1
+          and po.job_id = $2
+      `, [Number(req.body.po_line_id), jobId])).rows[0];
+      const insert = await client.query(`
+        insert into receipts (job_id, mrr_log_id, po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        returning id
+      `, [jobId, mrrId, Number(req.body.po_line_id), qtyReceived, normalizedNames.warehouse, normalizedNames.location, req.body.osd_status || "OK", req.body.osd_notes || ""]);
+      if ((req.body.osd_status || "OK") !== "OK") {
+        await createOsdLog(client, {
+          job_id: jobId,
+          mrr_log_id: mrrId,
+          receipt_id: insert.rows[0].id,
+          po_id: poLine?.po_id || null,
+          po_line_id: Number(req.body.po_line_id),
+          mrr_number: mrr.mrr_number || "",
+          po_number: poLine?.po_no || mrr.po_number || "",
+          item_code: poLine?.item_code || "",
+          description: poLine?.description || "",
+          warehouse: normalizedNames.warehouse,
+          location: normalizedNames.location,
+          expected_qty: qtyReceived,
+          received_qty: qtyReceived,
+          osd_qty: qtyReceived,
+          osd_status: req.body.osd_status || "OK",
+          notes: req.body.osd_notes || ""
+        });
+      }
+      if (poLine?.po_id) await recalcPoStatus(client, poLine.po_id);
+      if (poLine?.rfq_id) await recalcRfqStatus(client, poLine.rfq_id);
+      await rebuildUnallocatedBom(client, jobId);
+      await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `mrr=${mrr.mrr_number};po_line=${req.body.po_line_id}`);
+    } else {
+      const result = await client.query(`
+        insert into material_receiving_logs (
+          job_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, warehouse, location, recv_date, comments, updated_at
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+        returning id
+      `, [
+        jobId,
+        mrr.discipline || "",
+        mrr.vendor_name || "",
+        mrr.po_number || "",
+        req.body.item_code?.trim() || "",
+        req.body.description?.trim() || mrr.material_description || "",
+        qtyReceived,
+        req.body.qty_unit?.trim() || "",
+        mrr.mrr_number || "",
+        normalizedNames.warehouse,
+        normalizedNames.location,
+        mrr.received_date || "",
+        req.body.osd_notes?.trim() || ""
+      ]);
+      await auditLog(client, req.user.id, "create", "material_receiving_log", result.rows[0].id, `mrr=${mrr.mrr_number}`);
+    }
   });
-  res.redirect(req.body.po_id ? `/receive?po_id=${encodeURIComponent(req.body.po_id)}` : "/receive");
+  res.redirect("/receive");
 });
 
-app.get("/inventory", requireAuth, async (req, res) => {
-  const rows = (await query(`
-    select mi.item_code, mi.description, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2,
-           r.warehouse, r.location,
-           sum(r.qty_received) as qty_on_hand,
-           sum(case when r.osd_status = 'OK' then 0 else r.qty_received end) as qty_osd
-    from receipts r
-    join po_lines pl on pl.id = r.po_line_id
-    join material_items mi on mi.id = pl.material_item_id
-    group by mi.item_code, mi.description, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, r.warehouse, r.location
-    order by mi.item_code
-  `)).rows;
+app.get("/inventory", requireAuth, requireJobContext, requirePermission("inventory", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const warehouseFilter = String(req.query.warehouse_filter || "").trim();
+  const locationFilter = String(req.query.location_filter || "").trim();
+  const identFilter = String(req.query.ident_filter || "").trim();
+  const allowedSorts = {
+    item_code: "coalesce(item_code, '')",
+    description: "coalesce(description, '')",
+    size_1: "coalesce(size_1, '')",
+    size_2: "coalesce(size_2, '')",
+    thk_1: "coalesce(thk_1, '')",
+    thk_2: "coalesce(thk_2, '')",
+    warehouse: "coalesce(warehouse, '')",
+    location: "coalesce(location, '')",
+    qty_on_hand: "qty_on_hand",
+    qty_osd: "qty_osd"
+  };
+  const sort = String(req.query.sort || "item_code").trim();
+  const dir = String(req.query.dir || "asc").trim().toLowerCase() === "desc" ? "desc" : "asc";
+  const sortSql = allowedSorts[sort] || allowedSorts.item_code;
+  const [warehouseOptions, locationMap] = await Promise.all([
+    getWarehouseOptions(jobId),
+    getWarehouseLocationMap(jobId)
+  ]);
+  const params = [];
+  const where = [];
+  if (warehouseFilter) {
+    params.push(`%${warehouseFilter}%`);
+    where.push(`coalesce(warehouse, '') ilike $${params.length}`);
+  }
+  if (locationFilter) {
+    params.push(`%${locationFilter}%`);
+    where.push(`coalesce(location, '') ilike $${params.length}`);
+  }
+  if (identFilter) {
+    params.push(`%${identFilter}%`);
+    where.push(`(coalesce(item_code, '') ilike $${params.length} or coalesce(description, '') ilike $${params.length})`);
+  }
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const inventoryQueryString = (source = {}) => new URLSearchParams({
+    warehouse_filter: String(source.warehouse_filter || ""),
+    location_filter: String(source.location_filter || ""),
+    ident_filter: String(source.ident_filter || ""),
+    sort: String(source.sort || sort),
+    dir: String(source.dir || dir)
+  }).toString();
+  const rows = await getCurrentOnHandRows({ query }, {
+    jobId,
+    whereSql,
+    params,
+    orderSql: `${sortSql} ${dir}, inventory_by_location.item_code asc, inventory_by_location.warehouse asc, inventory_by_location.location asc`
+  });
+  const sortLink = (column) => `/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter, ident_filter: identFilter, sort: column, dir: nextSortDir(sort, dir, column) })}`;
+  const warehouseOptionsHtml = [`<option value="">All warehouses</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
+    .join("");
   const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.item_code)}</td><td>${esc(row.description)}</td><td>${esc(row.size_1 || "")}</td><td>${esc(row.size_2 || "")}</td>
     <td>${esc(row.thk_1 || "")}</td><td>${esc(row.thk_2 || "")}</td><td>${esc(row.warehouse)}</td><td>${esc(row.location)}</td>
-    <td>${esc(row.qty_on_hand)}</td><td>${esc(row.qty_osd)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_on_hand))}</td><td>${esc(formatQtyDisplay(row.qty_osd))}</td>
   </tr>`).join("");
   res.send(layout("Inventory", `
     <h1>Inventory by Location</h1>
-    <div class="card scroll"><table><tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Warehouse</th><th>Location</th><th>Qty On Hand</th><th>Qty OS&D</th></tr>${tableRows}</table></div>
+    <div class="card">
+      <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">
+        <form method="get" action="/inventory" class="stack">
+          <label>Warehouse</label>
+          <select id="inventory-warehouse" name="warehouse_filter" onchange='syncLocationOptions("inventory-warehouse", "inventory-location", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(locationFilter)}")'>${warehouseOptionsHtml}</select>
+          <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="sort" value="${esc(sort)}" />
+          <input type="hidden" name="dir" value="${esc(dir)}" />
+          <div class="actions">
+            <button type="submit">Apply Warehouse</button>
+            <a class="btn btn-secondary" href="/inventory?${inventoryQueryString({ location_filter: locationFilter, ident_filter: identFilter })}">Clear Warehouse</a>
+          </div>
+        </form>
+        <form method="get" action="/inventory" class="stack">
+          <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <label>Location</label>
+          <select id="inventory-location" name="location_filter" data-placeholder="All locations"><option value="">All locations</option></select>
+          <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="sort" value="${esc(sort)}" />
+          <input type="hidden" name="dir" value="${esc(dir)}" />
+          <div class="actions">
+            <button type="submit">Apply Location</button>
+            <a class="btn btn-secondary" href="/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, ident_filter: identFilter })}">Clear Location</a>
+          </div>
+        </form>
+        <form method="get" action="/inventory" class="stack">
+          <label>Ident Or Description</label>
+          <input name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <input type="hidden" name="sort" value="${esc(sort)}" />
+          <input type="hidden" name="dir" value="${esc(dir)}" />
+          <div class="actions">
+            <button type="submit">Apply Filter</button>
+            <a class="btn btn-secondary" href="/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter })}">Clear Filter</a>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div class="card scroll"><table><tr><th><a href="${sortLink("item_code")}">${esc(sortLabel("Item", sort, dir, "item_code"))}</a></th><th><a href="${sortLink("description")}">${esc(sortLabel("Description", sort, dir, "description"))}</a></th><th><a href="${sortLink("size_1")}">${esc(sortLabel("Size 1", sort, dir, "size_1"))}</a></th><th><a href="${sortLink("size_2")}">${esc(sortLabel("Size 2", sort, dir, "size_2"))}</a></th><th><a href="${sortLink("thk_1")}">${esc(sortLabel("Thk 1", sort, dir, "thk_1"))}</a></th><th><a href="${sortLink("thk_2")}">${esc(sortLabel("Thk 2", sort, dir, "thk_2"))}</a></th><th><a href="${sortLink("warehouse")}">${esc(sortLabel("Warehouse", sort, dir, "warehouse"))}</a></th><th><a href="${sortLink("location")}">${esc(sortLabel("Location", sort, dir, "location"))}</a></th><th><a href="${sortLink("qty_on_hand")}">${esc(sortLabel("Qty On Hand", sort, dir, "qty_on_hand"))}</a></th><th><a href="${sortLink("qty_osd")}">${esc(sortLabel("Qty OS&D", sort, dir, "qty_osd"))}</a></th></tr>${tableRows}</table></div>
+    <script>syncLocationOptions("inventory-warehouse", "inventory-location", ${JSON.stringify(locationMap)}, ${JSON.stringify(locationFilter)});</script>
   `, req.user));
 });
 
-app.get("/material-logs", requireAuth, async (req, res) => {
-  const q = String(req.query.q || "").trim();
-  const receivingParams = [];
-  const receivingWhere = [];
-  if (q) {
-    receivingParams.push(`%${q}%`);
-    receivingWhere.push(`(
-      coalesce(discipline, '') ilike $1 or
-      coalesce(vendor_name, '') ilike $1 or
-      coalesce(po_number, '') ilike $1 or
-      coalesce(item_code, '') ilike $1 or
-      coalesce(description, '') ilike $1 or
-      coalesce(container_no, '') ilike $1 or
-      coalesce(mrr_number, '') ilike $1 or
-      coalesce(fmr_number, '') ilike $1
+app.get("/inventory-audit", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const createdReportNo = String(req.query.created_report_no || "").trim();
+  const recentReports = await query(`
+    select
+      r.id,
+      r.report_no,
+      r.created_at,
+      u.username as created_by_name
+    from inventory_audit_reports r
+    left join users u on u.id = r.created_by
+    where r.job_id = $1
+    order by r.id desc
+    limit 50
+  `, [jobId]);
+  const recentReportRows = recentReports.rows.map((row) => `<tr>
+    <td>${esc(row.report_no)}</td>
+    <td>${esc(formatShortDateTime(row.created_at))}</td>
+    <td>${esc(row.created_by_name || "")}</td>
+    <td><a class="btn btn-secondary" href="/inventory-audit/reports/${row.id}">View</a></td>
+  </tr>`).join("");
+  res.send(layout("Inventory Audit", `
+    <h1>Inventory Audit</h1>
+    ${createdReportNo ? `<div class="card success"><strong>Saved audit ${esc(createdReportNo)}.</strong> Inventory quantities have been updated and the entry sheet was reset.</div>` : ""}
+    <div class="card">
+      <div class="actions">
+        ${canEditInventoryAudit(req.user) ? `<a class="btn btn-primary" href="/inventory-audit/new">New Audit</a>` : ""}
+        <a class="btn btn-secondary" href="/yard">Back To Yard</a>
+      </div>
+    </div>
+    ${canEditInventoryAudit(req.user) ? `
+      <div class="card">
+        <h3 style="margin-top:0;">Import Current Inventory Reset</h3>
+        <p class="muted">Upload the current inventory workbook to create one full replacement audit. Rows in the workbook become the new on-hand truth, and inventory rows missing from the file are reset to zero.</p>
+        <form method="post" enctype="multipart/form-data" action="/inventory-audit/import" class="stack">
+          <div><label>Inventory Workbook</label><input type="file" name="sheet" required /></div>
+          <div class="actions"><button type="submit">Import Current Inventory</button></div>
+        </form>
+      </div>
+    ` : ""}
+    <div class="card scroll">
+      <h3 style="margin-top:0;">Past Inventory Audit Reports</h3>
+      <table><tr><th>Report #</th><th>Created</th><th>Created By</th><th>Action</th></tr>${recentReportRows || `<tr><td colspan="4" class="muted">No audit reports created yet.</td></tr>`}</table>
+    </div>
+  `, req.user));
+}));
+
+app.get("/inventory-audit/new", requireAuth, requireJobContext, requireInventoryAuditEdit, asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const warehouseFilter = String(req.query.warehouse_filter || "").trim();
+  const locationFilter = String(req.query.location_filter || "").trim();
+  const identFilter = String(req.query.ident_filter || "").trim();
+  const [warehouseOptions, locationMap] = await Promise.all([
+    getWarehouseOptions(jobId),
+    getWarehouseLocationMap(jobId)
+  ]);
+  const params = [];
+  const where = [];
+  if (warehouseFilter) {
+    params.push(`%${warehouseFilter}%`);
+    where.push(`coalesce(inventory_by_location.warehouse, '') ilike $${params.length}`);
+  }
+  if (locationFilter) {
+    params.push(`%${locationFilter}%`);
+    where.push(`coalesce(inventory_by_location.location, '') ilike $${params.length}`);
+  }
+  if (identFilter) {
+    params.push(`%${identFilter}%`);
+    where.push(`(
+      coalesce(inventory_by_location.item_code, '') ilike $${params.length}
+      or coalesce(inventory_by_location.description, '') ilike $${params.length}
     )`);
   }
-  const receivingWhereSql = receivingWhere.length ? `where ${receivingWhere.join(" and ")}` : "";
-  const [receiving, mrrs, fmrs] = await Promise.all([
-    query(`
-      select id, legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date
-      from material_receiving_logs
-      ${receivingWhereSql}
-      order by coalesce(legacy_row_id, id) desc
-      limit 60
-    `, receivingParams),
-    query(`
-      select id, discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by, load_number, opi_number
-      from mrr_logs
-      ${q ? "where (coalesce(mrr_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(po_number, '') ilike $1 or coalesce(material_description, '') ilike $1 or coalesce(opi_number, '') ilike $1)" : ""}
-      order by id desc
-      limit 60
-    `, q ? [`%${q}%`] : []),
-    query(`
-      select id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, mrr_number, request_date, need_date, pickup_location, pickup_date
-      from fmr_logs
-      ${q ? "where (coalesce(fmr_number, '') ilike $1 or coalesce(vendor_name, '') ilike $1 or coalesce(container_no, '') ilike $1 or coalesce(fluor_id, '') ilike $1 or coalesce(mrr_number, '') ilike $1)" : ""}
-      order by id desc
-      limit 60
-    `, q ? [`%${q}%`] : [])
-  ]);
+  const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const rows = await getInventoryAuditVisibleRows({ query }, {
+    jobId,
+    whereSql,
+    params,
+    orderSql: "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location"
+  });
+  const warehouseOptionsHtml = [`<option value="">All warehouses</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
+    .join("");
+  const rowWarehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
+    .join("");
+  const rowLocationScripts = [];
+  const tableRows = rows.map((row, index) => {
+    const key = Buffer.from(JSON.stringify({
+      item_code: row.item_code || "",
+      description: row.description || "",
+      size_1: row.size_1 || "",
+      size_2: row.size_2 || "",
+      thk_1: row.thk_1 || "",
+      thk_2: row.thk_2 || "",
+      warehouse: row.warehouse || "",
+      location: row.location || ""
+    })).toString("base64url");
+    const warehouseSelectId = `inventory-audit-row-warehouse-${index}`;
+    const locationSelectId = `inventory-audit-row-location-${index}`;
+    rowLocationScripts.push(`syncLocationOptions("${warehouseSelectId}", "${locationSelectId}", ${JSON.stringify(locationMap)}, ${JSON.stringify(row.location || "")});`);
+    return `<tr>
+      <td>${esc(row.item_code)}</td>
+      <td>${esc(row.description)}</td>
+      <td>${esc(row.size_1 || "")}</td>
+      <td>${esc(row.size_2 || "")}</td>
+      <td>${esc(row.thk_1 || "")}</td>
+      <td>${esc(row.thk_2 || "")}</td>
+      <td>
+        <select id="${warehouseSelectId}" name="warehouse_${index}" tabindex="-1" onchange='syncLocationOptions("${warehouseSelectId}", "${locationSelectId}", ${escAttr(JSON.stringify(locationMap))})'>${rowWarehouseOptionsHtml.replace(`value="${esc(row.warehouse)}"`, `value="${esc(row.warehouse)}" selected`)}</select>
+      </td>
+      <td>
+        <select id="${locationSelectId}" name="location_${index}" tabindex="-1" data-placeholder="Select location"><option value="">Select location</option></select>
+      </td>
+      <td>${esc(formatQtyDisplay(row.qty_on_hand))}</td>
+      <td>
+        <input type="hidden" name="key_${index}" value="${esc(key)}" />
+        <input name="actual_qty_${index}" value="" placeholder="Actual qty" style="min-width:110px;" inputmode="decimal" enterkeyhint="next" autocapitalize="off" autocomplete="off" data-qty-input="true" />
+      </td>
+    </tr>`;
+  }).join("");
+  res.send(layout("Inventory Audit", `
+    <h1>New Inventory Audit</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/inventory-audit">Back To Audit Reports</a>
+      </div>
+    </div>
+    <div class="card">
+      <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">
+        <form method="get" action="/inventory-audit/new" class="stack">
+          <label>Warehouse</label>
+          <select id="inventory-audit-warehouse" name="warehouse_filter" onchange='syncLocationOptions("inventory-audit-warehouse", "inventory-audit-location", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(locationFilter)}")'>${warehouseOptionsHtml}</select>
+          <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <div class="actions">
+            <button type="submit">Apply Warehouse</button>
+            <a class="btn btn-secondary" href="/inventory-audit/new?${getInventoryAuditQueryString({ location_filter: locationFilter, ident_filter: identFilter })}">Clear Warehouse</a>
+          </div>
+        </form>
+        <form method="get" action="/inventory-audit/new" class="stack">
+          <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <label>Location</label>
+          <select id="inventory-audit-location" name="location_filter" data-placeholder="All locations"><option value="">All locations</option></select>
+          <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <div class="actions">
+            <button type="submit">Apply Location</button>
+            <a class="btn btn-secondary" href="/inventory-audit/new?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, ident_filter: identFilter })}">Clear Location</a>
+          </div>
+        </form>
+        <form method="get" action="/inventory-audit/new" class="stack">
+          <label>Ident Or Description</label>
+          <input name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+          <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <div class="actions">
+            <button type="submit">Apply Filter</button>
+            <a class="btn btn-secondary" href="/inventory-audit/new?${getInventoryAuditQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter })}">Clear Filter</a>
+          </div>
+        </form>
+      </div>
+    </div>
+    <form method="post" action="/inventory-audit/commit" class="stack" id="inventory-audit-commit-form">
+      <input type="hidden" name="row_count" value="${rows.length}" />
+      <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+      <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+      <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+      <div class="card">
+        <div class="actions">
+          <button type="submit">Save Audit</button>
+        </div>
+        <p class="muted" style="margin:8px 0 0 0;">Enter only the rows you counted. You can also change warehouse and location before saving. Saving creates one audit report and applies all entered quantity adjustments together.</p>
+      </div>
+      <div class="card scroll">
+        <table>
+          <tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Warehouse</th><th>Location</th><th>Qty On Hand</th><th>Actual On-Hand Qty</th></tr>
+          ${tableRows || `<tr><td colspan="10" class="muted">No inventory rows found for the current filters.</td></tr>`}
+        </table>
+      </div>
+      ${rows.length ? `<div class="card"><div class="actions"><button type="submit">Save Audit</button></div></div>` : ""}
+    </form>
+    <script>
+      syncLocationOptions("inventory-audit-warehouse", "inventory-audit-location", ${JSON.stringify(locationMap)}, ${JSON.stringify(locationFilter)});
+      ${rowLocationScripts.join("\n      ")}
+      (function () {
+        const commitForm = document.getElementById("inventory-audit-commit-form");
+        const qtyInputs = Array.from(document.querySelectorAll('input[data-qty-input="true"]'));
+        if (!commitForm || !qtyInputs.length) return;
+        function focusNextQty(currentInput) {
+          const currentIndex = qtyInputs.indexOf(currentInput);
+          if (currentIndex >= 0 && currentIndex < qtyInputs.length - 1) {
+            const nextInput = qtyInputs[currentIndex + 1];
+            nextInput.focus();
+            nextInput.select();
+          }
+        }
+        commitForm.addEventListener("keydown", function (event) {
+          const target = event.target;
+          if (!target || event.key !== "Enter") return;
+          if (target.matches('button[type="submit"], input[type="submit"]')) return;
+          if (target.matches('input[data-qty-input="true"]')) {
+            event.preventDefault();
+            focusNextQty(target);
+            return;
+          }
+          event.preventDefault();
+        });
+        qtyInputs.forEach((input) => {
+          input.addEventListener("focus", function () {
+            input.select();
+          });
+        });
+      }());
+    </script>
+  `, req.user));
+}));
 
-  const receivingRows = receiving.rows.map((row) => `<tr>
-    <td>${esc(row.legacy_row_id || row.id)}</td>
-    <td>${esc(row.discipline)}</td>
-    <td>${esc(row.vendor_name)}</td>
-    <td>${esc(row.po_number)}</td>
+app.post("/inventory-audit/commit", requireAuth, requireJobContext, requireInventoryAuditEdit, asyncHandler(async (req, res) => {
+  const rowCount = Math.max(0, num(req.body.row_count, 0));
+  const desiredRows = new Map();
+  for (let index = 0; index < rowCount; index += 1) {
+    const rawActualQty = String(req.body[`actual_qty_${index}`] || "").trim();
+    if (!rawActualQty) continue;
+    const key = String(req.body[`key_${index}`] || "").trim();
+    if (!key) continue;
+    let decoded;
+    try {
+      decoded = JSON.parse(Buffer.from(key, "base64url").toString("utf8"));
+    } catch {
+      throw new Error("Invalid inventory audit row.");
+    }
+    const actualQty = parseQtyValue(rawActualQty);
+    if (!Number.isFinite(actualQty) || actualQty < 0) throw new Error("Actual on-hand qty must be zero or greater.");
+    const normalizedNames = normalizeWarehouseLocationValues(req.body[`warehouse_${index}`] || decoded.warehouse || "", req.body[`location_${index}`] || decoded.location || "");
+    const targetWarehouse = normalizedNames.warehouse;
+    const targetLocation = normalizedNames.location;
+    if (!targetWarehouse || !targetLocation) throw new Error("Choose a warehouse and location for each counted audit row.");
+    const sourceRow = {
+      item_code: String(decoded.item_code || ""),
+      description: String(decoded.description || ""),
+      size_1: String(decoded.size_1 || ""),
+      size_2: String(decoded.size_2 || ""),
+      thk_1: String(decoded.thk_1 || ""),
+      thk_2: String(decoded.thk_2 || ""),
+      warehouse: String(decoded.warehouse || ""),
+      location: String(decoded.location || "")
+    };
+    const targetRow = { ...sourceRow, warehouse: targetWarehouse, location: targetLocation };
+    if (buildInventoryEntryKey(sourceRow) !== buildInventoryEntryKey(targetRow)) {
+      setDesiredInventoryRow(desiredRows, sourceRow, 0);
+    }
+    setDesiredInventoryRow(desiredRows, targetRow, actualQty);
+  }
+  if (desiredRows.size === 0) throw new Error("Enter at least one actual on-hand qty before saving the audit.");
+  let createdReportNo = "";
+  await withTransaction(async (client) => {
+    const result = await saveInventoryAuditReport(client, {
+      userId: req.user.id || null,
+      jobId: currentJobId(req),
+      warehouseFilter: String(req.body.warehouse_filter || ""),
+      locationFilter: String(req.body.location_filter || ""),
+      identFilter: String(req.body.ident_filter || ""),
+      desiredRows: Array.from(desiredRows.values())
+    });
+    createdReportNo = result.reportNo;
+  });
+  res.redirect(`/inventory-audit?created_report_no=${encodeURIComponent(createdReportNo)}`);
+}));
+
+app.post("/inventory-audit/import", requireAuth, requireJobContext, requireInventoryAuditEdit, upload.single("sheet"), asyncHandler(async (req, res) => {
+  if (!req.file?.buffer) throw new Error("Choose an inventory workbook to import.");
+  const importedRows = importInventoryTrueUpRows(req.file.buffer);
+  if (!importedRows.length) throw new Error("No inventory rows were found in the workbook.");
+  let createdReportNo = "";
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+      const currentRows = await getCurrentOnHandRows(client, { jobId });
+      const desiredRows = new Map();
+    for (const currentRow of currentRows) {
+      setDesiredInventoryRow(desiredRows, {
+        item_code: currentRow.item_code,
+        description: currentRow.description,
+        size_1: currentRow.size_1,
+        size_2: currentRow.size_2,
+        thk_1: currentRow.thk_1,
+        thk_2: currentRow.thk_2,
+        warehouse: currentRow.warehouse,
+        location: currentRow.location
+      }, 0);
+    }
+    let importedCount = 0;
+    for (const row of importedRows) {
+      if (!row.item_code || !row.warehouse || !row.location) continue;
+      if (!Number.isFinite(row.actual_qty) || row.actual_qty < 0) continue;
+      addDesiredInventoryRow(desiredRows, row, row.actual_qty);
+      importedCount += 1;
+    }
+    if (importedCount === 0) throw new Error("The workbook did not contain any usable inventory rows.");
+    const ensuredPairs = new Set();
+    for (const desiredRow of desiredRows.values()) {
+      const warehouse = String(desiredRow.warehouse || "").trim();
+      const location = String(desiredRow.location || "").trim();
+      if (!warehouse || !location) continue;
+      const pairKey = `${warehouse.toLowerCase()}|${location.toLowerCase()}`;
+      if (ensuredPairs.has(pairKey)) continue;
+      await ensureWarehouseLocationExists(client, warehouse, location, jobId);
+      ensuredPairs.add(pairKey);
+    }
+    const result = await saveInventoryAuditReport(client, {
+      userId: req.user.id || null,
+      jobId,
+      identFilter: `FULL RESET IMPORT | ${req.file.originalname || "inventory workbook"}`,
+      desiredRows: Array.from(desiredRows.values())
+    });
+    createdReportNo = result.reportNo;
+    await auditLog(client, req.user.id, "import", "inventory_audit_reports", result.reportId, `${req.file.originalname || "inventory workbook"}|rows=${importedCount}`);
+  });
+  res.redirect(`/inventory-audit?created_report_no=${encodeURIComponent(createdReportNo)}`);
+}));
+
+app.get("/inventory-audit/reports/:id", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const report = (await query(`
+    select r.*, u.username as created_by_name
+    from inventory_audit_reports r
+    left join users u on u.id = r.created_by
+    where r.id = $1 and r.job_id = $2
+  `, [req.params.id, jobId])).rows[0];
+  if (!report) throw new Error("Inventory audit report not found.");
+  const lines = (await query(`
+    select *
+    from inventory_audit_report_lines
+    where report_id = $1 and job_id = $2
+    order by id
+  `, [req.params.id, jobId])).rows;
+  const lineRows = lines.map((row) => `<tr>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
-    <td>${esc(row.received_qty)}</td>
-    <td>${esc(row.qty_unit)}</td>
-    <td>${esc(row.mrr_number)}</td>
-    <td>${esc(row.fmr_number)}</td>
-    <td>${esc(row.warehouse)}</td>
-    <td>${esc(row.location)}</td>
-    <td>${esc(row.recv_date)}</td>
-    <td><a class="btn btn-secondary" href="/material-logs/receiving/${row.id}/edit">Edit</a></td>
+    <td>${esc(row.size_1 || "")}</td>
+    <td>${esc(row.size_2 || "")}</td>
+    <td>${esc(row.thk_1 || "")}</td>
+    <td>${esc(row.thk_2 || "")}</td>
+    <td>${esc(row.warehouse || "")}</td>
+    <td>${esc(row.location || "")}</td>
+    <td>${esc(formatQtyDisplay(row.book_qty))}</td>
+    <td>${esc(formatQtyDisplay(row.actual_qty))}</td>
+    <td>${esc(formatQtyDisplay(row.adjustment_qty))}</td>
   </tr>`).join("");
-  const mrrRows = mrrs.rows.map((row) => `<tr>
+  res.send(layout(`Inventory Audit ${report.report_no}`, `
+    <h1>${esc(report.report_no)}</h1>
+    <div class="card">
+      <div class="stats">
+        <div class="stat"><div>Created</div><strong>${esc(formatShortDateTime(report.created_at))}</strong></div>
+        <div class="stat"><div>Created By</div><strong>${esc(report.created_by_name || "")}</strong></div>
+        <div class="stat"><div>Warehouse Filter</div><strong>${esc(report.warehouse_filter || "All")}</strong></div>
+        <div class="stat"><div>Location Filter</div><strong>${esc(report.location_filter || "All")}</strong></div>
+        <div class="stat"><div>Ident Filter</div><strong>${esc(report.ident_filter || "All")}</strong></div>
+      </div>
+      <div class="actions" style="margin-top:12px;"><a class="btn btn-secondary" href="/inventory-audit">Back To Inventory Audit</a></div>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Warehouse</th><th>Location</th><th>Book Qty</th><th>Actual Qty</th><th>Adjustment</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No report lines found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+}));
+
+app.get("/material-logs", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
+  res.send(layout("Material Logs", `
+    <h1>Material Logs</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-primary" href="/material-logs/mrr">MRR Log</a>
+        <a class="btn btn-primary" href="/material-logs/fmr">Vendor FMR Log</a>
+        <a class="btn btn-primary" href="/material-logs/opi">OPI Log</a>
+        <a class="btn btn-primary" href="/material-logs/issue-report">Issue Report</a>
+        ${canViewMaterialPurchaseReport(req.user) ? `<a class="btn btn-primary" href="/material-logs/purchase-report">Material Purchase Report</a>` : ""}
+      </div>
+    </div>
+  `, req.user));
+});
+
+app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const q = String(req.query.q || "").trim();
+  const imported = Number.parseInt(String(req.query.imported || ""), 10);
+  const skipped = Number.parseInt(String(req.query.skipped || ""), 10);
+  const rows = (await query(`
+    select m.id, m.discipline, m.mrr_number, m.vendor_name, coalesce(po.po_no, m.po_number) as po_number,
+           m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number
+    from mrr_logs m
+    left join purchase_orders po on po.id = m.app_po_id
+    where m.job_id = $1
+      ${q ? "and (coalesce(m.mrr_number, '') ilike $2 or coalesce(m.vendor_name, '') ilike $2 or coalesce(po.po_no, m.po_number, '') ilike $2 or coalesce(m.material_description, '') ilike $2 or coalesce(m.received_by, '') ilike $2)" : ""}
+    order by m.id desc
+    limit 200
+  `, q ? [jobId, `%${q}%`] : [jobId])).rows;
+  const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.mrr_number)}</td>
     <td>${esc(row.discipline)}</td>
     <td>${esc(row.vendor_name)}</td>
     <td>${esc(row.po_number)}</td>
     <td>${esc(row.pick_ticket)}</td>
     <td>${esc(row.material_description)}</td>
-    <td>${esc(row.received_date)}</td>
+    <td>${esc(formatShortDateTime(row.received_date))}</td>
     <td>${esc(row.received_by)}</td>
     <td>${esc(row.load_number)}</td>
     <td>${esc(row.opi_number)}</td>
-    <td><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a></td>
+    <td><div class="actions"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
   </tr>`).join("");
-  const fmrRows = fmrs.rows.map((row) => `<tr>
+  res.send(layout("MRR Log", `
+    <h1>MRR Log</h1>
+    ${Number.isFinite(imported) && imported >= 0 ? `
+      <div class="card success">
+        Imported ${esc(imported)} MRR row${imported === 1 ? "" : "s"}${Number.isFinite(skipped) && skipped > 0 ? ` and skipped ${esc(skipped)} row${skipped === 1 ? "" : "s"} with no MRR number.` : ""}.
+      </div>
+    ` : ""}
+    <div class="card">
+      <form method="get" action="/material-logs/mrr" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto auto;">
+          <div><label>Filter MRR Log</label><input name="q" value="${esc(q)}" placeholder="MRR, vendor, PO, description, received by" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+          <div style="align-self:end;"><a class="btn btn-primary" href="/material-logs/mrr/new">Add New MRR</a></div>
+        </div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Action</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No MRR rows found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.get("/material-logs/mrr/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const [disciplines, vendors, pos, receivers, nextMrrNumber, appPos] = await Promise.all([
+    getMaterialLogLookupOptions("discipline", jobId),
+    getMaterialLogLookupOptions("vendor_name", jobId),
+    getMaterialLogLookupOptions("po_number", jobId),
+    getMaterialLogLookupOptions("received_by", jobId),
+    getNextMrrNumber(null, jobId),
+    getAppPurchaseOrderOptions(jobId)
+  ]);
+  const optionList = (values, placeholder) => [`<option value="">${esc(placeholder)}</option>`]
+    .concat(values.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`))
+    .join("");
+  const appPoOptions = [`<option value="">Select app PO</option>`]
+    .concat(appPos.map((po) => `<option value="${po.id}">${esc(po.po_no)}${po.vendor_name ? ` | ${esc(po.vendor_name)}` : ""}${po.description ? ` | ${esc(po.description)}` : ""}</option>`))
+    .join("");
+  res.send(layout("Add MRR", `
+    <h1>Add MRR</h1>
+    <div class="card">
+      <form method="post" action="/material-logs/mrr/add" class="stack">
+        <div class="grid">
+          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly /></div>
+          <div><label>Discipline</label><select name="discipline">${optionList(disciplines, "Select discipline")}</select></div>
+          <div><label>Vendor</label><div class="inline-field"><select name="vendor_name">${optionList(vendors, "Select vendor")}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
+          <div><label>App PO</label><div class="inline-field"><select name="app_po_id">${appPoOptions}</select><a class="btn btn-secondary" href="/po/new">Add PO</a></div></div>
+          <div><label>Legacy PO Number</label><select name="po_number">${optionList(pos, "Select legacy PO")}</select></div>
+          <div><label>Pick Ticket</label><input name="pick_ticket" /></div>
+          <div><label>Received Date</label><input type="date" name="received_date" /></div>
+          <div><label>Received By</label><div class="inline-field"><select name="received_by">${optionList(receivers, "Select received by")}</select><a class="btn btn-secondary" href="/material-logs/received-by/new">Add Person</a></div></div>
+          <div><label>Load #</label><input name="load_number" /></div>
+          <div><label>OPI #</label><input name="opi_number" /></div>
+          <div><label>OPI Date</label><input type="date" name="opi_date" /></div>
+        </div>
+        <div><label>Material Description</label><textarea name="material_description"></textarea></div>
+        <div><label>Notes</label><textarea name="notes"></textarea></div>
+        <div class="actions"><button type="submit">Add MRR</button><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+});
+
+app.get("/material-logs/fmr", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const q = String(req.query.q || "").trim();
+  const createdCount = Number(req.query.created || 0);
+  const createdLineCount = Number(req.query.lines || 0);
+  const skippedCount = Number(req.query.skipped || 0);
+  const rows = (await query(`
+    select id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, mrr_number, request_date, need_date, pickup_location, pickup_date
+    from fmr_logs
+    where job_id = $1
+    ${q ? "and (coalesce(fmr_number, '') ilike $2 or coalesce(vendor_name, '') ilike $2 or coalesce(container_no, '') ilike $2 or coalesce(fluor_id, '') ilike $2 or coalesce(mrr_number, '') ilike $2)" : ""}
+    order by id desc
+    limit 200
+  `, q ? [jobId, `%${q}%`] : [jobId])).rows;
+  const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.fmr_number)}</td>
     <td>${esc(row.vendor_name)}</td>
     <td>${esc(row.container_no)}</td>
     <td>${esc(row.fluor_id)}</td>
     <td>${esc(row.fluor_desc)}</td>
     <td>${esc(row.mrr_number)}</td>
-    <td>${esc(row.request_date)}</td>
-    <td>${esc(row.need_date)}</td>
+    <td>${esc(formatShortDateTime(row.request_date))}</td>
+    <td>${esc(formatShortDateTime(row.need_date))}</td>
     <td>${esc(row.pickup_location)}</td>
-    <td>${esc(row.pickup_date)}</td>
+    <td>${esc(formatShortDateTime(row.pickup_date))}</td>
     <td><a class="btn btn-secondary" href="/material-logs/fmr/${row.id}/edit">Edit</a></td>
-  </tr>`).join("");
+    </tr>`).join("");
+    res.send(layout("Vendor FMR Log", `
+      <h1>Vendor FMR Log</h1>
+    ${createdCount > 0 || createdLineCount > 0 || skippedCount > 0 ? `<div class="card"><strong>Vendor FMR Generation:</strong> Created ${createdCount} FMR${createdCount === 1 ? "" : "s"} | ${createdLineCount} Line${createdLineCount === 1 ? "" : "s"} | Skipped ${skippedCount}</div>` : ""}
+      <div class="card">
+        <form method="get" action="/material-logs/fmr" class="stack">
+          <div class="grid" style="grid-template-columns: 1fr auto auto auto;">
+            <div><label>Filter Vendor FMR Log</label><input name="q" value="${esc(q)}" placeholder="FMR, vendor, container, fluor ID, MRR" /></div>
+            <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+            <div style="align-self:end;"><a class="btn btn-secondary" href="/material-logs/fmr/request-lines">Build Vendor FMRs</a></div>
+            <div style="align-self:end;"><a class="btn btn-primary" href="/material-logs/fmr/new">Add Vendor FMR</a></div>
+          </div>
+        </form>
+      </div>
+      <div class="card scroll">
+          <table><tr><th>FMR #</th><th>Vendor</th><th>Container</th><th>Fluor ID</th><th>Fluor Description</th><th>MRR #</th><th>Request Date</th><th>Need Date</th><th>Pickup Location</th><th>Pickup Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No vendor FMR rows found.</td></tr>`}</table>
+      </div>
+    `, req.user));
+  });
 
-  res.send(layout("Material Logs", `
-    <h1>Material Logs</h1>
+app.get("/material-logs/fmr/request-lines", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const poNumber = String(req.query.po_number || "").trim();
+  const itemCode = String(req.query.item_code || "").trim();
+  const abbrevDescription = String(req.query.abbrev_description || "").trim();
+  const currentCrateNumber = String(req.query.current_crate_number || "").trim() || itemCode || abbrevDescription;
+  const showRequested = String(req.query.show_requested || "").trim() === "1";
+  const params = [jobId];
+  const where = [];
+  if (poNumber) {
+    params.push(`%${poNumber}%`);
+    where.push(`coalesce(vl.po_number, '') ilike $${params.length}`);
+  }
+  if (itemCode) {
+    params.push(`%${itemCode}%`);
+    where.push(`coalesce(vl.item_code, '') ilike $${params.length}`);
+  }
+  if (abbrevDescription) {
+    params.push(`%${abbrevDescription}%`);
+    where.push(`coalesce(vl.abbrev_description, '') ilike $${params.length}`);
+  }
+  if (!showRequested) {
+    where.push(`not (
+      trim(coalesce(vl.crate_number, '')) <> ''
+      and exists (
+        select 1
+        from fmr_logs f
+        where f.job_id = $1
+          and lower(trim(coalesce(f.vendor_name, ''))) = lower(trim(coalesce(vl.vendor_name, '')))
+          and lower(trim(coalesce(f.container_no, ''))) = lower(trim(coalesce(vl.crate_number, '')))
+      )
+    )`);
+  }
+  const stagedRows = (await query(`
+    select *
+    from vendor_fmr_request_lines
+    where selected_for_request = true
+      and job_id = $1
+    order by updated_at desc, id desc
+    limit 100
+  `, [jobId])).rows;
+  const stagedCount = stagedRows.length;
+  const rows = (await query(`
+    select
+      vl.*,
+      exists (
+        select 1
+        from fmr_logs f
+        where f.job_id = $1
+          and trim(coalesce(vl.crate_number, '')) <> ''
+          and lower(trim(coalesce(f.vendor_name, ''))) = lower(trim(coalesce(vl.vendor_name, '')))
+          and lower(trim(coalesce(f.container_no, ''))) = lower(trim(coalesce(vl.crate_number, '')))
+      ) as already_requested
+    from vendor_fmr_request_lines vl
+    where vl.job_id = $1
+      ${where.length ? `and ${where.join(" and ")}` : ""}
+    order by coalesce(vl.po_number, ''), coalesce(vl.item_code, ''), coalesce(vl.abbrev_description, ''), vl.id
+    limit 300
+  `, params)).rows;
+  const stagedMarkup = stagedRows.map((row) => `<tr>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.abbrev_description)}</td>
+    <td>${esc(row.crate_number || "")}</td>
+    <td>${esc(row.srn_number || "")}</td>
+    <td>
+      <form method="post" action="/material-logs/fmr/request-lines/staged/${row.id}/delete">
+        <input type="hidden" name="po_number" value="${esc(poNumber)}" />
+        <input type="hidden" name="item_code" value="${esc(itemCode)}" />
+        <input type="hidden" name="abbrev_description" value="${esc(abbrevDescription)}" />
+        <input type="hidden" name="show_requested" value="${showRequested ? "1" : "0"}" />
+        <input type="hidden" name="current_crate_number" value="${esc(currentCrateNumber)}" />
+        <button type="submit" class="btn btn-secondary">Remove</button>
+      </form>
+    </td>
+  </tr>`).join("");
+  const rowMarkup = rows.map((row) => `<tr>
+    <td>${row.already_requested ? `<span class="chip">Requested</span>` : `<input type="checkbox" class="vendor-fmr-pick" data-row-id="${row.id}" name="selected_ids" value="${row.id}" ${row.selected_for_request ? "checked" : ""} />`}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.abbrev_description)}</td>
+    <td><input class="vendor-fmr-crate-input" data-row-id="${row.id}" name="crate_number_${row.id}" value="${esc(row.crate_number || "")}" placeholder="Enter crate #" /></td>
+    <td><input name="srn_number_${row.id}" value="${esc(row.srn_number || "")}" placeholder="Optional SRN" /></td>
+    <td>${esc(row.po_line || "")}</td>
+    <td>${esc(row.sub_line || "")}</td>
+    <td>${esc(formatQtyDisplay(row.qty_received))}</td>
+    <td>${esc(row.mrr_number || "")}</td>
+    <td>${esc(formatShortDateTime(row.received_date || ""))}</td>
+  </tr>`).join("");
+  res.send(layout("Build Vendor FMRs", `
+    <h1>Build Vendor FMRs</h1>
     <div class="card">
-      <form method="get" action="/material-logs" class="stack">
-        <div class="grid">
-          <div><label>Search Across Receiving, MRR, and FMR</label><input name="q" value="${esc(q)}" placeholder="PO, MRR, FMR, vendor, item, container..." /></div>
+      <form method="post" enctype="multipart/form-data" action="/material-logs/fmr/request-lines/import" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto auto;">
+          <div><label>PO Receiving Status Report</label><input type="file" name="sheet" accept=".xlsx,.xls,.xlsb" required /></div>
+          <div style="align-self:end;"><button type="submit">Import PO Status Report</button></div>
+          <div style="align-self:end;"><a class="btn btn-secondary" href="/material-logs/fmr">Back To Vendor FMR Log</a></div>
         </div>
-        <div class="actions"><button type="submit">Search</button><a class="btn btn-secondary" href="/material-logs">Clear</a></div>
+        <div class="muted">Imports columns from the vendor PO receiving status report and only adds new line items based on PO + Item Code + Abbrev Description.</div>
       </form>
     </div>
     <div class="card">
-      <h3>Import Existing Workbook Data</h3>
-      <p class="muted">Upload one of your current workbook files to refresh this log in the app.</p>
-      <form method="post" enctype="multipart/form-data" action="/material-logs/import" class="stack">
-        <div class="grid">
-          <div><label>Log Type</label><select name="log_type"><option value="receiving">Material Receiving</option><option value="mrr">MRR Log</option><option value="fmr">FMR Log</option></select></div>
-          <div><label>Workbook File</label><input type="file" name="sheet" required /></div>
+      <form method="get" action="/material-logs/fmr/request-lines" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr 1fr 1fr 1fr auto auto;">
+          <div><label>PO</label><input name="po_number" value="${esc(poNumber)}" /></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(itemCode)}" /></div>
+          <div><label>Abbrev Description</label><input name="abbrev_description" value="${esc(abbrevDescription)}" /></div>
+          <div><label>Current Crate #</label><input id="current_crate_number_display" name="current_crate_number" value="${esc(currentCrateNumber)}" placeholder="Use this crate # for checked rows" /></div>
+          <div><label>Show Requested</label><select name="show_requested"><option value="0" ${showRequested ? "" : "selected"}>No</option><option value="1" ${showRequested ? "selected" : ""}>Yes</option></select></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
         </div>
-        <div class="actions"><button type="submit">Import Workbook</button></div>
       </form>
     </div>
-    <div class="grid">
-      <div class="card">
-        <h3>Add Material Receiving Line</h3>
-        <form method="post" action="/material-logs/receiving/add" class="stack">
-          <div class="grid">
-            <div><label>Legacy ID</label><input name="legacy_row_id" /></div>
-            <div><label>Discipline</label><input name="discipline" /></div>
-            <div><label>Vendor</label><input name="vendor_name" /></div>
-            <div><label>PO</label><input name="po_number" /></div>
-            <div><label>Item Code</label><input name="item_code" /></div>
-            <div><label>Description</label><input name="description" /></div>
-            <div><label>Received Qty</label><input name="received_qty" /></div>
-            <div><label>Qty Unit</label><input name="qty_unit" /></div>
-            <div><label>MRR Number</label><input name="mrr_number" /></div>
-            <div><label>FMR Number</label><input name="fmr_number" /></div>
-            <div><label>Warehouse</label><input name="warehouse" /></div>
-            <div><label>Location</label><input name="location" /></div>
-          </div>
-          <div><label>Received Date</label><input name="recv_date" /></div>
-          <div class="actions"><button type="submit">Add Receiving Line</button></div>
-        </form>
-      </div>
-      <div class="card">
-        <h3>Add MRR Header</h3>
-        <form method="post" action="/material-logs/mrr/add" class="stack">
-          <div class="grid">
-            <div><label>MRR Number</label><input name="mrr_number" required /></div>
-            <div><label>Discipline</label><input name="discipline" /></div>
-            <div><label>Vendor</label><input name="vendor_name" /></div>
-            <div><label>PO</label><input name="po_number" /></div>
-            <div><label>Pick Ticket</label><input name="pick_ticket" /></div>
-            <div><label>Received Date</label><input name="received_date" /></div>
-            <div><label>Received By</label><input name="received_by" /></div>
-            <div><label>Load #</label><input name="load_number" /></div>
-            <div><label>OPI #</label><input name="opi_number" /></div>
-            <div><label>OPI Date</label><input name="opi_date" /></div>
-          </div>
-          <div><label>Material Description</label><textarea name="material_description"></textarea></div>
-          <div><label>Notes</label><textarea name="notes"></textarea></div>
-          <div class="actions"><button type="submit">Add MRR</button></div>
-        </form>
-      </div>
-    </div>
     <div class="card">
-      <h3>Add FMR Entry</h3>
-      <form method="post" action="/material-logs/fmr/add" class="stack">
-        <div class="grid">
-          <div><label>FMR Number</label><input name="fmr_number" required /></div>
-          <div><label>Vendor</label><input name="vendor_name" /></div>
-          <div><label>Container #</label><input name="container_no" /></div>
-          <div><label>Fluor ID</label><input name="fluor_id" /></div>
-          <div><label>MRR #</label><input name="mrr_number" /></div>
+      <div class="muted">Work one crate at a time here. Type the current crate number once, check the matching lines, and the app will fill that crate number into each checked row. Save as many staged crates as you need, then click Generate Vendor FMRs once to create all staged requests.</div>
+      <div class="muted" style="margin-top:8px;">Staged lines ready to generate: <strong>${stagedCount}</strong></div>
+    </div>
+    <div class="card scroll">
+      <h2 style="margin-top:0;">Currently Staged</h2>
+      <table><tr><th>Vendor</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Crate #</th><th>SRN</th><th>Action</th></tr>${stagedMarkup || `<tr><td colspan="7" class="muted">No lines are staged yet.</td></tr>`}</table>
+    </div>
+    <form method="post" action="/material-logs/fmr/request-lines/bulk" class="stack">
+      <input type="hidden" name="po_number" value="${esc(poNumber)}" />
+      <input type="hidden" name="item_code" value="${esc(itemCode)}" />
+      <input type="hidden" name="abbrev_description" value="${esc(abbrevDescription)}" />
+      <input type="hidden" name="show_requested" value="${showRequested ? "1" : "0"}" />
+      <input id="current_crate_number" type="hidden" name="current_crate_number" value="${esc(currentCrateNumber)}" />
+      <div class="actions">
+        <button type="submit" name="action" value="save">Save Crate / SRN</button>
+        <button type="submit" name="action" value="generate">Generate Vendor FMRs</button>
+      </div>
+      <div class="card scroll">
+        <table><tr><th>Pick</th><th>Vendor</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Crate #</th><th>SRN</th><th>Line</th><th>Sub</th><th>Rcvd</th><th>MRR #</th><th>Date Rcvd</th></tr>${rowMarkup || `<tr><td colspan="12" class="muted">No request lines found.</td></tr>`}</table>
+      </div>
+    </form>
+    <script>
+      (() => {
+        const crateSource = document.getElementById("current_crate_number_display");
+        const crateHidden = document.getElementById("current_crate_number");
+        if (!crateSource || !crateHidden) return;
+        const applyCrateToCheckedRows = () => {
+          const crateValue = crateSource.value.trim();
+          crateHidden.value = crateValue;
+          if (!crateValue) return;
+          document.querySelectorAll(".vendor-fmr-pick:checked").forEach((checkbox) => {
+            const crateInput = document.querySelector('.vendor-fmr-crate-input[data-row-id="' + checkbox.dataset.rowId + '"]');
+            if (crateInput) crateInput.value = crateValue;
+          });
+        };
+        document.querySelectorAll(".vendor-fmr-pick").forEach((checkbox) => {
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) applyCrateToCheckedRows();
+          });
+        });
+        crateSource.addEventListener("input", applyCrateToCheckedRows);
+        applyCrateToCheckedRows();
+      })();
+    </script>
+  `, req.user));
+}));
+
+app.post("/material-logs/fmr/request-lines/import", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  if (!req.file?.buffer?.length) throw new Error("Choose a PO receiving status report file to import.");
+  const rows = parseVendorFmrRequestWorkbook(req.file.buffer);
+  if (rows.length === 0) throw new Error("No matching line items were found in that report.");
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "vendor_fmr_request_lines",
+      rfqId: null,
+      jobId,
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || ""
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const rowNumber = index + 2;
+      const existing = (await client.query(`
+        select id
+        from vendor_fmr_request_lines
+        where job_id = $1 and po_number = $2 and item_code = $3 and abbrev_description = $4
+      `, [jobId, row.po_number, row.item_code, row.abbrev_description])).rows[0];
+      if (existing) {
+        await client.query(`
+          update vendor_fmr_request_lines
+          set vendor_name = $2,
+              po_line = $3,
+              sub_line = $4,
+              qty_ordered = $5,
+              qty_received = $6,
+              mrr_number = $7,
+              issued_date = $8,
+              received_date = $9,
+              source_filename = $10,
+              updated_at = now()
+          where id = $1
+        `, [existing.id, row.vendor_name, row.po_line, row.sub_line, parseQtyValue(row.qty_ordered), parseQtyValue(row.qty_received), row.mrr_number, row.issued_date, row.received_date, req.file?.originalname || ""]);
+        updatedCount += 1;
+      } else {
+        await client.query(`
+          insert into vendor_fmr_request_lines (
+            job_id, vendor_name, po_number, item_code, abbrev_description, po_line, sub_line,
+            qty_ordered, qty_received, mrr_number, issued_date, received_date, srn_number, crate_number, source_filename, updated_at
+          ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
+        `, [jobId, row.vendor_name, row.po_number, row.item_code, row.abbrev_description, row.po_line, row.sub_line, parseQtyValue(row.qty_ordered), parseQtyValue(row.qty_received), row.mrr_number, row.issued_date, row.received_date, row.srn_number || "", row.crate_number || "", req.file?.originalname || ""]);
+        insertedCount += 1;
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "vendor_fmr_request_lines", batchId, `rows=${rows.length}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+}));
+
+app.post("/material-logs/fmr/request-lines/staged/:id/delete", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) throw new Error("Invalid staged request line.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      update vendor_fmr_request_lines
+      set selected_for_request = false,
+          updated_at = now()
+      where id = $1 and job_id = $2
+    `, [id, jobId]);
+    await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", id, "unstaged");
+  });
+  res.redirect(`/material-logs/fmr/request-lines?${getVendorFmrRequestBuilderQuery(req.body)}`);
+}));
+
+app.post("/material-logs/fmr/request-lines/bulk", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const action = String(req.body.action || "save").trim();
+  const currentCrateNumber = String(req.body.current_crate_number || "").trim();
+  const fieldIds = Object.keys(req.body)
+    .map((key) => {
+      const match = key.match(/^(crate_number|srn_number)_(\d+)$/);
+      return match ? Number(match[2]) : null;
+    })
+    .filter((value, index, array) => Number.isFinite(value) && array.indexOf(value) === index);
+  const selectedIds = Array.isArray(req.body.selected_ids)
+    ? req.body.selected_ids.map((value) => Number(value)).filter(Number.isFinite)
+    : req.body.selected_ids
+      ? [Number(req.body.selected_ids)].filter(Number.isFinite)
+      : [];
+  const redirectQuery = getVendorFmrRequestBuilderQuery({
+    po_number: String(req.body.po_number || ""),
+    item_code: String(req.body.item_code || ""),
+    abbrev_description: String(req.body.abbrev_description || ""),
+    show_requested: String(req.body.show_requested || "0"),
+    current_crate_number: currentCrateNumber
+  });
+  await withTransaction(async (client) => {
+    const selectedIdSet = new Set(selectedIds);
+    for (const id of fieldIds) {
+      const savedCrateNumber = String(req.body[`crate_number_${id}`] || "").trim() || (selectedIdSet.has(id) ? currentCrateNumber : "");
+      await client.query(`
+        update vendor_fmr_request_lines
+        set crate_number = $2,
+            srn_number = $3,
+            selected_for_request = $4,
+            updated_at = now()
+        where id = $1 and job_id = $5
+      `, [id, savedCrateNumber, String(req.body[`srn_number_${id}`] || "").trim(), selectedIdSet.has(id), jobId]);
+    }
+    if (action !== "generate") {
+      await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", fieldIds.join(","), `count=${fieldIds.length}`);
+      return;
+    }
+    const preview = await buildVendorFmrPreviewData(client, jobId);
+    if (preview.stagedRows.length === 0) throw new Error("Save at least one staged line before generating Vendor FMRs.");
+  });
+  if (action === "generate") {
+    res.redirect(`/material-logs/fmr/request-lines/preview?${redirectQuery}`);
+    return;
+  }
+  res.redirect(`/material-logs/fmr/request-lines?${redirectQuery}`);
+}));
+
+app.get("/material-logs/fmr/request-lines/preview", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const queryString = getVendorFmrRequestBuilderQuery(req.query);
+  const preview = await withTransaction(async (client) => buildVendorFmrPreviewData(client, jobId));
+  if (preview.stagedRows.length === 0) {
+    res.redirect(`/material-logs/fmr/request-lines?${queryString}`);
+    return;
+  }
+  const previewMarkup = preview.previewRows.map((row) => `<tr>
+    <td>${esc(row.vendorName)}</td>
+    <td>${esc(row.crateNumber)}</td>
+    <td>${esc(row.srnNumber || "")}</td>
+    <td>${esc(row.poNumber)}</td>
+    <td>${esc(row.itemCode)}</td>
+    <td>${esc(row.abbrevDescription)}</td>
+    <td>${esc(row.stagedLineCount)}</td>
+    <td>
+      <form method="post" action="/material-logs/fmr/request-lines/preview/remove">
+        <input type="hidden" name="vendor_name" value="${esc(row.vendorName)}" />
+        <input type="hidden" name="crate_number" value="${esc(row.crateNumber)}" />
+        <input type="hidden" name="srn_number" value="${esc(row.srnNumber || "")}" />
+        <input type="hidden" name="po_number" value="${esc(String(req.query.po_number || ""))}" />
+        <input type="hidden" name="item_code" value="${esc(String(req.query.item_code || ""))}" />
+        <input type="hidden" name="abbrev_description" value="${esc(String(req.query.abbrev_description || ""))}" />
+        <input type="hidden" name="show_requested" value="${esc(String(req.query.show_requested || "0"))}" />
+        <input type="hidden" name="current_crate_number" value="${esc(String(req.query.current_crate_number || ""))}" />
+        <button type="submit" class="btn btn-secondary">Remove</button>
+      </form>
+    </td>
+  </tr>`).join("");
+  const skippedMarkup = preview.skippedRows.map((row) => `<tr>
+    <td>${esc(row.vendorName)}</td>
+    <td>${esc(row.crateNumber)}</td>
+    <td>${esc(row.srnNumber || "")}</td>
+    <td>${esc(row.poNumber)}</td>
+    <td>${esc(row.itemCode)}</td>
+    <td>${esc(row.abbrevDescription)}</td>
+    <td>Already on Vendor FMR Log</td>
+  </tr>`).join("");
+  const invalidMarkup = preview.invalidRows.map((row) => `<tr>
+    <td>${esc(row.vendorName)}</td>
+    <td>${esc(row.poNumber)}</td>
+    <td>${esc(row.itemCode)}</td>
+    <td>${esc(row.abbrevDescription)}</td>
+    <td>${esc(row.srnNumber || "")}</td>
+    <td>Missing crate #</td>
+  </tr>`).join("");
+  res.send(layout("Review Vendor FMRs", `
+    <h1>Review Vendor FMRs</h1>
+    <div class="card">
+      <div class="muted">This is the final review before new Vendor FMRs are created. Each row below represents one crate that will become one Vendor FMR line.</div>
+    </div>
+    ${preview.invalidRows.length ? `<div class="card scroll"><h2 style="margin-top:0;">Needs Attention</h2><table><tr><th>Vendor</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>SRN</th><th>Issue</th></tr>${invalidMarkup}</table></div>` : ""}
+    ${preview.skippedRows.length ? `<div class="card scroll"><h2 style="margin-top:0;">Already Requested</h2><table><tr><th>Vendor</th><th>Crate #</th><th>SRN</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Status</th></tr>${skippedMarkup}</table></div>` : ""}
+    <div class="card scroll">
+      <h2 style="margin-top:0;">Will Be Added</h2>
+      <table><tr><th>Vendor</th><th>Crate #</th><th>SRN</th><th>PO</th><th>Item Code</th><th>Abbrev Description</th><th>Staged Lines</th><th>Action</th></tr>${previewMarkup || `<tr><td colspan="8" class="muted">No new Vendor FMRs are queued right now.</td></tr>`}</table>
+    </div>
+    <div class="actions">
+      <a class="btn btn-secondary" href="/material-logs/fmr/request-lines?${queryString}">Back And Add More</a>
+      ${preview.invalidRows.length || preview.previewRows.length === 0 ? "" : `<form method="post" action="/material-logs/fmr/request-lines/preview/create" style="display:inline-block;">
+        <input type="hidden" name="po_number" value="${esc(String(req.query.po_number || ""))}" />
+        <input type="hidden" name="item_code" value="${esc(String(req.query.item_code || ""))}" />
+        <input type="hidden" name="abbrev_description" value="${esc(String(req.query.abbrev_description || ""))}" />
+        <input type="hidden" name="show_requested" value="${esc(String(req.query.show_requested || "0"))}" />
+        <input type="hidden" name="current_crate_number" value="${esc(String(req.query.current_crate_number || ""))}" />
+        <button type="submit">Confirm And Create Vendor FMRs</button>
+      </form>`}
+    </div>
+  `, req.user));
+}));
+
+app.post("/material-logs/fmr/request-lines/preview/remove", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const vendorName = String(req.body.vendor_name || "").trim();
+  const crateNumber = String(req.body.crate_number || "").trim();
+  const srnNumber = String(req.body.srn_number || "").trim();
+  if (!vendorName || !crateNumber) throw new Error("Invalid staged crate.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      update vendor_fmr_request_lines
+      set selected_for_request = false,
+          updated_at = now()
+      where selected_for_request = true
+        and job_id = $4
+        and lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))
+        and lower(trim(coalesce(crate_number, ''))) = lower(trim($2))
+        and lower(trim(coalesce(srn_number, ''))) = lower(trim($3))
+    `, [vendorName, crateNumber, srnNumber, jobId]);
+    await auditLog(client, req.user.id, "update", "vendor_fmr_request_lines", crateNumber, `preview-remove ${vendorName}`);
+  });
+  res.redirect(`/material-logs/fmr/request-lines/preview?${getVendorFmrRequestBuilderQuery(req.body)}`);
+}));
+
+app.post("/material-logs/fmr/request-lines/preview/create", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = normalizeJobIdValue(currentJobId(req));
+  if (!jobId) throw new Error("Select a valid current job before creating Vendor FMRs.");
+  await withTransaction(async (client) => {
+    const preview = await buildVendorFmrPreviewData(client, jobId);
+    if (preview.stagedRows.length === 0) throw new Error("There are no staged lines ready to create.");
+    if (preview.invalidRows.length > 0) throw new Error("Fix the staged lines that are missing crate numbers before creating Vendor FMRs.");
+    if (preview.previewGroups.length === 0) throw new Error("All staged crates have already been requested.");
+    let createdCount = 0;
+    let createdLineCount = 0;
+    for (const group of preview.previewGroups) {
+      const fmrNumber = await getNextFmrNumber(client, jobId);
+      createdCount += 1;
+      for (const { row, crateNumber, srnNumber } of group.crates) {
+        await ensureUniqueFmrContainer(client, row.vendor_name, crateNumber, null, jobId);
+        const requestDescription = [
+          row.po_number ? `PO ${row.po_number}` : "",
+          row.item_code || "",
+          row.abbrev_description || "",
+          srnNumber ? `SRN ${srnNumber}` : ""
+        ].filter(Boolean).join(" | ");
+        const insert = await client.query(`
+          insert into fmr_logs (
+            job_id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, request_date, updated_at
+          ) values ($1::bigint,$2,$3,$4,$5,$6,$7,$8, now())
+          returning id
+        `, [
+          jobId,
+          fmrNumber,
+          row.vendor_name || "",
+          crateNumber,
+          row.item_code || "",
+          row.abbrev_description || "",
+          requestDescription,
+          new Date().toISOString().slice(0, 10)
+        ]);
+        await ensureMrrForVendorCrate(client, {
+          jobId,
+          userId: req.user.id,
+          fmrId: insert.rows[0].id,
+          vendorName: row.vendor_name || "",
+          containerNo: crateNumber,
+          poNumber: row.po_number || ""
+        });
+        await auditLog(client, req.user.id, "create", "fmr_log", insert.rows[0].id, fmrNumber);
+        createdLineCount += 1;
+      }
+    }
+    await client.query(`
+      update vendor_fmr_request_lines
+      set selected_for_request = false,
+          updated_at = now()
+      where selected_for_request = true
+        and job_id = $1
+    `, [jobId]);
+    req._vendorFmrGenerateResult = {
+      createdCount,
+      createdLineCount,
+      skippedRequestedCount: preview.skippedRows.length
+    };
+  });
+  const createdCount = Number(req._vendorFmrGenerateResult?.createdCount || 0);
+  const createdLineCount = Number(req._vendorFmrGenerateResult?.createdLineCount || 0);
+  const skippedRequestedCount = Number(req._vendorFmrGenerateResult?.skippedRequestedCount || 0);
+  res.redirect(`/material-logs/fmr?created=${createdCount}&lines=${createdLineCount}&skipped=${skippedRequestedCount}`);
+}));
+
+app.get("/material-logs/opi", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    await syncOpiLogsFromMrr(client, jobId);
+  });
+  const q = String(req.query.q || "").trim();
+  const rows = (await query(`
+    select id, opi_number, vendor_name, material_description, load_number, mrr_number
+    from opi_logs
+    where job_id = $1
+    ${q ? "and (coalesce(opi_number, '') ilike $2 or coalesce(vendor_name, '') ilike $2 or coalesce(material_description, '') ilike $2 or coalesce(load_number, '') ilike $2 or coalesce(mrr_number, '') ilike $2)" : ""}
+    order by id desc
+    limit 300
+  `, q ? [jobId, `%${q}%`] : [jobId])).rows;
+  const tableRows = rows.map((row) => `<tr>
+    <td>${esc(row.opi_number)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.material_description)}</td>
+    <td>${esc(row.load_number)}</td>
+    <td>${esc(row.mrr_number)}</td>
+  </tr>`).join("");
+  res.send(layout("OPI Log", `
+    <h1>OPI Log</h1>
+    <div class="card">
+      <form method="get" action="/material-logs/opi" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto;">
+          <div><label>Filter OPI Log</label><input name="q" value="${esc(q)}" placeholder="OPI, vendor, description, load, MRR" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+        </div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>OPI #</th><th>Vendor</th><th>Description</th><th>Load #</th><th>MRR #</th></tr>${tableRows || `<tr><td colspan="5" class="muted">No OPI rows found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.get("/material-logs/fmr/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const [nextFmrNumber, vendors] = await Promise.all([
+    getNextFmrNumber(null, jobId),
+    query("select name from vendors where is_active = true order by name")
+  ]);
+  const vendorOptions = [`<option value="">Select vendor</option>`]
+    .concat(vendors.rows.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
+    .join("");
+  res.send(layout("Add Vendor FMR", `
+    <h1>Add Vendor FMR</h1>
+      <div class="card">
+        <form method="post" action="/material-logs/fmr/add" class="stack">
+          <div class="grid">
+            <div><label>FMR Number</label><input name="fmr_number" value="${esc(nextFmrNumber)}" readonly /></div>
+            <div><label>Vendor</label><div class="inline-field"><select name="vendor_name" required>${vendorOptions}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
+            <div><label>Container #</label><input name="container_no" required /></div>
+            <div><label>Fluor ID</label><input name="fluor_id" /></div>
+            <div><label>MRR #</label><input name="mrr_number" /></div>
           <div><label>Request Date</label><input name="request_date" /></div>
           <div><label>Need Date</label><input name="need_date" /></div>
           <div><label>Pick Ticket #</label><input name="pick_ticket" /></div>
@@ -1161,29 +13321,236 @@ app.get("/material-logs", requireAuth, async (req, res) => {
         </div>
         <div><label>Fluor Description</label><textarea name="fluor_desc"></textarea></div>
         <div><label>Request Description</label><textarea name="request_description"></textarea></div>
-        <div class="actions"><button type="submit">Add FMR</button></div>
+        <div class="actions"><button type="submit">Add Vendor FMR</button><a class="btn btn-secondary" href="/material-logs/fmr">Back</a></div>
       </form>
-    </div>
-    <div class="card scroll">
-      <h3>Material Receiving Log</h3>
-      <table><tr><th>ID</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Item</th><th>Description</th><th>Recv Qty</th><th>UOM</th><th>MRR</th><th>FMR</th><th>Warehouse</th><th>Location</th><th>Recv Date</th><th>Action</th></tr>${receivingRows || `<tr><td colspan="14" class="muted">No receiving lines yet.</td></tr>`}</table>
-    </div>
-    <div class="card scroll">
-      <h3>MRR Log</h3>
-      <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Action</th></tr>${mrrRows || `<tr><td colspan="11" class="muted">No MRR rows yet.</td></tr>`}</table>
-    </div>
-    <div class="card scroll">
-      <h3>FMR Log</h3>
-      <table><tr><th>FMR #</th><th>Vendor</th><th>Container</th><th>Fluor ID</th><th>Fluor Description</th><th>MRR #</th><th>Request Date</th><th>Need Date</th><th>Pickup Location</th><th>Pickup Date</th><th>Action</th></tr>${fmrRows || `<tr><td colspan="11" class="muted">No FMR rows yet.</td></tr>`}</table>
     </div>
   `, req.user));
 });
 
-app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "warehouse"]), upload.single("sheet"), async (req, res) => {
+app.get("/material-logs/received-by/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const values = await getMaterialLogLookupOptions("received_by", currentJobId(req));
+  const rows = values.map((value) => `<tr><td>${esc(value)}</td></tr>`).join("");
+  res.send(layout("Add Received By", `
+    <h1>Add Received By</h1>
+    <div class="card">
+      <form method="post" action="/material-logs/received-by/add" class="stack">
+        <div><label>Name</label><input name="value" required /></div>
+        <div class="actions"><button type="submit">Add Person</button><a class="btn btn-secondary" href="/material-logs/mrr/new">Back to Add MRR</a></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>Existing Names</th></tr>${rows || `<tr><td class="muted">No names saved yet.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.post("/material-logs/received-by/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  await withTransaction(async (client) => {
+    await saveMaterialLogLookup(client, "received_by", req.body.value, currentJobId(req));
+    await auditLog(client, req.user.id, "create", "material_log_lookup", "received_by", String(req.body.value || "").trim());
+  });
+  res.redirect("/material-logs/mrr/new");
+});
+
+app.get("/material-logs/issue-report", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const q = String(req.query.q || "").trim();
+  const params = q ? [jobId, `%${q}%`] : [jobId];
+  const rows = (await query(`
+    select id, legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date
+    from material_receiving_logs
+    where job_id = $1
+    ${q ? "and (coalesce(discipline, '') ilike $2 or coalesce(vendor_name, '') ilike $2 or coalesce(po_number, '') ilike $2 or coalesce(item_code, '') ilike $2 or coalesce(description, '') ilike $2 or coalesce(mrr_number, '') ilike $2 or coalesce(fmr_number, '') ilike $2)" : ""}
+    order by coalesce(legacy_row_id, id) desc
+    limit 200
+  `, params)).rows;
+  const tableRows = rows.map((row) => `<tr>
+    <td>${esc(row.legacy_row_id || row.id)}</td>
+    <td>${esc(row.discipline)}</td>
+    <td>${esc(row.vendor_name)}</td>
+    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(formatQtyDisplay(row.received_qty))}</td>
+    <td>${esc(row.qty_unit)}</td>
+    <td>${esc(row.mrr_number)}</td>
+    <td>${esc(row.fmr_number)}</td>
+    <td>${esc(row.warehouse)}</td>
+    <td>${esc(row.location)}</td>
+    <td>${esc(formatShortDateTime(row.recv_date))}</td>
+    <td><a class="btn btn-secondary" href="/material-logs/receiving/${row.id}/edit">Edit</a></td>
+  </tr>`).join("");
+  res.send(layout("Issue Report", `
+    <h1>Issue Report</h1>
+    <div class="card">
+      <form method="get" action="/material-logs/issue-report" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto;">
+          <div><label>Filter Issue Report</label><input name="q" value="${esc(q)}" placeholder="PO, item, vendor, MRR, FMR, description" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+        </div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>ID</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Item</th><th>Description</th><th>Recv Qty</th><th>UOM</th><th>MRR</th><th>FMR</th><th>Warehouse</th><th>Location</th><th>Recv Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="14" class="muted">No issue report rows found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
+app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
+  if (!canViewMaterialPurchaseReport(req.user)) {
+    res.status(403).send(layout("Forbidden", `<div class="card error"><h3>Forbidden</h3><p>You do not have permission to view the Material Purchase Report.</p></div>`, req.user));
+    return;
+  }
+
+  const jobId = currentJobId(req);
+  const boms = (await query(`
+    select id, bom_no, bom_name, description
+    from bom_headers
+    where job_id = $1
+      and coalesce(system_key, '') <> $2
+    order by
+      case when coalesce(bom_name, '') = '' then 1 else 0 end,
+      lower(coalesce(bom_name, description, bom_no, '')),
+      id desc
+  `, [jobId, unallocatedBomSystemKey])).rows;
+
+  const requestedSource = String(req.query.source || "combined").trim() || "combined";
+  const combinedMode = requestedSource === "combined";
+  const selectedBomId = combinedMode ? null : Number(requestedSource);
+  const selectedBom = combinedMode ? null : boms.find((row) => Number(row.id) === selectedBomId);
+  if (!combinedMode && !selectedBom) {
+    throw new Error("Selected BOM source was not found for the current job.");
+  }
+
+  const reportParams = combinedMode ? [jobId] : [jobId, selectedBomId];
+  const reportRows = (await query(`
+    with bom_scope as (
+      select bl.*
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bh.job_id = $1
+        and coalesce(bh.system_key, '') <> '${unallocatedBomSystemKey}'
+        ${combinedMode ? "" : "and bl.bom_id = $2"}
+    ),
+    demand as (
+      select
+        coalesce(item_code, '') as item_code,
+        string_agg(distinct nullif(coalesce(description, ''), ''), ' | ' order by nullif(coalesce(description, ''), '')) as description,
+        string_agg(distinct nullif(coalesce(uom, ''), ''), ' | ' order by nullif(coalesce(uom, ''), '')) as uom,
+        string_agg(distinct nullif(coalesce(spec, ''), ''), ' | ' order by nullif(coalesce(spec, ''), '')) as spec,
+        string_agg(distinct nullif(coalesce(commodity_code, ''), ''), ' | ' order by nullif(coalesce(commodity_code, ''), '')) as commodity_code,
+        string_agg(distinct nullif(coalesce(tag_number, ''), ''), ' | ' order by nullif(coalesce(tag_number, ''), '')) as tag_number,
+        string_agg(distinct nullif(coalesce(size_1, ''), ''), ' | ' order by nullif(coalesce(size_1, ''), '')) as size_1,
+        string_agg(distinct nullif(coalesce(size_2, ''), ''), ' | ' order by nullif(coalesce(size_2, ''), '')) as size_2,
+        string_agg(distinct nullif(coalesce(thk_1, ''), ''), ' | ' order by nullif(coalesce(thk_1, ''), '')) as thk_1,
+        string_agg(distinct nullif(coalesce(thk_2, ''), ''), ' | ' order by nullif(coalesce(thk_2, ''), '')) as thk_2,
+        sum(coalesce(qty_required, 0)) as qty_required,
+        sum(coalesce(qty_ordered, 0)) as qty_ordered
+      from bom_scope
+      group by coalesce(item_code, '')
+    ),
+    available_by_item as (
+      select
+        coalesce(inv.item_code, '') as item_code,
+        greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+      from (
+        ${getInventoryTotalsByItemSubquery(jobId)}
+      ) inv
+      left join (
+        ${getIssuedInventoryTotalsByItemSubquery(jobId)}
+      ) issued
+        on issued.item_code = inv.item_code
+      left join (
+        ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
+      ) alloc
+        on alloc.item_code = inv.item_code
+    )
+    select
+      demand.item_code,
+      coalesce(demand.description, '') as description,
+      coalesce(demand.uom, '') as uom,
+      coalesce(demand.spec, '') as spec,
+      coalesce(demand.commodity_code, '') as commodity_code,
+      coalesce(demand.tag_number, '') as tag_number,
+      coalesce(demand.size_1, '') as size_1,
+      coalesce(demand.size_2, '') as size_2,
+      coalesce(demand.thk_1, '') as thk_1,
+      coalesce(demand.thk_2, '') as thk_2,
+      demand.qty_required,
+      demand.qty_ordered,
+      coalesce(available_by_item.qty_available, 0) as qty_available,
+      greatest(demand.qty_required - demand.qty_ordered - coalesce(available_by_item.qty_available, 0), 0) as qty_to_purchase
+    from demand
+    left join available_by_item on available_by_item.item_code = demand.item_code
+    where greatest(demand.qty_required - demand.qty_ordered - coalesce(available_by_item.qty_available, 0), 0) > 0
+    order by lower(demand.item_code), lower(coalesce(demand.description, ''))
+  `, reportParams)).rows;
+
+  const sourceOptions = [
+    `<option value="combined" ${combinedMode ? "selected" : ""}>Combined BOMs</option>`,
+    ...boms.map((bom) => {
+      const label = [bom.bom_name || bom.description || bom.bom_no, bom.bom_no].filter(Boolean).join(" | ");
+      return `<option value="${bom.id}" ${Number(bom.id) === Number(selectedBomId) ? "selected" : ""}>${esc(label)}</option>`;
+    })
+  ].join("");
+
+  const tableRows = reportRows.map((row) => `<tr>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(row.uom)}</td>
+    <td>${esc(row.spec || "")}</td>
+    <td>${esc(row.commodity_code || "")}</td>
+    <td>${esc(row.tag_number || "")}</td>
+    <td>${esc(row.size_1 || "")}</td>
+    <td>${esc(row.size_2 || "")}</td>
+    <td>${esc(row.thk_1 || "")}</td>
+    <td>${esc(row.thk_2 || "")}</td>
+    <td>${esc(formatQtyDisplay(row.qty_required))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_ordered))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_available))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_to_purchase))}</td>
+  </tr>`).join("");
+
+  const sourceLabel = combinedMode
+    ? "Combined BOMs"
+    : [selectedBom.bom_name || selectedBom.description || selectedBom.bom_no, selectedBom.bom_no].filter(Boolean).join(" | ");
+
+  res.send(layout("Material Purchase Report", `
+    <h1>Material Purchase Report</h1>
+    <div class="card">
+      <form method="get" action="/material-logs/purchase-report" class="stack">
+        <div class="grid" style="grid-template-columns: minmax(0, 320px) auto;">
+          <div><label>Source</label><select name="source">${sourceOptions}</select></div>
+          <div style="align-self:end;"><button type="submit">Load Report</button></div>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <div class="stats" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+        <div class="stat"><div>Source</div><strong style="font-size:16px;">${esc(sourceLabel)}</strong></div>
+        <div class="stat"><div>Rows</div><strong>${esc(reportRows.length)}</strong></div>
+        <div class="stat"><div>Available</div><strong>${esc(formatQtyDisplay(reportRows.reduce((sum, row) => sum + num(row.qty_available), 0)))}</strong></div>
+        <div class="stat"><div>Qty To Purchase</div><strong>${esc(formatQtyDisplay(reportRows.reduce((sum, row) => sum + num(row.qty_to_purchase), 0)))}</strong></div>
+      </div>
+      ${combinedMode ? `<p class="muted" style="margin-top:10px;">Showing material rolled up by item code across all BOMs in the current job. Available material is deducted before calculating the buy quantity.</p>` : `<p class="muted" style="margin-top:10px;">Showing material rolled up by item code for <strong>${esc(sourceLabel)}</strong>. Available material is deducted before calculating the buy quantity.</p>`}
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Item Code</th><th>Description</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty Required</th><th>Qty Ordered</th><th>Available</th><th>Qty To Purchase</th></tr>
+        ${tableRows || `<tr><td colspan="14" class="muted">No material currently needs to be purchased for the selected source.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+}));
+
+app.post("/material-logs/import", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), upload.single("sheet"), async (req, res) => {
+  const jobId = currentJobId(req);
   if (!req.file?.buffer?.length) throw new Error("Upload a workbook file first.");
   const logType = String(req.body.log_type || "").trim();
   const rows = importRowsFromWorkbook(req.file.buffer, logType);
   if (rows.length === 0) throw new Error("No rows were found in that workbook.");
+  let importedCount = 0;
+  let skippedCount = 0;
 
   await withTransaction(async (client) => {
     if (logType === "receiving") {
@@ -1191,19 +13558,19 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
         const legacyId = numberValue(row.id);
         await client.query(`
           insert into material_receiving_logs (
-            legacy_row_id, discipline, vendor_name, po_number, po_position, purchased_by, delivery_to, eta_to_site, company, slid,
+            job_id, legacy_row_id, discipline, vendor_name, po_number, po_position, purchased_by, delivery_to, eta_to_site, company, slid,
             fluor_item_code, item_code, ident_code, commodity_code, description, size_1, size_2, thk_1, thk_2, bom_qty, ship_qty,
             received_qty, qty_unit, fmr_number, mrr_number, picking_ticket, opi, osd_number, load_no, container_no, load_date, mir_no,
             mir_date, cwa, area, drawing, sheet_no, iso, pipe_class, item_type, short_code, received_by, warehouse, location, recv_date,
             received_status, comments, iwp, package_number, scope, on_off_skid, updated_at
           ) values (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
-            $22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,
-            $33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,
-            $46,$47,$48,$49,$50,$51, now()
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+            $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
+            $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,
+            $34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,
+            $47,$48,$49,$50,$51,$52, now()
           )
-          on conflict (legacy_row_id) do update set
+          on conflict (job_id, legacy_row_id) do update set
             discipline = excluded.discipline,
             vendor_name = excluded.vendor_name,
             po_number = excluded.po_number,
@@ -1256,6 +13623,7 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
             on_off_skid = excluded.on_off_skid,
             updated_at = now()
         `, [
+          jobId,
           legacyId || null,
           textValue(row.discipline),
           textValue(row.vendor),
@@ -1275,9 +13643,9 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
           textValue(row.size_2),
           textValue(row.thk_1),
           textValue(row.thk_2),
-          numberValue(row.bom_qty),
-          numberValue(row.ship_qty),
-          numberValue(row.received_qty),
+          parseQtyValue(row.bom_qty),
+          parseQtyValue(row.ship_qty),
+          parseQtyValue(row.received_qty),
           textValue(row.qty_unit),
           textValue(row.fmr_number),
           textValue(row.mrr_number),
@@ -1298,8 +13666,8 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
           textValue(row.item_type),
           textValue(row.short_code),
           textValue(row.received_by),
-          textValue(row.warehouse),
-          textValue(row.location),
+          normalizeWarehouseName(row.warehouse),
+          normalizeLocationName(row.location),
           textValue(row.recv_date),
           textValue(row.received_status),
           textValue(row.comments),
@@ -1308,22 +13676,26 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
           textValue(row.scope),
           textValue(row.on_off_skid)
         ]);
+        importedCount += 1;
       }
     } else if (logType === "mrr") {
       for (const row of rows) {
-        const mrrNumber = textValue(row.mrr_number);
-        if (!mrrNumber) continue;
+        const mrrNumber = firstNonEmptyWorkbookValue(row, "mrr_number", "mrr", "mrr_no");
+        if (!mrrNumber) {
+          skippedCount += 1;
+          continue;
+        }
         await client.query(`
           insert into mrr_logs (
-            discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by,
+            job_id, discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by,
             mrr_lookup, client_mrr, mrr_link_label, mtrs_required, osd_required, notes, blank_mrr_link_label, mrr_entered,
             pictures_loaded, sent_to_matheson, load_number, opi_number, opi_date, updated_at
           ) values (
-            $1,$2,$3,$4,$5,$6,$7,$8,
-            $9,$10,$11,$12,$13,$14,$15,$16,
-            $17,$18,$19,$20,$21, now()
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,
+            $10,$11,$12,$13,$14,$15,$16,$17,
+            $18,$19,$20,$21,$22, now()
           )
-          on conflict (mrr_number) do update set
+          on conflict (job_id, mrr_number) do update set
             discipline = excluded.discipline,
             vendor_name = excluded.vendor_name,
             po_number = excluded.po_number,
@@ -1346,29 +13718,33 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
             opi_date = excluded.opi_date,
             updated_at = now()
         `, [
-          textValue(row.discipline),
+          jobId,
+          firstNonEmptyWorkbookValue(row, "discipline"),
           mrrNumber,
-          textValue(row.vendor),
-          textValue(row.po),
-          textValue(row.pick_ticket),
-          textValue(row.material_description),
-          textValue(row.received_date),
-          textValue(row.received_by),
-          textValue(row.mrr_lookup),
-          textValue(row.client_mrr),
-          textValue(row.mrr_link),
-          textValue(row.mtrs),
-          textValue(row.os_d),
-          textValue(row.notes),
-          textValue(row.blank_mrr_link),
-          textValue(row.mrr_entered),
-          textValue(row.pictures_loaded),
-          textValue(row.sent_to_matheson),
-          textValue(row.load),
-          textValue(row.opi),
-          textValue(row.opi_date)
+          firstNonEmptyWorkbookValue(row, "vendor", "vendor_name"),
+          firstNonEmptyWorkbookValue(row, "po", "po_number"),
+          firstNonEmptyWorkbookValue(row, "pick_ticket", "pick_ticket_number"),
+          firstNonEmptyWorkbookValue(row, "material_description", "description"),
+          firstNonEmptyWorkbookValue(row, "received_date", "recv_date"),
+          firstNonEmptyWorkbookValue(row, "received_by"),
+          firstNonEmptyWorkbookValue(row, "mrr_lookup"),
+          firstNonEmptyWorkbookValue(row, "client_mrr"),
+          firstNonEmptyWorkbookValue(row, "mrr_link", "mrr_link_label"),
+          firstNonEmptyWorkbookValue(row, "mtrs", "mtrs_required"),
+          firstNonEmptyWorkbookValue(row, "os_d", "osd_required"),
+          firstNonEmptyWorkbookValue(row, "notes", "comments"),
+          firstNonEmptyWorkbookValue(row, "blank_mrr_link", "blank_mrr_link_label"),
+          firstNonEmptyWorkbookValue(row, "mrr_entered"),
+          firstNonEmptyWorkbookValue(row, "pictures_loaded"),
+          firstNonEmptyWorkbookValue(row, "sent_to_matheson"),
+          firstNonEmptyWorkbookValue(row, "load", "load_number"),
+          firstNonEmptyWorkbookValue(row, "opi", "opi_number"),
+          firstNonEmptyWorkbookValue(row, "opi_date")
         ]);
+        importedCount += 1;
       }
+      await syncMrrVendorsIntoVendorTable(client, jobId);
+      await syncOpiLogsFromMrr(client, jobId);
     } else if (logType === "fmr") {
       for (const row of rows) {
         const fmrNumber = textValue(row.fmr);
@@ -1377,13 +13753,13 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
         if (!fmrNumber && !containerNo && !fluorId) continue;
         await client.query(`
           insert into fmr_logs (
-            fmr_number, vendor_name, container_no, fmr_lookup, request_description, fluor_id, fluor_desc, mrr_number,
+            job_id, fmr_number, vendor_name, container_no, fmr_lookup, request_description, fluor_id, fluor_desc, mrr_number,
             mr_fmr, mr_opi, requestor, request_date, need_date, pick_ticket, ready_to_pickup, pickup_location, pickup_date, updated_at
           ) values (
-            $1,$2,$3,$4,$5,$6,$7,$8,
-            $9,$10,$11,$12,$13,$14,$15,$16,$17, now()
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,
+            $10,$11,$12,$13,$14,$15,$16,$17,$18, now()
           )
-          on conflict (fmr_number, container_no, fluor_id) do update set
+          on conflict (job_id, fmr_number, container_no, fluor_id) do update set
             vendor_name = excluded.vendor_name,
             fmr_lookup = excluded.fmr_lookup,
             request_description = excluded.request_description,
@@ -1400,6 +13776,7 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
             pickup_date = excluded.pickup_date,
             updated_at = now()
         `, [
+          jobId,
           fmrNumber,
           textValue(row.vendor),
           containerNo,
@@ -1418,36 +13795,51 @@ app.post("/material-logs/import", requireAuth, requireRole(["admin", "buyer", "w
           textValue(row.pickup_location),
           textValue(row.pickup_date)
         ]);
+        importedCount += 1;
       }
     } else {
       throw new Error("Choose a valid log type.");
     }
+    if (logType === "mrr") {
+      for (const row of rows) {
+        await saveMaterialLogLookup(client, "discipline", textValue(row.discipline), jobId);
+        await saveMaterialLogLookup(client, "vendor_name", firstNonEmptyWorkbookValue(row, "vendor", "vendor_name"), jobId);
+        await saveMaterialLogLookup(client, "po_number", firstNonEmptyWorkbookValue(row, "po", "po_number"), jobId);
+        await saveMaterialLogLookup(client, "received_by", textValue(row.received_by), jobId);
+      }
+    }
     await auditLog(client, req.user.id, "import", "material_logs", logType, `rows=${rows.length}`);
   });
-
-  res.redirect("/material-logs");
+  if (logType === "mrr") {
+    res.redirect(`/material-logs/mrr?imported=${importedCount}&skipped=${skippedCount}`);
+    return;
+  }
+  res.redirect("/settings/material-log-imports");
 });
 
-app.post("/material-logs/receiving/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/receiving/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
     const result = await client.query(`
       insert into material_receiving_logs (
-        legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date, updated_at
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+        job_id, legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
       returning id
     `, [
+      jobId,
       req.body.legacy_row_id ? Number(req.body.legacy_row_id) : null,
       req.body.discipline?.trim() || "",
       req.body.vendor_name?.trim() || "",
       req.body.po_number?.trim() || "",
       req.body.item_code?.trim() || "",
       req.body.description?.trim() || "",
-      Number(req.body.received_qty || 0),
+      parseQtyValue(req.body.received_qty || 0),
       req.body.qty_unit?.trim() || "",
       req.body.mrr_number?.trim() || "",
       req.body.fmr_number?.trim() || "",
-      req.body.warehouse?.trim() || "",
-      req.body.location?.trim() || "",
+      normalizeWarehouseName(req.body.warehouse),
+      normalizeLocationName(req.body.location),
       req.body.recv_date?.trim() || ""
     ]);
     await auditLog(client, req.user.id, "create", "material_receiving_log", result.rows[0].id, req.body.item_code?.trim() || "");
@@ -1455,18 +13847,27 @@ app.post("/material-logs/receiving/add", requireAuth, requireRole(["admin", "buy
   res.redirect("/material-logs");
 });
 
-app.post("/material-logs/mrr/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/mrr/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    const mrrNumber = await getNextMrrNumber(client, jobId);
+    const appPoId = req.body.app_po_id ? Number(req.body.app_po_id) : null;
+    const linkedPo = appPoId
+      ? (await client.query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [appPoId, jobId])).rows[0]
+      : null;
+    const effectivePoNumber = linkedPo?.po_no || req.body.po_number?.trim() || "";
     const result = await client.query(`
       insert into mrr_logs (
-        discipline, mrr_number, vendor_name, po_number, pick_ticket, material_description, received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+        job_id, discipline, mrr_number, vendor_name, app_po_id, po_number, pick_ticket, material_description, received_date, received_by, notes, load_number, opi_number, opi_date, updated_at
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
       returning id
     `, [
+      jobId,
       req.body.discipline?.trim() || "",
-      req.body.mrr_number?.trim(),
+      mrrNumber,
       req.body.vendor_name?.trim() || "",
-      req.body.po_number?.trim() || "",
+      linkedPo?.id || null,
+      effectivePoNumber,
       req.body.pick_ticket?.trim() || "",
       req.body.material_description?.trim() || "",
       req.body.received_date?.trim() || "",
@@ -1476,20 +13877,31 @@ app.post("/material-logs/mrr/add", requireAuth, requireRole(["admin", "buyer", "
       req.body.opi_number?.trim() || "",
       req.body.opi_date?.trim() || ""
     ]);
-    await auditLog(client, req.user.id, "create", "mrr_log", result.rows[0].id, req.body.mrr_number?.trim() || "");
+    await saveMaterialLogLookup(client, "discipline", req.body.discipline, jobId);
+    await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name, jobId);
+    await saveMaterialLogLookup(client, "po_number", effectivePoNumber, jobId);
+    await saveMaterialLogLookup(client, "received_by", req.body.received_by, jobId);
+    await syncMrrVendorsIntoVendorTable(client, jobId);
+    await syncOpiLogsFromMrr(client, jobId);
+    await auditLog(client, req.user.id, "create", "mrr_log", result.rows[0].id, mrrNumber);
   });
-  res.redirect("/material-logs");
+  res.redirect("/material-logs/mrr");
 });
 
-app.post("/material-logs/fmr/add", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/fmr/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = normalizeJobIdValue(currentJobId(req));
+  if (!jobId) throw new Error("Select a valid current job before creating a Vendor FMR.");
   await withTransaction(async (client) => {
+    const fmrNumber = await getNextFmrNumber(client, jobId);
+    await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no, null, jobId);
     const result = await client.query(`
       insert into fmr_logs (
-        fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, mrr_number, request_date, need_date, pick_ticket, pickup_location, pickup_date, updated_at
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+        job_id, fmr_number, vendor_name, container_no, fluor_id, fluor_desc, request_description, mrr_number, request_date, need_date, pick_ticket, pickup_location, pickup_date, updated_at
+      ) values ($1::bigint,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
       returning id
     `, [
-      req.body.fmr_number?.trim(),
+      jobId,
+      fmrNumber,
       req.body.vendor_name?.trim() || "",
       req.body.container_no?.trim() || "",
       req.body.fluor_id?.trim() || "",
@@ -1502,17 +13914,33 @@ app.post("/material-logs/fmr/add", requireAuth, requireRole(["admin", "buyer", "
       req.body.pickup_location?.trim() || "",
       req.body.pickup_date?.trim() || ""
     ]);
-    await auditLog(client, req.user.id, "create", "fmr_log", result.rows[0].id, req.body.fmr_number?.trim() || "");
+    await ensureMrrForVendorCrate(client, {
+      jobId,
+      userId: req.user.id,
+      fmrId: result.rows[0].id,
+      vendorName: req.body.vendor_name?.trim() || "",
+      containerNo: req.body.container_no?.trim() || "",
+      mrrNumber: req.body.mrr_number?.trim() || ""
+    });
+    await auditLog(client, req.user.id, "create", "fmr_log", result.rows[0].id, fmrNumber);
   });
-  res.redirect("/material-logs");
+  res.redirect("/material-logs/fmr");
 });
 
-app.get("/material-logs/receiving/:id/edit", requireAuth, async (req, res) => {
-  const row = (await query("select * from material_receiving_logs where id = $1", [req.params.id])).rows[0];
+app.get("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const row = (await query("select * from material_receiving_logs where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!row) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Receiving log row not found.</h3></div>`, req.user));
     return;
   }
+  const normalizedRowWarehouse = normalizeWarehouseName(row.warehouse);
+  const normalizedRowLocation = normalizeLocationName(row.location);
+  const warehouseOptions = await getWarehouseOptions(jobId);
+  const locationMap = await getWarehouseLocationMap(jobId);
+  const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
+    .concat(warehouseOptions.map((warehouse) => `<option value="${esc(warehouse.name)}" ${warehouse.name === normalizedRowWarehouse ? "selected" : ""}>${esc(warehouse.name)}</option>`))
+    .join("");
   res.send(layout("Edit Receiving Log", `
     <h1>Edit Material Receiving Line</h1>
     <div class="card">
@@ -1524,28 +13952,31 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, async (req, res) => {
           <div><label>PO</label><input name="po_number" value="${esc(row.po_number)}" /></div>
           <div><label>Item Code</label><input name="item_code" value="${esc(row.item_code)}" /></div>
           <div><label>Description</label><input name="description" value="${esc(row.description)}" /></div>
-          <div><label>Received Qty</label><input name="received_qty" value="${esc(row.received_qty)}" /></div>
+          <div><label>Received Qty</label><input name="received_qty" value="${esc(formatQtyDisplay(row.received_qty))}" /></div>
           <div><label>Qty Unit</label><input name="qty_unit" value="${esc(row.qty_unit)}" /></div>
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
           <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" /></div>
-          <div><label>Warehouse</label><input name="warehouse" value="${esc(row.warehouse)}" /></div>
-          <div><label>Location</label><input name="location" value="${esc(row.location)}" /></div>
+          <div><label>Warehouse</label><select id="receiving-log-warehouse-${row.id}" name="warehouse" onchange='syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(normalizedRowLocation)}")'>${warehouseOptionsHtml}</select></div>
+          <div><label>Location</label><select id="receiving-log-location-${row.id}" name="location" data-placeholder="Select location"><option value="">Select location</option></select></div>
         </div>
-        <div><label>Received Date</label><input name="recv_date" value="${esc(row.recv_date)}" /></div>
+        <div><label>Received Date</label><input name="recv_date" value="${esc(formatShortDateTime(row.recv_date))}" /></div>
         <div><label>Comments</label><textarea name="comments">${esc(row.comments)}</textarea></div>
         <div class="actions"><button type="submit">Save Receiving Line</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
       </form>
+      <script>syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${JSON.stringify(locationMap)}, ${JSON.stringify(normalizedRowLocation)});</script>
     </div>
   `, req.user));
 });
 
-app.post("/material-logs/receiving/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
     await client.query(`
       update material_receiving_logs
       set legacy_row_id = $2, discipline = $3, vendor_name = $4, po_number = $5, item_code = $6, description = $7, received_qty = $8,
           qty_unit = $9, mrr_number = $10, fmr_number = $11, warehouse = $12, location = $13, recv_date = $14, comments = $15, updated_at = now()
-      where id = $1
+      where id = $1 and job_id = $16
     `, [
       req.params.id,
       req.body.legacy_row_id ? Number(req.body.legacy_row_id) : null,
@@ -1554,63 +13985,142 @@ app.post("/material-logs/receiving/:id/edit", requireAuth, requireRole(["admin",
       req.body.po_number?.trim() || "",
       req.body.item_code?.trim() || "",
       req.body.description?.trim() || "",
-      Number(req.body.received_qty || 0),
+      parseQtyValue(req.body.received_qty || 0),
       req.body.qty_unit?.trim() || "",
       req.body.mrr_number?.trim() || "",
       req.body.fmr_number?.trim() || "",
-      req.body.warehouse?.trim() || "",
-      req.body.location?.trim() || "",
+      normalizeWarehouseName(req.body.warehouse),
+      normalizeLocationName(req.body.location),
       req.body.recv_date?.trim() || "",
-      req.body.comments?.trim() || ""
+      req.body.comments?.trim() || "",
+      jobId
     ]);
     await auditLog(client, req.user.id, "update", "material_receiving_log", req.params.id, req.body.item_code?.trim() || "");
   });
   res.redirect("/material-logs");
 });
 
-app.get("/material-logs/mrr/:id/edit", requireAuth, async (req, res) => {
-  const row = (await query("select * from mrr_logs where id = $1", [req.params.id])).rows[0];
+app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const row = (await query("select * from mrr_logs where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
   if (!row) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR log row not found.</h3></div>`, req.user));
     return;
   }
-  res.send(layout("Edit MRR Log", `
-    <h1>Edit MRR Header</h1>
-    <div class="card">
+  const [disciplines, vendors, pos, receivers, appPos, poReceiptLines, manualLines] = await Promise.all([
+      getMaterialLogLookupOptions("discipline", jobId),
+      getMaterialLogLookupOptions("vendor_name", jobId),
+      getMaterialLogLookupOptions("po_number", jobId),
+      getMaterialLogLookupOptions("received_by", jobId),
+      getAppPurchaseOrderOptions(jobId),
+      query(`
+        select
+          r.id,
+          'PO Receipt' as source_type,
+          coalesce(pl.po_line, '') as po_line,
+          mi.item_code,
+          mi.description,
+          r.qty_received,
+          r.warehouse,
+          r.location,
+          r.osd_status,
+          coalesce(r.osd_notes, '') as notes,
+          r.received_at::text as line_date
+        from receipts r
+        join po_lines pl on pl.id = r.po_line_id
+        join material_items mi on mi.id = pl.material_item_id
+        where r.mrr_log_id = $1
+          and r.job_id = $2
+        order by r.id desc
+      `, [req.params.id, jobId]),
+      query(`
+        select
+          mrl.id,
+          'Manual Entry' as source_type,
+          coalesce(mrl.po_position, '') as po_line,
+          coalesce(mrl.item_code, '') as item_code,
+          coalesce(mrl.description, '') as description,
+          coalesce(mrl.received_qty, 0) as qty_received,
+          coalesce(mrl.warehouse, '') as warehouse,
+          coalesce(mrl.location, '') as location,
+          coalesce(mrl.received_status, '') as osd_status,
+          coalesce(mrl.comments, '') as notes,
+          coalesce(mrl.recv_date, '') as line_date
+        from material_receiving_logs mrl
+        where coalesce(mrl.mrr_number, '') = $1
+          and mrl.job_id = $2
+        order by coalesce(mrl.legacy_row_id, mrl.id) desc
+      `, [row.mrr_number, jobId])
+    ]);
+  const optionList = (values, selectedValue, placeholder) => [`<option value="">${esc(placeholder)}</option>`]
+    .concat(values.map((value) => `<option value="${esc(value)}" ${value === selectedValue ? "selected" : ""}>${esc(value)}</option>`))
+    .join("");
+    const appPoOptions = [`<option value="">Select app PO</option>`]
+      .concat(appPos.map((po) => `<option value="${po.id}" ${Number(po.id) === Number(row.app_po_id || 0) ? "selected" : ""}>${esc(po.po_no)}${po.vendor_name ? ` | ${esc(po.vendor_name)}` : ""}${po.description ? ` | ${esc(po.description)}` : ""}</option>`))
+      .join("");
+    const mrrLineRows = [...poReceiptLines.rows, ...manualLines.rows]
+      .sort((a, b) => String(b.line_date || "").localeCompare(String(a.line_date || "")) || Number(b.id || 0) - Number(a.id || 0))
+      .map((line) => `<tr>
+        <td>${esc(line.source_type)}</td>
+        <td>${esc(line.po_line || "")}</td>
+        <td>${esc(line.item_code || "")}</td>
+        <td>${esc(line.description || "")}</td>
+        <td>${esc(formatQtyDisplay(line.qty_received))}</td>
+        <td>${esc(line.warehouse || "")}</td>
+        <td>${esc(line.location || "")}</td>
+        <td>${esc(line.osd_status || "")}</td>
+        <td>${esc(formatShortDateTime(line.line_date || ""))}</td>
+        <td>${esc(line.notes || "")}</td>
+      </tr>`).join("");
+    res.send(layout("Edit MRR Log", `
+      <h1>Edit MRR Header</h1>
+      <div class="card">
       <form method="post" action="/material-logs/mrr/${row.id}/edit" class="stack">
         <div class="grid">
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(row.mrr_number)}" required /></div>
-          <div><label>Discipline</label><input name="discipline" value="${esc(row.discipline)}" /></div>
-          <div><label>Vendor</label><input name="vendor_name" value="${esc(row.vendor_name)}" /></div>
-          <div><label>PO</label><input name="po_number" value="${esc(row.po_number)}" /></div>
+          <div><label>Discipline</label><select name="discipline">${optionList(disciplines, row.discipline, "Select discipline")}</select></div>
+          <div><label>Vendor</label><div class="inline-field"><select name="vendor_name">${optionList(vendors, row.vendor_name, "Select vendor")}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
+          <div><label>App PO</label><div class="inline-field"><select name="app_po_id">${appPoOptions}</select><a class="btn btn-secondary" href="/po/new">Add PO</a></div></div>
+          <div><label>Legacy PO Number</label><select name="po_number">${optionList(pos, row.po_number, "Select legacy PO")}</select></div>
           <div><label>Pick Ticket</label><input name="pick_ticket" value="${esc(row.pick_ticket)}" /></div>
-          <div><label>Received Date</label><input name="received_date" value="${esc(row.received_date)}" /></div>
-          <div><label>Received By</label><input name="received_by" value="${esc(row.received_by)}" /></div>
+          <div><label>Received Date</label><input type="date" name="received_date" value="${esc(row.received_date)}" /></div>
+          <div><label>Received By</label><div class="inline-field"><select name="received_by">${optionList(receivers, row.received_by, "Select received by")}</select><a class="btn btn-secondary" href="/material-logs/received-by/new">Add Person</a></div></div>
           <div><label>Load #</label><input name="load_number" value="${esc(row.load_number)}" /></div>
           <div><label>OPI #</label><input name="opi_number" value="${esc(row.opi_number)}" /></div>
-          <div><label>OPI Date</label><input name="opi_date" value="${esc(row.opi_date)}" /></div>
+          <div><label>OPI Date</label><input type="date" name="opi_date" value="${esc(row.opi_date)}" /></div>
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
         <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
-        <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
-      </form>
-    </div>
-  `, req.user));
-});
+          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit">Receive Missed Line</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+        </form>
+      </div>
+      <div class="card scroll">
+        <h3>MRR Lines</h3>
+        <table><tr><th>Source</th><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>Status</th><th>Date</th><th>Notes</th></tr>${mrrLineRows || `<tr><td colspan="10" class="muted">No MRR lines found for this header yet.</td></tr>`}</table>
+      </div>
+    `, req.user));
+  });
 
-app.post("/material-logs/mrr/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
+app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    const appPoId = req.body.app_po_id ? Number(req.body.app_po_id) : null;
+    const linkedPo = appPoId
+      ? (await client.query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [appPoId, jobId])).rows[0]
+      : null;
+    const effectivePoNumber = linkedPo?.po_no || req.body.po_number?.trim() || "";
     await client.query(`
       update mrr_logs
-      set mrr_number = $2, discipline = $3, vendor_name = $4, po_number = $5, pick_ticket = $6, material_description = $7,
-          received_date = $8, received_by = $9, notes = $10, load_number = $11, opi_number = $12, opi_date = $13, updated_at = now()
-      where id = $1
+      set mrr_number = $2, discipline = $3, vendor_name = $4, app_po_id = $5, po_number = $6, pick_ticket = $7, material_description = $8,
+          received_date = $9, received_by = $10, notes = $11, load_number = $12, opi_number = $13, opi_date = $14, updated_at = now()
+      where id = $1 and job_id = $15
     `, [
       req.params.id,
       req.body.mrr_number?.trim(),
       req.body.discipline?.trim() || "",
       req.body.vendor_name?.trim() || "",
-      req.body.po_number?.trim() || "",
+      linkedPo?.id || null,
+      effectivePoNumber,
       req.body.pick_ticket?.trim() || "",
       req.body.material_description?.trim() || "",
       req.body.received_date?.trim() || "",
@@ -1618,50 +14128,77 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireRole(["admin", "buye
       req.body.notes?.trim() || "",
       req.body.load_number?.trim() || "",
       req.body.opi_number?.trim() || "",
-      req.body.opi_date?.trim() || ""
+      req.body.opi_date?.trim() || "",
+      jobId
     ]);
+    await saveMaterialLogLookup(client, "discipline", req.body.discipline, jobId);
+    await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name, jobId);
+    await saveMaterialLogLookup(client, "po_number", effectivePoNumber, jobId);
+    await saveMaterialLogLookup(client, "received_by", req.body.received_by, jobId);
+    await syncMrrVendorsIntoVendorTable(client, jobId);
+    await syncOpiLogsFromMrr(client, jobId);
     await auditLog(client, req.user.id, "update", "mrr_log", req.params.id, req.body.mrr_number?.trim() || "");
   });
-  res.redirect("/material-logs");
+  res.redirect("/material-logs/mrr");
 });
 
-app.get("/material-logs/fmr/:id/edit", requireAuth, async (req, res) => {
-  const row = (await query("select * from fmr_logs where id = $1", [req.params.id])).rows[0];
+app.get("/material-logs/fmr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const [rowRes, vendors] = await Promise.all([
+    query("select * from fmr_logs where id = $1 and job_id = $2", [req.params.id, jobId]),
+    query("select name from vendors where is_active = true order by name")
+  ]);
+  const row = rowRes.rows[0];
   if (!row) {
-    res.status(404).send(layout("Not Found", `<div class="card error"><h3>FMR log row not found.</h3></div>`, req.user));
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Vendor FMR log row not found.</h3></div>`, req.user));
     return;
   }
-  res.send(layout("Edit FMR Log", `
-    <h1>Edit FMR Entry</h1>
-    <div class="card">
-      <form method="post" action="/material-logs/fmr/${row.id}/edit" class="stack">
-        <div class="grid">
-          <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" required /></div>
-          <div><label>Vendor</label><input name="vendor_name" value="${esc(row.vendor_name)}" /></div>
-          <div><label>Container #</label><input name="container_no" value="${esc(row.container_no)}" /></div>
-          <div><label>Fluor ID</label><input name="fluor_id" value="${esc(row.fluor_id)}" /></div>
-          <div><label>MRR #</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
-          <div><label>Request Date</label><input name="request_date" value="${esc(row.request_date)}" /></div>
-          <div><label>Need Date</label><input name="need_date" value="${esc(row.need_date)}" /></div>
+  const vendorNames = vendors.rows.map((vendor) => String(vendor.name || "").trim()).filter(Boolean);
+  if (String(row.vendor_name || "").trim() && !vendorNames.some((name) => name.toLowerCase() === String(row.vendor_name || "").trim().toLowerCase())) {
+    vendorNames.unshift(String(row.vendor_name || "").trim());
+  }
+  const vendorOptions = [`<option value="">Select vendor</option>`]
+    .concat(vendorNames.map((vendorName) => `<option value="${esc(vendorName)}" ${String(row.vendor_name || "").trim().toLowerCase() === vendorName.toLowerCase() ? "selected" : ""}>${esc(vendorName)}</option>`))
+    .join("");
+  res.send(layout("Edit Vendor FMR Log", `
+      <h1>Edit Vendor FMR Entry</h1>
+      <div class="card">
+        <form method="post" action="/material-logs/fmr/${row.id}/edit" class="stack">
+          <div class="grid">
+            <div><label>FMR Number</label><input name="fmr_number" value="${esc(row.fmr_number)}" required /></div>
+            <div><label>Vendor</label><div class="inline-field"><select name="vendor_name" required>${vendorOptions}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
+            <div><label>Container #</label><input name="container_no" value="${esc(row.container_no)}" /></div>
+            <div><label>Fluor ID</label><input name="fluor_id" value="${esc(row.fluor_id)}" /></div>
+            <div><label>MRR #</label><input name="mrr_number" value="${esc(row.mrr_number)}" /></div>
+          <div><label>Request Date</label><input name="request_date" value="${esc(formatShortDateTime(row.request_date))}" /></div>
+          <div><label>Need Date</label><input name="need_date" value="${esc(formatShortDateTime(row.need_date))}" /></div>
           <div><label>Pick Ticket #</label><input name="pick_ticket" value="${esc(row.pick_ticket)}" /></div>
           <div><label>Pickup Location</label><input name="pickup_location" value="${esc(row.pickup_location)}" /></div>
-          <div><label>Pickup Date</label><input name="pickup_date" value="${esc(row.pickup_date)}" /></div>
+          <div><label>Pickup Date</label><input name="pickup_date" value="${esc(formatShortDateTime(row.pickup_date))}" /></div>
         </div>
         <div><label>Fluor Description</label><textarea name="fluor_desc">${esc(row.fluor_desc)}</textarea></div>
         <div><label>Request Description</label><textarea name="request_description">${esc(row.request_description)}</textarea></div>
-        <div class="actions"><button type="submit">Save FMR</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
-      </form>
-    </div>
-  `, req.user));
-});
+        <div class="actions">
+          <button type="submit">Save Vendor FMR</button>
+          <a class="btn btn-secondary" href="/material-logs">Back</a>
+          <form method="post" action="/material-logs/fmr/${row.id}/delete" onsubmit="return confirm('Delete Vendor FMR ${escAttr(row.fmr_number)}?');">
+            <button class="btn btn-danger" type="submit">Delete Vendor FMR</button>
+          </form>
+        </div>
+        </form>
+      </div>
+    `, req.user));
+  });
 
-app.post("/material-logs/fmr/:id/edit", requireAuth, requireRole(["admin", "buyer", "warehouse"]), async (req, res) => {
-  await withTransaction(async (client) => {
+  app.post("/material-logs/fmr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+    const jobId = currentJobId(req);
+    await withTransaction(async (client) => {
+      await ensureUniqueFmrContainer(client, req.body.vendor_name, req.body.container_no, req.params.id, jobId);
     await client.query(`
       update fmr_logs
       set fmr_number = $2, vendor_name = $3, container_no = $4, fluor_id = $5, fluor_desc = $6, request_description = $7,
           mrr_number = $8, request_date = $9, need_date = $10, pick_ticket = $11, pickup_location = $12, pickup_date = $13, updated_at = now()
-      where id = $1
+      where id = $1 and job_id = $14
     `, [
       req.params.id,
       req.body.fmr_number?.trim(),
@@ -1675,19 +14212,42 @@ app.post("/material-logs/fmr/:id/edit", requireAuth, requireRole(["admin", "buye
       req.body.need_date?.trim() || "",
       req.body.pick_ticket?.trim() || "",
       req.body.pickup_location?.trim() || "",
-      req.body.pickup_date?.trim() || ""
+      req.body.pickup_date?.trim() || "",
+      jobId
     ]);
+    await ensureMrrForVendorCrate(client, {
+      jobId,
+      userId: req.user.id,
+      fmrId: req.params.id,
+      vendorName: req.body.vendor_name?.trim() || "",
+      containerNo: req.body.container_no?.trim() || "",
+      mrrNumber: req.body.mrr_number?.trim() || ""
+    });
     await auditLog(client, req.user.id, "update", "fmr_log", req.params.id, req.body.fmr_number?.trim() || "");
+    });
+    res.redirect("/material-logs/fmr");
   });
-  res.redirect("/material-logs");
-});
+
+  app.post("/material-logs/fmr/:id/delete", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+    const jobId = currentJobId(req);
+    await withTransaction(async (client) => {
+      const current = (await client.query("select fmr_number from fmr_logs where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+      if (!current) throw new Error("Vendor FMR log row not found.");
+      await client.query("delete from fmr_logs where id = $1 and job_id = $2", [req.params.id, jobId]);
+      await auditLog(client, req.user.id, "delete", "fmr_log", req.params.id, current.fmr_number || "");
+    });
+    res.redirect("/material-logs/fmr");
+  });
 
 app.use((error, req, res, _next) => {
   const user = currentUser(req);
-  res.status(400).send(layout("Error", `<div class="card error"><h3>Error</h3><pre>${esc(error.message)}</pre></div>`, user));
+  const statusCode = getHttpErrorStatus(error);
+  if (statusCode >= 500) console.error(error);
+  res.status(statusCode).send(layout("Error", `<div class="card error"><h3>Error</h3><pre>${esc(error.message)}</pre></div>`, user));
 });
 
 await initDb();
+await refreshHeaderSettings();
 
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
