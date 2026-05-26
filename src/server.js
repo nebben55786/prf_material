@@ -270,6 +270,39 @@ function formatShortDate(value) {
   return text;
 }
 
+function dateKey(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+
+function isPastDate(value) {
+  const key = dateKey(value);
+  if (!key) return false;
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  return key < todayKey;
+}
+
+function rfqStatusLabel(status) {
+  return (rfqStatuses.find((item) => item.value === status) || { label: status }).label;
+}
+
+function renderRfqStatusChip(status, dueDate) {
+  let className = "";
+  if (status === "SEND_FOR_QUOTES") className = "rfq-status-send";
+  if (status === "WAITING_ON_QUOTES" && isPastDate(dueDate)) className = "rfq-status-waiting-past";
+  if (status === "WAITING_ON_CLIENT") className = "rfq-status-client";
+  if (status === "PURCHASED") className = "rfq-status-purchased";
+  if (status === "RECEIVED") className = "rfq-status-received";
+  const classes = ["chip", "rfq-status-chip", className].filter(Boolean).join(" ");
+  return `<span class="${classes}">${esc(rfqStatusLabel(status))}</span>`;
+}
+
 function formatShortDateTime(value) {
   if (value === null || value === undefined || value === "") return "";
   const text = String(value).trim();
@@ -1371,6 +1404,12 @@ function layout(title, body, user) {
       .rfq-entry-grid td input:focus { outline: 2px solid #6f95b8; outline-offset: -2px; background: #f7fbff; }
       .resize-handle { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: col-resize; }
       .chip { display: inline-block; padding: 3px 8px; border-radius: 2px; background: #e3ebf2; border: 1px solid #b6c4d1; color: #264b69; font-weight: 700; }
+      .rfq-status-chip { white-space: nowrap; }
+      .rfq-status-send { background: #fbe1dd; border-color: #d66b5f; color: #8e2118; }
+      .rfq-status-waiting-past { background: #f9d7eb; border-color: #d76aa7; color: #86184f; }
+      .rfq-status-client { background: #ffe4bd; border-color: #d38a2d; color: #7a4300; }
+      .rfq-status-purchased { background: #fff3b0; border-color: #d4b83d; color: #665200; }
+      .rfq-status-received { background: #dff0d8; border-color: #72a864; color: #275f25; }
       .chip-remove { font-size: 0.2em; line-height: 1; padding: 0 1px; margin-left: 4px; min-width: 0; min-height: 0; vertical-align: middle; }
       .tab-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
       .tab-link { display: inline-flex; align-items: center; justify-content: center; min-width: 92px; min-height: 32px; padding: 6px 12px; border-radius: 2px; border: 1px solid var(--line-strong); background: linear-gradient(180deg, #eef3f7 0%, #d9e1e8 100%); color: #18354e; font-weight: 700; text-decoration: none; }
@@ -9179,7 +9218,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td>${esc(rfq.awarded_vendor_refs || "")}</td>
     <td>${esc(rfq.issued_po_refs || "")}</td>
     <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
-    <td><span class="chip">${esc((rfqStatuses.find((item) => item.value === rfq.status) || { label: rfq.status }).label)}</span></td>
+    <td>${renderRfqStatusChip(rfq.status, rfq.due_date)}</td>
   </tr>`).join("");
   res.send(layout("RFQs", `
     <h1>RFQs</h1>
@@ -9498,7 +9537,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const rfqStatusOptions = rfqStatuses
     .map((status) => `<option value="${status.value}" ${rfq.status === status.value ? "selected" : ""}>${esc(status.label)}</option>`)
     .join("");
-  const rfqStatusLabel = (rfqStatuses.find((status) => status.value === rfq.status) || { label: rfq.status }).label;
+  const rfqStatusChip = renderRfqStatusChip(rfq.status, rfq.due_date);
   const selectedVendorChips = selectedVendors.length > 0
     ? selectedVendors.map((vendor) => `<span class="chip">${esc(vendor.name)}</span>`).join(" ")
     : `<span class="muted">No participating vendors selected yet.</span>`;
@@ -9580,7 +9619,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     <div class="card">
       <h3>Award Summary</h3>
       <div class="summary-grid">
-        <div class="stat"><div>RFQ Status</div><strong>${esc(rfqStatusLabel)}</strong></div>
+        <div class="stat"><div>RFQ Status</div><strong>${rfqStatusChip}</strong></div>
         <div class="stat"><div>Lines</div><strong>${items.length}</strong></div>
         <div class="stat"><div>Participating Vendors</div><strong>${selectedVendors.length}</strong></div>
         <div class="stat"><div>Issued POs</div><strong>${poCount}</strong></div>
