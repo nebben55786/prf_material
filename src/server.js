@@ -12122,7 +12122,7 @@ app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("rec
   const where = ["po.job_id = $1"];
   if (q) {
     params.push(`%${q}%`);
-    where.push(`(po.po_no ilike $2 or coalesce(po.description, '') ilike $2)`);
+    where.push(`(po.po_no ilike $2 or coalesce(po.description, '') ilike $2 or coalesce(rfq.requestor_name, '') ilike $2)`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const rows = (await query(`
@@ -12130,6 +12130,7 @@ app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("rec
       po.id,
       po.po_no,
       coalesce(po.description, '') as description,
+      coalesce(rfq.requestor_name, '') as requestor_name,
       coalesce(v.name, '') as vendor_name,
       po.status,
       count(pl.id) as line_count,
@@ -12138,15 +12139,17 @@ app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("rec
       ) as open_line_count
     from purchase_orders po
     left join vendors v on v.id = po.vendor_id
+    left join rfqs rfq on rfq.id = po.rfq_id and rfq.job_id = po.job_id
     left join po_lines pl on pl.po_id = po.id
     ${whereSql}
-    group by po.id, po.po_no, po.description, v.name, po.status
+    group by po.id, po.po_no, po.description, rfq.requestor_name, v.name, po.status
     order by po.id desc
     limit 300
   `, params)).rows;
   const poRows = rows.map((row) => `<tr>
     <td>${esc(row.po_no)}</td>
     <td>${esc(row.description)}</td>
+    <td>${esc(row.requestor_name)}</td>
     <td>${esc(row.vendor_name)}</td>
     <td>${esc(row.status)}</td>
     <td>${esc(row.line_count)}</td>
@@ -12158,14 +12161,14 @@ app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("rec
     <div class="card">
       <form method="get" action="/receive/by-po" class="stack">
         <div class="grid" style="grid-template-columns: 1fr auto auto;">
-          <div><label>Filter POs</label><input name="q" value="${esc(q)}" placeholder="PO number or description" /></div>
+          <div><label>Filter POs</label><input name="q" value="${esc(q)}" placeholder="PO number, description, or requestor" /></div>
           <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
           <div style="align-self:end;"><a class="btn btn-secondary" href="/receive/by-po">Clear</a></div>
         </div>
       </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>PO #</th><th>Description</th><th>Vendor</th><th>Status</th><th>Lines</th><th>Open Lines</th><th>Action</th></tr>${poRows || `<tr><td colspan="7" class="muted">No purchase orders found.</td></tr>`}</table>
+      <table><tr><th>PO #</th><th>Description</th><th>Requestor</th><th>Vendor</th><th>Status</th><th>Lines</th><th>Open Lines</th><th>Action</th></tr>${poRows || `<tr><td colspan="8" class="muted">No purchase orders found.</td></tr>`}</table>
     </div>
   `, req.user));
 });
