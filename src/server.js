@@ -9148,7 +9148,18 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const status = String(req.query.status || "").trim();
   const itemCode = String(req.query.item_code || "").trim();
   const vendorId = String(req.query.vendor_id || "").trim();
-  const vendors = (await query("select id, name from vendors order by name")).rows;
+  const requestorName = String(req.query.requestor_name || "").trim();
+  const [vendorsRes, requestorsRes] = await Promise.all([
+    query("select id, name from vendors order by name"),
+    query(`
+      select distinct trim(requestor_name) as requestor_name
+      from rfqs
+      where job_id = $1 and coalesce(trim(requestor_name), '') <> ''
+      order by requestor_name
+    `, [jobId])
+  ]);
+  const vendors = vendorsRes.rows;
+  const requestors = requestorsRes.rows;
   const where = ["r.job_id = $1"];
   const params = [jobId];
   if (rfqNo) {
@@ -9162,6 +9173,10 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   if (status) {
     params.push(status);
     where.push(`r.status = $${params.length}`);
+  }
+  if (requestorName) {
+    params.push(requestorName);
+    where.push(`trim(coalesce(r.requestor_name, '')) = $${params.length}`);
   }
   if (itemCode) {
     params.push(`%${itemCode}%`);
@@ -9210,6 +9225,9 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const rfqStatusOptions = [`<option value="">All Statuses</option>`]
     .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
     .join("");
+  const requestorOptions = [`<option value="">All Requestors</option>`]
+    .concat(requestors.map((requestor) => `<option value="${esc(requestor.requestor_name)}" ${requestor.requestor_name === requestorName ? "selected" : ""}>${esc(requestor.requestor_name)}</option>`))
+    .join("");
   const rows = rfqs.map((rfq) => `<tr>
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td>${esc(rfq.client_request_no || "")}</td>
@@ -9232,6 +9250,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         </div>
         <div class="grid">
           <div><label>Quoted Vendor</label><select name="vendor_id">${vendorOptions}</select></div>
+          <div><label>Requestor</label><select name="requestor_name">${requestorOptions}</select></div>
         </div>
         <div class="actions">
           <button type="submit">Filter RFQs</button>
