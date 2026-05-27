@@ -8,6 +8,7 @@ dotenv.config();
 
 const { Pool } = pg;
 const databaseUrl = process.env.DATABASE_URL;
+const slowQueryMs = Number(process.env.SLOW_QUERY_MS || 0);
 
 if (!databaseUrl) {
   throw new Error("DATABASE_URL is not set.");
@@ -45,7 +46,16 @@ export function setPermissionMatrix(values) {
 }
 
 export async function query(text, params = []) {
-  return pool.query(text, params);
+  const startedAt = Date.now();
+  try {
+    return await pool.query(text, params);
+  } finally {
+    const durationMs = Date.now() - startedAt;
+    if (slowQueryMs > 0 && durationMs >= slowQueryMs) {
+      const compactSql = String(text || "").replace(/\s+/g, " ").trim().slice(0, 500);
+      console.warn(`[db] slow query ${durationMs}ms (${params.length} params): ${compactSql}`);
+    }
+  }
 }
 
 export async function withTransaction(fn) {
@@ -112,16 +122,18 @@ export async function initDb() {
 
   const username = process.env.DEFAULT_ADMIN_USERNAME || "admin";
   const password = process.env.DEFAULT_ADMIN_PASSWORD || "admin123";
-  const passwordHash = await bcrypt.hash(password, 10);
-
-  await pool.query(
-    `
-      insert into users (username, password_hash, role)
-      values ($1, $2, 'admin')
-      on conflict (username) do nothing
-    `,
-    [username, passwordHash]
-  );
+  const defaultAdmin = await pool.query("select id from users where username = $1 limit 1", [username]);
+  if (!defaultAdmin.rowCount) {
+    const passwordHash = await bcrypt.hash(password, 10);
+    await pool.query(
+      `
+        insert into users (username, password_hash, role)
+        values ($1, $2, 'admin')
+        on conflict (username) do nothing
+      `,
+      [username, passwordHash]
+    );
+  }
 
   const defaultJobNumber = process.env.DEFAULT_JOB_NUMBER || "0000";
   await pool.query(

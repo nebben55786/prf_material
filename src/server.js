@@ -9233,23 +9233,39 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const [rfqsRes] = await Promise.all([
     query(`
+    with base_rfqs as (
+      select r.*
+      from rfqs r
+      ${whereSql}
+      order by r.id desc
+      limit 300
+    ),
+    awarded_vendors as (
+      select
+        ri.rfq_id,
+        string_agg(distinct v.name, ', ' order by v.name) as awarded_vendor_refs
+      from rfq_items ri
+      join base_rfqs b on b.id = ri.rfq_id and b.job_id = ri.job_id
+      join vendors v on v.id = ri.awarded_vendor_id
+      where ri.award_status = 'AWARDED' and ri.awarded_vendor_id is not null
+      group by ri.rfq_id
+    ),
+    issued_pos as (
+      select
+        po.rfq_id,
+        string_agg(distinct po.po_no, ', ' order by po.po_no) as issued_po_refs
+      from purchase_orders po
+      join base_rfqs b on b.id = po.rfq_id and b.job_id = po.job_id
+      group by po.rfq_id
+    )
     select
-      r.*,
-      coalesce((
-        select string_agg(distinct v.name, ', ' order by v.name)
-        from rfq_items ri
-        join vendors v on v.id = ri.awarded_vendor_id
-        where ri.rfq_id = r.id and ri.job_id = r.job_id and ri.award_status = 'AWARDED' and ri.awarded_vendor_id is not null
-      ), '') as awarded_vendor_refs,
-      coalesce((
-        select string_agg(distinct po.po_no, ', ' order by po.po_no)
-        from purchase_orders po
-        where po.rfq_id = r.id and po.job_id = r.job_id
-      ), '') as issued_po_refs
-    from rfqs r
-    ${whereSql}
-    order by r.id desc
-    limit 300
+      b.*,
+      coalesce(av.awarded_vendor_refs, '') as awarded_vendor_refs,
+      coalesce(ip.issued_po_refs, '') as issued_po_refs
+    from base_rfqs b
+    left join awarded_vendors av on av.rfq_id = b.id
+    left join issued_pos ip on ip.rfq_id = b.id
+    order by b.id desc
   `, params)
   ]);
   const rfqs = rfqsRes.rows;
