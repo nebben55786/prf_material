@@ -2298,6 +2298,40 @@ function safeBlobPathSegment(value, fallback = "file") {
   return cleaned || fallback;
 }
 
+function safeQuoteFilenamePart(value, fallback = "file") {
+  const cleaned = String(value ?? "")
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  return cleaned || fallback;
+}
+
+function quoteFileExtension(filename, contentType = "") {
+  const ext = path.extname(String(filename || "")).toLowerCase();
+  if (/^\.[a-z0-9]{1,12}$/.test(ext)) return ext;
+  const type = String(contentType || "").toLowerCase();
+  if (type === "application/pdf") return ".pdf";
+  if (type.includes("spreadsheet") || type.includes("excel")) return ".xlsx";
+  if (type.includes("wordprocessingml")) return ".docx";
+  return "";
+}
+
+function quoteFileDisplayName({ rfqNo, vendorName, quoteSequence, sourceFilename, contentType }) {
+  const sequence = Math.max(1, Number(quoteSequence || 1));
+  const quoteNo = String(sequence).padStart(2, "0");
+  const base = [
+    safeQuoteFilenamePart(rfqNo, "RFQ"),
+    safeQuoteFilenamePart(vendorName, "Vendor"),
+    `Quote ${quoteNo}`
+  ].join(" - ").replace(/[. ]+$/g, "");
+  return `${base}${quoteFileExtension(sourceFilename, contentType)}`;
+}
+
+function contentDispositionFilename(value) {
+  return safeQuoteFilenamePart(value, "quote-file").replace(/["\\\r\n]/g, "_");
+}
+
 function formatBytes(value) {
   const bytes = Number(value || 0);
   if (!Number.isFinite(bytes) || bytes <= 0) return "";
@@ -9439,7 +9473,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       group by pl.rfq_item_id
     `, [rfqId, jobId]),
     query(`
-      select qf.id, qf.vendor_id, qf.filename, qf.content_type, qf.size_bytes, qf.created_at, v.name as vendor_name, u.username as uploaded_by_name
+      select qf.id, qf.vendor_id, qf.filename, qf.content_type, qf.size_bytes, qf.created_at, v.name as vendor_name, u.username as uploaded_by_name,
+             row_number() over (partition by qf.rfq_id, qf.vendor_id order by qf.created_at, qf.id) as quote_sequence
       from rfq_quote_files qf
       left join vendors v on v.id = qf.vendor_id
       left join users u on u.id = qf.uploaded_by
@@ -9575,8 +9610,16 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <a class="btn btn-primary" target="_blank" href="/rfq/${rfqId}/sheet.pdf" onclick="return openRfqPdfWithOrder(this, 'rfq-quote-table-${rfqId}');">Open RFQ PDF</a>
     </div>`;
   const quoteFileRows = quoteFiles.length > 0
-    ? quoteFiles.map((file) => `<tr>
-      <td>${esc(file.filename)}</td>
+    ? quoteFiles.map((file) => {
+      const displayFilename = quoteFileDisplayName({
+        rfqNo: rfq.rfq_no,
+        vendorName: file.vendor_name || "Vendor",
+        quoteSequence: file.quote_sequence,
+        sourceFilename: file.filename,
+        contentType: file.content_type
+      });
+      return `<tr>
+      <td>${esc(displayFilename)}</td>
       <td>${esc(file.vendor_name || "RFQ")}</td>
       <td>${esc(formatBytes(file.size_bytes))}</td>
       <td>${esc(file.uploaded_by_name || "")}</td>
@@ -9585,12 +9628,13 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         <div class="actions">
           <a class="btn btn-secondary" target="_blank" href="/rfq/${rfqId}/quote-files/${file.id}/open">Open</a>
           <a class="btn btn-secondary" href="/rfq/${rfqId}/quote-files/${file.id}/download">Download</a>
-          <form method="post" action="/rfq/${rfqId}/quote-files/${file.id}/delete" onsubmit="return confirm('Delete quote file ${escAttr(file.filename)}?');">
+          <form method="post" action="/rfq/${rfqId}/quote-files/${file.id}/delete" onsubmit="return confirm('Delete quote file ${escAttr(displayFilename)}?');">
             <button class="btn btn-danger" type="submit">Delete</button>
           </form>
         </div>
       </td>
-    </tr>`).join("")
+    </tr>`;
+    }).join("")
     : `<tr><td colspan="6" class="muted">No quote files uploaded yet.</td></tr>`;
   const quoteFileCard = `
     <div class="card">
@@ -9742,13 +9786,25 @@ app.post("/rfq/:id/quote-files", requireAuth, requireJobContext, requirePermissi
     if (!rfq) throw new Error("RFQ not found.");
     const vendor = (await client.query("select v.name from rfq_vendors rv join vendors v on v.id = rv.vendor_id where rv.rfq_id = $1 and rv.vendor_id = $2 and rv.job_id = $3", [rfqId, vendorId, jobId])).rows[0];
     if (!vendor) throw new Error("Choose a vendor from the RFQ vendor list before uploading.");
+    const quoteSequence = Number((await client.query(`
+      select count(*) as count
+      from rfq_quote_files
+      where rfq_id = $1 and job_id = $2 and vendor_id = $3
+    `, [rfqId, jobId, vendorId])).rows[0]?.count || 0) + 1;
+    const generatedFilename = quoteFileDisplayName({
+      rfqNo: rfq.rfq_no,
+      vendorName: vendor.name,
+      quoteSequence,
+      sourceFilename: file.originalname || "quote-file",
+      contentType: file.mimetype || ""
+    });
 
     const pathname = [
       "rfq-quotes",
       `job-${jobId}`,
       `rfq-${safeBlobPathSegment(rfq.rfq_no, String(rfqId))}`,
       `vendor-${safeBlobPathSegment(vendor.name, String(vendorId))}`,
-      `${Date.now()}-${safeBlobPathSegment(file.originalname, "quote-file")}`
+      `${Date.now()}-${safeBlobPathSegment(generatedFilename, "quote-file")}`
     ].join("/");
     const blob = await put(pathname, file.buffer, {
       access: "private",
@@ -9759,8 +9815,8 @@ app.post("/rfq/:id/quote-files", requireAuth, requireJobContext, requirePermissi
       insert into rfq_quote_files (job_id, rfq_id, vendor_id, filename, content_type, size_bytes, blob_url, blob_download_url, blob_pathname, uploaded_by)
       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       returning vendor_id
-    `, [jobId, rfqId, vendorId, file.originalname || "quote-file", file.mimetype || "", file.size || file.buffer.length, blob.url, blob.downloadUrl || "", blob.pathname, req.user.id]);
-    await auditLog(client, req.user.id, "upload", "rfq_quote_file", rfqId, `${vendor.name}:${file.originalname || "quote-file"}`);
+    `, [jobId, rfqId, vendorId, generatedFilename, file.mimetype || "", file.size || file.buffer.length, blob.url, blob.downloadUrl || "", blob.pathname, req.user.id]);
+    await auditLog(client, req.user.id, "upload", "rfq_quote_file", rfqId, `${vendor.name}:${generatedFilename}`);
     return insert.rows[0].vendor_id;
   });
   res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(activeVendorId))}`);
@@ -9771,18 +9827,31 @@ app.get("/rfq/:id/quote-files/:fileId/:mode(open|download)", requireAuth, requir
   const fileId = Number(req.params.fileId);
   const jobId = currentJobId(req);
   const file = (await query(`
-    select qf.*
-    from rfq_quote_files qf
-    join rfqs r on r.id = qf.rfq_id and r.job_id = qf.job_id
-    where qf.id = $1 and qf.rfq_id = $2 and qf.job_id = $3
+    select *
+    from (
+      select qf.*, r.rfq_no, v.name as vendor_name,
+             row_number() over (partition by qf.rfq_id, qf.vendor_id order by qf.created_at, qf.id) as quote_sequence
+      from rfq_quote_files qf
+      join rfqs r on r.id = qf.rfq_id and r.job_id = qf.job_id
+      left join vendors v on v.id = qf.vendor_id
+      where qf.rfq_id = $2 and qf.job_id = $3
+    ) ranked
+    where id = $1
   `, [fileId, rfqId, jobId])).rows[0];
   if (!file) throw new Error("Quote file not found.");
 
   const blob = await get(file.blob_pathname || file.blob_url, { access: "private" });
   if (!blob.stream) throw new Error("Quote file is not available.");
-  const filename = safeBlobPathSegment(file.filename, "quote-file");
+  const displayFilename = quoteFileDisplayName({
+    rfqNo: file.rfq_no,
+    vendorName: file.vendor_name || "Vendor",
+    quoteSequence: file.quote_sequence,
+    sourceFilename: file.filename,
+    contentType: file.content_type
+  });
+  const filename = contentDispositionFilename(displayFilename);
   res.setHeader("Content-Type", file.content_type || blob.blob?.contentType || "application/octet-stream");
-  res.setHeader("Content-Disposition", `${req.params.mode === "download" ? "attachment" : "inline"}; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(file.filename || filename)}`);
+  res.setHeader("Content-Disposition", `${req.params.mode === "download" ? "attachment" : "inline"}; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(displayFilename || filename)}`);
   if (file.size_bytes) res.setHeader("Content-Length", String(file.size_bytes));
   Readable.fromWeb(blob.stream).pipe(res);
 }));
