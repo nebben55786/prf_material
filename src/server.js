@@ -12393,7 +12393,10 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
     <td>${esc(formatQtyDisplay(row.qty_on_hand))}</td><td>${esc(formatQtyDisplay(row.qty_osd))}</td>
   </tr>`).join("");
   res.send(layout("Inventory", `
-    <h1>Inventory by Location</h1>
+    <div class="actions" style="justify-content:space-between; align-items:center;">
+      <h1 style="margin:0;">Inventory by Location</h1>
+      <a class="btn btn-primary" href="/inventory/export.xlsx">Download Entire Inventory</a>
+    </div>
     <div class="card">
       <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">
         <form method="get" action="/inventory" class="stack">
@@ -12438,6 +12441,103 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
     <script>syncLocationOptions("inventory-warehouse", "inventory-location", ${JSON.stringify(locationMap)}, ${JSON.stringify(locationFilter)});</script>
   `, req.user));
 });
+
+app.get("/inventory/export.xlsx", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const [currentRows, itemRows] = await Promise.all([
+    getCurrentOnHandRows({ query }, {
+      jobId,
+      orderSql: "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location"
+    }),
+    query(`
+      select item_code, description, material_type, uom
+      from material_items
+      where job_id = $1
+      order by item_code
+    `, [jobId])
+  ]);
+  const itemMeta = new Map(itemRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), row]));
+  const stockedItemCodes = new Set(currentRows.map((row) => normalizeInventoryKeyPart(row.item_code)).filter(Boolean));
+  const zeroQuantityRows = itemRows.rows
+    .filter((row) => !stockedItemCodes.has(normalizeInventoryKeyPart(row.item_code)))
+    .map((row) => ({
+      item_code: row.item_code,
+      description: row.description,
+      material_type: row.material_type,
+      uom: row.uom,
+      size_1: "",
+      size_2: "",
+      thk_1: "",
+      thk_2: "",
+      warehouse: "",
+      location: "",
+      qty_on_hand: 0,
+      qty_osd: 0
+    }));
+  const exportRows = currentRows
+    .map((row) => {
+      const meta = itemMeta.get(normalizeInventoryKeyPart(row.item_code)) || {};
+      return {
+        item_code: row.item_code,
+        description: row.description || meta.description || "",
+        material_type: meta.material_type || "",
+        uom: meta.uom || "",
+        size_1: row.size_1 || "",
+        size_2: row.size_2 || "",
+        thk_1: row.thk_1 || "",
+        thk_2: row.thk_2 || "",
+        warehouse: row.warehouse || "",
+        location: row.location || "",
+        qty_on_hand: num(row.qty_on_hand),
+        qty_osd: num(row.qty_osd)
+      };
+    })
+    .concat(zeroQuantityRows)
+    .sort((a, b) => (
+      String(a.item_code || "").localeCompare(String(b.item_code || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.warehouse || "").localeCompare(String(b.warehouse || ""), undefined, { numeric: true, sensitivity: "base" })
+      || String(a.location || "").localeCompare(String(b.location || ""), undefined, { numeric: true, sensitivity: "base" })
+    ));
+  const worksheetRows = exportRows.map((row) => ({
+    "Item": row.item_code || "",
+    "Description": row.description || "",
+    "Material Type": row.material_type || "",
+    "UOM": row.uom || "",
+    "Size 1": row.size_1 || "",
+    "Size 2": row.size_2 || "",
+    "Thk 1": row.thk_1 || "",
+    "Thk 2": row.thk_2 || "",
+    "Warehouse": row.warehouse || "",
+    "Location": row.location || "",
+    "Qty On Hand": num(row.qty_on_hand),
+    "Qty OS&D": num(row.qty_osd)
+  }));
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.json_to_sheet(worksheetRows, {
+    header: ["Item", "Description", "Material Type", "UOM", "Size 1", "Size 2", "Thk 1", "Thk 2", "Warehouse", "Location", "Qty On Hand", "Qty OS&D"]
+  });
+  worksheet["!cols"] = [
+    { wch: 22 },
+    { wch: 64 },
+    { wch: 16 },
+    { wch: 10 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 10 },
+    { wch: 10 },
+    { wch: 18 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 12 }
+  ];
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Inventory");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  const jobToken = safeBlobPathSegment(req.user?.activeJob?.job_number || headerJobNumber || "job", "job");
+  await auditLog(pool, req.user.id, "export", "inventory", jobId, `rows=${exportRows.length}`);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="inventory-by-location-${jobToken}.xlsx"`);
+  res.send(buffer);
+}));
 
 app.get("/inventory-audit", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
