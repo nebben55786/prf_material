@@ -1728,10 +1728,9 @@ function layout(title, body, user) {
           ? table.tHead.rows[0]
           : table.querySelector("tr");
         const bodyContainer = table.tBodies && table.tBodies.length ? table.tBodies[0] : table;
-        const rows = headerRow
-          ? [headerRow].concat(Array.from(bodyContainer.querySelectorAll("tr")))
-          : Array.from(table.querySelectorAll("tr"));
-        if (rows.length < 2) return;
+        const dataRows = Array.from(bodyContainer.querySelectorAll("tr"))
+          .filter((row) => row !== headerRow && !row.querySelector("th"));
+        if (!headerRow || dataRows.length < 2) return;
         const headers = Array.from(headerRow.querySelectorAll("th"));
         if (!headers.length) return;
         headers.forEach((th, index) => {
@@ -1748,7 +1747,8 @@ function layout(title, body, user) {
           th.addEventListener("click", () => {
               const currentIndex = Number(table.dataset.sortIndex || -1);
               const nextDir = currentIndex === index && table.dataset.sortDir === "asc" ? "desc" : "asc";
-              const bodyRows = Array.from(bodyContainer.querySelectorAll("tr"));
+              const bodyRows = Array.from(bodyContainer.querySelectorAll("tr"))
+                .filter((row) => row !== headerRow && !row.querySelector("th"));
               bodyRows.sort((a, b) => {
                 const aParsed = parseSortableValue(getSortableCellText(a.children[index]));
                 const bParsed = parseSortableValue(getSortableCellText(b.children[index]));
