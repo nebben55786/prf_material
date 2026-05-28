@@ -2151,7 +2151,7 @@ function normalizePoImportRow(row) {
     po_line: ["po_line", "po_line_no", "po_line_number", "line_no", "line_number", "line"],
     vendor_name: ["vendor_name", "vendor", "supplier", "supplier_name", "name"],
     item_code: ["item_code", "item", "item_no", "item_number", "material_code", "material_item"],
-    description: ["description", "item_description", "material_description", "desc"],
+    description: ["description", "item_description", "material_description", "abbrev_description", "abbrev_desc", "product_description", "desc"],
     material_type: ["material_type", "type", "item_type"],
     uom: ["uom", "unit", "unit_of_measure"],
     size_1: ["size_1", "size1", "primary_size"],
@@ -2220,7 +2220,7 @@ function normalizeBomImportRow(row) {
   return {
     line_no: text(row.line_no, row.line, row.line_number),
     item_code: text(row.item_code, row.ident, row.ident_code, row.item),
-    description: text(row.description, row.abbrev_description, row.abbrev_desc),
+    description: text(row.description, row.item_description, row.material_description, row.abbrev_description, row.abbrev_desc, row.product_description),
     material_type: text(row.material_type, row.category, row.type, "misc"),
     uom: text(row.uom, row.unit, row.unit_of_measure, "EA"),
     spec: text(row.spec),
@@ -2506,24 +2506,52 @@ function requestAccessPage(error = "", success = "") {
 
 const rfqItemColumns = ["po_line", "item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
 
+function normalizeDescriptionText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function isItemCodeDescription(description, itemCode) {
+  const normalizedDescription = normalizeDescriptionText(description);
+  const normalizedItemCode = normalizeDescriptionText(itemCode);
+  return Boolean(normalizedDescription && normalizedItemCode && normalizedDescription === normalizedItemCode);
+}
+
+function pickRealMaterialDescription(itemCode, ...values) {
+  for (const value of values) {
+    const description = String(value || "").replace(/\s+/g, " ").trim();
+    if (description && !isItemCodeDescription(description, itemCode)) return description;
+  }
+  return "";
+}
+
 async function upsertMaterialItem(client, row, jobId) {
   const itemCode = String(row.item_code || "").trim();
-  const description = String(row.description || "").trim();
+  const description = pickRealMaterialDescription(
+    itemCode,
+    row.description,
+    row.item_description,
+    row.material_description,
+    row.abbrev_description,
+    row.abbrev_desc,
+    row.product_description,
+    row.desc
+  );
   const materialType = String(row.material_type || "").trim();
   const uom = String(row.uom || "").trim();
   if (!itemCode) throw new Error("Item code is required.");
   const existing = await client.query("select id, description, material_type, uom from material_items where job_id = $1 and item_code = $2", [jobId, itemCode]);
   if (existing.rows[0]) {
     const current = existing.rows[0];
+    const currentDescription = pickRealMaterialDescription(itemCode, current.description);
     await client.query(
       "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
-      [current.id, description || current.description, materialType || current.material_type, uom || current.uom]
+      [current.id, description || currentDescription, materialType || current.material_type, uom || current.uom]
     );
     return current.id;
   }
   const insert = await client.query(
     "insert into material_items (job_id, item_code, description, material_type, uom) values ($1, $2, $3, $4, $5) returning id",
-    [jobId, itemCode, description || itemCode, materialType || "misc", uom || "EA"]
+    [jobId, itemCode, description, materialType || "misc", uom || "EA"]
   );
   return insert.rows[0].id;
 }
@@ -2591,7 +2619,7 @@ async function upsertPurchaseOrderRow(client, row, jobId) {
   const vendorId = await findOrCreateVendorByName(client, vendorName, jobId);
   const materialItemId = await upsertMaterialItem(client, {
     item_code: itemCode,
-    description: row.description || row.item_description || itemCode,
+    description: row.description || row.item_description,
     material_type: row.material_type || row.type || "misc",
     uom: row.uom || row.unit || "EA"
   }, jobId);
@@ -2752,7 +2780,7 @@ async function upsertPurchaseOrderLineRow(client, row, jobId) {
 
   const materialItemId = await upsertMaterialItem(client, {
     item_code: itemCode,
-    description: row.description || row.item_description || itemCode,
+    description: row.description || row.item_description,
     material_type: row.material_type || row.type || "misc",
     uom: row.uom || row.unit || "EA"
   }, poRow.job_id);
@@ -3633,7 +3661,7 @@ async function ensureUnallocatedBom(client, jobId) {
 
 async function rebuildUnallocatedBom(client, jobId) {
   const bom = await ensureUnallocatedBom(client, jobId);
-  const [inventoryRows, demandRows, itemRows, existingLines] = await Promise.all([
+  const [inventoryRows, demandRows, itemRows, existingLines, sourceDescriptionRows] = await Promise.all([
     client.query(getInventoryTotalsByItemSubquery(jobId)),
     client.query(`
       select
@@ -3656,13 +3684,41 @@ async function rebuildUnallocatedBom(client, jobId) {
       from bom_lines bl
       where bl.bom_id = $1
       order by bl.id
-    `, [bom.id])
+    `, [bom.id]),
+    client.query(`
+      select item_code, description, priority
+      from (
+        select bl.item_code, bl.description, 1 as priority
+        from bom_lines bl
+        join bom_headers bh on bh.id = bl.bom_id
+        where bh.job_id = $1
+          and coalesce(bh.system_key, '') <> $2
+        union all
+        select item_code, description, 2 as priority
+        from material_receiving_logs
+        where job_id = $1
+        union all
+        select item_code, abbrev_description as description, 3 as priority
+        from vendor_fmr_request_lines
+        where job_id = $1
+      ) source_descriptions
+      where coalesce(trim(item_code), '') <> ''
+        and coalesce(trim(description), '') <> ''
+      order by priority, length(description) desc
+    `, [jobId, unallocatedBomSystemKey])
   ]);
 
   const inventoryByItem = new Map(inventoryRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), parseQtyValue(row.qty_on_hand || 0)]));
   const demandByItem = new Map(demandRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), parseQtyValue(row.qty_needed || 0)]));
   const itemByCode = new Map(itemRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), row]));
   const existingByItem = new Map(existingLines.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), row]));
+  const descriptionByItem = new Map();
+  for (const row of sourceDescriptionRows.rows) {
+    const itemCode = normalizeInventoryKeyPart(row.item_code);
+    if (!itemCode || descriptionByItem.has(itemCode)) continue;
+    const description = pickRealMaterialDescription(itemCode, row.description);
+    if (description) descriptionByItem.set(itemCode, description);
+  }
 
   const targetRows = [];
   for (const [itemCode, qtyOnHand] of inventoryByItem.entries()) {
@@ -3673,7 +3729,7 @@ async function rebuildUnallocatedBom(client, jobId) {
     const existing = existingByItem.get(itemCode) || {};
     targetRows.push({
       item_code: itemCode,
-      description: String(item.description || existing.description || "").trim() || itemCode,
+      description: pickRealMaterialDescription(itemCode, item.description, existing.description, descriptionByItem.get(itemCode)),
       material_type: String(item.material_type || existing.material_type || "misc").trim() || "misc",
       uom: String(item.uom || existing.uom || "EA").trim() || "EA",
       qty_required: qtyUnallocated
@@ -6940,7 +6996,7 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       </div>
       <div class="card">
         <h3>Upload BOM Lines</h3>
-        <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes</p>
+        <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes. Description also accepts item_description, material_description, or abbrev_description.</p>
           <form id="bom-lines-import-form" method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
             <div><label>CSV/XLSX File</label><input id="bom-lines-import-file" type="file" name="sheet" /></div>
             <div><label>Or Paste CSV</label><textarea id="bom-lines-import-text" name="csv_text"></textarea></div>
@@ -6989,21 +7045,7 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
     `, [jobId, rfqNo, req.body.project_name?.trim() || bom.bom_name || bom.description || bom.bom_no, req.body.due_date || null]);
     const newRfqId = rfqInsert.rows[0].id;
     for (const line of lines) {
-      let materialItemId;
-      const existingItem = await client.query("select id from material_items where job_id = $1 and item_code = $2", [jobId, line.item_code]);
-      if (existingItem.rows[0]) {
-        materialItemId = existingItem.rows[0].id;
-        await client.query(
-          "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
-          [materialItemId, line.description, line.material_type || "misc", line.uom || "EA"]
-        );
-      } else {
-        const inserted = await client.query(
-          "insert into material_items (job_id, item_code, description, material_type, uom) values ($1, $2, $3, $4, $5) returning id",
-          [jobId, line.item_code, line.description, line.material_type || "misc", line.uom || "EA"]
-        );
-        materialItemId = inserted.rows[0].id;
-      }
+      const materialItemId = await upsertMaterialItem(client, line, jobId);
       await client.query(`
         insert into rfq_items (job_id, rfq_id, bom_line_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
@@ -7146,7 +7188,7 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
       validRowsBySourceUid.set(sourceUid, {
         lineNo,
         itemCode,
-        description: row.description || itemCode,
+        description: pickRealMaterialDescription(itemCode, row.description),
         materialType: row.material_type || "misc",
         uom: row.uom || "EA",
         spec: row.spec || "",
@@ -11048,11 +11090,19 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
   const itemId = Number(req.params.id);
   const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
-    const current = (await client.query("select rfq_id, material_item_id from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
+    const current = (await client.query(`
+      select ri.rfq_id, ri.material_item_id, mi.item_code, mi.description
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
+    `, [itemId, jobId])).rows[0];
     if (!current) throw new Error("RFQ item not found.");
+    const nextItemCode = String(req.body.item_code || "").trim();
+    const nextDescription = pickRealMaterialDescription(nextItemCode, req.body.description)
+      || pickRealMaterialDescription(current.item_code, current.description);
     await client.query(
       "update material_items set item_code = $2, description = $3, material_type = $4, uom = $5 where id = $1 and job_id = $6",
-      [current.material_item_id, req.body.item_code?.trim(), req.body.description?.trim() || req.body.item_code?.trim(), req.body.material_type?.trim() || "misc", req.body.uom?.trim() || "EA", jobId]
+      [current.material_item_id, nextItemCode, nextDescription, req.body.material_type?.trim() || "misc", req.body.uom?.trim() || "EA", jobId]
     );
     const update = await client.query(`
       update rfq_items
@@ -11359,7 +11409,7 @@ app.get("/po/import", requireAuth, requireJobContext, requirePermission("pos", "
     </div>
     <div class="card">
       <h3>Import PO Lines</h3>
-      <p class="muted">Use this import after the PO headers already exist. Missing items are added automatically. Supported columns: po_no, po_line, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price.</p>
+      <p class="muted">Use this import after the PO headers already exist. Missing items are added automatically. Supported columns: po_no, po_line, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price. Description also accepts item_description, material_description, or abbrev_description.</p>
       <div class="actions"><a class="btn btn-secondary" href="/po/import/lines/template">Download Line Template</a></div>
       <form method="post" enctype="multipart/form-data" action="/po/import/lines/preview" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
