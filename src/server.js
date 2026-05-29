@@ -10032,8 +10032,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         </table>
       </form>
     </div>
-    ${quoteFileCard}
     ${awardSummaryCard}
+    ${quoteFileCard}
     <div class="card scroll">
       <h3>Recent Imports</h3>
       <table>
