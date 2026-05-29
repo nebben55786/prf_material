@@ -157,6 +157,12 @@ create table if not exists material_requisitions (
   verified_by_user_id bigint references users(id) on delete set null,
   issued_at timestamptz,
   issued_by_user_id bigint references users(id) on delete set null,
+  flag_color text,
+  flagged_at timestamptz,
+  flagged_by_user_id bigint references users(id) on delete set null,
+  trailer_number text,
+  loaded_at timestamptz,
+  loaded_by_user_id bigint references users(id) on delete set null,
   signed_at timestamptz,
   signed_by_name text,
   signed_signature_data text,
@@ -192,6 +198,12 @@ alter table material_requisitions add column if not exists verified_at timestamp
 alter table material_requisitions add column if not exists verified_by_user_id bigint references users(id) on delete set null;
 alter table material_requisitions add column if not exists issued_at timestamptz;
 alter table material_requisitions add column if not exists issued_by_user_id bigint references users(id) on delete set null;
+alter table material_requisitions add column if not exists flag_color text;
+alter table material_requisitions add column if not exists flagged_at timestamptz;
+alter table material_requisitions add column if not exists flagged_by_user_id bigint references users(id) on delete set null;
+alter table material_requisitions add column if not exists trailer_number text;
+alter table material_requisitions add column if not exists loaded_at timestamptz;
+alter table material_requisitions add column if not exists loaded_by_user_id bigint references users(id) on delete set null;
 alter table material_requisitions add column if not exists signed_at timestamptz;
 alter table material_requisitions add column if not exists signed_by_name text;
 alter table material_requisitions add column if not exists signed_signature_data text;

@@ -940,8 +940,8 @@ function buildPickTicketPdf(header, lines) {
   const right = pageWidth - 28;
   const top = pageHeight - 24;
   const rowHeight = 30;
-  const maxRowsFirstPage = 11;
-  const maxRowsOtherPages = 14;
+  const maxRowsFirstPage = 9;
+  const maxRowsOtherPages = 12;
   const chunks = [];
   let cursor = 0;
   while (cursor < lines.length || !chunks.length) {
@@ -974,13 +974,22 @@ function buildPickTicketPdf(header, lines) {
     content.push(makeText(left + 8, metaTop - 13, "REQUESTED BY", "F2", 8));
     content.push(makeText(left + 8, metaTop - 26, String(header.requested_by_name || "").slice(0, 34), "F1", 10));
     content.push(makeText(left + 248, metaTop - 13, "CREATED", "F2", 8));
-  content.push(makeText(left + 248, metaTop - 26, formatShortDateTime(header.created_at), "F1", 9));
+    content.push(makeText(left + 248, metaTop - 26, formatShortDateTime(header.created_at), "F1", 9));
     content.push(makeText(left + 380, metaTop - 13, "PRINTED", "F2", 8));
     content.push(makeText(left + 380, metaTop - 26, formatPickTicketTimestamp().slice(0, 19), "F1", 9));
     content.push(makeText(left + 520, metaTop - 13, "BOM", "F2", 8));
     content.push(makeText(left + 520, metaTop - 26, String(header.bom_name || header.bom_description || header.bom_no || "").slice(0, 32), "F1", 9));
 
-    const meta2Top = metaTop - 42;
+    const handlingTop = metaTop - 42;
+    const handlingWidth = (right - left) / 2;
+    content.push(rect(left, handlingTop - 34, handlingWidth, 34));
+    content.push(rect(left + handlingWidth, handlingTop - 34, handlingWidth, 34));
+    content.push(makeText(left + 8, handlingTop - 13, "FLAG COLOR", "F2", 8));
+    content.push(makeText(left + 8, handlingTop - 26, String(header.flag_color || "").slice(0, 46), "F1", 10));
+    content.push(makeText(left + handlingWidth + 8, handlingTop - 13, "TRAILER NUMBER", "F2", 8));
+    content.push(makeText(left + handlingWidth + 8, handlingTop - 26, String(header.trailer_number || "").slice(0, 46), "F1", 10));
+
+    const meta2Top = handlingTop - 42;
     if (header.notes) {
       content.push(rect(left, meta2Top - 26, right - left, 26));
       content.push(makeText(left + 8, meta2Top - 10, "NOTES", "F2", 7));
@@ -1604,6 +1613,17 @@ function layout(title, body, user) {
         if (!dialog) return false;
         if (typeof dialog.close === "function") dialog.close();
         else dialog.removeAttribute("open");
+        return false;
+      }
+      function toggleInlineForm(formId) {
+        const form = document.getElementById(formId);
+        if (!form) return false;
+        const shouldShow = form.style.display === "none";
+        form.style.display = shouldShow ? "" : "none";
+        if (shouldShow) {
+          const input = form.querySelector("input, select, textarea");
+          if (input) window.setTimeout(() => input.focus(), 0);
+        }
         return false;
       }
       function removeVendorSelection(vendorId, selectedListId, hiddenContainerId, formId) {
@@ -8245,13 +8265,40 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Requisition not found.</h3></div>`, req.user));
     return;
   }
-  const lines = (await query(`
-    select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
-    from material_requisition_lines mrl
-    join bom_lines bl on bl.id = mrl.bom_line_id
-    where mrl.requisition_id = $1 and mrl.job_id = $2
-    order by bl.line_no, bl.id
-  `, [req.params.id, jobId])).rows;
+  const [linesResult, flagColorResult, trailerNumberResult] = await Promise.all([
+    query(`
+      select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
+      from material_requisition_lines mrl
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where mrl.requisition_id = $1 and mrl.job_id = $2
+      order by bl.line_no, bl.id
+    `, [req.params.id, jobId]),
+    query(`
+      select distinct flag_color
+      from material_requisitions
+      where job_id = $1
+        and coalesce(flag_color, '') <> ''
+      order by flag_color
+    `, [jobId]),
+    query(`
+      select distinct trailer_number
+      from material_requisitions
+      where job_id = $1
+        and coalesce(trailer_number, '') <> ''
+      order by trailer_number
+    `, [jobId])
+  ]);
+  const lines = linesResult.rows;
+  const flagColorValues = Array.from(new Set([
+    ...flagColorResult.rows.map((row) => String(row.flag_color || "").trim()),
+    String(header.flag_color || "").trim()
+  ].filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  const trailerNumberValues = Array.from(new Set([
+    ...trailerNumberResult.rows.map((row) => String(row.trailer_number || "").trim()),
+    String(header.trailer_number || "").trim()
+  ].filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  const flagColorOptionsHtml = flagColorValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
+  const trailerNumberOptionsHtml = trailerNumberValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
   const lineRows = lines.map((line) => `<tr>
     <td>${esc(line.line_no)}</td>
     <td>${esc(line.iwp_no || "")}</td>
@@ -8276,6 +8323,16 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       headerActions.push(`<form method="post" action="/requisitions/${header.id}/unverify"><button class="btn btn-secondary" type="submit">Set To Un-Verified</button></form>`);
     }
     if (canAccess(req.user, "requisitions", "issue")) {
+      const flagFormId = `requisition-flag-form-${header.id}`;
+      const loadFormId = `requisition-load-form-${header.id}`;
+      const flagOptionsId = `requisition-flag-options-${header.id}`;
+      const trailerOptionsId = `requisition-trailer-options-${header.id}`;
+      headerActions.push(`<button class="btn btn-secondary" type="button" onclick="return toggleInlineForm('${flagFormId}')">Flagged</button>`);
+      headerActions.push(`<form id="${flagFormId}" method="post" action="/requisitions/${header.id}/flag" class="inline-field" style="display:none; min-width:360px;"><div><label>Flag Color</label><input name="flag_color" list="${flagOptionsId}" value="${escAttr(header.flag_color || "")}" required /><datalist id="${flagOptionsId}">${flagColorOptionsHtml}</datalist></div><button type="submit">Save Flag</button></form>`);
+      headerActions.push(`<button class="btn btn-secondary" type="button" onclick="return toggleInlineForm('${loadFormId}')">Loaded</button>`);
+      headerActions.push(`<form id="${loadFormId}" method="post" action="/requisitions/${header.id}/load" class="inline-field" style="display:none; min-width:360px;"><div><label>Trailer Number</label><input name="trailer_number" list="${trailerOptionsId}" value="${escAttr(header.trailer_number || "")}" required /><datalist id="${trailerOptionsId}">${trailerNumberOptionsHtml}</datalist></div><button type="submit">Save Loaded</button></form>`);
+    }
+    if (canAccess(req.user, "requisitions", "issue")) {
       headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
     }
   }
@@ -8288,11 +8345,19 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   if (req.user?.role === "admin" && header.status === "CANCELLED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore Requisition</button></form>`);
   }
+  const handlingParts = [];
+  if (header.flag_color) {
+    handlingParts.push(`Flag Color: ${esc(header.flag_color)}${header.flagged_at ? ` (${esc(formatShortDateTime(header.flagged_at))})` : ""}`);
+  }
+  if (header.trailer_number) {
+    handlingParts.push(`Trailer Number: ${esc(header.trailer_number)}${header.loaded_at ? ` (${esc(formatShortDateTime(header.loaded_at))})` : ""}`);
+  }
   res.send(layout(`Requisition ${header.requisition_no}`, `
     <h1>Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
       <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(formatShortDateTime(header.created_at))}</p>
       <p class="muted">IWP: ${esc(header.iwp_no || "")}</p>
+      ${handlingParts.length ? `<p class="muted">${handlingParts.join(" | ")}</p>` : ""}
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
       ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}
     </div>
@@ -8890,10 +8955,56 @@ app.post("/requisitions/:id/unverify", requireAuth, requireJobContext, requirePe
       update material_requisitions
       set status = 'REQUESTED',
           verified_at = null,
-          verified_by_user_id = null
+          verified_by_user_id = null,
+          flag_color = null,
+          flagged_at = null,
+          flagged_by_user_id = null,
+          trailer_number = null,
+          loaded_at = null,
+          loaded_by_user_id = null
       where id = $1 and job_id = $2
     `, [req.params.id, jobId]);
     await auditLog(client, req.user.id, "unverify", "material_requisition", req.params.id, header.requisition_no);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/flag", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const flagColor = String(req.body.flag_color || "").trim().slice(0, 80);
+  if (!flagColor) throw new Error("Enter a flag color.");
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "VERIFIED") throw new Error("Only verified requisitions can be flagged.");
+    await client.query(`
+      update material_requisitions
+      set flag_color = $2,
+          flagged_at = now(),
+          flagged_by_user_id = $3
+      where id = $1 and job_id = $4
+    `, [req.params.id, flagColor, req.user.id, jobId]);
+    await auditLog(client, req.user.id, "flag", "material_requisition", req.params.id, `${header.requisition_no}|${flagColor}`);
+  });
+  res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/load", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const trailerNumber = String(req.body.trailer_number || "").trim().slice(0, 120);
+  if (!trailerNumber) throw new Error("Enter a trailer number.");
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "VERIFIED") throw new Error("Only verified requisitions can be loaded.");
+    await client.query(`
+      update material_requisitions
+      set trailer_number = $2,
+          loaded_at = now(),
+          loaded_by_user_id = $3
+      where id = $1 and job_id = $4
+    `, [req.params.id, trailerNumber, req.user.id, jobId]);
+    await auditLog(client, req.user.id, "load", "material_requisition", req.params.id, `${header.requisition_no}|${trailerNumber}`);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
@@ -9048,7 +9159,13 @@ app.post("/requisitions/:id/restore", requireAuth, requireJobContext, requirePer
           verified_at = null,
           verified_by_user_id = null,
           issued_at = null,
-          issued_by_user_id = null
+          issued_by_user_id = null,
+          flag_color = null,
+          flagged_at = null,
+          flagged_by_user_id = null,
+          trailer_number = null,
+          loaded_at = null,
+          loaded_by_user_id = null
       where id = $1 and job_id = $2
     `, [req.params.id, jobId]);
     await auditLog(client, req.user.id, "restore", "material_requisition", req.params.id, header.requisition_no);
