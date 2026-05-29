@@ -149,6 +149,7 @@ create table if not exists material_requisitions (
   bom_id bigint not null references bom_headers(id) on delete cascade,
   requested_by_user_id bigint references users(id) on delete set null,
   requested_by_name text not null,
+  issued_to text,
   iwp_no text,
   iso_no text,
   status text not null default 'REQUESTED',
@@ -196,6 +197,7 @@ create table if not exists material_issue_transactions (
 
 alter table material_requisitions add column if not exists verified_at timestamptz;
 alter table material_requisitions add column if not exists verified_by_user_id bigint references users(id) on delete set null;
+alter table material_requisitions add column if not exists issued_to text;
 alter table material_requisitions add column if not exists issued_at timestamptz;
 alter table material_requisitions add column if not exists issued_by_user_id bigint references users(id) on delete set null;
 alter table material_requisitions add column if not exists flag_color text;

@@ -967,18 +967,22 @@ function buildPickTicketPdf(header, lines) {
     content.push(makeText(right - 170, top - 32, `Page ${pageIndex + 1} of ${chunks.length}`, "F1", 8));
 
     const metaTop = top - 52;
-    content.push(rect(left, metaTop - 34, 240, 34));
-    content.push(rect(left + 240, metaTop - 34, 132, 34));
-    content.push(rect(left + 372, metaTop - 34, 140, 34));
-    content.push(rect(left + 512, metaTop - 34, 224, 34));
-    content.push(makeText(left + 8, metaTop - 13, "REQUESTED BY", "F2", 8));
-    content.push(makeText(left + 8, metaTop - 26, String(header.requested_by_name || "").slice(0, 34), "F1", 10));
-    content.push(makeText(left + 248, metaTop - 13, "CREATED", "F2", 8));
-    content.push(makeText(left + 248, metaTop - 26, formatShortDateTime(header.created_at), "F1", 9));
-    content.push(makeText(left + 380, metaTop - 13, "PRINTED", "F2", 8));
-    content.push(makeText(left + 380, metaTop - 26, formatPickTicketTimestamp().slice(0, 19), "F1", 9));
-    content.push(makeText(left + 520, metaTop - 13, "BOM", "F2", 8));
-    content.push(makeText(left + 520, metaTop - 26, String(header.bom_name || header.bom_description || header.bom_no || "").slice(0, 32), "F1", 9));
+    const metaWidths = [168, 168, 112, 112, right - left - 560];
+    const metaLabels = ["REQUESTED BY", "ISSUED TO", "CREATED", "PRINTED", "BOM"];
+    const metaValues = [
+      String(header.requested_by_name || "").slice(0, 24),
+      String(header.issued_to || "").slice(0, 24),
+      formatShortDateTime(header.created_at),
+      formatPickTicketTimestamp().slice(0, 19),
+      String(header.bom_name || header.bom_description || header.bom_no || "").slice(0, 24)
+    ];
+    let metaX = left;
+    for (let i = 0; i < metaWidths.length; i += 1) {
+      content.push(rect(metaX, metaTop - 34, metaWidths[i], 34));
+      content.push(makeText(metaX + 8, metaTop - 13, metaLabels[i], "F2", 8));
+      content.push(makeText(metaX + 8, metaTop - 26, metaValues[i], "F1", i < 2 ? 10 : 9));
+      metaX += metaWidths[i];
+    }
 
     const handlingTop = metaTop - 42;
     const handlingWidth = (right - left) / 2;
@@ -1405,6 +1409,7 @@ function layout(title, body, user) {
       h3 { font-size: 16px; text-transform: uppercase; letter-spacing: .03em; }
       .muted { color: var(--muted); font-size: 12px; }
       .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
       .grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
       .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
       .stat { padding: 10px; border: 1px solid var(--line-strong); border-radius: 2px; background: linear-gradient(180deg, #f6f8fa 0%, #e9eef2 100%); }
@@ -1452,7 +1457,7 @@ function layout(title, body, user) {
       .dashboard-sections { display: grid; gap: 10px; }
       .error { border-color: #d0a19b; background: #f8ecea; color: var(--warn); }
       .stack { display: grid; gap: 10px; }
-      @media (max-width: 900px) { .grid, .grid-4, .stats, .summary-grid { grid-template-columns: 1fr; } .topbar { flex-direction: column; align-items: flex-start; } }
+      @media (max-width: 900px) { .grid, .grid-3, .grid-4, .stats, .summary-grid { grid-template-columns: 1fr; } .topbar { flex-direction: column; align-items: flex-start; } }
     </style>
     <script>
       function togglePassword(button, targetId) {
@@ -7202,10 +7207,10 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
     if (!bom) throw new Error("BOM not found.");
     const requisitionNo = await getNextRequisitionNumber(client, jobId);
       const insertReq = await client.query(`
-        insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, iwp_no, iso_no, status, notes)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, issued_to, iwp_no, iso_no, status, notes)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         returning id
-    `, [jobId, requisitionNo, bomId, req.user.id, getUserDisplayName(req.user), req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
+    `, [jobId, requisitionNo, bomId, req.user.id, getUserDisplayName(req.user), req.body.issued_to || "", req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
       let createdLineCount = 0;
     for (const lineId of selectedLineIds) {
       const qtyRequested = selectedLineQtys.get(lineId);
@@ -7971,8 +7976,9 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         <p class="muted">BOM: ${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
         <form method="post" action="/bom/${selectedBom.id}/requisitions" class="stack" id="requisition-create-form">
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
-          <div class="grid">
+          <div class="grid-3">
             <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
+            <div><label>Issued To</label><input name="issued_to" /></div>
             <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
           </div>
           <div><label>Notes</label><input name="notes" /></div>
@@ -8133,6 +8139,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
     <td>${esc(row.bom_name || row.bom_description || row.bom_no)}</td>
     <td>${esc(row.requested_by_name)}</td>
+    <td>${esc(row.issued_to || "")}</td>
     <td>${esc(row.iwp_no || "")}</td>
     <td>${row.line_count}</td>
     <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
@@ -8164,7 +8171,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
         <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Req #</th><th>BOM</th><th>Requested By</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="9" class="muted">No requisitions yet.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Req #</th><th>BOM</th><th>Requested By</th><th>Issued To</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="10" class="muted">No requisitions yet.</td></tr>`}</table></div>
   `, req.user));
 });
 
@@ -8355,7 +8362,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   res.send(layout(`Requisition ${header.requisition_no}`, `
     <h1>Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
-      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Status: ${esc(header.status)} | Created: ${esc(formatShortDateTime(header.created_at))}</p>
+      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Issued To: ${esc(header.issued_to || "")} | Status: ${esc(header.status)} | Created: ${esc(formatShortDateTime(header.created_at))}</p>
       <p class="muted">IWP: ${esc(header.iwp_no || "")}</p>
       ${handlingParts.length ? `<p class="muted">${handlingParts.join(" | ")}</p>` : ""}
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
@@ -8398,15 +8405,16 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
   const signerNames = Array.from(new Set([
     ...requesterNameRows.map((row) => String(row.requested_by_name || "").trim()).filter(Boolean),
     String(header.signed_by_name || "").trim(),
+    String(header.issued_to || "").trim(),
     String(header.requested_by_name || "").trim(),
     getUserDisplayName(req.user)
   ].filter(Boolean))).sort((a, b) => a.localeCompare(b));
-  const defaultSigner = String(header.signed_by_name || header.requested_by_name || getUserDisplayName(req.user)).trim();
+  const defaultSigner = String(header.signed_by_name || header.issued_to || header.requested_by_name || getUserDisplayName(req.user)).trim();
   const signerOptionsHtml = signerNames.map((name) => `<option value="${esc(name)}" ${name === defaultSigner ? "selected" : ""}>${esc(name)}</option>`).join("");
   res.send(layout(`Sign ${header.requisition_no}`, `
     <h1>Sign Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
-      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | Status: ${esc(header.status)} | Requested By: ${esc(header.requested_by_name)}</p>
+      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | Status: ${esc(header.status)} | Requested By: ${esc(header.requested_by_name)} | Issued To: ${esc(header.issued_to || "")}</p>
       <div class="actions">
         ${header.status === "VERIFIED" ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${header.id}/pick-ticket.pdf">Open Pick Ticket PDF</a>` : ""}
         <a class="btn btn-secondary" href="/requisitions/${header.id}">Back To Requisition</a>
@@ -8885,8 +8893,9 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
     <div class="card">
       <p class="muted">BOM: ${esc(header.bom_name || header.bom_description || header.bom_no)} | BOM #: ${esc(header.bom_no)} | Status: ${esc(header.status)}</p>
       <form method="post" action="/requisitions/${header.id}/edit" class="stack">
-        <div class="grid">
+        <div class="grid-3">
           <div><label>Requested By</label><input value="${esc(header.requested_by_name)}" readonly /></div>
+          <div><label>Issued To</label><input name="issued_to" value="${esc(header.issued_to || "")}" /></div>
           <div><label>IWP</label><input name="iwp_no" value="${esc(header.iwp_no || "")}" /></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(header.notes || "")}</textarea></div>
@@ -8906,9 +8915,9 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
     const availableMap = await getAvailableInventoryByItemMap(client, jobId);
     await client.query(`
       update material_requisitions
-      set requested_by_name = $2, iwp_no = $3, notes = $4
-      where id = $1 and job_id = $5
-    `, [req.params.id, getUserDisplayName(req.user), req.body.iwp_no || "", req.body.notes || "", jobId]);
+      set requested_by_name = $2, issued_to = $3, iwp_no = $4, notes = $5
+      where id = $1 and job_id = $6
+    `, [req.params.id, getUserDisplayName(req.user), req.body.issued_to || "", req.body.iwp_no || "", req.body.notes || "", jobId]);
     const lines = (await client.query(`
       select
         mrl.id as requisition_line_id,
