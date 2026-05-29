@@ -41,7 +41,7 @@ const permissionSections = [
   { key: "dashboard", label: "Dashboard", href: "/" },
   { key: "material_logs", label: "Material Logs", href: "/material-logs" },
   { key: "vendors", label: "Vendors", href: "/vendors" },
-  { key: "rfqs", label: "RFQs", href: "/rfq" },
+  { key: "rfqs", label: "Purchasing", href: "/rfq" },
   { key: "pos", label: "POs", href: "/po" },
   { key: "bom", label: "BOM", href: "/bom" },
   { key: "receiving", label: "Receiving", href: "/receive" },
@@ -9537,8 +9537,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
     <td>${renderRfqStatusChip(rfq.status, rfq.due_date)}</td>
   </tr>`).join("");
-  res.send(layout("RFQs", `
-    <h1>RFQs</h1>
+  res.send(layout("Purchasing", `
+    <h1>Purchasing</h1>
     <div class="card">
       <form method="get" action="/rfq" class="stack">
         <div class="grid-4">
