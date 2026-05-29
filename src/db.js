@@ -8,7 +8,7 @@ dotenv.config();
 
 const { Pool } = pg;
 const databaseUrl = process.env.DATABASE_URL;
-const slowQueryMs = Number(process.env.SLOW_QUERY_MS || 0);
+const slowQueryMs = Math.max(0, Number(process.env.SLOW_QUERY_MS || 500));
 
 if (!databaseUrl) {
   throw new Error("DATABASE_URL is not set.");
@@ -45,10 +45,10 @@ export function setPermissionMatrix(values) {
   permissionMatrix = values || {};
 }
 
-export async function query(text, params = []) {
+async function timedQuery(runner, text, params = []) {
   const startedAt = Date.now();
   try {
-    return await pool.query(text, params);
+    return await runner.query(text, params);
   } finally {
     const durationMs = Date.now() - startedAt;
     if (slowQueryMs > 0 && durationMs >= slowQueryMs) {
@@ -58,11 +58,18 @@ export async function query(text, params = []) {
   }
 }
 
+export async function query(text, params = []) {
+  return timedQuery(pool, text, params);
+}
+
 export async function withTransaction(fn) {
   const client = await pool.connect();
+  const timedClient = {
+    query: (text, params = []) => timedQuery(client, text, params)
+  };
   try {
     await client.query("begin");
-    const result = await fn(client);
+    const result = await fn(timedClient);
     await client.query("commit");
     return result;
   } catch (error) {

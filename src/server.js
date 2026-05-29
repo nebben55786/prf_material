@@ -15,6 +15,8 @@ const app = express();
 const upload = multer();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
+const authContextCacheMs = Math.max(0, Number(process.env.AUTH_CONTEXT_CACHE_MS || 15000));
+const slowRequestMs = Math.max(0, Number(process.env.SLOW_REQUEST_MS || 1000));
 const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
@@ -179,6 +181,20 @@ function getAppHeaderTitle(user = null) {
 app.use(express.urlencoded({ extended: true, limit: "20mb", parameterLimit: 20000 }));
 app.use(cookieParser(undefined, { decode: safeCookieDecode }));
 app.use("/public", express.static(path.join(process.cwd(), "public")));
+app.use((req, res, next) => {
+  if (!slowRequestMs) {
+    next();
+    return;
+  }
+  const startedAt = Date.now();
+  res.on("finish", () => {
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= slowRequestMs) {
+      console.warn(`[http] slow request ${req.method} ${req.originalUrl} ${res.statusCode} ${durationMs}ms`);
+    }
+  });
+  next();
+});
 
 function esc(value) {
   return String(value ?? "")
@@ -4652,10 +4668,60 @@ function currentUser(req) {
   return sessionToken ? readSession(sessionToken) : null;
 }
 
+const authContextCache = new Map();
+
+function cloneJobContextRow(row) {
+  return row ? { ...row } : null;
+}
+
+function cloneAuthContextUser(user) {
+  return {
+    ...user,
+    activeJob: cloneJobContextRow(user.activeJob),
+    accessibleJobs: Array.isArray(user.accessibleJobs) ? user.accessibleJobs.map(cloneJobContextRow) : [],
+    activeJobs: Array.isArray(user.activeJobs) ? user.activeJobs.map(cloneJobContextRow) : []
+  };
+}
+
+function authContextCacheKey(sessionUser) {
+  return `${Number(sessionUser?.id || 0)}:${Number(sessionUser?.job_id || 0)}`;
+}
+
+function getCachedAuthContext(sessionUser) {
+  if (!authContextCacheMs) return null;
+  const key = authContextCacheKey(sessionUser);
+  const cached = authContextCache.get(key);
+  if (!cached) return null;
+  if (Date.now() > cached.expiresAt) {
+    authContextCache.delete(key);
+    return null;
+  }
+  return cloneAuthContextUser(cached.user);
+}
+
+function setCachedAuthContext(sessionUser, user) {
+  if (!authContextCacheMs) return;
+  const key = authContextCacheKey(sessionUser);
+  authContextCache.set(key, {
+    expiresAt: Date.now() + authContextCacheMs,
+    user: cloneAuthContextUser(user)
+  });
+  while (authContextCache.size > 250) {
+    const oldestKey = authContextCache.keys().next().value;
+    authContextCache.delete(oldestKey);
+  }
+}
+
 const requireAuth = asyncHandler(async (req, res, next) => {
   const sessionUser = currentUser(req);
   if (!sessionUser) {
     res.redirect("/login");
+    return;
+  }
+  const cachedUser = getCachedAuthContext(sessionUser);
+  if (cachedUser) {
+    req.user = cachedUser;
+    next();
     return;
   }
   const user = (await query(`
@@ -4669,13 +4735,15 @@ const requireAuth = asyncHandler(async (req, res, next) => {
     return;
   }
   const { jobs, activeJobs, activeJob } = await resolveJobContextForUser(user, null, sessionUser.job_id);
-  req.user = {
+  const authUser = {
     ...user,
     job_id: activeJob ? Number(activeJob.id) : null,
     activeJob: activeJob || null,
     accessibleJobs: jobs,
     activeJobs
   };
+  setCachedAuthContext(sessionUser, authUser);
+  req.user = cloneAuthContextUser(authUser);
   next();
 });
 
