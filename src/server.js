@@ -10005,6 +10005,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         <button type="submit" form="rfq-${rfqId}-header-form">Save Header</button>
         <button type="button" onclick='openVendorPicker("rfq-${rfqId}-vendor-dialog", "rfq-${rfqId}-vendor-input")'>Add Vendor</button>
         <a class="btn btn-danger" href="/rfq/${rfqId}/delete">Delete RFQ</a>
+        <a class="btn btn-secondary" href="/rfq">Back</a>
       </div>
       <div class="muted">Choose the vendors for this RFQ once, then enter quotes vendor-by-vendor in the tabs below.</div>
     </div>
