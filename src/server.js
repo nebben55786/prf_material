@@ -1573,7 +1573,7 @@ function layout(title, body, user) {
         window.open(url.toString(), link.target || "_blank");
         return false;
       }
-      function promptPoNumber(button, vendorSelectId, targetFormId) {
+      function promptPoNumber(button, vendorSelectId, targetFormId, defaultPoInputId) {
         const vendorSelect = document.getElementById(vendorSelectId);
         const targetForm = document.getElementById(targetFormId);
         if (!vendorSelect || !targetForm) return false;
@@ -1581,12 +1581,16 @@ function layout(title, body, user) {
           window.alert("Select a vendor first.");
           return false;
         }
-        const poNumber = window.prompt("Enter PO number");
+        const defaultPoInput = defaultPoInputId ? document.getElementById(defaultPoInputId) : null;
+        const defaultPoNumber = defaultPoInput ? String(defaultPoInput.value || "").trim() : "";
+        const poNumber = window.prompt("Enter PO number", defaultPoNumber);
         if (!poNumber || !String(poNumber).trim()) return false;
         const poInput = targetForm.querySelector('input[name="po_no"]');
         const vendorInput = targetForm.querySelector('input[name="vendor_id"]');
         if (!poInput || !vendorInput) return false;
-        poInput.value = String(poNumber).trim();
+        const cleanPoNumber = String(poNumber).trim();
+        poInput.value = cleanPoNumber;
+        if (defaultPoInput) defaultPoInput.value = cleanPoNumber;
         vendorInput.value = vendorSelect.value;
         targetForm.submit();
         return false;
@@ -9653,6 +9657,7 @@ app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("r
   const jobId = currentJobId(req);
   const projectName = String(req.body.project_name || "").trim();
   const clientRequestNo = String(req.body.client_request_no || "").trim();
+  const poNumber = String(req.body.po_number || "").trim();
   const requestorName = String(req.body.requestor_name || "").trim();
   const dueDate = String(req.body.due_date || "").trim();
   const requestedStatus = String(req.body.status || "").trim();
@@ -9661,10 +9666,10 @@ app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("r
   if (!dueDate) throw new Error("Due date is required.");
   if (!status) throw new Error("Choose a valid RFQ status.");
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select rfq_no, project_name, client_request_no, requestor_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    const rfq = (await client.query("select rfq_no, project_name, client_request_no, po_number, requestor_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
-    await client.query("update rfqs set project_name = $2, client_request_no = $3, requestor_name = $4, due_date = $5, status = $6 where id = $1 and job_id = $7", [rfqId, projectName, clientRequestNo, requestorName, dueDate, status, jobId]);
-    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${clientRequestNo}:${requestorName}:${dueDate}:${status}`);
+    await client.query("update rfqs set project_name = $2, client_request_no = $3, po_number = $4, requestor_name = $5, due_date = $6, status = $7 where id = $1 and job_id = $8", [rfqId, projectName, clientRequestNo, poNumber, requestorName, dueDate, status, jobId]);
+    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${clientRequestNo}:${poNumber}:${requestorName}:${dueDate}:${status}`);
   });
   res.redirect(`/rfq/${rfqId}`);
 });
@@ -9963,7 +9968,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         <div class="actions">
           <button type="submit" ${selectedVendors.length === 0 ? "disabled" : ""}>Award Whole RFQ</button>
           ${awardedItems.length > 0 ? `<button class="btn btn-secondary" type="submit" formaction="/rfq/${rfqId}/award/clear">Clear Whole RFQ Award</button>` : ""}
-          ${awardedVendorId ? `<button type="button" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}')">Create Draft PO</button>` : ""}
+          ${awardedVendorId ? `<button type="button" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}', 'rfq-po-number-${rfqId}')">Create Draft PO</button>` : ""}
           <a class="btn btn-secondary" href="/rfq/${rfqId}/export.xlsx">Export AX XLSX</a>
         </div>
         ${awardedVendorId ? `<div class="muted">Current award: <strong>${esc(awardedVendorName)}</strong> | ${awardedItems.length} line(s) | Estimated total $${awardedTotal.toFixed(2)}</div>` : `<div class="muted">Award the full RFQ to one vendor once the selected vendor has quotes on every RFQ line.</div>`}
@@ -9971,6 +9976,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <form id="rfq-po-create-form-${rfqId}" method="post" action="/po/create" style="display:none;">
         <input type="hidden" name="rfq_id" value="${rfqId}" />
         <input type="hidden" name="po_no" value="" />
+        <input type="hidden" name="return_to" value="/rfq/${rfqId}" />
         <input type="hidden" id="rfq-awarded-vendor-${rfqId}" name="vendor_id" value="${awardedVendorId ? esc(String(awardedVendorId)) : ""}" />
       </form>
     </div>`;
@@ -9984,8 +9990,9 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <div><label>Due Date</label><input type="date" name="due_date" value="${esc(textValue(rfq.due_date))}" required /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
-        <div class="grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+        <div class="grid" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
           <div><label>Client Request #</label><input name="client_request_no" value="${esc(rfq.client_request_no || "")}" /></div>
+          <div><label>PO Number</label><input id="rfq-po-number-${rfqId}" name="po_number" value="${esc(rfq.po_number || "")}" /></div>
           <div><label>Requestor</label><input name="requestor_name" value="${esc(rfq.requestor_name || "")}" /></div>
         </div>
       </form>
@@ -11148,10 +11155,13 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
       `, [jobId, poId, line.rfq_item_id, line.material_item_id, line.po_line || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price, num(line.lead_days)]);
     }
+    if (rfqId && poNo) {
+      await client.query("update rfqs set po_number = $1 where id = $2 and job_id = $3", [poNo, rfqId, jobId]);
+    }
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
   });
-  res.redirect("/po");
+  res.redirect(getSafeReturnPath(req, "/po"));
 });
 
 app.get("/rfq-item/:id/award", requireAuth, requireJobContext, async (req, res) => {
