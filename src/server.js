@@ -8098,7 +8098,6 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
   const tableRows = rows.map((row) => `<tr>
     <td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
     <td>${esc(row.bom_name || row.bom_description || row.bom_no)}</td>
-    <td>${esc(row.bom_no)}</td>
     <td>${esc(row.requested_by_name)}</td>
     <td>${esc(row.iwp_no || "")}</td>
     <td>${row.line_count}</td>
@@ -8131,7 +8130,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
         <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Req #</th><th>BOM Name</th><th>BOM #</th><th>Requested By</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="10" class="muted">No requisitions yet.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Req #</th><th>BOM</th><th>Requested By</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="9" class="muted">No requisitions yet.</td></tr>`}</table></div>
   `, req.user));
 });
 
