@@ -1327,7 +1327,7 @@ function renderJobSwitcher(user) {
   return `
     <form method="post" action="/jobs/select" class="job-switcher">
       <label>Current Job</label>
-      <input type="hidden" name="return_to" value="/dashboard" />
+      <input type="hidden" name="return_to" value="${esc(getUserHomePath(user))}" />
       <select name="job_id" onchange="this.form.submit();">
         ${options}
       </select>
@@ -1335,12 +1335,21 @@ function renderJobSwitcher(user) {
   `;
 }
 
+function isWarehouseUser(user) {
+  return String(user?.role || "").trim().toLowerCase() === "warehouse";
+}
+
+function getUserHomePath(user) {
+  return isWarehouseUser(user) ? "/yard" : "/dashboard";
+}
+
 function layout(title, body, user) {
   const appHeaderTitle = getAppHeaderTitle(user);
   const navLinks = user
     ? permissionSections
         .filter((section) => canAccess(user, section.key, "view"))
-        .map((section) => `<a href="${section.href}">${section.label}</a>`)
+        .filter((section) => !(isWarehouseUser(user) && section.key === "yard"))
+        .map((section) => `<a href="${isWarehouseUser(user) && section.key === "dashboard" ? "/yard" : section.href}">${section.label}</a>`)
         .concat(`<a href="/logout">Logout</a>`)
         .join("")
     : "";
@@ -1842,7 +1851,7 @@ function layout(title, body, user) {
     <div class="shell">
       <div class="topbar">
         <div class="brand-wrap">
-          <a class="brand-link" href="${user ? "/dashboard" : "/"}">
+          <a class="brand-link" href="${user ? getUserHomePath(user) : "/"}">
             <img class="brand-logo" src="/public/prf-logo.png" alt="Performance Contractors logo" />
             <div class="brand-copy">
               <div class="brand">${esc(appHeaderTitle)}</div>
@@ -5159,8 +5168,9 @@ function loginPage(error = "") {
 }
 
 app.get("/login", (req, res) => {
-  if (currentUser(req)) {
-    res.redirect("/dashboard");
+  const sessionUser = currentUser(req);
+  if (sessionUser) {
+    res.redirect(getUserHomePath(sessionUser));
     return;
   }
   const errorMap = {
@@ -5196,7 +5206,7 @@ app.post("/login", asyncHandler(async (req, res) => {
   }
   if (activeJobs.length === 1) {
     setSessionCookie(res, buildSessionPayload(user, activeJobs[0].id));
-    res.redirect("/dashboard");
+    res.redirect(getUserHomePath(user));
     return;
   }
   setSessionCookie(res, buildSessionPayload(user, null));
@@ -5209,8 +5219,9 @@ app.get("/logout", (req, res) => {
 });
 
 app.get("/", async (req, res) => {
-  if (currentUser(req)) {
-    res.redirect("/dashboard");
+  const sessionUser = currentUser(req);
+  if (sessionUser) {
+    res.redirect(getUserHomePath(sessionUser));
     return;
   }
   res.send(landingPage());
@@ -5238,7 +5249,7 @@ app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
   }
   if (req.user.role !== "admin" && jobs.length === 1) {
     setSessionCookie(res, buildSessionPayload(req.user, jobs[0].id));
-    res.redirect("/dashboard");
+    res.redirect(getUserHomePath(req.user));
     return;
   }
   const rows = jobs.map((job) => `
@@ -5279,10 +5290,14 @@ app.post("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
     throw new Error("Choose a valid active job.");
   }
   setSessionCookie(res, buildSessionPayload(req.user, selectedJob.id));
-  res.redirect(getSafeReturnPath(req, "/dashboard"));
+  res.redirect(getSafeReturnPath(req, getUserHomePath(req.user)));
 }));
 
 app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboard", "view"), async (req, res) => {
+  if (isWarehouseUser(req.user)) {
+    res.redirect("/yard");
+    return;
+  }
   const jobId = currentJobId(req);
   const [rfqs, pos, receipts, vendors, osd, jobNumber, pendingAccessRequests, rfqStatusCounts] = await Promise.all([
     query("select count(*) from rfqs where job_id = $1", [jobId]),
@@ -12077,7 +12092,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
     await rebuildUnallocatedBom(client, jobId);
     await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};mrr=${mrrNumber};lines=${postedCount}`);
   });
-  res.redirect("/dashboard");
+  res.redirect(getUserHomePath(req.user));
 });
 
 app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
