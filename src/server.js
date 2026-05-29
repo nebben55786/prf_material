@@ -5155,7 +5155,6 @@ function loginPage(error = "") {
       ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
       <div class="card">
         <h2>Sign In</h2>
-        <p class="muted">Default admin login: <strong>admin</strong> / <strong>admin123</strong></p>
         <form method="post" action="/login" class="stack">
           <div class="stack">
             <div><label>Username</label><input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></div>
