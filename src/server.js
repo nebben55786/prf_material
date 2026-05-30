@@ -20,6 +20,7 @@ const slowRequestMs = Math.max(0, Number(process.env.SLOW_REQUEST_MS || 1000));
 const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
+const bomLineImportHeaders = ["line_no", "item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "iwp_no", "iso_no", "size_1", "size_2", "thk_1", "thk_2", "qty_required", "notes"];
 const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CANCELLED", "CLOSED"];
 const unallocatedBomSystemKey = "UNALLOCATED";
 const unallocatedBomName = "Un-Allocated Inventory";
@@ -7107,11 +7108,11 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       </div>
       <div class="card">
         <h3>Upload BOM Lines</h3>
-        <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes. Description also accepts item_description, material_description, or abbrev_description.</p>
+        <p class="muted">CSV/XLSX columns: ${esc(bomLineImportHeaders.join(", "))}. Description also accepts item_description, material_description, or abbrev_description.</p>
           <form id="bom-lines-import-form" method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
             <div><label>CSV/XLSX File</label><input id="bom-lines-import-file" type="file" name="sheet" /></div>
             <div><label>Or Paste CSV</label><textarea id="bom-lines-import-text" name="csv_text"></textarea></div>
-            <div class="actions"><button type="submit">Import BOM Lines</button></div>
+            <div class="actions"><button type="submit">Import BOM Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines/import-template.xlsx">Download Import Template</a></div>
           </form>
           <script>
             (() => {
@@ -7259,6 +7260,24 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
     return insertReq.rows[0].id;
   });
   res.redirect(`/requisitions/${requisitionId}`);
+}));
+
+app.get("/bom/:id/lines/import-template.xlsx", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  assertBomAllowsManualChanges(bom, "import");
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.aoa_to_sheet([bomLineImportHeaders]);
+  worksheet["!cols"] = bomLineImportHeaders.map((header) => ({ wch: Math.max(header.length + 2, 12) }));
+  XLSX.utils.book_append_sheet(workbook, worksheet, "BOM Lines");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  const filename = `${safeBlobPathSegment(bom.bom_no || "bom-lines", "bom-lines")}-import-template.xlsx`;
+  await auditLog(pool, req.user.id, "download_template", "bom_lines", bomId, filename);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(buffer);
 }));
 
 app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermission("bom", "edit"), upload.single("sheet"), async (req, res) => {
