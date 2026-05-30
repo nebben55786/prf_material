@@ -3983,6 +3983,27 @@ function applyIssuedInventoryToRows(rows, issuedRows = []) {
   return clonedRows;
 }
 
+function filterRedundantZeroInventoryRows(rows = []) {
+  const stockedItemCodes = new Set();
+  for (const row of rows) {
+    const itemCode = normalizeInventoryKeyPart(row.item_code);
+    if (!itemCode) continue;
+    if (parseQtyValue(row.qty_on_hand || 0) !== 0 || parseQtyValue(row.qty_osd || 0) !== 0) {
+      stockedItemCodes.add(itemCode);
+    }
+  }
+  const keptZeroItemCodes = new Set();
+  return rows.filter((row) => {
+    const itemCode = normalizeInventoryKeyPart(row.item_code);
+    if (!itemCode) return true;
+    if (parseQtyValue(row.qty_on_hand || 0) !== 0 || parseQtyValue(row.qty_osd || 0) !== 0) return true;
+    if (stockedItemCodes.has(itemCode)) return false;
+    if (keptZeroItemCodes.has(itemCode)) return false;
+    keptZeroItemCodes.add(itemCode);
+    return true;
+  });
+}
+
 async function getCurrentOnHandRows(runner = { query }, { jobId = null, whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
   const baseRows = (await runner.query(`
     select inventory_by_location.*
@@ -12751,12 +12772,12 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
     sort: String(source.sort || sort),
     dir: String(source.dir || dir)
   }).toString();
-  const rows = await getCurrentOnHandRows({ query }, {
+  const rows = filterRedundantZeroInventoryRows(await getCurrentOnHandRows({ query }, {
     jobId,
     whereSql,
     params,
     orderSql: `${sortSql} ${dir}, inventory_by_location.item_code asc, inventory_by_location.warehouse asc, inventory_by_location.location asc`
-  });
+  }));
   const sortLink = (column) => `/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter, ident_filter: identFilter, sort: column, dir: nextSortDir(sort, dir, column) })}`;
   const warehouseOptionsHtml = [`<option value="">All warehouses</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
@@ -12818,7 +12839,7 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
 
 app.get("/inventory/export.xlsx", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
-  const [currentRows, itemRows] = await Promise.all([
+  const [currentRowsRaw, itemRows] = await Promise.all([
     getCurrentOnHandRows({ query }, {
       jobId,
       orderSql: "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location"
@@ -12830,6 +12851,7 @@ app.get("/inventory/export.xlsx", requireAuth, requireJobContext, requirePermiss
       order by item_code
     `, [jobId])
   ]);
+  const currentRows = filterRedundantZeroInventoryRows(currentRowsRaw);
   const itemMeta = new Map(itemRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), row]));
   const stockedItemCodes = new Set(currentRows.map((row) => normalizeInventoryKeyPart(row.item_code)).filter(Boolean));
   const zeroQuantityRows = itemRows.rows
