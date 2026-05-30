@@ -7291,6 +7291,7 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
     assertBomAllowsManualChanges(bom, "import");
     const batchId = await createImportBatch(client, {
       entityType: "bom_lines",
+      rfqId: bomId,
       uploadedBy: req.user.id,
       filename: req.file?.originalname || "",
       jobId
@@ -10995,13 +10996,28 @@ app.get("/imports/:id", requireAuth, requireJobContext, async (req, res) => {
   const batch = (await query(`
     select ib.*, r.rfq_no
     from import_batches ib
-    left join rfqs r on r.id = ib.rfq_id
-    where ib.id = $1 and ib.job_id = $2 and (r.id is null or r.job_id = $2)
+    left join rfqs r on r.id = ib.rfq_id and r.job_id = ib.job_id and ib.entity_type <> 'bom_lines'
+    where ib.id = $1 and ib.job_id = $2
   `, [req.params.id, jobId])).rows[0];
   if (!batch) {
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Import batch not found.</h3></div>`, req.user));
     return;
   }
+  const isBomLineImport = String(batch.entity_type || "") === "bom_lines";
+  const batchFilename = String(batch.filename || "");
+  const bom = isBomLineImport ? (await query(`
+    select id, bom_no, bom_name
+    from bom_headers
+    where job_id = $1
+      and (
+        ($2::bigint is not null and id = $2::bigint)
+        or ($3 <> '' and $3 ilike bom_no || '%')
+      )
+    order by
+      case when $2::bigint is not null and id = $2::bigint then 0 else 1 end,
+      id desc
+    limit 1
+  `, [jobId, batch.rfq_id || null, batchFilename])).rows[0] : null;
   const errors = (await query(`
     select row_number, error_code, message, raw_payload
     from import_batch_errors
@@ -11011,13 +11027,17 @@ app.get("/imports/:id", requireAuth, requireJobContext, async (req, res) => {
   const errorRows = errors.length > 0
     ? errors.map((error) => `<tr><td>${error.row_number}</td><td>${esc(error.error_code)}</td><td>${esc(error.message)}</td><td><code>${esc(JSON.stringify(error.raw_payload))}</code></td></tr>`).join("")
     : `<tr><td colspan="4" class="muted">No row-level errors.</td></tr>`;
-  const importBackHref = batch.rfq_id ? `/rfq/${batch.rfq_id}` : "/po";
-  const importBackLabel = batch.rfq_id ? "Back To RFQ" : "Back To POs";
+  const importBackHref = isBomLineImport ? (bom ? `/bom/${bom.id}` : "/bom") : (batch.rfq_id ? `/rfq/${batch.rfq_id}` : "/po");
+  const importBackLabel = isBomLineImport ? "Back To BOM" : (batch.rfq_id ? "Back To RFQ" : "Back To POs");
+  const referenceLabel = isBomLineImport ? "BOM" : "RFQ";
+  const referenceValue = isBomLineImport
+    ? [bom?.bom_no, bom?.bom_name].filter(Boolean).join(" - ") || "N/A"
+    : batch.rfq_no || "N/A";
   res.send(layout("Import Results", `
     <h1>Import Results</h1>
     <div class="card">
       <div class="grid">
-        <div><label>RFQ</label><div>${esc(batch.rfq_no || "N/A")}</div></div>
+        <div><label>${esc(referenceLabel)}</label><div>${esc(referenceValue)}</div></div>
         <div><label>Import Type</label><div>${esc(batch.entity_type)}</div></div>
         <div><label>File</label><div>${esc(batch.filename || "Pasted data")}</div></div>
         <div><label>Status</label><div>${esc(batch.status)}</div></div>
