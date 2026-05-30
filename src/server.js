@@ -4057,7 +4057,7 @@ async function getInventoryAuditVisibleRows(runner = { query }, { jobId = null, 
     order by ${orderSql}
   `, [jobId, ...params])).rows;
   const issuedRows = await getIssuedInventoryTotals(runner, jobId);
-  return applyIssuedInventoryToRows(baseRows, issuedRows);
+  return filterRedundantZeroInventoryRows(applyIssuedInventoryToRows(baseRows, issuedRows));
 }
 
 function normalizeWarehouseLocationImportRow(row) {
