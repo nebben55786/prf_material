@@ -11588,7 +11588,15 @@ app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"),
     limit 300
   `, params)).rows;
   const vendors = (await query("select id, name from vendors order by name")).rows;
-  const poRows = pos.map((po) => `<tr>
+  const poRows = pos.map((po) => {
+    const openItems = Number(po.open_items || 0);
+    const statusKey = String(po.status || "").toUpperCase();
+    const canReceive = openItems > 0 && !["FULLY_RECEIVED", "CLOSED", "CANCELLED"].includes(statusKey);
+    const blockedReceiveLabel = ["CLOSED", "CANCELLED"].includes(statusKey) ? esc(po.status || "Closed") : "Fully Received";
+    const receiveAction = canReceive
+      ? `<a class="btn btn-secondary" href="/po/${po.id}/receive">Receive</a>`
+      : `<span class="chip">${blockedReceiveLabel}</span>`;
+    return `<tr>
     <td>${esc(po.po_no)}</td>
     <td>${esc(po.vendor)}</td>
     <td>${esc(po.rfq_no || "")}</td>
@@ -11602,11 +11610,12 @@ app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"),
     <td>${esc(formatShortDateTime(po.created_at))}</td>
     <td>
       <div class="actions">
-        <a class="btn btn-secondary" href="/po/${po.id}/receive">Receive</a>
+        ${receiveAction}
         <a class="btn btn-secondary" href="/po/${po.id}/edit">Edit</a>
       </div>
     </td>
-  </tr>`).join("");
+  </tr>`;
+  }).join("");
   const vendorOptions = [`<option value="">All Vendors</option>`]
     .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === vendorId ? "selected" : ""}>${esc(vendor.name)}</option>`)).join("");
   res.send(layout("POs", `
@@ -11921,7 +11930,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
   const jobId = currentJobId(req);
   const [po, warehouseOptions, locationMap, nextMrrNumber, receivedByOptions] = await Promise.all([
     query(`
-      select po.id, po.po_no, coalesce(po.description, '') as description, v.name as vendor_name
+      select po.id, po.po_no, po.status, coalesce(po.description, '') as description, v.name as vendor_name
       from purchase_orders po
       join vendors v on v.id = po.vendor_id
       where po.id = $1 and po.job_id = $2
@@ -11986,13 +11995,19 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     .concat(receivedByOptions.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`))
     .join("");
   const today = new Date().toISOString().slice(0, 10);
+  const openPoLineCount = poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0) > 0).length;
+  const receiveStatusKey = String(record.status || "").toUpperCase();
+  const canPostReceipt = openPoLineCount > 0 && !["FULLY_RECEIVED", "CLOSED", "CANCELLED"].includes(receiveStatusKey);
+  const receiveBlockedMessage = ["CLOSED", "CANCELLED"].includes(receiveStatusKey)
+    ? `This PO is ${record.status || "closed"}. No additional receipts can be posted against it.`
+    : "This PO is fully received. No additional receipts can be posted against it.";
   const lineRows = poLines.map((line) => {
     const lineId = Number(line.id);
     const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
     const locked = remainingQty <= 0;
     const qtyCell = locked
       ? `<span class="chip">Received</span><input type="hidden" name="po_line_ids" value="${lineId}" />`
-      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
+      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" min="0" max="${escAttr(String(remainingQty))}" step="any" data-remaining="${escAttr(String(remainingQty))}" placeholder="${escAttr(formatQtyDisplay(remainingQty))}" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
     const warehouseCell = locked
       ? `<span>${esc(line.last_warehouse || "")}</span>`
       : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select>`;
@@ -12032,9 +12047,11 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         <div class="stat"><div>Vendor</div><strong>${esc(record.vendor_name)}</strong></div>
         <div class="stat"><div>Description</div><strong>${esc(record.description || "")}</strong></div>
         <div class="stat"><div>PO Lines</div><strong>${poLines.length}</strong></div>
+        <div class="stat"><div>Open Lines</div><strong>${openPoLineCount}</strong></div>
       </div>
     </div>
     <div class="card">
+      ${canPostReceipt ? "" : `<p class="muted">${esc(receiveBlockedMessage)}</p>`}
       <form method="post" action="/po/${record.id}/receive" class="stack" id="po-receive-form-${record.id}">
         <div class="grid">
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly /></div>
@@ -12055,7 +12072,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         </div>
         <div><label>MRR Notes</label><textarea name="mrr_notes"></textarea></div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
-        <div class="actions"><button type="submit">Post Receipt</button><a class="btn btn-secondary" href="/po">Back</a></div>
+        <div class="actions">${canPostReceipt ? `<button type="submit">Post Receipt</button>` : `<span class="chip">Fully Received</span>`}<a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
       <script>
         function applyPoHeaderDefaults(poId, optionsByWarehouse) {
@@ -12080,8 +12097,14 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           event.preventDefault();
         });
         document.getElementById("po-receive-form-${record.id}").addEventListener("submit", function(event) {
+          if (!${JSON.stringify(canPostReceipt)}) {
+            event.preventDefault();
+            alert(${JSON.stringify(receiveBlockedMessage)});
+            return;
+          }
           let hasQty = false;
           let hasError = false;
+          let hasOverRemaining = false;
           const receivedBySelect = document.querySelector('select[name="received_by"]');
           const receivedByManual = document.querySelector('input[name="received_by_manual"]');
           if ((!receivedBySelect || !receivedBySelect.value) && (!receivedByManual || !receivedByManual.value.trim())) {
@@ -12094,6 +12117,10 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
             const qty = Number(input.value || 0);
             if (!Number.isFinite(qty) || qty <= 0) return;
             hasQty = true;
+            const remaining = Number(input.dataset.remaining || 0);
+            if (Number.isFinite(remaining) && remaining > 0 && qty > remaining) {
+              hasOverRemaining = true;
+            }
             const warehouse = document.getElementById("po-line-warehouse-" + lineId);
             const location = document.getElementById("po-line-location-" + lineId);
             if (!warehouse || !warehouse.value || !location || !location.value) {
@@ -12103,6 +12130,11 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           if (!hasQty) {
             event.preventDefault();
             alert("Enter a received quantity on at least one editable PO line.");
+            return;
+          }
+          if (hasOverRemaining) {
+            event.preventDefault();
+            alert("Received quantity cannot be greater than the remaining PO quantity.");
             return;
           }
           if (hasError) {
@@ -12123,22 +12155,38 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const po = (await client.query(`
-      select po.id, po.po_no, po.rfq_id, coalesce(po.description, '') as description, coalesce(v.name, '') as vendor_name
+      select po.id, po.po_no, po.rfq_id, po.status, coalesce(po.description, '') as description, coalesce(v.name, '') as vendor_name
       from purchase_orders po
       left join vendors v on v.id = po.vendor_id
       where po.id = $1
         and po.job_id = $2
     `, [poId, jobId])).rows[0];
     if (!po) throw new Error("PO not found.");
-    const mrrNumber = String(req.body.mrr_number || "").trim();
+    const poStatusKey = String(po.status || "").toUpperCase();
+    if (["FULLY_RECEIVED", "CLOSED", "CANCELLED"].includes(poStatusKey)) {
+      throw new Error(poStatusKey === "FULLY_RECEIVED"
+        ? "This PO is fully received. No additional receipts can be posted against it."
+        : `This PO is ${po.status}. No additional receipts can be posted against it.`);
+    }
+    const mrrNumber = await getNextMrrNumber(client, jobId);
     const receivedBy = String(req.body.received_by_manual || req.body.received_by || "").trim();
     const receivedDate = String(req.body.received_date || "").trim();
     const loadNumber = String(req.body.load_number || "").trim();
     const mrrNotes = String(req.body.mrr_notes || "").trim();
-    if (!mrrNumber) throw new Error("MRR number is required.");
     if (!receivedBy) throw new Error("Received By is required.");
     if (!receivedDate) throw new Error("Received Date is required.");
     const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
+    const openTotals = (await client.query(`
+      select count(*) filter (
+        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) < pl.qty_ordered
+      ) as open_line_count
+      from po_lines pl
+      where pl.po_id = $1
+        and pl.job_id = $2
+    `, [poId, jobId])).rows[0];
+    if (Number(openTotals?.open_line_count || 0) <= 0) {
+      throw new Error("This PO is fully received. No additional receipts can be posted against it.");
+    }
     const mrrInsert = (await client.query(`
       insert into mrr_logs (
         job_id, discipline, mrr_number, vendor_name, app_po_id, po_number, material_description,
@@ -12173,58 +12221,31 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
         from po_lines pl
         join material_items mi on mi.id = pl.material_item_id
         left join receipts r on r.po_line_id = pl.id
-        where pl.id = $1 and pl.po_id = $2
+        where pl.id = $1 and pl.po_id = $2 and pl.job_id = $3
         group by pl.id, pl.qty_ordered, mi.item_code, mi.description
-      `, [lineId, poId])).rows[0];
+      `, [lineId, poId, jobId])).rows[0];
       if (!line) throw new Error("PO line not found.");
       const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
       if (remainingQty <= 0) throw new Error("Fully received PO lines cannot be edited.");
+      if (qtyReceived > remainingQty) {
+        throw new Error(`Received qty for ${line.item_code} cannot exceed the remaining PO qty of ${formatQtyDisplay(remainingQty)}.`);
+      }
       const warehouse = normalizeWarehouseName(req.body[`warehouse_${lineId}`]);
       const location = normalizeLocationName(req.body[`location_${lineId}`]);
       await assertValidWarehouseLocation(client, warehouse, location, jobId);
       const enteredStatus = String(req.body.osd_status || "OK").trim() || "OK";
       const enteredNotes = String(req.body.osd_notes || "").trim();
-      const baseQty = Math.min(qtyReceived, remainingQty);
-      const overageQty = Math.max(qtyReceived - remainingQty, 0);
-      if (baseQty > 0) {
-        const receipt = (await client.query(`
-          insert into receipts (job_id, po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
-          values ($1, $2, $3, $4, $5, $6, $7, $8)
-          returning id
-        `, [jobId, lineId, mrrInsert.id, baseQty, warehouse, location, enteredStatus, enteredNotes])).rows[0];
-        postedCount += 1;
-        if (enteredStatus !== "OK") {
-          await createOsdLog(client, {
-            job_id: jobId,
-            mrr_log_id: mrrInsert.id,
-            receipt_id: receipt.id,
-            po_id: po.id,
-            po_line_id: lineId,
-            mrr_number: mrrNumber,
-            po_number: po.po_no || "",
-            item_code: line.item_code || "",
-            description: line.description || "",
-            warehouse,
-            location,
-            expected_qty: remainingQty,
-            received_qty: baseQty,
-            osd_qty: baseQty,
-            osd_status: enteredStatus,
-            notes: enteredNotes
-          });
-        }
-      }
-      if (overageQty > 0) {
-        const overReceipt = (await client.query(`
-          insert into receipts (job_id, po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
-          values ($1, $2, $3, $4, $5, $6, 'OVERAGE', $7)
-          returning id
-        `, [jobId, lineId, mrrInsert.id, overageQty, warehouse, location, enteredNotes ? `Auto-created overage from PO receipt. ${enteredNotes}` : "Auto-created overage from PO receipt."])).rows[0];
-        postedCount += 1;
+      const receipt = (await client.query(`
+        insert into receipts (job_id, po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        returning id
+      `, [jobId, lineId, mrrInsert.id, qtyReceived, warehouse, location, enteredStatus, enteredNotes])).rows[0];
+      postedCount += 1;
+      if (enteredStatus !== "OK") {
         await createOsdLog(client, {
           job_id: jobId,
           mrr_log_id: mrrInsert.id,
-          receipt_id: overReceipt.id,
+          receipt_id: receipt.id,
           po_id: po.id,
           po_line_id: lineId,
           mrr_number: mrrNumber,
@@ -12235,9 +12256,9 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
           location,
           expected_qty: remainingQty,
           received_qty: qtyReceived,
-          osd_qty: overageQty,
-          osd_status: "OVERAGE",
-          notes: enteredNotes ? `Auto-created from over receipt. ${enteredNotes}` : "Auto-created from over receipt."
+          osd_qty: qtyReceived,
+          osd_status: enteredStatus,
+          notes: enteredNotes
         });
       }
     }
@@ -12433,7 +12454,15 @@ app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("rec
     order by po.id desc
     limit 300
   `, params)).rows;
-  const poRows = rows.map((row) => `<tr>
+  const poRows = rows.map((row) => {
+    const openLineCount = Number(row.open_line_count || 0);
+    const statusKey = String(row.status || "").toUpperCase();
+    const canReceive = openLineCount > 0 && !["FULLY_RECEIVED", "CLOSED", "CANCELLED"].includes(statusKey);
+    const blockedReceiveLabel = ["CLOSED", "CANCELLED"].includes(statusKey) ? esc(row.status || "Closed") : "Fully Received";
+    const receiveAction = canReceive
+      ? `<a class="btn btn-secondary" href="/po/${row.id}/receive">Receive</a>`
+      : `<span class="chip">${blockedReceiveLabel}</span>`;
+    return `<tr>
     <td>${esc(row.po_no)}</td>
     <td>${esc(row.description)}</td>
     <td>${esc(row.requestor_name)}</td>
@@ -12441,8 +12470,9 @@ app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("rec
     <td>${esc(row.status)}</td>
     <td>${esc(row.line_count)}</td>
     <td>${esc(row.open_line_count)}</td>
-    <td><a class="btn btn-secondary" href="/po/${row.id}/receive">Receive</a></td>
-  </tr>`).join("");
+    <td>${receiveAction}</td>
+  </tr>`;
+  }).join("");
   res.send(layout("Receive By PO", `
     <h1>Receive By PO</h1>
     <div class="card">
@@ -12503,7 +12533,17 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
       case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
       pl.id
   `, [po.id])).rows : [];
-  const lineOptions = openLines.map((line) => `<option value="${line.id}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(formatQtyDisplay(line.qty_ordered))} | Rec ${esc(formatQtyDisplay(line.qty_received))} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`).join("");
+  const mrrPoReceiptCount = po
+    ? Number((await query("select count(*) from receipts where mrr_log_id = $1 and job_id = $2", [mrr.id, jobId])).rows[0]?.count || 0)
+    : 0;
+  const canReceiveOnExistingMrr = !po || (openLines.length > 0 && mrrPoReceiptCount === 0);
+  const existingMrrReceiveMessage = mrrPoReceiptCount > 0
+    ? "Use Receive By PO to post remaining PO quantities on a new MRR."
+    : "All PO lines tied to this MRR are already fully received.";
+  const lineOptions = openLines.map((line) => {
+    const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
+    return `<option value="${line.id}" data-remaining="${escAttr(String(remainingQty))}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(formatQtyDisplay(line.qty_ordered))} | Rec ${esc(formatQtyDisplay(line.qty_received))} | Remaining ${esc(formatQtyDisplay(remainingQty))} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`;
+  }).join("");
   res.send(layout("Receive MRR", `
     <h1>Receive ${esc(mrr.mrr_number)}</h1>
     <div class="card">
@@ -12535,10 +12575,10 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
           <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
-        <div class="actions"><button type="submit">${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="${escAttr(backHref)}">Back</a></div>
+        <div class="actions"><button type="submit" ${canReceiveOnExistingMrr ? "" : "disabled"}>${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="${escAttr(backHref)}">Back</a></div>
       </form>
       <script>syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${JSON.stringify(locationMap)});</script>
-      ${po ? (openLines.length ? "" : `<p class="muted">All PO lines tied to this MRR are already fully received.</p>`) : `<p class="muted">No-PO receipts are logged for traceability, but they do not post into PO-based inventory until a PO line exists.</p>`}
+      ${po ? (canReceiveOnExistingMrr ? "" : `<p class="muted">${esc(existingMrrReceiveMessage)}</p>`) : `<p class="muted">No-PO receipts are logged for traceability, but they do not post into PO-based inventory until a PO line exists.</p>`}
     </div>
   `, req.user));
 });
@@ -12554,14 +12594,41 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
     await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
     const normalizedNames = normalizeWarehouseLocationValues(req.body.warehouse, req.body.location);
     if (String(req.body.mode || "") === "po") {
+      const existingReceiptCount = Number((await client.query(
+        "select count(*) from receipts where mrr_log_id = $1 and job_id = $2",
+        [mrrId, jobId]
+      )).rows[0]?.count || 0);
+      if (existingReceiptCount > 0) {
+        throw new Error("Use Receive By PO to post remaining PO quantities on a new MRR.");
+      }
       const poLine = (await client.query(`
-        select po.id as po_id, po.po_no, po.rfq_id, mi.item_code, mi.description
+        select
+          po.id as po_id,
+          po.po_no,
+          po.rfq_id,
+          po.status,
+          mi.item_code,
+          mi.description,
+          pl.qty_ordered,
+          coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as qty_received
         from po_lines pl
         join purchase_orders po on po.id = pl.po_id
         join material_items mi on mi.id = pl.material_item_id
         where pl.id = $1
           and po.job_id = $2
       `, [Number(req.body.po_line_id), jobId])).rows[0];
+      if (!poLine) throw new Error("PO line not found.");
+      const poStatusKey = String(poLine.status || "").toUpperCase();
+      if (["FULLY_RECEIVED", "CLOSED", "CANCELLED"].includes(poStatusKey)) {
+        throw new Error(poStatusKey === "FULLY_RECEIVED"
+          ? "This PO is fully received. No additional receipts can be posted against it."
+          : `This PO is ${poLine.status}. No additional receipts can be posted against it.`);
+      }
+      const remainingQty = Math.max(Number(poLine.qty_ordered || 0) - Number(poLine.qty_received || 0), 0);
+      if (remainingQty <= 0) throw new Error("This PO line is fully received. No additional receipts can be posted against it.");
+      if (qtyReceived > remainingQty) {
+        throw new Error(`Received qty for ${poLine.item_code} cannot exceed the remaining PO qty of ${formatQtyDisplay(remainingQty)}.`);
+      }
       const insert = await client.query(`
         insert into receipts (job_id, mrr_log_id, po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
         values ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -12580,7 +12647,7 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
           description: poLine?.description || "",
           warehouse: normalizedNames.warehouse,
           location: normalizedNames.location,
-          expected_qty: qtyReceived,
+          expected_qty: remainingQty,
           received_qty: qtyReceived,
           osd_qty: qtyReceived,
           osd_status: req.body.osd_status || "OK",
@@ -14605,6 +14672,10 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         <td>${esc(formatShortDateTime(line.line_date || ""))}</td>
         <td>${esc(line.notes || "")}</td>
       </tr>`).join("");
+    const receiveRemainingHref = row.app_po_id
+      ? `/po/${row.app_po_id}/receive`
+      : `/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit`;
+    const receiveRemainingLabel = row.app_po_id ? "Receive Remaining on New MRR" : "Receive Missed Line";
     res.send(layout("Edit MRR Log", `
       <h1>Edit MRR Header</h1>
       <div class="card">
@@ -14624,7 +14695,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
         <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
-          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit">Receive Missed Line</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="${escAttr(receiveRemainingHref)}">${esc(receiveRemainingLabel)}</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
         </form>
       </div>
       <div class="card scroll">
