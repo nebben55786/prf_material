@@ -3071,7 +3071,7 @@ async function getMaterialLogLookupOptions(kind, jobId = null) {
   const result = await query(`
     select value
     from (
-      select value from material_log_lookup_values where kind = $1 and ($2::bigint is null or job_id = $2)
+      select value from material_log_lookup_values where kind = $1 and ($2::bigint is null or job_id is null or job_id = $2 or $1 = 'received_by')
       union
       select name as value from vendors where $1 = 'vendor_name' and coalesce(name, '') <> ''
       union
@@ -12033,7 +12033,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
     .join("");
   const receivedByOptionsHtml = receivedByOptions
-    .map((value) => `<option value="${escAttr(value)}"></option>`)
+    .map((value) => `<option value="${escAttr(value)}">${esc(value)}</option>`)
     .join("");
   const receivedByListId = `received-by-options-${record.id}`;
   const today = new Date().toISOString().slice(0, 10);
