@@ -12457,7 +12457,7 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
     <h1>Edit PO</h1>
     <div class="card">
       <p class="muted">RFQ: ${esc(record.rfq_no || "N/A")} | Created: ${esc(formatShortDateTime(record.created_at))}</p>
-      <form method="post" action="/po/${record.id}/edit" class="stack">
+      <form id="po-edit-form-${record.id}" method="post" action="/po/${record.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(record.updated_token)}" />
         <div class="grid">
           <div><label>PO Number</label><input name="po_no" value="${esc(record.po_no)}" required /></div>
@@ -12467,14 +12467,14 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
         <div class="grid">
           <div><label>Description</label><input name="description" value="${esc(record.description || "")}" /></div>
         </div>
-        <div class="actions">
-          <button type="submit">Save PO</button>
-          <a class="btn btn-secondary" href="/po">Back</a>
-          <form method="post" action="/po/${record.id}/delete" onsubmit="return confirm('Delete PO ${escAttr(record.po_no)}? This will also remove its PO lines and receipts.');">
-            <button class="btn btn-danger" type="submit">Delete PO</button>
-          </form>
-        </div>
       </form>
+      <form id="po-delete-form-${record.id}" method="post" action="/po/${record.id}/delete" onsubmit="return confirm('Delete PO ${escAttr(record.po_no)}? This will also remove its PO lines and receipts.');"></form>
+      <div class="actions">
+        <button type="submit" form="po-edit-form-${record.id}">Save PO</button>
+        <a class="btn btn-primary" href="/po/${record.id}/receive">Receive PO</a>
+        <button class="btn btn-danger" type="submit" form="po-delete-form-${record.id}">Delete PO</button>
+        <a class="btn btn-secondary" href="/po">Back</a>
+      </div>
     </div>
     <div class="card scroll">
       <h3>PO Lines</h3>
