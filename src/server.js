@@ -9641,11 +9641,11 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   };
   const rows = rfqs.map((rfq) => `<tr>
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
-    <td>${esc(rfq.client_request_no || "")}</td>
     <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.requestor_name || "")}</td>
     <td>${esc(rfq.awarded_vendor_refs || "")}</td>
     <td>${renderIssuedPoLinks(rfq.issued_po_links, rfq.issued_po_refs)}</td>
+    <td style="width:1%; white-space:nowrap;">${esc(rfq.client_request_no || "")}</td>
     <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
     <td>${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}</td>
   </tr>`).join("");
@@ -9671,7 +9671,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table><tr><th>RFQ</th><th>Client Request #</th><th>Description</th><th>Requestor</th><th>Awarded Vendor(s)</th><th>Issued PO(s)</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="8" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+        <table><tr><th>RFQ</th><th>Description</th><th>Requestor</th><th>Awarded Vendor(s)</th><th>Issued PO(s)</th><th style="width:1%; white-space:nowrap;">Client Request #</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="8" class="muted">No RFQs match the current filter.</td></tr>`}</table>
       </div>
     </div>
   `, req.user));
