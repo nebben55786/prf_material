@@ -9560,7 +9560,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     issued_pos as (
       select
         po.rfq_id,
-        string_agg(distinct po.po_no, ', ' order by po.po_no) as issued_po_refs
+        string_agg(distinct po.po_no, ', ' order by po.po_no) as issued_po_refs,
+        jsonb_agg(jsonb_build_object('id', po.id, 'po_no', po.po_no) order by po.po_no) as issued_po_links
       from purchase_orders po
       join base_rfqs b on b.id = po.rfq_id and b.job_id = po.job_id
       group by po.rfq_id
@@ -9597,7 +9598,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         else b.status
       end as display_status,
       coalesce(av.awarded_vendor_refs, '') as awarded_vendor_refs,
-      coalesce(ip.issued_po_refs, '') as issued_po_refs
+      coalesce(ip.issued_po_refs, '') as issued_po_refs,
+      coalesce(ip.issued_po_links, '[]'::jsonb) as issued_po_links
     from base_rfqs b
     left join awarded_vendors av on av.rfq_id = b.id
     left join issued_pos ip on ip.rfq_id = b.id
@@ -9616,13 +9618,34 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const requestorOptions = [`<option value="">All Requestors</option>`]
     .concat(requestors.map((requestor) => `<option value="${esc(requestor.requestor_name)}" ${requestor.requestor_name === requestorName ? "selected" : ""}>${esc(requestor.requestor_name)}</option>`))
     .join("");
+  const renderIssuedPoLinks = (value, fallbackText) => {
+    const links = Array.isArray(value)
+      ? value
+      : (() => {
+        try {
+          return JSON.parse(String(value || "[]"));
+        } catch {
+          return [];
+        }
+      })();
+    if (!links.length) return esc(fallbackText || "");
+    return links
+      .filter((po) => po && String(po.po_no || "").trim())
+      .map((po) => {
+        const poNo = String(po.po_no || "").trim();
+        const poId = Number(po.id || 0);
+        const href = poId > 0 ? `/po/${poId}/edit` : `/po?po_no=${encodeURIComponent(poNo)}`;
+        return `<a href="${escAttr(href)}">${esc(poNo)}</a>`;
+      })
+      .join(", ");
+  };
   const rows = rfqs.map((rfq) => `<tr>
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td>${esc(rfq.client_request_no || "")}</td>
     <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.requestor_name || "")}</td>
     <td>${esc(rfq.awarded_vendor_refs || "")}</td>
-    <td>${esc(rfq.issued_po_refs || "")}</td>
+    <td>${renderIssuedPoLinks(rfq.issued_po_links, rfq.issued_po_refs)}</td>
     <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
     <td>${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}</td>
   </tr>`).join("");
