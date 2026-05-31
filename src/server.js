@@ -5009,7 +5009,7 @@ async function recalcPoStatus(client, poId) {
   const lineCount = num(totals?.line_count);
   const fullyReceivedCount = num(totals?.fully_received_count);
   const receivedCount = num(totals?.received_count);
-  let nextStatus = "ISSUED";
+  let nextStatus = String(po.status || "").toUpperCase() === "OPEN" ? "OPEN" : "ISSUED";
   if (lineCount > 0 && fullyReceivedCount >= lineCount) nextStatus = "FULLY_RECEIVED";
   else if (receivedCount > 0) nextStatus = "PARTIALLY_RECEIVED";
   await client.query(`
@@ -12421,7 +12421,8 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
     query("select id, name from vendors order by name"),
     query(`
       select pl.id, coalesce(pl.po_line, '') as po_line, mi.item_code, mi.description, pl.qty_ordered, pl.unit_price,
-             coalesce(pl.size_1, '') as size_1, coalesce(pl.size_2, '') as size_2, coalesce(pl.thk_1, '') as thk_1, coalesce(pl.thk_2, '') as thk_2
+             coalesce(pl.size_1, '') as size_1, coalesce(pl.size_2, '') as size_2, coalesce(pl.thk_1, '') as thk_1, coalesce(pl.thk_2, '') as thk_2,
+             coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as received_qty
       from po_lines pl
       join material_items mi on mi.id = pl.material_item_id
       where pl.po_id = $1
@@ -12434,7 +12435,12 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
   ]);
   const record = po.rows[0];
   const vendorOptions = vendors.rows.map((vendor) => `<option value="${vendor.id}" ${vendor.id === record.vendor_id ? "selected" : ""}>${esc(vendor.name)}</option>`).join("");
-  const poLineRows = poLines.rows.map((line) => `<tr>
+  const poLineRows = poLines.rows.map((line) => {
+    const receivedQty = Number(line.received_qty || 0);
+    const deleteAction = receivedQty > 0
+      ? `<span class="chip">Received</span>`
+      : `<form method="post" action="/po-line/${line.id}/delete" onsubmit="return confirm('Delete PO line ${escAttr(String(line.po_line || line.item_code || line.id))}?');"><button class="btn btn-danger" type="submit">Delete Line</button></form>`;
+    return `<tr>
     <td>${esc(line.po_line || "")}</td>
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
@@ -12444,8 +12450,9 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
     <td>${esc(line.thk_2)}</td>
       <td>${esc(formatQtyDisplay(line.qty_ordered))}</td>
     <td>${esc(line.unit_price)}</td>
-    <td><a class="btn btn-secondary" href="/po-line/${line.id}/edit">Edit Line</a></td>
-  </tr>`).join("");
+    <td><div class="actions"><a class="btn btn-secondary" href="/po-line/${line.id}/edit">Edit Line</a>${deleteAction}</div></td>
+  </tr>`;
+  }).join("");
   res.send(layout("Edit PO", `
     <h1>Edit PO</h1>
     <div class="card">
@@ -12546,6 +12553,35 @@ app.post("/po-line/:id/edit", requireAuth, requireJobContext, requirePermission(
   });
   res.redirect("/po");
 });
+
+app.post("/po-line/:id/delete", requireAuth, requireJobContext, requirePermission("pos", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  let poId = 0;
+  let rfqId = 0;
+  await withTransaction(async (client) => {
+    const line = (await client.query(`
+      select pl.id, pl.po_id, coalesce(pl.po_line, '') as po_line, coalesce(mi.item_code, '') as item_code,
+             po.rfq_id, coalesce(sum(r.qty_received), 0) as received_qty
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
+      join material_items mi on mi.id = pl.material_item_id
+      left join receipts r on r.po_line_id = pl.id
+      where pl.id = $1 and pl.job_id = $2
+      group by pl.id, pl.po_id, pl.po_line, mi.item_code, po.rfq_id
+    `, [req.params.id, jobId])).rows[0];
+    if (!line) throw new Error("PO line not found.");
+    poId = Number(line.po_id);
+    rfqId = Number(line.rfq_id || 0);
+    if (Number(line.received_qty || 0) > 0) {
+      throw new Error("PO lines with received material cannot be deleted. Adjust the receipt/MRR first.");
+    }
+    await client.query("delete from po_lines where id = $1 and job_id = $2", [req.params.id, jobId]);
+    await recalcPoStatus(client, poId);
+    if (rfqId) await recalcRfqStatus(client, rfqId);
+    await auditLog(client, req.user.id, "delete", "po_line", req.params.id, `${line.po_line || ""}:${line.item_code || ""}`);
+  });
+  res.redirect(poId ? `/po/${poId}/edit` : "/po");
+}));
 
 app.get("/receive", requireAuth, requireJobContext, requirePermission("receiving", "view"), async (req, res) => {
   res.send(layout("Receiving", `
