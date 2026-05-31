@@ -9759,7 +9759,17 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       where rv.rfq_id = $1 and rv.job_id = $2
       order by v.name
     `, [rfqId, jobId]),
-    query("select count(*) from purchase_orders where rfq_id = $1 and job_id = $2", [rfqId, jobId]),
+    query(`
+      select
+        count(distinct po.id) as po_count,
+        count(distinct issued_ri.id) as issued_item_count,
+        string_agg(distinct po.po_no, ', ' order by po.po_no) as po_refs,
+        min(po.id) as first_po_id
+      from purchase_orders po
+      left join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id and pl.rfq_item_id is not null
+      left join rfq_items issued_ri on issued_ri.id = pl.rfq_item_id and issued_ri.rfq_id = po.rfq_id and issued_ri.job_id = po.job_id
+      where po.rfq_id = $1 and po.job_id = $2
+    `, [rfqId, jobId]),
     query(`
       select ib.id, ib.entity_type, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
              coalesce((select count(*) from import_batch_errors ibe where ibe.batch_id = ib.id), 0) as error_count
@@ -9780,7 +9790,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       select pl.rfq_item_id, string_agg(distinct po.po_no, ', ' order by po.po_no) as po_refs
       from po_lines pl
       join purchase_orders po on po.id = pl.po_id
-      where po.rfq_id = $1 and po.job_id = $2 and pl.rfq_item_id is not null
+      where po.rfq_id = $1 and po.job_id = $2 and pl.job_id = $2 and pl.rfq_item_id is not null
       group by pl.rfq_item_id
     `, [rfqId, jobId]),
     query(`
@@ -9797,7 +9807,11 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const items = itemsRes.rows;
   const vendors = vendorsRes.rows;
   const selectedVendors = selectedVendorsRes.rows;
-  const poCount = Number(poCountRes.rows[0].count);
+  const poSummary = poCountRes.rows[0] || {};
+  const poCount = Number(poSummary.po_count || 0);
+  const issuedItemCount = Number(poSummary.issued_item_count || 0);
+  const issuedPoRefs = String(poSummary.po_refs || "").trim();
+  const firstIssuedPoId = Number(poSummary.first_po_id || 0);
   const recentImports = recentImportsRes.rows;
   const quoteFiles = quoteFilesRes.rows;
   const materialItems = materialItemsRes.rows;
@@ -9817,6 +9831,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     quoteCountsByVendor.set(vendorKey, (quoteCountsByVendor.get(vendorKey) || 0) + 1);
   }
   const poRefMap = new Map(poRefsRes.rows.map((row) => [Number(row.rfq_item_id), row.po_refs]));
+  const allItemsIssuedToPo = items.length > 0 && issuedItemCount >= items.length;
+  const headerPoNumber = issuedPoRefs || rfq.po_number || "";
   const awardedItems = items.filter((item) => item.award_status === "AWARDED" && item.awarded_vendor_id);
   const awardedVendorSet = new Set(awardedItems.map((item) => Number(item.awarded_vendor_id)));
   const awardedVendorId = items.length > 0 && awardedItems.length === items.length && awardedVendorSet.size === 1
@@ -9989,6 +10005,9 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         })();
       </script>
     </div>`;
+  const poAwardAction = allItemsIssuedToPo && poCount > 0
+    ? `<a class="btn btn-secondary" href="${poCount === 1 && firstIssuedPoId ? `/po/${firstIssuedPoId}/edit` : `/po?rfq_no=${encodeURIComponent(rfq.rfq_no || "")}`}">${poCount > 1 ? "Edit POs" : "Edit PO"}</a>`
+    : (awardedVendorId ? `<button type="button" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}', 'rfq-po-number-${rfqId}')">Create Draft PO</button>` : "");
   const awardSummaryCard = `
     <div class="card">
       <h3>Award Summary</h3>
@@ -10009,7 +10028,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         <div class="actions">
           <button type="submit" ${selectedVendors.length === 0 ? "disabled" : ""}>Award Whole RFQ</button>
           ${awardedItems.length > 0 ? `<button class="btn btn-secondary" type="submit" formaction="/rfq/${rfqId}/award/clear">Clear Whole RFQ Award</button>` : ""}
-          ${awardedVendorId ? `<button type="button" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}', 'rfq-po-number-${rfqId}')">Create Draft PO</button>` : ""}
+          ${poAwardAction}
           <a class="btn btn-secondary" href="/rfq/${rfqId}/export.xlsx">Export AX XLSX</a>
         </div>
         ${awardedVendorId ? `<div class="muted">Current award: <strong>${esc(awardedVendorName)}</strong> | ${awardedItems.length} line(s) | Estimated total $${awardedTotal.toFixed(2)}</div>` : `<div class="muted">Award the full RFQ to one vendor once the selected vendor has quotes on every RFQ line.</div>`}
@@ -10033,7 +10052,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         </div>
         <div class="grid" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
           <div><label>Client Request #</label><input name="client_request_no" value="${esc(rfq.client_request_no || "")}" /></div>
-          <div><label>PO Number</label><input id="rfq-po-number-${rfqId}" name="po_number" value="${esc(rfq.po_number || "")}" /></div>
+          <div><label>PO Number</label><input id="rfq-po-number-${rfqId}" name="po_number" value="${esc(headerPoNumber)}" /></div>
           <div><label>Requestor</label><input name="requestor_name" value="${esc(rfq.requestor_name || "")}" /></div>
         </div>
       </form>
