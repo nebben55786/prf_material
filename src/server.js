@@ -36,6 +36,7 @@ const rfqStatuses = [
   { value: "WAITING_ON_CLIENT", label: "Waiting on Client" },
   { value: "CANCELLED", label: "Cancelled" },
   { value: "PURCHASED", label: "Purchased" },
+  { value: "PARTIALLY_RECEIVED", label: "Partially Received" },
   { value: "RECEIVED", label: "Received" }
 ];
 const permissionSections = [
@@ -315,6 +316,7 @@ function renderRfqStatusChip(status, dueDate) {
   if (status === "WAITING_ON_QUOTES" && isPastDate(dueDate)) className = "rfq-status-waiting-past";
   if (status === "WAITING_ON_CLIENT") className = "rfq-status-client";
   if (status === "PURCHASED") className = "rfq-status-purchased";
+  if (status === "PARTIALLY_RECEIVED") className = "rfq-status-partial";
   if (status === "RECEIVED") className = "rfq-status-received";
   const classes = ["chip", "rfq-status-chip", className].filter(Boolean).join(" ");
   return `<span class="${classes}">${esc(rfqStatusLabel(status))}</span>`;
@@ -1449,6 +1451,7 @@ function layout(title, body, user) {
       .rfq-status-waiting-past { background: #f9d7eb; border-color: #d76aa7; color: #86184f; }
       .rfq-status-client { background: #ffe4bd; border-color: #d38a2d; color: #7a4300; }
       .rfq-status-purchased { background: #fff3b0; border-color: #d4b83d; color: #665200; }
+      .rfq-status-partial { background: #d9ecff; border-color: #6aa5d9; color: #184f86; }
       .rfq-status-received { background: #dff0d8; border-color: #72a864; color: #275f25; }
       .chip-remove { font-size: 0.2em; line-height: 1; padding: 0 1px; margin-left: 4px; min-width: 0; min-height: 0; vertical-align: middle; }
       .tab-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
@@ -4901,30 +4904,40 @@ async function recalcRfqStatus(client, rfqId) {
     where ri.rfq_id = $1 and ri.job_id = $2 and q.job_id = $2
   `, [rfqId, rfq.job_id])).rows[0]?.quoted_count || 0);
   const totals = (await client.query(`
-    select count(distinct pl.rfq_item_id)
-      filter (where pl.rfq_item_id is not null) as issued_count,
-      count(distinct pl.rfq_item_id)
-      filter (
-        where pl.rfq_item_id is not null
-          and coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) >= pl.qty_ordered
-      ) as fully_received_count
-    from purchase_orders po
-    join po_lines pl on pl.po_id = po.id
-    where po.rfq_id = $1 and po.job_id = $2 and pl.job_id = $2
+    with po_line_receipts as (
+      select
+        pl.id,
+        pl.rfq_item_id,
+        pl.qty_ordered,
+        coalesce(sum(r.qty_received), 0) as qty_received
+      from purchase_orders po
+      join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+      left join receipts r on r.po_line_id = pl.id
+      where po.rfq_id = $1 and po.job_id = $2
+      group by pl.id, pl.rfq_item_id, pl.qty_ordered
+    )
+    select
+      count(distinct rfq_item_id) filter (where rfq_item_id is not null) as issued_count,
+      count(distinct rfq_item_id) filter (where rfq_item_id is not null and qty_received > 0) as received_count,
+      count(distinct rfq_item_id) filter (where rfq_item_id is not null and qty_received >= qty_ordered) as fully_received_count
+    from po_line_receipts
   `, [rfqId, rfq.job_id])).rows[0];
   const issued = Number(totals?.issued_count || 0);
+  const received = Number(totals?.received_count || 0);
   const fullyReceived = Number(totals?.fully_received_count || 0);
+  let nextStatus = "SEND_FOR_QUOTES";
   if (total > 0 && fullyReceived >= total) {
-    await client.query("update rfqs set status = 'RECEIVED' where id = $1 and job_id = $2 and status <> 'CANCELLED'", [rfqId, rfq.job_id]);
+    nextStatus = "RECEIVED";
+  } else if (received > 0) {
+    nextStatus = "PARTIALLY_RECEIVED";
   } else if (issued > 0) {
-    await client.query("update rfqs set status = 'PURCHASED' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'RECEIVED')", [rfqId, rfq.job_id]);
+    nextStatus = "PURCHASED";
   } else if (total > 0 && awardedCount >= total) {
-    await client.query("update rfqs set status = 'AWARDED' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
+    nextStatus = "AWARDED";
   } else if (quotedCount > 0) {
-    await client.query("update rfqs set status = 'WAITING_ON_QUOTES' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
-  } else {
-    await client.query("update rfqs set status = 'SEND_FOR_QUOTES' where id = $1 and job_id = $2 and status not in ('CANCELLED', 'AWARDED', 'PURCHASED', 'RECEIVED')", [rfqId, rfq.job_id]);
+    nextStatus = "WAITING_ON_QUOTES";
   }
+  await client.query("update rfqs set status = $3 where id = $1 and job_id = $2 and status <> 'CANCELLED'", [rfqId, rfq.job_id, nextStatus]);
 }
 
 async function backfillRfqVendors(client, rfqId) {
@@ -9551,14 +9564,45 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       from purchase_orders po
       join base_rfqs b on b.id = po.rfq_id and b.job_id = po.job_id
       group by po.rfq_id
+    ),
+    item_counts as (
+      select
+        ri.rfq_id,
+        count(distinct ri.id) as item_count
+      from rfq_items ri
+      join base_rfqs b on b.id = ri.rfq_id and b.job_id = ri.job_id
+      group by ri.rfq_id
+    ),
+    receiving_status as (
+      select
+        po.rfq_id,
+        count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) > 0) as received_item_count,
+        count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) >= pl.qty_ordered) as fully_received_item_count
+      from purchase_orders po
+      join base_rfqs b on b.id = po.rfq_id and b.job_id = po.job_id
+      join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+      left join (
+        select po_line_id, sum(qty_received) as qty_received
+        from receipts
+        group by po_line_id
+      ) rcv on rcv.po_line_id = pl.id
+      group by po.rfq_id
     )
     select
       b.*,
+      case
+        when b.status = 'CANCELLED' then b.status
+        when coalesce(ic.item_count, 0) > 0 and coalesce(rs.fully_received_item_count, 0) >= coalesce(ic.item_count, 0) then 'RECEIVED'
+        when coalesce(rs.received_item_count, 0) > 0 then 'PARTIALLY_RECEIVED'
+        else b.status
+      end as display_status,
       coalesce(av.awarded_vendor_refs, '') as awarded_vendor_refs,
       coalesce(ip.issued_po_refs, '') as issued_po_refs
     from base_rfqs b
     left join awarded_vendors av on av.rfq_id = b.id
     left join issued_pos ip on ip.rfq_id = b.id
+    left join item_counts ic on ic.rfq_id = b.id
+    left join receiving_status rs on rs.rfq_id = b.id
     order by b.id desc
   `, params)
   ]);
@@ -9580,7 +9624,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td>${esc(rfq.awarded_vendor_refs || "")}</td>
     <td>${esc(rfq.issued_po_refs || "")}</td>
     <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
-    <td>${renderRfqStatusChip(rfq.status, rfq.due_date)}</td>
+    <td>${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}</td>
   </tr>`).join("");
   res.send(layout("Purchasing", `
     <h1>Purchasing</h1>
@@ -9763,6 +9807,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       select
         count(distinct po.id) as po_count,
         count(distinct issued_ri.id) as issued_item_count,
+        count(distinct issued_ri.id) filter (where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) > 0) as received_item_count,
+        count(distinct issued_ri.id) filter (where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) >= pl.qty_ordered) as fully_received_item_count,
         string_agg(distinct po.po_no, ', ' order by po.po_no) as po_refs,
         min(po.id) as first_po_id
       from purchase_orders po
@@ -9810,6 +9856,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const poSummary = poCountRes.rows[0] || {};
   const poCount = Number(poSummary.po_count || 0);
   const issuedItemCount = Number(poSummary.issued_item_count || 0);
+  const receivedItemCount = Number(poSummary.received_item_count || 0);
+  const fullyReceivedItemCount = Number(poSummary.fully_received_item_count || 0);
   const issuedPoRefs = String(poSummary.po_refs || "").trim();
   const firstIssuedPoId = Number(poSummary.first_po_id || 0);
   const recentImports = recentImportsRes.rows;
@@ -9833,6 +9881,11 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const poRefMap = new Map(poRefsRes.rows.map((row) => [Number(row.rfq_item_id), row.po_refs]));
   const allItemsIssuedToPo = items.length > 0 && issuedItemCount >= items.length;
   const headerPoNumber = issuedPoRefs || rfq.po_number || "";
+  const displayRfqStatus = rfq.status === "CANCELLED"
+    ? rfq.status
+    : (items.length > 0 && fullyReceivedItemCount >= items.length
+      ? "RECEIVED"
+      : (receivedItemCount > 0 ? "PARTIALLY_RECEIVED" : rfq.status));
   const awardedItems = items.filter((item) => item.award_status === "AWARDED" && item.awarded_vendor_id);
   const awardedVendorSet = new Set(awardedItems.map((item) => Number(item.awarded_vendor_id)));
   const awardedVendorId = items.length > 0 && awardedItems.length === items.length && awardedVendorSet.size === 1
@@ -9916,9 +9969,9 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     .concat(selectedVendors.map((vendor) => `<option value="${vendor.vendor_id}" ${Number(vendor.vendor_id) === awardedVendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
   const rfqStatusOptions = rfqStatuses
-    .map((status) => `<option value="${status.value}" ${rfq.status === status.value ? "selected" : ""}>${esc(status.label)}</option>`)
+    .map((status) => `<option value="${status.value}" ${displayRfqStatus === status.value ? "selected" : ""}>${esc(status.label)}</option>`)
     .join("");
-  const rfqStatusChip = renderRfqStatusChip(rfq.status, rfq.due_date);
+  const rfqStatusChip = renderRfqStatusChip(displayRfqStatus, rfq.due_date);
   const selectedVendorChips = selectedVendors.length > 0
     ? selectedVendors.map((vendor) => `<span class="chip">${esc(vendor.name)}</span>`).join(" ")
     : `<span class="muted">No participating vendors selected yet.</span>`;
