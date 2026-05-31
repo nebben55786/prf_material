@@ -12032,9 +12032,10 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
     .join("");
-  const receivedByOptionsHtml = [`<option value="">Select received by</option>`]
-    .concat(receivedByOptions.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`))
+  const receivedByOptionsHtml = receivedByOptions
+    .map((value) => `<option value="${escAttr(value)}"></option>`)
     .join("");
+  const receivedByListId = `received-by-options-${record.id}`;
   const today = new Date().toISOString().slice(0, 10);
   const openPoLineCount = poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0) > 0).length;
   const receiveStatusKey = String(record.status || "").toUpperCase();
@@ -12097,7 +12098,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         <div class="grid">
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly /></div>
           <div><label>Received Date</label><input name="received_date" type="date" value="${esc(today)}" required /></div>
-          <div><label>Received By</label><div class="inline-field"><select name="received_by" required>${receivedByOptionsHtml}</select><input name="received_by_manual" placeholder="Or enter received by" /></div></div>
+          <div><label>Received By</label><input name="received_by" list="${receivedByListId}" placeholder="Type received by" required /><datalist id="${receivedByListId}">${receivedByOptionsHtml}</datalist></div>
           <div><label>Load Number</label><input name="load_number" /></div>
         </div>
         <div class="grid">
@@ -12146,9 +12147,8 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           let hasQty = false;
           let hasError = false;
           let hasOverRemaining = false;
-          const receivedBySelect = document.querySelector('select[name="received_by"]');
-          const receivedByManual = document.querySelector('input[name="received_by_manual"]');
-          if ((!receivedBySelect || !receivedBySelect.value) && (!receivedByManual || !receivedByManual.value.trim())) {
+          const receivedByInput = document.querySelector('input[name="received_by"]');
+          if (!receivedByInput || !receivedByInput.value.trim()) {
             event.preventDefault();
             alert("Received By is required for every new MRR.");
             return;
@@ -12210,7 +12210,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
         : `This PO is ${po.status}. No additional receipts can be posted against it.`);
     }
     const mrrNumber = await getNextMrrNumber(client, jobId);
-    const receivedBy = String(req.body.received_by_manual || req.body.received_by || "").trim();
+    const receivedBy = String(req.body.received_by || "").trim();
     const receivedDate = String(req.body.received_date || "").trim();
     const loadNumber = String(req.body.load_number || "").trim();
     const mrrNotes = String(req.body.mrr_notes || "").trim();
