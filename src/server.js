@@ -7909,7 +7909,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     select id, bom_no, bom_name, description, status, is_system_generated, system_key
     from bom_headers
     where job_id = $1
-      and (bom_type = 'pipe' or system_key = $2)
     order by
       case when system_key = $2 then 0 else 1 end,
       id desc
@@ -8014,7 +8013,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           <input type="hidden" name="bom_id" value="${selectedBom.id}" />
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
           <div class="grid">
-            <div><label>Piping BOM</label><input value="${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}" readonly /></div>
+            <div><label>BOM</label><input value="${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}" readonly /></div>
             <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
             <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
             <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
@@ -8163,13 +8162,13 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         </script>
     ` : `<div class="card">
       <form method="get" action="/requisitions/new" class="stack">
-        <div><label>Select Piping BOM</label><select name="bom_id" required><option value="">Choose BOM</option>${bomOptions || ""}</select></div>
+        <div><label>Select BOM</label><select name="bom_id" required><option value="">Choose BOM</option>${bomOptions || ""}</select></div>
         <div class="actions">
           <button type="submit">Continue</button>
           <a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a>
         </div>
       </form>
-      ${availableBoms.length ? `<p class="muted" style="margin-top:12px;">Choose the BOM first, then we’ll take you to the request builder for that BOM.</p>` : `<div class="error" style="margin-top:12px;"><h3>No Piping BOM Found</h3><p>Select or create a piping BOM first.</p></div>`}
+      ${availableBoms.length ? `<p class="muted" style="margin-top:12px;">Choose the BOM first, then we'll take you to the request builder for that BOM.</p>` : `<div class="error" style="margin-top:12px;"><h3>No BOM Found</h3><p>Select or create a BOM first.</p></div>`}
     </div>`}
   `, req.user));
 });
