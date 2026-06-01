@@ -21,6 +21,7 @@ const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing",
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
 const bomLineImportHeaders = ["line_no", "item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "iwp_no", "iso_no", "size_1", "size_2", "thk_1", "thk_2", "qty_required", "notes"];
+const materialItemImportHeaders = ["item_code", "description", "material_type", "uom"];
 const requisitionStatuses = ["REQUESTED", "VERIFIED", "ISSUED", "CANCELLED", "CLOSED"];
 const unallocatedBomSystemKey = "UNALLOCATED";
 const unallocatedBomName = "Un-Allocated Inventory";
@@ -46,6 +47,7 @@ const permissionSections = [
   { key: "rfqs", label: "Purchasing", href: "/rfq" },
   { key: "pos", label: "POs", href: "/po" },
   { key: "bom", label: "BOM", href: "/bom" },
+  { key: "inventory", label: "Items", href: "/items" },
   { key: "receiving", label: "Receiving", href: "/receive" },
   { key: "yard", label: "Yard", href: "/yard" },
   { key: "requisitions", label: "REQs", href: "/requisitions" },
@@ -2612,6 +2614,83 @@ async function upsertMaterialItem(client, row, jobId) {
     [jobId, itemCode, description, materialType || "misc", uom || "EA"]
   );
   return insert.rows[0].id;
+}
+
+function normalizeMaterialItemImportRow(row) {
+  const firstText = (...values) => {
+    for (const value of values) {
+      const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+      if (normalized) return normalized;
+    }
+    return "";
+  };
+  const itemCode = firstText(
+    row.item_code,
+    row.ident,
+    row.ident_code,
+    row.item,
+    row.item_no,
+    row.item_number,
+    row.material_code,
+    row.material_item
+  );
+  return {
+    item_code: itemCode,
+    description: pickRealMaterialDescription(
+      itemCode,
+      row.description,
+      row.item_description,
+      row.material_description,
+      row.abbrev_description,
+      row.abbrev_desc,
+      row.product_description,
+      row.desc
+    ),
+    material_type: firstText(row.material_type, row.type, row.item_type, row.category, "misc"),
+    uom: firstText(row.uom, row.unit, row.unit_of_measure, "EA")
+  };
+}
+
+async function bulkUpsertMaterialItems(client, rows, jobId) {
+  const rowsByItemCode = new Map();
+  let skippedCount = 0;
+  for (const row of rows) {
+    const normalized = normalizeMaterialItemImportRow(row);
+    if (!normalized.item_code) {
+      skippedCount += 1;
+      continue;
+    }
+    rowsByItemCode.set(normalized.item_code, normalized);
+  }
+  const validRows = Array.from(rowsByItemCode.values());
+  if (!validRows.length) return { insertedCount: 0, updatedCount: 0, skippedCount };
+  const existing = await client.query(
+    "select item_code from material_items where job_id = $1 and item_code = any($2::text[])",
+    [jobId, validRows.map((row) => row.item_code)]
+  );
+  const existingCodes = new Set(existing.rows.map((row) => String(row.item_code || "")));
+  const insertedCount = validRows.filter((row) => !existingCodes.has(row.item_code)).length;
+  const updatedCount = validRows.length - insertedCount;
+  const chunkSize = 500;
+  for (let index = 0; index < validRows.length; index += chunkSize) {
+    const chunk = validRows.slice(index, index + chunkSize);
+    await client.query(`
+      insert into material_items (job_id, item_code, description, material_type, uom)
+      select $1, data.item_code, data.description, data.material_type, data.uom
+      from unnest($2::text[], $3::text[], $4::text[], $5::text[]) as data(item_code, description, material_type, uom)
+      on conflict (job_id, item_code) do update
+      set description = case when coalesce(excluded.description, '') <> '' then excluded.description else material_items.description end,
+          material_type = case when coalesce(excluded.material_type, '') <> '' then excluded.material_type else material_items.material_type end,
+          uom = case when coalesce(excluded.uom, '') <> '' then excluded.uom else material_items.uom end
+    `, [
+      jobId,
+      chunk.map((row) => row.item_code),
+      chunk.map((row) => row.description || ""),
+      chunk.map((row) => row.material_type || "misc"),
+      chunk.map((row) => row.uom || "EA")
+    ]);
+  }
+  return { insertedCount, updatedCount, skippedCount };
 }
 
 async function findOrCreateVendorByName(client, vendorName, jobId) {
@@ -6876,6 +6955,174 @@ app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyn
   res.redirect(getSafeReturnPath(req, "/settings/user-management"));
 }));
 
+app.get("/items", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const q = String(req.query.q || "").trim();
+  const canEdit = canAccess(req.user, "inventory", "edit");
+  const params = [jobId];
+  const where = ["job_id = $1"];
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(item_code ilike $${params.length} or description ilike $${params.length} or material_type ilike $${params.length} or uom ilike $${params.length})`);
+  }
+  const rows = (await query(`
+    select id, item_code, description, material_type, uom, created_at
+    from material_items
+    where ${where.join(" and ")}
+    order by item_code
+    limit 500
+  `, params)).rows;
+  const notices = [];
+  if (req.query.saved) notices.push("Item saved.");
+  if (req.query.inserted !== undefined || req.query.updated !== undefined || req.query.skipped !== undefined) {
+    notices.push(`Import complete. Inserted ${Number(req.query.inserted || 0)}, updated ${Number(req.query.updated || 0)}, skipped ${Number(req.query.skipped || 0)}.`);
+  }
+  const noticesHtml = notices.map((notice) => `<div class="card"><strong>${esc(notice)}</strong></div>`).join("");
+  const rowsHtml = rows.map((item) => `<tr>
+    <td>${esc(item.item_code)}</td>
+    <td>${esc(item.description || "")}</td>
+    <td>${esc(item.material_type || "")}</td>
+    <td>${esc(item.uom || "")}</td>
+    ${canEdit ? `<td><a class="btn btn-secondary" href="/items/${item.id}/edit">Edit</a></td>` : ""}
+  </tr>`).join("");
+  res.send(layout("Item Master", `
+    <h1>Item Master</h1>
+    ${noticesHtml}
+    <div class="card">
+      <form method="get" action="/items" class="stack">
+        <div><label>Search Items</label><input name="q" value="${esc(q)}" placeholder="Item code, description, type, or UOM" /></div>
+        <div class="actions">
+          <button type="submit">Filter Items</button>
+          <a class="btn btn-secondary" href="/items">Clear</a>
+          <span class="muted">${rows.length} result(s), max 500 shown</span>
+        </div>
+      </form>
+    </div>
+    ${canEdit ? `
+      <div class="card">
+        <h3>Add Or Update Item</h3>
+        <form method="post" action="/items" class="stack">
+          <div class="grid-4">
+            <div><label>Item Code</label><input name="item_code" required /></div>
+            <div><label>Description</label><input name="description" /></div>
+            <div><label>Material Type</label><input name="material_type" value="misc" /></div>
+            <div><label>UOM</label><input name="uom" value="EA" /></div>
+          </div>
+          <div class="actions"><button type="submit">Save Item</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Import Items</h3>
+        <form method="post" action="/items/import" enctype="multipart/form-data" class="stack">
+          <p class="muted">CSV/XLSX columns: ${materialItemImportHeaders.map(esc).join(", ")}</p>
+          <div><label>CSV/XLSX File</label><input type="file" name="sheet" accept=".csv,.xlsx,.xls,.xlsm,.xlsb" /></div>
+          <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
+          <div class="actions">
+            <button type="submit">Import Items</button>
+            <a class="btn btn-secondary" href="/items/import-template.xlsx">Download Import Template</a>
+          </div>
+        </form>
+      </div>
+    ` : ""}
+    <div class="card scroll">
+      <table>
+        <tr><th>Item Code</th><th>Description</th><th>Material Type</th><th>UOM</th>${canEdit ? "<th>Action</th>" : ""}</tr>
+        ${rowsHtml || `<tr><td colspan="${canEdit ? 5 : 4}" class="muted">No items match the current filter.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+}));
+
+app.post("/items", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const row = normalizeMaterialItemImportRow(req.body);
+  if (!row.item_code) throw new Error("Item code is required.");
+  await withTransaction(async (client) => {
+    const importResult = await bulkUpsertMaterialItems(client, [row], jobId);
+    await auditLog(client, req.user.id, "upsert", "material_item", 0, row.item_code);
+    return importResult;
+  });
+  const params = new URLSearchParams({ q: row.item_code, saved: "1" });
+  res.redirect(`/items?${params.toString()}`);
+}));
+
+app.get("/items/import-template.xlsx", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.aoa_to_sheet([materialItemImportHeaders]);
+  worksheet["!cols"] = materialItemImportHeaders.map((header) => ({ wch: Math.max(header.length + 2, 14) }));
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Items");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  const jobToken = safeBlobPathSegment(req.user.activeJob?.job_number || "job", "job");
+  const filename = `${jobToken}-item-master-import-template.xlsx`;
+  await auditLog(pool, req.user.id, "download_template", "material_items", 0, filename);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(buffer);
+}));
+
+app.post("/items/import", requireAuth, requireJobContext, requirePermission("inventory", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const rows = parseUploadedRows(req.file, req.body.csv_text);
+  if (!rows.length) throw new Error("No item rows found.");
+  const result = await withTransaction(async (client) => {
+    const importResult = await bulkUpsertMaterialItems(client, rows, jobId);
+    await auditLog(client, req.user.id, "import", "material_items", 0, `rows=${rows.length}|inserted=${importResult.insertedCount}|updated=${importResult.updatedCount}|skipped=${importResult.skippedCount}`);
+    return importResult;
+  });
+  const params = new URLSearchParams({
+    inserted: String(result.insertedCount),
+    updated: String(result.updatedCount),
+    skipped: String(result.skippedCount)
+  });
+  res.redirect(`/items?${params.toString()}`);
+}));
+
+app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const item = (await query("select id, item_code, description, material_type, uom from material_items where id = $1 and job_id = $2", [Number(req.params.id), currentJobId(req)])).rows[0];
+  if (!item) throw new Error("Item not found.");
+  res.send(layout("Edit Item", `
+    <h1>Edit Item</h1>
+    <div class="card">
+      <form method="post" action="/items/${item.id}/edit" class="stack">
+        <div class="grid-4">
+          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" required /></div>
+          <div><label>Description</label><input name="description" value="${esc(item.description || "")}" /></div>
+          <div><label>Material Type</label><input name="material_type" value="${esc(item.material_type || "")}" /></div>
+          <div><label>UOM</label><input name="uom" value="${esc(item.uom || "")}" /></div>
+        </div>
+        <div class="actions">
+          <button type="submit">Save Item</button>
+          <a class="btn btn-secondary" href="/items">Back</a>
+        </div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/items/:id/edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const row = normalizeMaterialItemImportRow(req.body);
+  if (!row.item_code) throw new Error("Item code is required.");
+  await withTransaction(async (client) => {
+    const current = (await client.query("select id from material_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
+    if (!current) throw new Error("Item not found.");
+    const duplicate = (await client.query(
+      "select id from material_items where job_id = $1 and lower(item_code) = lower($2) and id <> $3 limit 1",
+      [jobId, row.item_code, itemId]
+    )).rows[0];
+    if (duplicate) throw new Error("Another item already uses that item code.");
+    await client.query(`
+      update material_items
+      set item_code = $1, description = $2, material_type = $3, uom = $4
+      where id = $5 and job_id = $6
+    `, [row.item_code, row.description || "", row.material_type || "misc", row.uom || "EA", itemId, jobId]);
+    await auditLog(client, req.user.id, "update", "material_item", itemId, row.item_code);
+  });
+  const params = new URLSearchParams({ q: row.item_code, saved: "1" });
+  res.redirect(`/items?${params.toString()}`);
+}));
+
 app.get("/bom", requireAuth, requireJobContext, requirePermission("bom", "view"), async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
@@ -9666,6 +9913,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
           <button type="submit">Filter RFQs</button>
           <a class="btn btn-secondary" href="/rfq">Clear</a>
           <a class="btn btn-primary" href="/rfq/new">Create RFQ</a>
+          ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
           <span class="muted">${rfqs.length} result(s), max 300 shown</span>
         </div>
       </form>
@@ -10550,7 +10798,10 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
           <tbody>${materialItemRows || `<tr><td colspan="9" class="muted">No existing items found.</td></tr>`}</tbody>
         </table>
       </div>
-      <div class="actions"><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
+        ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
+      </div>
     </div>
     <dialog id="rfq-existing-item-dialog-${rfqId}" class="modal-card">
       <form method="post" action="/rfq/${rfqId}/items/add" class="stack">
