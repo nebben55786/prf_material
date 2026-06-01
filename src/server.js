@@ -1368,6 +1368,7 @@ function layout(title, body, user) {
         .filter((section) => canAccess(user, section.key, "view"))
         .filter((section) => !(isWarehouseUser(user) && section.key === "yard"))
         .map((section) => `<a href="${isWarehouseUser(user) && section.key === "dashboard" ? "/yard" : section.href}">${section.label}</a>`)
+        .concat(String(user.role || "").trim().toLowerCase() === "admin" ? `<a href="/notes">Notes</a>` : "")
         .concat(`<a href="/logout">Logout</a>`)
         .join("")
     : "";
@@ -6953,6 +6954,43 @@ app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyn
     await auditLog(client, req.user.id, "deactivate", "user", userId, current.username);
   });
   res.redirect(getSafeReturnPath(req, "/settings/user-management"));
+}));
+
+app.get("/notes", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const notesRow = (await query("select value, updated_at from app_settings where key = 'admin_notes'")).rows[0];
+  const notes = String(notesRow?.value ?? "");
+  const updatedAt = notesRow?.updated_at ? formatShortDateTime(notesRow.updated_at) : "";
+  res.send(layout("Notes", `
+    <h1>Notes</h1>
+    ${req.query.saved ? `<div class="card"><strong>Notes saved.</strong></div>` : ""}
+    <div class="card">
+      <form method="post" action="/notes" class="stack">
+        <div>
+          <label>Admin Notes</label>
+          <textarea name="notes" style="min-height:70vh; font-family:Consolas, 'Courier New', monospace; font-size:14px; line-height:1.45;">${esc(notes)}</textarea>
+        </div>
+        <div class="actions">
+          <button type="submit">Save Notes</button>
+          ${updatedAt ? `<span class="muted">Last saved ${esc(updatedAt)}</span>` : ""}
+        </div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/notes", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const notes = String(req.body.notes ?? "");
+  await withTransaction(async (client) => {
+    await client.query(`
+      insert into app_settings (key, value, updated_at)
+      values ('admin_notes', $1, now())
+      on conflict (key) do update
+      set value = excluded.value,
+          updated_at = now()
+    `, [notes]);
+    await auditLog(client, req.user.id, "update", "admin_notes", "admin_notes", `chars=${notes.length}`);
+  });
+  res.redirect("/notes?saved=1");
 }));
 
 app.get("/items", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
