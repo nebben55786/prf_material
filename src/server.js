@@ -9766,6 +9766,7 @@ app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("r
   const projectName = String(req.body.project_name || "").trim();
   const clientRequestNo = String(req.body.client_request_no || "").trim();
   const poNumber = String(req.body.po_number || "").trim();
+  const vendorQuoteNumber = String(req.body.vendor_quote_number || "").trim();
   const requestorName = String(req.body.requestor_name || "").trim();
   const dueDate = String(req.body.due_date || "").trim();
   const requestedStatus = String(req.body.status || "").trim();
@@ -9774,10 +9775,10 @@ app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("r
   if (!dueDate) throw new Error("Due date is required.");
   if (!status) throw new Error("Choose a valid RFQ status.");
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select rfq_no, project_name, client_request_no, po_number, requestor_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    const rfq = (await client.query("select rfq_no, project_name, client_request_no, po_number, vendor_quote_number, requestor_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
-    await client.query("update rfqs set project_name = $2, client_request_no = $3, po_number = $4, requestor_name = $5, due_date = $6, status = $7 where id = $1 and job_id = $8", [rfqId, projectName, clientRequestNo, poNumber, requestorName, dueDate, status, jobId]);
-    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${clientRequestNo}:${poNumber}:${requestorName}:${dueDate}:${status}`);
+    await client.query("update rfqs set project_name = $2, client_request_no = $3, po_number = $4, vendor_quote_number = $5, requestor_name = $6, due_date = $7, status = $8 where id = $1 and job_id = $9", [rfqId, projectName, clientRequestNo, poNumber, vendorQuoteNumber, requestorName, dueDate, status, jobId]);
+    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${clientRequestNo}:${poNumber}:${vendorQuoteNumber}:${requestorName}:${dueDate}:${status}`);
   });
   res.redirect(`/rfq/${rfqId}`);
 });
@@ -10126,9 +10127,10 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <div><label>Due Date</label><input type="date" name="due_date" value="${esc(textValue(rfq.due_date))}" required /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
-        <div class="grid" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+        <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
           <div><label>Client Request #</label><input name="client_request_no" value="${esc(rfq.client_request_no || "")}" /></div>
           <div><label>PO Number</label><input id="rfq-po-number-${rfqId}" name="po_number" value="${esc(headerPoNumber)}" /></div>
+          <div><label>Vendor Quote Number</label><input name="vendor_quote_number" value="${esc(rfq.vendor_quote_number || "")}" /></div>
           <div><label>Requestor</label><input name="requestor_name" value="${esc(rfq.requestor_name || "")}" /></div>
         </div>
       </form>
