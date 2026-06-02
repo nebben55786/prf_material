@@ -10242,7 +10242,13 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const quoteFiles = quoteFilesRes.rows;
   const materialItems = materialItemsRes.rows;
   const allQuotes = quotesRes.rows;
-  const vendorNameMap = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
+  const vendorNameMap = new Map(vendors.map((vendor) => [Number(vendor.id), vendor.name]));
+  for (const vendor of selectedVendors) {
+    vendorNameMap.set(Number(vendor.vendor_id), vendor.name);
+  }
+  for (const quote of allQuotes) {
+    vendorNameMap.set(Number(quote.vendor_id), quote.vendor_name);
+  }
   const selectedVendorIds = selectedVendors.map((vendor) => Number(vendor.vendor_id));
   const activeQuoteVendorId = selectedVendorIds.includes(Number(selectedVendorId))
     ? String(selectedVendorId)
@@ -10327,7 +10333,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     const selectedQuote = itemQuotes.get(Number(activeQuoteVendorId));
     const poRefs = poRefMap.get(Number(item.id)) || "Not Issued";
     const itemIssuedToPo = poRefMap.has(Number(item.id));
-    const awardedVendor = item.awarded_vendor_id ? (vendorNameMap.get(item.awarded_vendor_id) || `Vendor ${item.awarded_vendor_id}`) : "";
+    const awardedVendor = item.awarded_vendor_id ? (vendorNameMap.get(Number(item.awarded_vendor_id)) || `Vendor ${item.awarded_vendor_id}`) : "";
     const awardSummary = item.award_status === "AWARDED"
       ? `${awardedVendor} | $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d`
       : "Open";
