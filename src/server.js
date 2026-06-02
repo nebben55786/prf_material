@@ -10269,8 +10269,20 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const awardedVendorId = items.length > 0 && awardedItems.length === items.length && awardedVendorSet.size === 1
     ? Number(awardedItems[0].awarded_vendor_id)
     : 0;
-  const awardedVendorName = awardedVendorId ? (vendorNameMap.get(awardedVendorId) || `Vendor ${awardedVendorId}`) : "";
-  const awardedTotal = awardedItems.reduce((sum, item) => sum + (Number(item.awarded_unit_price || 0) * Number(item.qty || 0)), 0);
+  const awardedVendorGroups = Array.from(awardedVendorSet)
+    .map((vendorId) => {
+      const vendorItems = awardedItems.filter((item) => Number(item.awarded_vendor_id) === vendorId);
+      const unissuedItems = vendorItems.filter((item) => !poRefMap.has(Number(item.id)));
+      const vendorTotal = vendorItems.reduce((sum, item) => sum + (Number(item.awarded_unit_price || 0) * Number(item.qty || 0)), 0);
+      return {
+        vendorId,
+        vendorName: vendorNameMap.get(vendorId) || `Vendor ${vendorId}`,
+        lineCount: vendorItems.length,
+        unissuedCount: unissuedItems.length,
+        total: vendorTotal
+      };
+    })
+    .sort((left, right) => left.vendorName.localeCompare(right.vendorName));
   const activeVendor = selectedVendors.find((vendor) => String(vendor.vendor_id) === activeQuoteVendorId) || null;
   const materialItemRows = materialItems
     .map((item) => `<tr>
@@ -10314,10 +10326,14 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     const itemQuotes = quoteMap.get(Number(item.id)) || new Map();
     const selectedQuote = itemQuotes.get(Number(activeQuoteVendorId));
     const poRefs = poRefMap.get(Number(item.id)) || "Not Issued";
+    const itemIssuedToPo = poRefMap.has(Number(item.id));
     const awardedVendor = item.awarded_vendor_id ? (vendorNameMap.get(item.awarded_vendor_id) || `Vendor ${item.awarded_vendor_id}`) : "";
     const awardSummary = item.award_status === "AWARDED"
       ? `${awardedVendor} | $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d`
       : "Open";
+    const awardLineButton = selectedQuote && activeQuoteVendorId && !itemIssuedToPo
+      ? `<button class="btn btn-primary" type="submit" formaction="/rfq-item/${item.id}/award" formmethod="post">Award Line</button>`
+      : "";
     itemRows.push(`<tr data-rfq-item-id="${item.id}">
       <td style="width:1%; white-space:nowrap;">${esc(item.po_line || "")}</td>
       <td style="width:1%; white-space:nowrap;"><input type="hidden" name="rfq_item_id_${item.id}" value="${item.id}" />${esc(item.item_code)}</td>
@@ -10335,6 +10351,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <td style="width:1%; white-space:nowrap;">${esc(poRefs)}</td>
       <td><div class="actions">
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/quotes">Quotes / History</a>
+        ${awardLineButton}
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/edit">Edit</a>
         ${item.award_status === "AWARDED" ? `<button class="btn btn-secondary" type="submit" formaction="/rfq-item/${item.id}/award/clear" formmethod="post">Clear Award</button>` : ""}
         <button class="btn btn-danger" type="submit" formaction="/rfq-item/${item.id}/delete" formmethod="post" onclick="return confirm('Delete RFQ line ${escAttr(String(item.po_line || item.item_code || item.id))}?');">Delete</button>
@@ -10436,9 +10453,23 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         })();
       </script>
     </div>`;
+  const poAwardButtons = awardedVendorGroups
+    .filter((group) => group.unissuedCount > 0)
+    .map((group) => `<button type="button" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}-${group.vendorId}', 'rfq-po-create-form-${rfqId}-${group.vendorId}', 'rfq-po-number-${rfqId}')">Create ${esc(group.vendorName)} PO</button>`)
+    .join("");
   const poAwardAction = allItemsIssuedToPo && poCount > 0
     ? `<a class="btn btn-secondary" href="${poCount === 1 && firstIssuedPoId ? `/po/${firstIssuedPoId}/edit` : `/po?rfq_no=${encodeURIComponent(rfq.rfq_no || "")}`}">${poCount > 1 ? "Edit POs" : "Edit PO"}</a>`
-    : (awardedVendorId ? `<button type="button" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}', 'rfq-po-create-form-${rfqId}', 'rfq-po-number-${rfqId}')">Create Draft PO</button>` : "");
+    : poAwardButtons;
+  const awardSummaryText = awardedVendorGroups.length > 0
+    ? `<div class="muted">Current awards: ${awardedVendorGroups.map((group) => `<strong>${esc(group.vendorName)}</strong> | ${group.lineCount} line(s) | Estimated total $${group.total.toFixed(2)}`).join("; ")}</div>`
+    : `<div class="muted">Award the full RFQ to one vendor, or award lines vendor-by-vendor from the quote grid above.</div>`;
+  const poAwardForms = awardedVendorGroups.map((group) => `
+      <form id="rfq-po-create-form-${rfqId}-${group.vendorId}" method="post" action="/po/create" style="display:none;">
+        <input type="hidden" name="rfq_id" value="${rfqId}" />
+        <input type="hidden" name="po_no" value="" />
+        <input type="hidden" name="return_to" value="/rfq/${rfqId}" />
+        <input type="hidden" id="rfq-awarded-vendor-${rfqId}-${group.vendorId}" name="vendor_id" value="${group.vendorId}" />
+      </form>`).join("");
   const awardSummaryCard = `
     <div class="card">
       <h3>Award Summary</h3>
@@ -10462,14 +10493,9 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           ${poAwardAction}
           <a class="btn btn-secondary" href="/rfq/${rfqId}/export.xlsx">Export AX XLSX</a>
         </div>
-        ${awardedVendorId ? `<div class="muted">Current award: <strong>${esc(awardedVendorName)}</strong> | ${awardedItems.length} line(s) | Estimated total $${awardedTotal.toFixed(2)}</div>` : `<div class="muted">Award the full RFQ to one vendor once the selected vendor has quotes on every RFQ line.</div>`}
+        ${awardSummaryText}
       </form>
-      <form id="rfq-po-create-form-${rfqId}" method="post" action="/po/create" style="display:none;">
-        <input type="hidden" name="rfq_id" value="${rfqId}" />
-        <input type="hidden" name="po_no" value="" />
-        <input type="hidden" name="return_to" value="/rfq/${rfqId}" />
-        <input type="hidden" id="rfq-awarded-vendor-${rfqId}" name="vendor_id" value="${awardedVendorId ? esc(String(awardedVendorId)) : ""}" />
-      </form>
+      ${poAwardForms}
     </div>`;
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>${esc(rfq.rfq_no)}${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</h1>
@@ -11644,7 +11670,7 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
     const totalCount = Number(awardTotals?.total_count || 0);
     const vendorAwardedCount = Number(awardTotals?.vendor_awarded_count || 0);
     if (totalCount === 0) throw new Error("Add RFQ items before creating a PO.");
-    if (vendorAwardedCount !== totalCount) throw new Error("Award the whole RFQ to one vendor before creating the draft PO.");
+    if (vendorAwardedCount <= 0) throw new Error("Selected vendor has no awarded RFQ lines.");
     const poInsert = await client.query(
       "insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, description, status, updated_at) values ($1, $2, $3, $4, $5, 'OPEN', now()) returning id",
       [jobId, poNo, vendorId, rfqId, rfq?.project_name || ""]
@@ -11669,8 +11695,16 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
       `, [jobId, poId, line.rfq_item_id, line.material_item_id, line.po_line || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price, num(line.lead_days)]);
     }
-    if (rfqId && poNo) {
-      await client.query("update rfqs set po_number = $1 where id = $2 and job_id = $3", [poNo, rfqId, jobId]);
+    if (rfqId) {
+      await client.query(`
+        update rfqs
+        set po_number = coalesce((
+          select string_agg(distinct po.po_no, ', ' order by po.po_no)
+          from purchase_orders po
+          where po.rfq_id = $1 and po.job_id = $2 and coalesce(po.po_no, '') <> ''
+        ), po_number)
+        where id = $1 and job_id = $2
+      `, [rfqId, jobId]);
     }
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
@@ -11678,7 +11712,7 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
   res.redirect(getSafeReturnPath(req, "/po"));
 });
 
-app.get("/rfq-item/:id/award", requireAuth, requireJobContext, async (req, res) => {
+app.get("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
   const [itemRes, quotesRes] = await Promise.all([
     query(`
@@ -11724,14 +11758,52 @@ app.get("/rfq-item/:id/award", requireAuth, requireJobContext, async (req, res) 
 app.post("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const itemId = Number(req.params.id);
   const jobId = currentJobId(req);
+  let awardedVendorId = 0;
   const rfqId = await withTransaction(async (client) => {
+    const vendorId = Number(req.body.vendor_id);
+    if (!vendorId) throw new Error("Select a quoted vendor before awarding.");
+    const item = (await client.query("select rfq_id from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
+    if (!item) throw new Error("RFQ item not found.");
+    const vendorRow = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2 and job_id = $3", [item.rfq_id, vendorId, jobId])).rows[0];
+    if (!vendorRow) throw new Error("Choose a vendor from the RFQ vendor list.");
+    const issued = await client.query(`
+      select 1
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id
+      where pl.rfq_item_id = $1 and pl.job_id = $2 and po.job_id = $2
+      limit 1
+    `, [itemId, jobId]);
+    if (issued.rows[0]) throw new Error("Cannot change an award after a PO line has been issued.");
+    const submittedUnitPriceRaw = String(req.body[`unit_price_${itemId}`] || "").trim();
+    const submittedLeadDaysRaw = String(req.body[`lead_days_${itemId}`] || "").trim();
+    if (submittedUnitPriceRaw || submittedLeadDaysRaw) {
+      const unitPrice = num(submittedUnitPriceRaw, NaN);
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0) throw new Error("Unit price must be greater than zero before awarding.");
+      const leadDays = submittedLeadDaysRaw ? num(submittedLeadDaysRaw) : 0;
+      await client.query(`
+        insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+        values ($1, $2, $3, $4, $5, now())
+        on conflict (rfq_item_id, vendor_id)
+        do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
+      `, [jobId, itemId, vendorId, unitPrice, leadDays]);
+      await writeQuoteRevision(client, {
+        rfqItemId: itemId,
+        vendorId,
+        unitPrice,
+        leadDays,
+        sourceType: "manual",
+        createdBy: req.user.id,
+        jobId
+      });
+      await auditLog(client, req.user.id, "upsert", "quote", itemId, `vendor=${vendorId}`);
+    }
     const quote = (await client.query(`
-      select ri.rfq_id, q.vendor_id, q.unit_price, q.lead_days
-      from rfq_items ri
-      join quotes q on q.rfq_item_id = ri.id
-      where ri.id = $1 and q.vendor_id = $2 and ri.job_id = $3 and q.job_id = $3
-    `, [itemId, Number(req.body.vendor_id), jobId])).rows[0];
+      select vendor_id, unit_price, lead_days
+      from quotes
+      where rfq_item_id = $1 and vendor_id = $2 and job_id = $3
+    `, [itemId, vendorId, jobId])).rows[0];
     if (!quote) throw new Error("Select a quoted vendor before awarding.");
+    awardedVendorId = Number(quote.vendor_id);
     await client.query(`
       update rfq_items
       set award_status = 'AWARDED',
@@ -11745,9 +11817,10 @@ app.post("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermissio
       where id = $1 and job_id = $7
     `, [itemId, quote.vendor_id, quote.unit_price, quote.lead_days, req.user.id, req.body.award_notes || "", jobId]);
     await auditLog(client, req.user.id, "award", "rfq_item", itemId, `vendor=${quote.vendor_id}`);
-    return quote.rfq_id;
+    await recalcRfqStatus(client, item.rfq_id);
+    return item.rfq_id;
   });
-  res.redirect(`/rfq/${rfqId}`);
+  res.redirect(`/rfq/${rfqId}${awardedVendorId ? `?vendor_tab_id=${encodeURIComponent(String(awardedVendorId))}` : ""}`);
 });
 
 app.post("/rfq-item/:id/award/clear", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
@@ -11777,6 +11850,7 @@ app.post("/rfq-item/:id/award/clear", requireAuth, requireJobContext, requirePer
       where id = $1 and job_id = $2
     `, [itemId, jobId]);
     await auditLog(client, req.user.id, "clear_award", "rfq_item", itemId, "");
+    await recalcRfqStatus(client, current.rfq_id);
     return current.rfq_id;
   });
   res.redirect(`/rfq/${rfqId}`);
