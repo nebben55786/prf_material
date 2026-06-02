@@ -1006,8 +1006,8 @@ function buildPickTicketPdf(header, lines) {
     }
 
     const tableTop = meta2Top - (header.notes ? 40 : 14);
-    const widths = [116, 344, 58, 46, 200];
-    const headers = ["ITEM", "DESCRIPTION", "QTY", "UOM", "LOCATION"];
+    const widths = [96, 292, 54, 54, 40, 198];
+    const headers = ["ITEM", "DESCRIPTION", "REQ QTY", "ISS QTY", "UOM", "LOCATION"];
     let x = left;
     content.push(rect(left, tableTop - rowHeight, right - left, rowHeight));
     for (let i = 0; i < widths.length; i += 1) {
@@ -1027,23 +1027,24 @@ function buildPickTicketPdf(header, lines) {
         item.item_code || "",
         wrappedDescription[0] || "",
         formatQtyDisplay(item.qty_requested),
+        formatQtyDisplay(item.qty_issued),
         item.uom || "",
         wrappedLocation[0] || ""
       ];
       for (let i = 0; i < widths.length; i += 1) {
         const value = rowValues[i];
-        const textX = i === 3 ? cellX + widths[i] - 24 : cellX + 4;
-        const qtyTextX = i === 2 ? cellX + widths[i] - 24 : textX;
-        const wrappedCell = (i === 1 && wrappedDescription[1]) || (i === 4 && wrappedLocation[1]);
+        const textX = i === 4 ? cellX + widths[i] - 24 : cellX + 4;
+        const qtyTextX = (i === 2 || i === 3) ? cellX + widths[i] - 24 : textX;
+        const wrappedCell = (i === 1 && wrappedDescription[1]) || (i === 5 && wrappedLocation[1]);
         const textY = wrappedCell ? y - 13 : y - 15;
-        content.push(makeText(i === 2 ? qtyTextX : textX, textY, value, "F1", 8));
+        content.push(makeText((i === 2 || i === 3) ? qtyTextX : textX, textY, value, "F1", 8));
         cellX += widths[i];
       }
       if (wrappedDescription[1]) {
         content.push(makeText(left + widths[0] + 4, y - 25, wrappedDescription[1], "F1", 8));
       }
       if (wrappedLocation[1]) {
-        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + 4, y - 25, wrappedLocation[1], "F1", 8));
+        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + widths[4] + 4, y - 25, wrappedLocation[1], "F1", 8));
       }
       y -= rowHeight;
     }
@@ -8616,7 +8617,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   }
   const [linesResult, flagColorResult, trailerNumberResult] = await Promise.all([
     query(`
-      select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
+      select mrl.id as requisition_line_id, mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
       where mrl.requisition_id = $1 and mrl.job_id = $2
@@ -8648,17 +8649,21 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   ].filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
   const flagColorOptionsHtml = flagColorValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
   const trailerNumberOptionsHtml = trailerNumberValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
+  const canEditIssuedQty = header.status === "VERIFIED" && canAccess(req.user, "requisitions", "issue");
+  const issuedQtyFormId = `requisition-issued-qty-form-${header.id}`;
   const lineRows = lines.map((line) => `<tr>
     <td>${esc(line.line_no)}</td>
     <td>${esc(line.iwp_no || "")}</td>
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
     <td>${esc(formatQtyDisplay(line.qty_requested))}</td>
-    <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+    <td>${canEditIssuedQty ? `<input name="qty_issued_${line.requisition_line_id}" value="${esc(formatQtyDisplay(line.qty_issued))}" inputmode="decimal" />` : esc(formatQtyDisplay(line.qty_issued))}</td>
+    <td>${esc(formatQtyDisplay(Math.max(parseQtyValue(line.qty_requested || 0) - parseQtyValue(line.qty_issued || 0), 0)))}</td>
     <td>${esc(line.uom)}</td>
     <td>${esc(line.spec || "")}</td>
     <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
   </tr>`).join("");
+  const linesTable = `<table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>Qty Not Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="10" class="muted">No lines on this requisition.</td></tr>`}</table>`;
   const headerActions = [];
   if (canEditRequisition(req.user, header)) {
     headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Edit Request</a>`);
@@ -8682,11 +8687,14 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       headerActions.push(`<form id="${loadFormId}" method="post" action="/requisitions/${header.id}/load" class="inline-field" style="display:none; min-width:360px;"><div><label>Trailer Number</label><input name="trailer_number" list="${trailerOptionsId}" value="${escAttr(header.trailer_number || "")}" required /><datalist id="${trailerOptionsId}">${trailerNumberOptionsHtml}</datalist></div><button type="submit">Save Loaded</button></form>`);
     }
     if (canAccess(req.user, "requisitions", "issue")) {
-      headerActions.push(`<form method="post" action="/requisitions/${header.id}/issue"><button type="submit">Issue To Field</button></form>`);
+      headerActions.push(`<button type="submit" form="${issuedQtyFormId}" name="next_action" value="issue">Issue To Field</button>`);
     }
   }
   if (canSignRequisition(req.user, header)) {
-    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${hasLoggedRequisitionSignature(header) ? "Update Sign-Off" : "Sign Requisition"}</a>`);
+    const signLabel = hasLoggedRequisitionSignature(header) ? "Update Sign-Off" : "Sign Requisition";
+    headerActions.push(canEditIssuedQty
+      ? `<button class="btn btn-secondary" type="submit" form="${issuedQtyFormId}" name="next_action" value="sign">${signLabel}</button>`
+      : `<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${signLabel}</a>`);
   }
   if (req.user?.role === "admin" && header.status !== "CANCELLED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/cancel" onsubmit="return confirm('Cancel this requisition? The record will be kept. If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Cancel Requisition</button></form>`);
@@ -8715,13 +8723,13 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       <p class="muted">Use either a signed paper copy upload or an electronic signature from an iPad. Both stay attached to this requisition.</p>
       <p class="muted">Signed By: ${esc(header.signed_by_name || "") || `<span class="muted">Not signed yet</span>`} ${header.signed_at ? `| Signed At: ${esc(formatShortDateTime(header.signed_at))}` : ""}</p>
       <div class="actions">
-        ${canSignRequisition(req.user, header) ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${hasLoggedRequisitionSignature(header) ? "Open Sign-Off Page" : "Capture Sign-Off"}</a>` : ""}
+        ${canSignRequisition(req.user, header) ? (canEditIssuedQty ? `<button class="btn btn-secondary" type="submit" form="${issuedQtyFormId}" name="next_action" value="sign">${hasLoggedRequisitionSignature(header) ? "Open Sign-Off Page" : "Capture Sign-Off"}</button>` : `<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${hasLoggedRequisitionSignature(header) ? "Open Sign-Off Page" : "Capture Sign-Off"}</a>`) : ""}
         ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/signed-copy" target="_blank">Open Uploaded Signed Copy</a>` : ""}
       </div>
       ${header.signed_signature_data ? `<div style="margin-top:12px;"><label>Electronic Signature</label><div class="card" style="padding:12px; background:#fff;"><img src="${escAttr(header.signed_signature_data)}" alt="Electronic requisition signature" style="max-width:100%; max-height:180px; display:block;" /></div></div>` : `<p class="muted">No electronic signature saved yet.</p>`}
       ${header.signed_copy_filename ? `<p class="muted">Uploaded signed copy: ${esc(header.signed_copy_filename)}</p>` : `<p class="muted">No signed paper copy uploaded yet.</p>`}
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="9" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+    ${canEditIssuedQty ? `<div class="card"><form id="${issuedQtyFormId}" method="post" action="/requisitions/${header.id}/issued-qty" class="stack"><div class="scroll">${linesTable}</div><div class="actions"><button type="submit">Save Issued Qty</button>${req.query.issued_qty_saved ? `<span class="muted">Issued quantities saved.</span>` : ""}</div></form></div>` : `<div class="card scroll">${linesTable}</div>`}
   `, req.user));
 });
 
@@ -8953,7 +8961,7 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, req
   if (!header) throw new Error("Requisition not found.");
   if (header.status !== "VERIFIED") throw new Error("Pick tickets are only available for verified requisitions.");
   const lines = (await query(`
-    select mrl.qty_requested, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom,
+    select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom,
            coalesce(bl.size_1, '') as size_1, coalesce(bl.size_2, '') as size_2,
            coalesce(bl.thk_1, '') as thk_1, coalesce(bl.thk_2, '') as thk_2
     from material_requisition_lines mrl
@@ -9035,12 +9043,14 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, req
         size_2: line.size_2 || "",
         thk_1: line.thk_1 || "",
         thk_2: line.thk_2 || "",
-        qty_requested: 0
+        qty_requested: 0,
+        qty_issued: 0
       };
       groupedLineMap.set(groupKey, grouped);
       groupedLines.push(grouped);
     }
     groupedLineMap.get(groupKey).qty_requested += Number(line.qty_requested || 0);
+    groupedLineMap.get(groupKey).qty_issued += Number(line.qty_issued || 0);
   }
 
   const printableLines = groupedLines.map((line) => {
@@ -9174,9 +9184,50 @@ app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePerm
           verified_by_user_id = $2
       where id = $1 and job_id = $3
     `, [req.params.id, req.user.id, jobId]);
+    await client.query(`
+      update material_requisition_lines
+      set qty_issued = qty_requested
+      where requisition_id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
     await auditLog(client, req.user.id, "verify", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/issued-qty", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const nextAction = String(req.body.next_action || "").trim();
+  const shouldIssue = nextAction === "issue";
+  const shouldSign = nextAction === "sign";
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    if (header.status !== "VERIFIED") throw new Error("Issued quantities can only be edited on verified requisitions.");
+    const lines = (await client.query(`
+      select mrl.id, mrl.qty_requested, bl.item_code
+      from material_requisition_lines mrl
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      where mrl.requisition_id = $1 and mrl.job_id = $2
+      order by bl.line_no, bl.id
+    `, [req.params.id, jobId])).rows;
+    if (!lines.length) throw new Error("No requisition lines found.");
+    for (const line of lines) {
+      const issuedQty = parseQtyValue(req.body[`qty_issued_${line.id}`], NaN);
+      const requestedQty = parseQtyValue(line.qty_requested || 0);
+      if (!Number.isFinite(issuedQty) || issuedQty < 0) {
+        throw new Error(`Issued qty for ${line.item_code} must be zero or greater.`);
+      }
+      if (issuedQty > requestedQty) {
+        throw new Error(`Issued qty for ${line.item_code} cannot exceed requested qty.`);
+      }
+      await client.query("update material_requisition_lines set qty_issued = $2 where id = $1 and job_id = $3", [line.id, issuedQty, jobId]);
+    }
+    await auditLog(client, req.user.id, "update_issued_qty", "material_requisition", req.params.id, header.requisition_no);
+    if (shouldIssue) {
+      await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+    }
+  });
+  res.redirect(shouldIssue ? `/requisitions/${req.params.id}` : shouldSign ? `/requisitions/${req.params.id}/sign` : `/requisitions/${req.params.id}?issued_qty_saved=1`);
 }));
 
 app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
@@ -9315,6 +9366,11 @@ app.post("/requisitions/:id/unverify", requireAuth, requireJobContext, requirePe
           loaded_by_user_id = null
       where id = $1 and job_id = $2
     `, [req.params.id, jobId]);
+    await client.query(`
+      update material_requisition_lines
+      set qty_issued = 0
+      where requisition_id = $1 and job_id = $2
+    `, [req.params.id, jobId]);
     await auditLog(client, req.user.id, "unverify", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
@@ -9379,6 +9435,7 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
     select
       mrl.id as requisition_line_id,
       mrl.qty_requested,
+      mrl.qty_issued,
       bl.id as bom_line_id,
       bl.item_code,
       coalesce(bh.system_key, '') as system_key,
@@ -9387,7 +9444,7 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
       coalesce(bl.thk_1, '') as thk_1,
       coalesce(bl.thk_2, '') as thk_2,
       bl.qty_required,
-      bl.qty_issued
+      bl.qty_issued as bom_qty_issued
     from material_requisition_lines mrl
     join bom_lines bl on bl.id = mrl.bom_line_id
     join bom_headers bh on bh.id = bl.bom_id
@@ -9405,17 +9462,29 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
   for (const line of lines) {
     const itemKey = buildInventoryItemKey(line);
     const qtyAvailable = parseQtyValue(availableTotalsMap.get(itemKey) || 0, 0);
-    if (num(line.qty_requested) > qtyAvailable) {
-      throw new Error(`Cannot issue ${line.item_code}; requested qty exceeds available stock.`);
+    const requestedQty = parseQtyValue(line.qty_requested || 0);
+    const issuedQty = parseQtyValue(line.qty_issued || 0);
+    if (issuedQty < 0) {
+      throw new Error(`Cannot issue ${line.item_code}; issued qty must be zero or greater.`);
+    }
+    if (issuedQty > requestedQty) {
+      throw new Error(`Cannot issue ${line.item_code}; issued qty cannot exceed requested qty.`);
+    }
+    if (issuedQty > qtyAvailable) {
+      throw new Error(`Cannot issue ${line.item_code}; issued qty exceeds available stock.`);
+    }
+    if (issuedQty <= 0) {
+      lineAllocations.set(Number(line.requisition_line_id), []);
+      continue;
     }
     const locationRows = (inventoryMap.get(itemKey) || []).map((row) => ({ ...row }));
-    const allocations = buildPickLocationAllocations(locationRows, line.qty_requested);
+    const allocations = buildPickLocationAllocations(locationRows, issuedQty);
     const allocatedQty = allocations.reduce((sum, row) => parseQtyValue(sum + parseQtyValue(row.qty_issued || 0), 0), 0);
-    if (allocatedQty < num(line.qty_requested)) {
+    if (allocatedQty < issuedQty) {
       throw new Error(`Cannot issue ${line.item_code}; not enough warehouse/location inventory is available.`);
     }
     lineAllocations.set(Number(line.requisition_line_id), allocations);
-    let qtyToReserve = parseQtyValue(line.qty_requested || 0);
+    let qtyToReserve = issuedQty;
     const currentLocationRows = inventoryMap.get(itemKey) || [];
     for (const location of currentLocationRows) {
       if (qtyToReserve <= 0) break;
@@ -9430,9 +9499,9 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
   for (const line of lines) {
     await client.query(`
       update material_requisition_lines
-      set qty_issued = qty_requested
-      where id = $1 and job_id = $2
-    `, [line.requisition_line_id, jobId]);
+      set qty_issued = $2
+      where id = $1 and job_id = $3
+    `, [line.requisition_line_id, parseQtyValue(line.qty_issued || 0), jobId]);
     const allocations = lineAllocations.get(Number(line.requisition_line_id)) || [];
     for (const allocation of allocations) {
       await client.query(`
