@@ -35,6 +35,7 @@ const rfqStatuses = [
   { value: "WAITING_ON_QUOTES", label: "Waiting on Quotes" },
   { value: "AWARDED", label: "Awarded" },
   { value: "WAITING_ON_CLIENT", label: "Waiting on Client" },
+  { value: "ON_HOLD", label: "On-hold" },
   { value: "CANCELLED", label: "Cancelled" },
   { value: "PURCHASED", label: "Purchased" },
   { value: "PARTIALLY_RECEIVED", label: "Partially Received" },
@@ -317,6 +318,7 @@ function renderRfqStatusChip(status, dueDate) {
   if (status === "SEND_FOR_QUOTES") className = "rfq-status-send";
   if (status === "WAITING_ON_QUOTES" && isPastDate(dueDate)) className = "rfq-status-waiting-past";
   if (status === "WAITING_ON_CLIENT") className = "rfq-status-client";
+  if (status === "ON_HOLD") className = "rfq-status-on-hold";
   if (status === "PURCHASED") className = "rfq-status-purchased";
   if (status === "PARTIALLY_RECEIVED") className = "rfq-status-partial";
   if (status === "RECEIVED") className = "rfq-status-received";
@@ -1454,6 +1456,7 @@ function layout(title, body, user) {
       .rfq-status-send { background: #fbe1dd; border-color: #d66b5f; color: #8e2118; }
       .rfq-status-waiting-past { background: #f9d7eb; border-color: #d76aa7; color: #86184f; }
       .rfq-status-client { background: #ffe4bd; border-color: #d38a2d; color: #7a4300; }
+      .rfq-status-on-hold { background: #e5e7eb; border-color: #9ca3af; color: #374151; }
       .rfq-status-purchased { background: #fff3b0; border-color: #d4b83d; color: #665200; }
       .rfq-status-partial { background: #d9ecff; border-color: #6aa5d9; color: #184f86; }
       .rfq-status-received { background: #dff0d8; border-color: #72a864; color: #275f25; }
@@ -5018,7 +5021,7 @@ async function recalcRfqStatus(client, rfqId) {
   } else if (quotedCount > 0) {
     nextStatus = "WAITING_ON_QUOTES";
   }
-  await client.query("update rfqs set status = $3 where id = $1 and job_id = $2 and status <> 'CANCELLED'", [rfqId, rfq.job_id, nextStatus]);
+  await client.query("update rfqs set status = $3 where id = $1 and job_id = $2 and status not in ('CANCELLED', 'ON_HOLD')", [rfqId, rfq.job_id, nextStatus]);
 }
 
 async function backfillRfqVendors(client, rfqId) {
@@ -9945,7 +9948,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     select
       b.*,
       case
-        when b.status = 'CANCELLED' then b.status
+        when b.status in ('CANCELLED', 'ON_HOLD') then b.status
         when coalesce(ic.item_count, 0) > 0 and coalesce(rs.fully_received_item_count, 0) >= coalesce(ic.item_count, 0) then 'RECEIVED'
         when coalesce(rs.received_item_count, 0) > 0 then 'PARTIALLY_RECEIVED'
         else b.status
@@ -10265,7 +10268,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const poRefMap = new Map(poRefsRes.rows.map((row) => [Number(row.rfq_item_id), row.po_refs]));
   const allItemsIssuedToPo = items.length > 0 && issuedItemCount >= items.length;
   const headerPoNumber = issuedPoRefs || rfq.po_number || "";
-  const displayRfqStatus = rfq.status === "CANCELLED"
+  const displayRfqStatus = ["CANCELLED", "ON_HOLD"].includes(rfq.status)
     ? rfq.status
     : (items.length > 0 && fullyReceivedItemCount >= items.length
       ? "RECEIVED"
