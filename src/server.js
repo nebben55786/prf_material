@@ -9950,8 +9950,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         <div class="actions">
           <button type="submit">Filter RFQs</button>
           <a class="btn btn-secondary" href="/rfq">Clear</a>
-          <a class="btn btn-primary" href="/rfq/new">Create RFQ</a>
           ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
+          <a class="btn btn-primary" href="/rfq/new">Create RFQ</a>
           <span class="muted">${rfqs.length} result(s), max 300 shown</span>
         </div>
       </form>
