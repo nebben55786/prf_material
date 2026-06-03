@@ -12853,13 +12853,13 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" min="0" step="any" data-remaining="${escAttr(String(remainingQty))}" placeholder="${escAttr(formatQtyDisplay(remainingQty))}" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
     const shortCell = locked
       ? ""
-      : `<select name="short_action_${lineId}" style="min-width:120px;"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select>`;
+      : `<select name="short_action_${lineId}" tabindex="-1" style="min-width:120px;"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select>`;
     const warehouseCell = locked
       ? `<span>${esc(line.last_warehouse || "")}</span>`
-      : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select>`;
+      : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" tabindex="-1" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select>`;
     const locationCell = locked
       ? `<span>${esc(line.last_location || "")}</span>`
-      : `<select id="po-line-location-${lineId}" name="location_${lineId}" data-placeholder="Select location"><option value="">Select location</option></select>`;
+      : `<select id="po-line-location-${lineId}" name="location_${lineId}" tabindex="-1" data-placeholder="Select location"><option value="">Select location</option></select>`;
     return `<tr>
       <td style="width:1%; white-space:nowrap;">${esc(line.po_line || "")}</td>
       <td style="width:1%; white-space:nowrap;">${esc(line.item_code)}</td>
@@ -12943,6 +12943,15 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           const tag = (event.target.tagName || "").toUpperCase();
           if (tag === "TEXTAREA" || tag === "BUTTON") return;
           event.preventDefault();
+          if (event.target.matches('input[name^="qty_received_"]')) {
+            const qtyInputs = Array.from(document.querySelectorAll('input[name^="qty_received_"]'));
+            const index = qtyInputs.indexOf(event.target);
+            const nextInput = index >= 0 ? qtyInputs[index + 1] : null;
+            if (nextInput) {
+              nextInput.focus();
+              nextInput.select();
+            }
+          }
         });
         document.getElementById("po-receive-form-${record.id}").addEventListener("submit", function(event) {
           if (!${JSON.stringify(canPostReceipt)}) {
