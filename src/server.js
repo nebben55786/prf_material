@@ -3422,8 +3422,8 @@ function getInventoryByLocationSubquery(jobId = null) {
         coalesce(pl.thk_2, '') as thk_2,
         initcap(lower(coalesce(r.warehouse, ''))) as warehouse,
         upper(coalesce(r.location, '')) as location,
-        sum(case when coalesce(r.osd_status, 'OK') = 'OK' then r.qty_received else 0 end) as qty_on_hand,
-        sum(case when coalesce(r.osd_status, 'OK') = 'OK' then 0 else r.qty_received end) as qty_osd
+        sum(case when ${receiptAffectsInventorySql("r")} then r.qty_received else 0 end) as qty_on_hand,
+        sum(case when ${receiptAffectsInventorySql("r")} then 0 else r.qty_received end) as qty_osd
       from receipts r
       join po_lines pl on pl.id = r.po_line_id
       join material_items mi on mi.id = pl.material_item_id
@@ -4541,6 +4541,42 @@ async function getNextOpiNumber(client = null, jobId = null) {
   return `${prefix}${nextValue}`;
 }
 
+async function getNextOsdNumber(client = null, jobId = null) {
+  const runner = client || { query };
+  const normalizedJobId = normalizeJobIdValue(jobId);
+  const latest = (await runner.query(`
+    select osd_number
+    from osd_logs
+    where coalesce(osd_number, '') <> '' and osd_number ~ '\\d+$'
+      ${normalizedJobId ? "and job_id = $1::bigint" : ""}
+    order by ((regexp_match(osd_number, '(\\d+)$'))[1])::bigint desc, id desc
+    limit 1
+  `, normalizedJobId ? [normalizedJobId] : [])).rows[0];
+  const current = String(latest?.osd_number || "").trim();
+  if (!current) return "OSD-000001";
+  const match = current.match(/^(.*?)(\d+)$/);
+  if (!match) return "OSD-000001";
+  const prefix = match[1];
+  const nextValue = String(Number(match[2]) + 1).padStart(match[2].length, "0");
+  return `${prefix}${nextValue}`;
+}
+
+function receiptAffectsInventorySql(alias = "r") {
+  return `upper(coalesce(${alias}.osd_status, 'OK')) in ('OK', 'OVERAGE', 'SHORTAGE', 'BACKORDER')`;
+}
+
+function poLineReceivedQtySql(alias = "pl") {
+  return `coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = ${alias}.id), 0)`;
+}
+
+function poLineShortOsdQtySql(alias = "pl") {
+  return `coalesce((select sum(o.osd_qty) from osd_logs o where o.po_line_id = ${alias}.id and upper(coalesce(o.osd_status, '')) = 'SHORTAGE'), 0)`;
+}
+
+function poLineAccountedQtySql(alias = "pl") {
+  return `(${poLineReceivedQtySql(alias)} + ${poLineShortOsdQtySql(alias)})`;
+}
+
 async function getLatestMrrForPo(client, poId) {
   if (!poId) return null;
   return (await client.query(`
@@ -4680,14 +4716,17 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
 }
 
 async function createOsdLog(client, payload) {
-  await client.query(`
+  const osdNumber = String(payload.osd_number || "").trim() || await getNextOsdNumber(client, payload.job_id || null);
+  return (await client.query(`
     insert into osd_logs (
-      job_id, mrr_log_id, receipt_id, po_id, po_line_id, mrr_number, po_number, item_code, description,
+      job_id, osd_number, mrr_log_id, receipt_id, po_id, po_line_id, mrr_number, po_number, item_code, description,
       warehouse, location, expected_qty, received_qty, osd_qty, osd_status, notes, updated_at
     )
-    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+    returning id, osd_number
   `, [
     payload.job_id || null,
+    osdNumber,
     payload.mrr_log_id || null,
     payload.receipt_id || null,
     payload.po_id || null,
@@ -4703,7 +4742,7 @@ async function createOsdLog(client, payload) {
     Number(payload.osd_qty || 0),
     String(payload.osd_status || ""),
     String(payload.notes || "")
-  ]);
+  ])).rows[0];
 }
 
 async function syncMrrVendorsIntoVendorTable(client, jobId = null) {
@@ -5142,17 +5181,16 @@ async function recalcRfqStatus(client, rfqId) {
         pl.id,
         pl.rfq_item_id,
         pl.qty_ordered,
-        coalesce(sum(r.qty_received), 0) as qty_received
+        ${poLineReceivedQtySql("pl")} as qty_received,
+        ${poLineAccountedQtySql("pl")} as qty_accounted
       from purchase_orders po
       join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
-      left join receipts r on r.po_line_id = pl.id
       where po.rfq_id = $1 and po.job_id = $2
-      group by pl.id, pl.rfq_item_id, pl.qty_ordered
     )
     select
       count(distinct rfq_item_id) filter (where rfq_item_id is not null) as issued_count,
       count(distinct rfq_item_id) filter (where rfq_item_id is not null and qty_received > 0) as received_count,
-      count(distinct rfq_item_id) filter (where rfq_item_id is not null and qty_received >= qty_ordered) as fully_received_count
+      count(distinct rfq_item_id) filter (where rfq_item_id is not null and qty_accounted >= qty_ordered) as fully_received_count
     from po_line_receipts
   `, [rfqId, rfq.job_id])).rows[0];
   const issued = Number(totals?.issued_count || 0);
@@ -5231,10 +5269,10 @@ async function recalcPoStatus(client, poId) {
     select
       count(*) as line_count,
       count(*) filter (
-        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) >= pl.qty_ordered
+        where ${poLineAccountedQtySql("pl")} >= pl.qty_ordered
       ) as fully_received_count,
       count(*) filter (
-        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) > 0
+        where ${poLineReceivedQtySql("pl")} > 0
       ) as received_count
     from po_lines pl
     where pl.po_id = $1
@@ -5600,7 +5638,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
     query("select count(*) from purchase_orders where job_id = $1", [jobId]),
     query("select count(*) from receipts where job_id = $1", [jobId]),
     query("select count(*) from vendors"),
-    query("select count(*) from receipts where job_id = $1 and osd_status <> 'OK'", [jobId]),
+    query("select count(*) from osd_logs where job_id = $1", [jobId]),
     Promise.resolve(req.user.activeJob?.job_number || ""),
     req.user.role === "admin"
       ? query("select count(*) from access_requests where status = 'PENDING'").catch(() => ({ rows: [{ count: 0 }] }))
@@ -6355,7 +6393,7 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(["admi
         initcap(lower(coalesce(r.warehouse, ''))) as warehouse,
         upper(coalesce(r.location, '')) as location,
         r.qty_received as transaction_qty,
-        case when coalesce(r.osd_status, 'OK') = 'OK' then r.qty_received else 0 end as inventory_effect,
+        case when ${receiptAffectsInventorySql("r")} then r.qty_received else 0 end as inventory_effect,
         true as affects_on_hand,
         'Receipt' as source_type,
         coalesce(m.received_by, '') as actor_name,
@@ -10396,8 +10434,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       select
         count(distinct po.id) as po_count,
         count(distinct issued_ri.id) as issued_item_count,
-        count(distinct issued_ri.id) filter (where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) > 0) as received_item_count,
-        count(distinct issued_ri.id) filter (where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) >= pl.qty_ordered) as fully_received_item_count,
+        count(distinct issued_ri.id) filter (where ${poLineReceivedQtySql("pl")} > 0) as received_item_count,
+        count(distinct issued_ri.id) filter (where ${poLineAccountedQtySql("pl")} >= pl.qty_ordered) as fully_received_item_count,
         string_agg(distinct po.po_no, ', ' order by po.po_no) as po_refs,
         min(po.id) as first_po_id
       from purchase_orders po
@@ -12360,13 +12398,8 @@ app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"),
     left join (
       select
         pl.po_id,
-        count(*) filter (where coalesce(rcv.qty_received, 0) < pl.qty_ordered) as open_items
+        count(*) filter (where ${poLineAccountedQtySql("pl")} < pl.qty_ordered) as open_items
       from po_lines pl
-      left join (
-        select po_line_id, sum(qty_received) as qty_received
-        from receipts
-        group by po_line_id
-      ) rcv on rcv.po_line_id = pl.id
       group by pl.po_id
     ) open_counts on open_counts.po_id = po.id
     ${whereSql}
@@ -12743,6 +12776,8 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       pl.thk_1,
       pl.thk_2,
       coalesce(rcv.qty_received, 0) as qty_received,
+      coalesce(osd.qty_short_osd, 0) as qty_short_osd,
+      coalesce(rcv.qty_received, 0) + coalesce(osd.qty_short_osd, 0) as qty_accounted,
       coalesce(last_receipt.warehouse, '') as last_warehouse,
       coalesce(last_receipt.location, '') as last_location
     from po_lines pl
@@ -12752,6 +12787,12 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       from receipts
       group by po_line_id
     ) rcv on rcv.po_line_id = pl.id
+    left join (
+      select po_line_id, sum(osd_qty) as qty_short_osd
+      from osd_logs
+      where upper(coalesce(osd_status, '')) = 'SHORTAGE'
+      group by po_line_id
+    ) osd on osd.po_line_id = pl.id
     left join lateral (
       select r.warehouse, r.location
       from receipts r
@@ -12766,10 +12807,25 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       pl.id
   `, [poId])).rows;
   const history = (await query(`
-    select r.received_at, mi.item_code, mi.description, r.qty_received, r.warehouse, r.location, r.osd_status, r.osd_notes
+    select
+      r.received_at,
+      mi.item_code,
+      mi.description,
+      r.qty_received,
+      r.warehouse,
+      r.location,
+      coalesce(logs.osd_status, r.osd_status) as osd_status,
+      coalesce(logs.osd_notes, r.osd_notes) as osd_notes
     from receipts r
     join po_lines pl on pl.id = r.po_line_id
     join material_items mi on mi.id = pl.material_item_id
+    left join lateral (
+      select
+        string_agg(concat(o.osd_number, ' ', o.osd_status), ', ' order by o.id) as osd_status,
+        string_agg(o.notes, ' | ' order by o.id) filter (where coalesce(o.notes, '') <> '') as osd_notes
+      from osd_logs o
+      where o.receipt_id = r.id
+    ) logs on true
     where pl.po_id = $1
     order by r.id desc
     limit 30
@@ -12782,7 +12838,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     .join("");
   const receivedByListId = `received-by-options-${record.id}`;
   const today = new Date().toISOString().slice(0, 10);
-  const openPoLineCount = poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0) > 0).length;
+  const openPoLineCount = poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0) > 0).length;
   const receiveStatusKey = String(record.status || "").toUpperCase();
   const canPostReceipt = openPoLineCount > 0 && !["FULLY_RECEIVED", "CLOSED", "CANCELLED"].includes(receiveStatusKey);
   const receiveBlockedMessage = ["CLOSED", "CANCELLED"].includes(receiveStatusKey)
@@ -12790,11 +12846,14 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     : "This PO is fully received. No additional receipts can be posted against it.";
   const lineRows = poLines.map((line) => {
     const lineId = Number(line.id);
-    const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
+    const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0);
     const locked = remainingQty <= 0;
     const qtyCell = locked
       ? `<span class="chip">Received</span><input type="hidden" name="po_line_ids" value="${lineId}" />`
-      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" min="0" max="${escAttr(String(remainingQty))}" step="any" data-remaining="${escAttr(String(remainingQty))}" placeholder="${escAttr(formatQtyDisplay(remainingQty))}" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
+      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" min="0" step="any" data-remaining="${escAttr(String(remainingQty))}" placeholder="${escAttr(formatQtyDisplay(remainingQty))}" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
+    const shortCell = locked
+      ? ""
+      : `<select name="short_action_${lineId}" style="min-width:120px;"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select>`;
     const warehouseCell = locked
       ? `<span>${esc(line.last_warehouse || "")}</span>`
       : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select>`;
@@ -12811,8 +12870,10 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       <td style="width:1%; white-space:nowrap;">${esc(line.thk_2 || "")}</td>
     <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_ordered))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_received))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_short_osd || 0))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(remainingQty))}</td>
       <td style="width:84px; white-space:nowrap;">${qtyCell}</td>
+      <td style="width:1%; white-space:nowrap;">${shortCell}</td>
       <td>${warehouseCell}</td>
       <td>${locationCell}</td>
     </tr>`;
@@ -12849,12 +12910,12 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         <div class="grid">
           <div><label>Default Warehouse</label><select id="po-receive-warehouse-${record.id}" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
           <div><label>Default Location</label><select id="po-receive-location-${record.id}" data-placeholder="Select location" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'><option value="">Select location</option></select></div>
-          <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
+          <div><label>Short Qty Default</label><select name="short_action_default" onchange='document.querySelectorAll("select[name^=short_action_]").forEach(function(select){ select.value = this.value; }, this);'><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
         </div>
         <div class="scroll">
           <table>
-            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Remaining</th><th style="width:84px; white-space:nowrap;">Qty</th><th>Warehouse</th><th>Location</th></tr>
-            ${lineRows || `<tr><td colspan="13" class="muted">No PO lines found.</td></tr>`}
+            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Short OS&amp;D</th><th style="width:1%; white-space:nowrap;">Open</th><th style="width:84px; white-space:nowrap;">Qty</th><th style="width:1%; white-space:nowrap;">Short Handling</th><th>Warehouse</th><th>Location</th></tr>
+            ${lineRows || `<tr><td colspan="15" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
         <div><label>MRR Notes</label><textarea name="mrr_notes"></textarea></div>
@@ -12876,7 +12937,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           });
         }
         syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${JSON.stringify(locationMap)});
-        ${poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0) > 0).map((line) => `syncLocationOptions("po-line-warehouse-${line.id}", "po-line-location-${line.id}", ${JSON.stringify(locationMap)});`).join("\n")}
+        ${poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0) > 0).map((line) => `syncLocationOptions("po-line-warehouse-${line.id}", "po-line-location-${line.id}", ${JSON.stringify(locationMap)});`).join("\n")}
         document.getElementById("po-receive-form-${record.id}").addEventListener("keydown", function(event) {
           if (event.key !== "Enter") return;
           const tag = (event.target.tagName || "").toUpperCase();
@@ -12891,7 +12952,6 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           }
           let hasQty = false;
           let hasError = false;
-          let hasOverRemaining = false;
           const receivedByInput = document.querySelector('input[name="received_by"]');
           if (!receivedByInput || !receivedByInput.value.trim()) {
             event.preventDefault();
@@ -12903,10 +12963,6 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
             const qty = Number(input.value || 0);
             if (!Number.isFinite(qty) || qty <= 0) return;
             hasQty = true;
-            const remaining = Number(input.dataset.remaining || 0);
-            if (Number.isFinite(remaining) && remaining > 0 && qty > remaining) {
-              hasOverRemaining = true;
-            }
             const warehouse = document.getElementById("po-line-warehouse-" + lineId);
             const location = document.getElementById("po-line-location-" + lineId);
             if (!warehouse || !warehouse.value || !location || !location.value) {
@@ -12916,11 +12972,6 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           if (!hasQty) {
             event.preventDefault();
             alert("Enter a received quantity on at least one editable PO line.");
-            return;
-          }
-          if (hasOverRemaining) {
-            event.preventDefault();
-            alert("Received quantity cannot be greater than the remaining PO quantity.");
             return;
           }
           if (hasError) {
@@ -12964,7 +13015,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
     const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
     const openTotals = (await client.query(`
       select count(*) filter (
-        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) < pl.qty_ordered
+        where ${poLineAccountedQtySql("pl")} < pl.qty_ordered
       ) as open_line_count
       from po_lines pl
       where pl.po_id = $1
@@ -13003,32 +13054,50 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
       const qtyReceived = parseQtyValue(req.body[`qty_received_${lineId}`] || 0);
       if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
       const line = (await client.query(`
-        select pl.id, pl.qty_ordered, mi.item_code, mi.description, coalesce(sum(r.qty_received), 0) as qty_received
+        select
+          pl.id,
+          pl.qty_ordered,
+          mi.item_code,
+          mi.description,
+          ${poLineReceivedQtySql("pl")} as qty_received,
+          ${poLineShortOsdQtySql("pl")} as qty_short_osd,
+          ${poLineAccountedQtySql("pl")} as qty_accounted
         from po_lines pl
         join material_items mi on mi.id = pl.material_item_id
-        left join receipts r on r.po_line_id = pl.id
         where pl.id = $1 and pl.po_id = $2 and pl.job_id = $3
-        group by pl.id, pl.qty_ordered, mi.item_code, mi.description
       `, [lineId, poId, jobId])).rows[0];
       if (!line) throw new Error("PO line not found.");
-      const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
+      const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0);
       if (remainingQty <= 0) throw new Error("Fully received PO lines cannot be edited.");
-      if (qtyReceived > remainingQty) {
-        throw new Error(`Received qty for ${line.item_code} cannot exceed the remaining PO qty of ${formatQtyDisplay(remainingQty)}.`);
-      }
       const warehouse = normalizeWarehouseName(req.body[`warehouse_${lineId}`]);
       const location = normalizeLocationName(req.body[`location_${lineId}`]);
       await assertValidWarehouseLocation(client, warehouse, location, jobId);
-      const enteredStatus = String(req.body.osd_status || "OK").trim() || "OK";
+      const shortAction = String(req.body[`short_action_${lineId}`] || req.body.short_action_default || "backorder").trim().toLowerCase();
       const enteredNotes = String(req.body.osd_notes || "").trim();
+      let enteredStatus = "OK";
+      let osdStatus = "";
+      let osdQty = 0;
+      if (qtyReceived > remainingQty) {
+        enteredStatus = "OVERAGE";
+        osdStatus = "OVERAGE";
+        osdQty = qtyReceived - remainingQty;
+      } else if (qtyReceived < remainingQty) {
+        if (shortAction === "osd") {
+          enteredStatus = "SHORTAGE";
+          osdStatus = "SHORTAGE";
+          osdQty = remainingQty - qtyReceived;
+        } else {
+          enteredStatus = "BACKORDER";
+        }
+      }
       const receipt = (await client.query(`
         insert into receipts (job_id, po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
         values ($1, $2, $3, $4, $5, $6, $7, $8)
         returning id
       `, [jobId, lineId, mrrInsert.id, qtyReceived, warehouse, location, enteredStatus, enteredNotes])).rows[0];
       postedCount += 1;
-      if (enteredStatus !== "OK") {
-        await createOsdLog(client, {
+      if (osdStatus) {
+        const osdLog = await createOsdLog(client, {
           job_id: jobId,
           mrr_log_id: mrrInsert.id,
           receipt_id: receipt.id,
@@ -13042,10 +13111,11 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
           location,
           expected_qty: remainingQty,
           received_qty: qtyReceived,
-          osd_qty: qtyReceived,
-          osd_status: enteredStatus,
+          osd_qty: osdQty,
+          osd_status: osdStatus,
           notes: enteredNotes
         });
+        await auditLog(client, req.user.id, "create", "osd_log", osdLog.id, osdLog.osd_number);
       }
     }
     if (postedCount === 0) throw new Error("Enter a received quantity on at least one editable PO line.");
@@ -13239,6 +13309,7 @@ app.get("/receive", requireAuth, requireJobContext, requirePermission("receiving
     <div class="card">
       <div class="actions">
         <a class="btn btn-primary" href="/receive/by-po">By PO</a>
+        <a class="btn btn-primary" href="/receive/osd">OS&amp;D Log</a>
         <a class="btn btn-primary" href="/material-logs/mrr/new">Manual Entry</a>
       </div>
     </div>
@@ -13265,7 +13336,7 @@ app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("rec
       po.status,
       count(pl.id) as line_count,
       count(pl.id) filter (
-        where coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) < pl.qty_ordered
+        where ${poLineAccountedQtySql("pl")} < pl.qty_ordered
       ) as open_line_count
     from purchase_orders po
     left join vendors v on v.id = po.vendor_id
@@ -13312,6 +13383,66 @@ app.get("/receive/by-po", requireAuth, requireJobContext, requirePermission("rec
   `, req.user));
 });
 
+app.get("/receive/osd", requireAuth, requireJobContext, requirePermission("receiving", "view"), async (req, res) => {
+  const jobId = currentJobId(req);
+  const q = String(req.query.q || "").trim();
+  const params = q ? [jobId, `%${q}%`] : [jobId];
+  const rows = (await query(`
+    select
+      o.id,
+      coalesce(o.osd_number, '') as osd_number,
+      o.created_at,
+      coalesce(o.osd_status, '') as osd_status,
+      coalesce(o.po_number, po.po_no, '') as po_number,
+      coalesce(o.mrr_number, m.mrr_number, '') as mrr_number,
+      coalesce(o.item_code, '') as item_code,
+      coalesce(o.description, '') as description,
+      coalesce(o.warehouse, '') as warehouse,
+      coalesce(o.location, '') as location,
+      coalesce(o.expected_qty, 0) as expected_qty,
+      coalesce(o.received_qty, 0) as received_qty,
+      coalesce(o.osd_qty, 0) as osd_qty,
+      coalesce(o.notes, '') as notes
+    from osd_logs o
+    left join purchase_orders po on po.id = o.po_id
+    left join mrr_logs m on m.id = o.mrr_log_id
+    where o.job_id = $1
+      ${q ? "and (coalesce(o.osd_number, '') ilike $2 or coalesce(o.osd_status, '') ilike $2 or coalesce(o.po_number, po.po_no, '') ilike $2 or coalesce(o.mrr_number, m.mrr_number, '') ilike $2 or coalesce(o.item_code, '') ilike $2 or coalesce(o.description, '') ilike $2 or coalesce(o.notes, '') ilike $2)" : ""}
+    order by o.id desc
+    limit 500
+  `, params)).rows;
+  const tableRows = rows.map((row) => `<tr>
+    <td>${esc(row.osd_number || `OSD-${row.id}`)}</td>
+    <td>${esc(formatShortDateTime(row.created_at))}</td>
+    <td>${esc(row.osd_status)}</td>
+    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.mrr_number)}</td>
+    <td>${esc(row.item_code)}</td>
+    <td>${esc(row.description)}</td>
+    <td>${esc(formatQtyDisplay(row.expected_qty))}</td>
+    <td>${esc(formatQtyDisplay(row.received_qty))}</td>
+    <td>${esc(formatQtyDisplay(row.osd_qty))}</td>
+    <td>${esc(row.warehouse)}</td>
+    <td>${esc(row.location)}</td>
+    <td>${esc(row.notes)}</td>
+  </tr>`).join("");
+  res.send(layout("OS&D Log", `
+    <h1>OS&amp;D Log</h1>
+    <div class="card">
+      <form method="get" action="/receive/osd" class="stack">
+        <div class="grid" style="grid-template-columns: 1fr auto auto;">
+          <div><label>Filter OS&amp;D Log</label><input name="q" value="${esc(q)}" placeholder="OS&D, PO, MRR, item, description, notes" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+          <div style="align-self:end;"><a class="btn btn-secondary" href="/receive/osd">Clear</a></div>
+        </div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <table><tr><th>OS&amp;D #</th><th>Created</th><th>Status</th><th>PO #</th><th>MRR #</th><th>Item</th><th>Description</th><th>Expected</th><th>Received</th><th>OS&amp;D Qty</th><th>Warehouse</th><th>Location</th><th>Notes</th></tr>${tableRows || `<tr><td colspan="13" class="muted">No OS&amp;D entries found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+});
+
 app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
   const mrrId = Number(req.params.mrrId);
@@ -13340,16 +13471,13 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
       pl.size_2,
       pl.thk_1,
       pl.thk_2,
-      coalesce(rcv.qty_received, 0) as qty_received
+      ${poLineReceivedQtySql("pl")} as qty_received,
+      ${poLineShortOsdQtySql("pl")} as qty_short_osd,
+      ${poLineAccountedQtySql("pl")} as qty_accounted
     from po_lines pl
     join material_items mi on mi.id = pl.material_item_id
-    left join (
-      select po_line_id, sum(qty_received) as qty_received
-      from receipts
-      group by po_line_id
-    ) rcv on rcv.po_line_id = pl.id
     where pl.po_id = $1
-      and coalesce(rcv.qty_received, 0) < pl.qty_ordered
+      and ${poLineAccountedQtySql("pl")} < pl.qty_ordered
     order by
       case when coalesce(pl.po_line, '') = '' then 1 else 0 end,
       case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
@@ -13363,8 +13491,8 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
     ? "Use Receive By PO to post remaining PO quantities on a new MRR."
     : "All PO lines tied to this MRR are already fully received.";
   const lineOptions = openLines.map((line) => {
-    const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
-    return `<option value="${line.id}" data-remaining="${escAttr(String(remainingQty))}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(formatQtyDisplay(line.qty_ordered))} | Rec ${esc(formatQtyDisplay(line.qty_received))} | Remaining ${esc(formatQtyDisplay(remainingQty))} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`;
+    const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0);
+    return `<option value="${line.id}" data-remaining="${escAttr(String(remainingQty))}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(formatQtyDisplay(line.qty_ordered))} | Rec ${esc(formatQtyDisplay(line.qty_received))} | Short OS&D ${esc(formatQtyDisplay(line.qty_short_osd || 0))} | Open ${esc(formatQtyDisplay(remainingQty))} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`;
   }).join("");
   res.send(layout("Receive MRR", `
     <h1>Receive ${esc(mrr.mrr_number)}</h1>
@@ -13394,7 +13522,7 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
           <div><label>Qty Received</label><input name="qty_received" required inputmode="decimal" /></div>
           <div><label>Warehouse</label><select id="receive-warehouse-${mrr.id}" name="warehouse" required onchange='syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
           <div><label>Location</label><select id="receive-location-${mrr.id}" name="location" data-placeholder="Select location" required><option value="">Select location</option></select></div>
-          <div><label>OS&D Status</label><select name="osd_status"><option>OK</option><option>OVERAGE</option><option>SHORTAGE</option><option>DAMAGE</option></select></div>
+          <div><label>Short Handling</label><select name="short_action"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions"><button type="submit" ${canReceiveOnExistingMrr ? "" : "disabled"}>${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="${escAttr(backHref)}">Back</a></div>
@@ -13432,7 +13560,9 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
           mi.item_code,
           mi.description,
           pl.qty_ordered,
-          coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as qty_received
+          ${poLineReceivedQtySql("pl")} as qty_received,
+          ${poLineShortOsdQtySql("pl")} as qty_short_osd,
+          ${poLineAccountedQtySql("pl")} as qty_accounted
         from po_lines pl
         join purchase_orders po on po.id = pl.po_id
         join material_items mi on mi.id = pl.material_item_id
@@ -13446,18 +13576,33 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
           ? "This PO is fully received. No additional receipts can be posted against it."
           : `This PO is ${poLine.status}. No additional receipts can be posted against it.`);
       }
-      const remainingQty = Math.max(Number(poLine.qty_ordered || 0) - Number(poLine.qty_received || 0), 0);
+      const remainingQty = Math.max(Number(poLine.qty_ordered || 0) - Number(poLine.qty_accounted || 0), 0);
       if (remainingQty <= 0) throw new Error("This PO line is fully received. No additional receipts can be posted against it.");
+      const shortAction = String(req.body.short_action || "backorder").trim().toLowerCase();
+      const enteredNotes = String(req.body.osd_notes || "").trim();
+      let enteredStatus = "OK";
+      let osdStatus = "";
+      let osdQty = 0;
       if (qtyReceived > remainingQty) {
-        throw new Error(`Received qty for ${poLine.item_code} cannot exceed the remaining PO qty of ${formatQtyDisplay(remainingQty)}.`);
+        enteredStatus = "OVERAGE";
+        osdStatus = "OVERAGE";
+        osdQty = qtyReceived - remainingQty;
+      } else if (qtyReceived < remainingQty) {
+        if (shortAction === "osd") {
+          enteredStatus = "SHORTAGE";
+          osdStatus = "SHORTAGE";
+          osdQty = remainingQty - qtyReceived;
+        } else {
+          enteredStatus = "BACKORDER";
+        }
       }
       const insert = await client.query(`
         insert into receipts (job_id, mrr_log_id, po_line_id, qty_received, warehouse, location, osd_status, osd_notes)
         values ($1, $2, $3, $4, $5, $6, $7, $8)
         returning id
-      `, [jobId, mrrId, Number(req.body.po_line_id), qtyReceived, normalizedNames.warehouse, normalizedNames.location, req.body.osd_status || "OK", req.body.osd_notes || ""]);
-      if ((req.body.osd_status || "OK") !== "OK") {
-        await createOsdLog(client, {
+      `, [jobId, mrrId, Number(req.body.po_line_id), qtyReceived, normalizedNames.warehouse, normalizedNames.location, enteredStatus, enteredNotes]);
+      if (osdStatus) {
+        const osdLog = await createOsdLog(client, {
           job_id: jobId,
           mrr_log_id: mrrId,
           receipt_id: insert.rows[0].id,
@@ -13471,10 +13616,11 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
           location: normalizedNames.location,
           expected_qty: remainingQty,
           received_qty: qtyReceived,
-          osd_qty: qtyReceived,
-          osd_status: req.body.osd_status || "OK",
-          notes: req.body.osd_notes || ""
+          osd_qty: osdQty,
+          osd_status: osdStatus,
+          notes: enteredNotes
         });
+        await auditLog(client, req.user.id, "create", "osd_log", osdLog.id, osdLog.osd_number);
       }
       if (poLine?.po_id) await recalcPoStatus(client, poLine.po_id);
       if (poLine?.rfq_id) await recalcRfqStatus(client, poLine.rfq_id);

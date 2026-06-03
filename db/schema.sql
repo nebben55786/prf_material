@@ -596,6 +596,7 @@ create table if not exists opi_logs (
 
 create table if not exists osd_logs (
   id bigserial primary key,
+  osd_number text not null default '',
   mrr_log_id bigint references mrr_logs(id) on delete set null,
   receipt_id bigint references receipts(id) on delete set null,
   po_id bigint references purchase_orders(id) on delete set null,
@@ -618,6 +619,7 @@ create table if not exists osd_logs (
 alter table mrr_logs add column if not exists app_po_id bigint references purchase_orders(id) on delete set null;
 
 alter table receipts add column if not exists mrr_log_id bigint references mrr_logs(id) on delete set null;
+alter table osd_logs add column if not exists osd_number text not null default '';
 
 create index if not exists idx_po_po_no on purchase_orders(po_no);
 create index if not exists idx_po_vendor_id on purchase_orders(vendor_id);
@@ -666,3 +668,4 @@ create index if not exists idx_opi_logs_mrr_number on opi_logs(mrr_number);
 create index if not exists idx_osd_logs_mrr_number on osd_logs(mrr_number);
 create index if not exists idx_osd_logs_po_id on osd_logs(po_id);
 create index if not exists idx_osd_logs_po_line_id on osd_logs(po_line_id);
+create unique index if not exists idx_osd_logs_job_osd_number_unique on osd_logs(job_id, osd_number) where coalesce(osd_number, '') <> '';
