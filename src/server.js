@@ -9899,11 +9899,10 @@ app.get("/vendors/merge", requireAuth, requireJobContext, requirePermission("ven
 });
 
 app.post("/vendors/merge", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
-  let mergeResult = null;
   await withTransaction(async (client) => {
-    mergeResult = await mergeVendors(client, req.body.source_id, req.body.target_id, req.user.id);
+    await mergeVendors(client, req.body.source_id, req.body.target_id, req.user.id);
   });
-  res.redirect(`/vendors?search=${encodeURIComponent(mergeResult?.target?.name || "")}&show_inactive=1`);
+  res.redirect("/vendors/merge");
 });
 
 app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
