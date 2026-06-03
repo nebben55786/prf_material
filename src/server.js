@@ -2041,6 +2041,150 @@ async function syncLegacyVendorContact(client, vendorId) {
   `, [vendorId, contactName || "Primary Contact", email, phone]);
 }
 
+function mergeCommaLists(...texts) {
+  const seen = new Set();
+  const values = [];
+  for (const text of texts) {
+    for (const rawValue of String(text || "").split(",")) {
+      const value = rawValue.trim();
+      const key = value.toLowerCase();
+      if (!value || seen.has(key)) continue;
+      seen.add(key);
+      values.push(value);
+    }
+  }
+  return values.join(",");
+}
+
+async function getVendorMergeUsage(runner, sourceVendorId, sourceVendorName = "") {
+  const sourceId = Number(sourceVendorId || 0);
+  const sourceName = String(sourceVendorName || "").trim();
+  if (!sourceId) return [];
+  const directCounts = await Promise.all([
+    runner.query("select count(*) as count from vendor_contacts where vendor_id = $1", [sourceId]),
+    runner.query("select count(*) as count from rfq_vendors where vendor_id = $1", [sourceId]),
+    runner.query("select count(*) as count from quotes where vendor_id = $1", [sourceId]),
+    runner.query("select count(*) as count from quote_revisions where vendor_id = $1", [sourceId]),
+    runner.query("select count(*) as count from rfq_quote_files where vendor_id = $1", [sourceId]),
+    runner.query("select count(*) as count from rfq_items where awarded_vendor_id = $1", [sourceId]),
+    runner.query("select count(*) as count from purchase_orders where vendor_id = $1", [sourceId])
+  ]);
+  const usageRows = [
+    ["Vendor contacts", directCounts[0]],
+    ["RFQ vendor selections", directCounts[1]],
+    ["Quotes", directCounts[2]],
+    ["Quote revisions", directCounts[3]],
+    ["Quote files", directCounts[4]],
+    ["Awarded RFQ lines", directCounts[5]],
+    ["Purchase orders", directCounts[6]]
+  ];
+  if (sourceName) {
+    const textCounts = await Promise.all([
+      runner.query("select count(*) as count from material_receiving_logs where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName]),
+      runner.query("select count(*) as count from mrr_logs where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName]),
+      runner.query("select count(*) as count from fmr_logs where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName]),
+      runner.query("select count(*) as count from opi_logs where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName]),
+      runner.query("select count(*) as count from vendor_fmr_request_lines where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName]),
+      runner.query("select count(*) as count from material_log_lookup_values where kind = 'vendor_name' and lower(trim(coalesce(value, ''))) = lower(trim($1))", [sourceName])
+    ]);
+    usageRows.push(
+      ["Material receiving log names", textCounts[0]],
+      ["MRR log names", textCounts[1]],
+      ["FMR log names", textCounts[2]],
+      ["OPI log names", textCounts[3]],
+      ["Vendor FMR request names", textCounts[4]],
+      ["Vendor lookup suggestions", textCounts[5]]
+    );
+  }
+  return usageRows.map(([label, result]) => ({ label, count: Number(result.rows[0]?.count || 0) }));
+}
+
+async function mergeVendors(client, sourceVendorId, targetVendorId, userId) {
+  const sourceId = Number(sourceVendorId || 0);
+  const targetId = Number(targetVendorId || 0);
+  if (!sourceId || !targetId) throw new Error("Choose both vendors to merge.");
+  if (sourceId === targetId) throw new Error("Choose two different vendors.");
+  const source = (await client.query("select * from vendors where id = $1", [sourceId])).rows[0];
+  const target = (await client.query("select * from vendors where id = $1", [targetId])).rows[0];
+  if (!source) throw new Error("Source vendor not found.");
+  if (!target) throw new Error("Target vendor not found.");
+  const mergedCategories = mergeCommaLists(target.categories, source.categories);
+  await client.query(`
+    update vendors
+    set contact_name = case when coalesce(trim(contact_name), '') = '' then $2 else contact_name end,
+        website = case when coalesce(trim(website), '') = '' then $3 else website end,
+        email = case when coalesce(trim(email), '') = '' then $4 else email end,
+        phone = case when coalesce(trim(phone), '') = '' then $5 else phone end,
+        categories = $6,
+        is_active = is_active or $7
+    where id = $1
+  `, [
+    targetId,
+    String(source.contact_name || "").trim(),
+    String(source.website || "").trim(),
+    normalizeEmail(source.email),
+    normalizePhone(source.phone),
+    mergedCategories,
+    Boolean(source.is_active)
+  ]);
+
+  await client.query("update vendor_contacts set vendor_id = $2 where vendor_id = $1", [sourceId, targetId]);
+  await client.query(`
+    delete from rfq_vendors rv
+    where rv.vendor_id = $1
+      and exists (
+        select 1
+        from rfq_vendors existing
+        where existing.rfq_id = rv.rfq_id
+          and existing.vendor_id = $2
+      )
+  `, [sourceId, targetId]);
+  await client.query("update rfq_vendors set vendor_id = $2 where vendor_id = $1", [sourceId, targetId]);
+  await client.query(`
+    delete from quotes q
+    where q.vendor_id = $1
+      and exists (
+        select 1
+        from quotes existing
+        where existing.rfq_item_id = q.rfq_item_id
+          and existing.vendor_id = $2
+      )
+  `, [sourceId, targetId]);
+  await client.query("update quotes set vendor_id = $2 where vendor_id = $1", [sourceId, targetId]);
+  await client.query("update quote_revisions set vendor_id = $2 where vendor_id = $1", [sourceId, targetId]);
+  await client.query("update rfq_quote_files set vendor_id = $2 where vendor_id = $1", [sourceId, targetId]);
+  await client.query("update rfq_items set awarded_vendor_id = $2 where awarded_vendor_id = $1", [sourceId, targetId]);
+  await client.query("update purchase_orders set vendor_id = $2, updated_at = now() where vendor_id = $1", [sourceId, targetId]);
+
+  const sourceName = String(source.name || "").trim();
+  const targetName = String(target.name || "").trim();
+  if (sourceName && targetName) {
+    await client.query("update material_receiving_logs set vendor_name = $2, updated_at = now() where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName, targetName]);
+    await client.query("update mrr_logs set vendor_name = $2, updated_at = now() where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName, targetName]);
+    await client.query("update fmr_logs set vendor_name = $2, updated_at = now() where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName, targetName]);
+    await client.query("update opi_logs set vendor_name = $2, updated_at = now() where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName, targetName]);
+    await client.query("update vendor_fmr_request_lines set vendor_name = $2, updated_at = now() where lower(trim(coalesce(vendor_name, ''))) = lower(trim($1))", [sourceName, targetName]);
+    await client.query(`
+      delete from material_log_lookup_values source_lookup
+      where source_lookup.kind = 'vendor_name'
+        and lower(trim(coalesce(source_lookup.value, ''))) = lower(trim($1))
+        and exists (
+          select 1
+          from material_log_lookup_values target_lookup
+          where target_lookup.job_id = source_lookup.job_id
+            and target_lookup.kind = source_lookup.kind
+            and lower(trim(coalesce(target_lookup.value, ''))) = lower(trim($2))
+        )
+    `, [sourceName, targetName]);
+    await client.query("update material_log_lookup_values set value = $2 where kind = 'vendor_name' and lower(trim(coalesce(value, ''))) = lower(trim($1))", [sourceName, targetName]);
+  }
+
+  await client.query("delete from vendors where id = $1", [sourceId]);
+  await syncLegacyVendorContact(client, targetId);
+  await auditLog(client, userId, "merge", "vendor", targetId, `${source.name} -> ${target.name}`);
+  return { source, target };
+}
+
 function parseUploadedRows(file, pastedText) {
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (file?.buffer?.length) {
@@ -9655,7 +9799,7 @@ app.get("/vendors", requireAuth, requireJobContext, requirePermission("vendors",
   res.send(layout("Vendors", `
         <h1>Vendors</h1>
         <div class="card">
-          <div class="actions"><a class="btn btn-primary" href="/vendors/new">Add Vendor</a></div>
+          <div class="actions"><a class="btn btn-primary" href="/vendors/new">Add Vendor</a><a class="btn btn-secondary" href="/vendors/merge">Merge Vendors</a></div>
         </div>
         <div class="card">
           <form method="get" action="/vendors" class="stack">
@@ -9700,6 +9844,66 @@ app.post("/vendors/add", requireAuth, requireJobContext, requirePermission("vend
     await auditLog(client, req.user.id, "create", "vendor", result.rows[0].id, req.body.name?.trim() || "");
   });
   res.redirect("/vendors");
+});
+
+app.get("/vendors/merge", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const sourceId = Number(req.query.source_id || 0);
+  const targetId = Number(req.query.target_id || 0);
+  const vendors = (await query("select id, name, is_active from vendors order by lower(name), id")).rows;
+  const sourceVendor = vendors.find((vendor) => Number(vendor.id) === sourceId) || null;
+  const targetVendor = vendors.find((vendor) => Number(vendor.id) === targetId) || null;
+  const renderVendorOptions = (selectedId, placeholder) => [`<option value="">${esc(placeholder)}</option>`]
+    .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${Number(vendor.id) === Number(selectedId) ? "selected" : ""}>${esc(vendor.name)}${vendor.is_active ? "" : " (inactive)"}</option>`))
+    .join("");
+  const usageRows = sourceVendor
+    ? await getVendorMergeUsage({ query }, sourceVendor.id, sourceVendor.name)
+    : [];
+  const usageTableRows = usageRows.length > 0
+    ? usageRows.map((row) => `<tr><td>${esc(row.label)}</td><td>${row.count}</td></tr>`).join("")
+    : `<tr><td colspan="2" class="muted">Choose a source vendor to preview what will move.</td></tr>`;
+  const confirmCard = sourceVendor && targetVendor && sourceVendor.id !== targetVendor.id
+    ? (() => {
+      const confirmMessage = `Merge ${sourceVendor.name} into ${targetVendor.name}? This deletes the source vendor.`;
+      return `<div class="card">
+        <h3>Confirm Merge</h3>
+        <p class="muted">This will move all references from <strong>${esc(sourceVendor.name)}</strong> into <strong>${esc(targetVendor.name)}</strong>, update matching material log vendor names, and delete <strong>${esc(sourceVendor.name)}</strong> from the vendor list.</p>
+        <form method="post" action="/vendors/merge" onsubmit="return confirm(${escAttr(JSON.stringify(confirmMessage))});">
+          <input type="hidden" name="source_id" value="${sourceVendor.id}" />
+          <input type="hidden" name="target_id" value="${targetVendor.id}" />
+          <div class="actions">
+            <button class="btn btn-danger" type="submit">Merge Vendors</button>
+            <a class="btn btn-secondary" href="/vendors">Cancel</a>
+          </div>
+        </form>
+      </div>`;
+    })()
+    : "";
+  res.send(layout("Merge Vendors", `
+    <h1>Merge Vendors</h1>
+    <div class="card">
+      <form method="get" action="/vendors/merge" class="stack">
+        <div class="grid">
+          <div><label>Incorrect Vendor To Merge</label><select name="source_id" required>${renderVendorOptions(sourceId, "Choose source vendor")}</select></div>
+          <div><label>Correct Vendor To Keep</label><select name="target_id" required>${renderVendorOptions(targetId, "Choose target vendor")}</select></div>
+        </div>
+        <div class="actions"><button type="submit">Preview Merge</button><a class="btn btn-secondary" href="/vendors">Back</a></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <h3>References To Move</h3>
+      <table><tr><th>Area</th><th>Count</th></tr>${usageTableRows}</table>
+    </div>
+    ${sourceVendor && targetVendor && sourceVendor.id === targetVendor.id ? `<div class="card error"><h3>Choose two different vendors.</h3></div>` : ""}
+    ${confirmCard}
+  `, req.user));
+});
+
+app.post("/vendors/merge", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  let mergeResult = null;
+  await withTransaction(async (client) => {
+    mergeResult = await mergeVendors(client, req.body.source_id, req.body.target_id, req.user.id);
+  });
+  res.redirect(`/vendors?search=${encodeURIComponent(mergeResult?.target?.name || "")}&show_inactive=1`);
 });
 
 app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
