@@ -1087,7 +1087,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const left = 18;
   const right = pageWidth - 18;
   const top = pageHeight - 18;
-  const content = [];
+  let content = [];
   const makeText = (x, y, text, font = "F1", size = 8) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
   const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
   const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
@@ -1130,7 +1130,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
       item_code: String(line.item_code || "").trim(),
       description: String(line.description || "").trim(),
       qty: String(line.qty || "").trim(),
-      location: String(line.location || "").trim(),
+      location: [line.location, line.grid].map((value) => String(value || "").trim()).filter(Boolean).join(" / "),
       grid: String(line.grid || "").trim(),
       status: String(line.status || "").trim(),
       ordered: String(line.ordered || "").trim(),
@@ -1155,16 +1155,27 @@ function buildMrrFormPdf(header, lines, options = {}) {
     });
   }
   normalizedLines.push(...detailLines);
-  const lineItems = normalizedLines.slice(0, 12);
-  const discrepancyItems = lines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK").slice(0, 8);
+  const allLineItems = normalizedLines;
+  const allDiscrepancyItems = lines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK");
   const jobNumber = String(options.jobNumber || "").trim();
   const deliveryLocation = String(options.deliveryLocation || "").trim();
   const fmrNumber = String(options.fmrNumber || "").trim();
-  const pageNo = "1";
-  const pageCount = "1";
+  const maxLineRowsPerPage = 12;
+  const maxDiscrepancyRowsPerPage = 8;
+  const linePageCount = Math.max(1, Math.ceil(allLineItems.length / maxLineRowsPerPage));
+  const discrepancyPageCount = Math.max(1, Math.ceil(allDiscrepancyItems.length / maxDiscrepancyRowsPerPage));
+  const totalPages = Math.max(linePageCount, discrepancyPageCount);
+  const pages = [];
 
-  content.push("0.4 w");
-  content.push("0 0 0 RG");
+  for (let pageIndex = 0; pageIndex < totalPages; pageIndex += 1) {
+    content = [];
+    const lineItems = allLineItems.slice(pageIndex * maxLineRowsPerPage, (pageIndex + 1) * maxLineRowsPerPage);
+    const discrepancyItems = allDiscrepancyItems.slice(pageIndex * maxDiscrepancyRowsPerPage, (pageIndex + 1) * maxDiscrepancyRowsPerPage);
+    const pageNo = String(pageIndex + 1);
+    const pageCount = String(totalPages);
+
+    content.push("0.4 w");
+    content.push("0 0 0 RG");
 
   const x0 = left;
   const totalWidth = right - left;
@@ -1219,13 +1230,12 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const lineRowCount = Math.max(lineItems.length, 12);
   const lineTableHeight = tableHeaderHeight + (lineRowCount * 18);
   const lineTableBottom = tableTop - lineTableHeight;
-  const itemCols = [140, 288, 48, 50, 50];
+  const itemCols = [140, 288, 48, 100];
   const itemHeaders = [
     "13. STOCK/ITEM NO (TAG NO)",
     "14. DESCRIPTION",
     "15\nQTY",
-    "16\nLOCATION",
-    "17\nGRID"
+    "16-17\nLOCATION"
   ];
   content.push(line(x0, tableTop, right, tableTop));
   content.push(line(x0, tableTop, x0, lineTableBottom));
@@ -1254,7 +1264,6 @@ function buildMrrFormPdf(header, lines, options = {}) {
     if (descLines[1]) content.push(makeText(x0 + itemCols[0] + 2, rowTop - 16, descLines[1], "F1", 6));
     content.push(centerText(x0 + itemCols[0] + itemCols[1], rowTop - 12, itemCols[2], item.qty || "", "F1", 7));
     content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2], rowTop - 12, itemCols[3], item.location || "", "F1", 7));
-    content.push(centerText(x0 + itemCols[0] + itemCols[1] + itemCols[2] + itemCols[3], rowTop - 12, itemCols[4], item.grid || "", "F1", 7));
   }
 
   const osdTop = lineTableBottom;
@@ -1341,7 +1350,10 @@ function buildMrrFormPdf(header, lines, options = {}) {
   field(x0 + 194, signTop, 164, 18, "BY:", "");
   field(x0 + 358, signTop, totalWidth - 358, 18, "TITLE:", "");
 
-  return buildDrawnPdf([content.join("\n")], { pageWidth, pageHeight });
+    pages.push(content.join("\n"));
+  }
+
+  return buildDrawnPdf(pages, { pageWidth, pageHeight });
 }
 
 function renderJobSwitcher(user) {
