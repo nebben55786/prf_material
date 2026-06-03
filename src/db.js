@@ -19,8 +19,20 @@ const useSsl =
   !databaseUrl.includes("127.0.0.1") &&
   !databaseUrl.includes("host.docker.internal");
 
+function cleanPgConnectionString(value) {
+  try {
+    const parsed = new URL(value);
+    for (const key of ["sslmode", "sslcert", "sslkey", "sslrootcert"]) {
+      parsed.searchParams.delete(key);
+    }
+    return parsed.toString();
+  } catch {
+    return value;
+  }
+}
+
 export const pool = new Pool({
-  connectionString: databaseUrl,
+  connectionString: cleanPgConnectionString(databaseUrl),
   ssl: useSsl ? { rejectUnauthorized: false } : false
 });
 

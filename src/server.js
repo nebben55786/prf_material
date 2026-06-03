@@ -186,6 +186,9 @@ function getAppHeaderTitle(user = null) {
 app.use(express.urlencoded({ extended: true, limit: "20mb", parameterLimit: 20000 }));
 app.use(cookieParser(undefined, { decode: safeCookieDecode }));
 app.use("/public", express.static(path.join(process.cwd(), "public")));
+app.get(["/favicon.ico", "/favicon.png"], (_req, res) => {
+  res.redirect(302, "/public/prf-logo.png");
+});
 app.use((req, res, next) => {
   if (!slowRequestMs) {
     next();
@@ -1381,6 +1384,7 @@ function layout(title, body, user) {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${esc(title)}</title>
+    <link rel="icon" href="/public/prf-logo.png" type="image/png" />
     <style>
       :root {
         --bg: #dfe3e8;
@@ -2667,6 +2671,7 @@ function landingPage() {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PRF Material Control</title>
+    <link rel="icon" href="/public/prf-logo.png" type="image/png" />
     <style>
       body { margin: 0; font-family: "Segoe UI", Tahoma, Verdana, sans-serif; background: linear-gradient(180deg, #dfe3e8 0%, #c7d0da 100%); color: #16212b; }
       .hero { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
