@@ -2753,6 +2753,16 @@ function normalizeSpecName(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+function materialSpecDisplaySql(alias = "ms") {
+  return `${alias}.name || case when coalesce(${alias}.vendor_rev, '') <> '' then ' | ' || ${alias}.vendor_rev else '' end`;
+}
+
+function formatMaterialSpecLabel(spec) {
+  const name = textValue(spec?.name);
+  const vendorRev = textValue(spec?.vendor_rev);
+  return vendorRev ? `${name} | ${vendorRev}` : name;
+}
+
 function parseSpecList(value) {
   const seen = new Set();
   return String(value || "")
@@ -2798,12 +2808,12 @@ async function ensureMaterialSpec(client, jobId, specName) {
   const name = normalizeSpecName(specName);
   if (!name) return null;
   const existing = (await client.query(
-    "select id, name from material_specs where job_id = $1 and lower(name) = lower($2) limit 1",
+    "select id, name, coalesce(vendor_rev, '') as vendor_rev from material_specs where job_id = $1 and lower(name) = lower($2) limit 1",
     [jobId, name]
   )).rows[0];
   if (existing) return existing;
   const inserted = await client.query(
-    "insert into material_specs (job_id, name) values ($1, $2) returning id, name",
+    "insert into material_specs (job_id, name) values ($1, $2) returning id, name, coalesce(vendor_rev, '') as vendor_rev",
     [jobId, name]
   );
   return inserted.rows[0];
@@ -2984,7 +2994,7 @@ function materialItemSnapshotParams(item) {
 }
 
 async function getMaterialSpecOptions(jobId) {
-  return (await query("select id, name from material_specs where job_id = $1 order by name", [jobId])).rows;
+  return (await query("select id, name, coalesce(vendor_rev, '') as vendor_rev from material_specs where job_id = $1 order by name, vendor_rev", [jobId])).rows;
 }
 
 async function getMaterialItemSpecsByItemIds(itemIds = []) {
@@ -7215,7 +7225,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
       coalesce(mi.thk_1, '') as thk_1,
       coalesce(mi.thk_2, '') as thk_2,
       coalesce(mi.notes, '') as notes,
-      coalesce(string_agg(ms.name, ', ' order by ms.name) filter (where ms.id is not null), '') as specs
+      coalesce(string_agg(${materialSpecDisplaySql("ms")}, ', ' order by ms.name, ms.vendor_rev) filter (where ms.id is not null), '') as specs
     from material_items mi
     left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
     left join material_specs ms on ms.id = mis.spec_id
@@ -7225,8 +7235,17 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
     limit 500
   `, params)).rows;
   const specOptions = [`<option value="">All Specs</option>`]
-    .concat(specs.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === specId ? "selected" : ""}>${esc(spec.name)}</option>`))
+    .concat(specs.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === specId ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`))
     .join("");
+  const specRows = specs.map((spec) => `<tr>
+    <td>
+      <form id="item-spec-form-${spec.id}" method="post" action="/items/specs/${spec.id}" class="inline-form">
+        <input name="name" value="${esc(spec.name)}" required />
+      </form>
+    </td>
+    <td><input form="item-spec-form-${spec.id}" name="vendor_rev" value="${esc(spec.vendor_rev || "")}" /></td>
+    <td><button form="item-spec-form-${spec.id}" type="submit">Save Spec</button></td>
+  </tr>`).join("");
   const itemRows = rows.map((item) => `<tr>
     <td>${esc(item.item_code)}</td>
     <td>${esc(item.description)}</td>
@@ -7291,6 +7310,17 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
           <div class="actions"><button type="submit">Import Items</button></div>
         </form>
       </div>
+      <div class="card scroll">
+        <h3>Specs</h3>
+        <form method="post" action="/items/specs" class="stack" style="margin-bottom:12px;">
+          <div class="grid" style="grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;">
+            <div><label>Spec Name</label><input name="name" required /></div>
+            <div><label>Vendor Rev</label><input name="vendor_rev" /></div>
+            <div style="align-self:end;"><button type="submit">Add Spec</button></div>
+          </div>
+        </form>
+        <table><tr><th>Spec Name</th><th>Vendor Rev</th><th>Action</th></tr>${specRows || `<tr><td colspan="3" class="muted">No specs added yet.</td></tr>`}</table>
+      </div>
     ` : ""}
     <div class="card scroll">
       <table>
@@ -7309,6 +7339,52 @@ app.post("/items", requireAuth, requireJobContext, requirePermission("inventory"
     await auditLog(client, req.user.id, result.status, "material_item", result.id, result.item.item_code);
   });
   res.redirect(`/items?q=${encodeURIComponent(String(req.body.item_code || "").trim())}`);
+}));
+
+app.post("/items/specs", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const name = normalizeSpecName(req.body.name);
+  const vendorRev = String(req.body.vendor_rev || "").trim();
+  if (!name) throw new Error("Spec name is required.");
+  await withTransaction(async (client) => {
+    const existing = (await client.query(
+      "select id from material_specs where job_id = $1 and lower(name) = lower($2) limit 1",
+      [jobId, name]
+    )).rows[0];
+    if (existing) {
+      await client.query("update material_specs set vendor_rev = $3 where id = $1 and job_id = $2", [existing.id, jobId, vendorRev]);
+      await auditLog(client, req.user.id, "update", "material_spec", existing.id, `${name}|${vendorRev}`);
+      return;
+    }
+    const inserted = (await client.query(
+      "insert into material_specs (job_id, name, vendor_rev) values ($1, $2, $3) returning id",
+      [jobId, name, vendorRev]
+    )).rows[0];
+    await auditLog(client, req.user.id, "create", "material_spec", inserted.id, `${name}|${vendorRev}`);
+  });
+  res.redirect("/items");
+}));
+
+app.post("/items/specs/:id", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const specId = Number(req.params.id);
+  const name = normalizeSpecName(req.body.name);
+  const vendorRev = String(req.body.vendor_rev || "").trim();
+  if (!name) throw new Error("Spec name is required.");
+  await withTransaction(async (client) => {
+    const duplicate = (await client.query(
+      "select id from material_specs where job_id = $1 and lower(name) = lower($2) and id <> $3 limit 1",
+      [jobId, name, specId]
+    )).rows[0];
+    if (duplicate) throw new Error(`Spec ${name} already exists.`);
+    const updated = await client.query(
+      "update material_specs set name = $3, vendor_rev = $4 where id = $1 and job_id = $2",
+      [specId, jobId, name, vendorRev]
+    );
+    if (updated.rowCount === 0) throw new Error("Spec not found.");
+    await auditLog(client, req.user.id, "update", "material_spec", specId, `${name}|${vendorRev}`);
+  });
+  res.redirect("/items");
 }));
 
 app.post("/items/import", requireAuth, requireJobContext, requirePermission("inventory", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
@@ -11585,7 +11661,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         coalesce(mi.size_2, '') as size_2,
         coalesce(mi.thk_1, '') as thk_1,
         coalesce(mi.thk_2, '') as thk_2,
-        coalesce(string_agg(ms.name, ', ' order by ms.name) filter (where ms.id is not null), '') as specs
+        coalesce(string_agg(${materialSpecDisplaySql("ms")}, ', ' order by ms.name, ms.vendor_rev) filter (where ms.id is not null), '') as specs
       from material_items mi
       left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
       left join material_specs ms on ms.id = mis.spec_id
@@ -11599,7 +11675,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
   if (!rfq) throw new Error("RFQ not found.");
   const selectedSpec = specOptions.find((spec) => Number(spec.id) === selectedSpecId) || null;
   const specSelectOptions = [`<option value="">All Specs</option>`]
-    .concat(specOptions.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === selectedSpecId ? "selected" : ""}>${esc(spec.name)}</option>`))
+    .concat(specOptions.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === selectedSpecId ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`))
     .join("");
   const materialItemRows = materialItemsRes.rows
     .map((item) => `<tr>

@@ -97,6 +97,7 @@ create table if not exists material_specs (
   id bigserial primary key,
   job_id bigint not null,
   name text not null,
+  vendor_rev text not null default '',
   created_at timestamptz not null default now()
 );
 
