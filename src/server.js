@@ -11031,6 +11031,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     })
     .sort((left, right) => left.vendorName.localeCompare(right.vendorName));
   const activeVendor = selectedVendors.find((vendor) => String(vendor.vendor_id) === activeQuoteVendorId) || null;
+  const quoteInputsDisabledAttr = activeQuoteVendorId ? "" : " disabled";
   const materialItemRows = materialItems
     .map((item) => `<tr>
       <td>${esc(item.item_code)}</td>
@@ -11091,8 +11092,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <td style="width:1%; white-space:nowrap;">${esc([item.size_1, item.size_2].filter(Boolean).join(" x "))}</td>
       <td style="width:1%; white-space:nowrap;">${esc([item.thk_1, item.thk_2].filter(Boolean).join(" x "))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(item.notes || "")}</td>
-      <td style="width:96px; white-space:nowrap;"><input name="unit_price_${item.id}" value="${esc(formatCurrencyInput(selectedQuote?.unit_price))}" inputmode="decimal" /></td>
-      <td style="width:88px; white-space:nowrap;"><input name="lead_days_${item.id}" value="${esc(selectedQuote?.lead_days || "")}" inputmode="numeric" /></td>
+      <td style="width:96px; white-space:nowrap;"><input data-rfq-quote-input="1" name="unit_price_${item.id}" value="${esc(formatCurrencyInput(selectedQuote?.unit_price))}" inputmode="decimal"${quoteInputsDisabledAttr} /></td>
+      <td style="width:88px; white-space:nowrap;"><input data-rfq-quote-input="1" name="lead_days_${item.id}" value="${esc(selectedQuote?.lead_days || "")}" inputmode="numeric"${quoteInputsDisabledAttr} /></td>
       <td style="width:1%; white-space:nowrap;">${esc(item.award_status)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(awardSummary)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(poRefs)}</td>
@@ -11128,7 +11129,9 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/existing">Add Existing</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/new">Add New</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Values</a>` : ""}
-      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page${activeQuoteVendorId ? `?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}` : ""}">Import Quotes</a>` : ""}
+      ${poCount === 0 ? (activeQuoteVendorId
+        ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}">Import Quotes</a>`
+        : `<button class="btn btn-secondary" type="button" disabled title="Select a vendor tab before importing quotes">Import Quotes</button>`) : ""}
       <a class="btn btn-primary" target="_blank" href="/rfq/${rfqId}/sheet.pdf" onclick="return openRfqPdfWithOrder(this, 'rfq-quote-table-${rfqId}');">Open RFQ PDF</a>
     </div>`;
   const quoteFileRows = quoteFiles.length > 0
@@ -11286,17 +11289,86 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <h3>Vendor Quote Workspace</h3>
       ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted" style="margin-bottom:10px;">Save at least one selected vendor to unlock quote tabs.</div>`}
       ${workspaceActions}
-      <form method="post" action="/rfq/${rfqId}/quotes/grid" class="stack" onsubmit="return captureRfqQuoteOrder(this);">
+      <form id="rfq-quote-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/quotes/grid" class="stack" onsubmit="return validateRfqQuoteGridSubmit(event, this);">
         <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
         <input type="hidden" name="rfq_item_order" value="" />
         <div class="actions" style="margin-top:6px;">
-          <button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Save ${esc(activeVendor?.name || "Vendor")} Quotes</button>
+          <button type="submit" data-rfq-quote-save="1" ${activeQuoteVendorId ? "" : "disabled"}>Save ${esc(activeVendor?.name || "Vendor")} Quotes</button>
         </div>
         <table id="rfq-quote-table-${rfqId}">
           <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:260px;">Description</th><th style="width:1%; white-space:nowrap;">Qty</th><th style="width:1%; white-space:nowrap;">UOM</th><th style="width:1%; white-space:nowrap;">Spec</th><th style="width:1%; white-space:nowrap;">Size</th><th style="width:1%; white-space:nowrap;">Thk</th><th style="width:1%; white-space:nowrap;">Notes</th><th style="width:96px; white-space:nowrap;">Unit Price</th><th style="width:88px; white-space:nowrap;">Lead Days</th><th style="width:1%; white-space:nowrap;">Award Status</th><th style="width:1%; white-space:nowrap;">Award Summary</th><th style="width:1%; white-space:nowrap;">Issued PO</th><th>Actions</th></tr>
           ${itemRows.join("") || `<tr><td colspan="15" class="muted">No RFQ items loaded yet.</td></tr>`}
         </table>
       </form>
+      <script>
+        (() => {
+          const form = document.getElementById("rfq-quote-grid-form-${rfqId}");
+          if (!form) return;
+          const inputs = Array.from(form.querySelectorAll("[data-rfq-quote-input]"));
+          const originalValues = new Map(inputs.map((input) => [input.name, String(input.value || "")]));
+          let quoteDirty = false;
+          let quoteSaveInFlight = false;
+          const message = "Save the quote grid before leaving this RFQ page.";
+          const refreshDirty = () => {
+            quoteDirty = inputs.some((input) => !input.disabled && String(input.value || "") !== String(originalValues.get(input.name) || ""));
+          };
+          const stopForUnsavedQuotes = (event) => {
+            if (!quoteDirty || quoteSaveInFlight) return false;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            window.alert(message);
+            return true;
+          };
+          inputs.forEach((input) => {
+            input.addEventListener("input", refreshDirty);
+            input.addEventListener("change", refreshDirty);
+          });
+          document.addEventListener("click", (event) => {
+            if (!quoteDirty || quoteSaveInFlight) return;
+            const quoteSaveButton = event.target.closest("[data-rfq-quote-save]");
+            if (quoteSaveButton) return;
+            const link = event.target.closest("a[href]");
+            if (link && link.target !== "_blank" && !link.hasAttribute("download")) {
+              stopForUnsavedQuotes(event);
+              return;
+            }
+            const button = event.target.closest("button, input[type='button'], input[type='submit']");
+            if (button) {
+              stopForUnsavedQuotes(event);
+            }
+          }, true);
+          document.addEventListener("submit", (event) => {
+            if (!quoteDirty || quoteSaveInFlight || event.target === form) return;
+            stopForUnsavedQuotes(event);
+          }, true);
+          window.addEventListener("beforeunload", (event) => {
+            if (!quoteDirty || quoteSaveInFlight) return;
+            event.preventDefault();
+            event.returnValue = "";
+          });
+          window.validateRfqQuoteGridSubmit = (event, targetForm) => {
+            const submitter = event?.submitter || document.activeElement;
+            const isQuoteInputEnter = !event?.submitter && document.activeElement?.matches?.("[data-rfq-quote-input]");
+            const isQuoteSave = submitter?.getAttribute?.("data-rfq-quote-save") === "1" || isQuoteInputEnter;
+            if (!isQuoteSave && quoteDirty) {
+              window.alert(message);
+              return false;
+            }
+            if (isQuoteSave) {
+              const vendorInput = targetForm.querySelector('input[name="vendor_id"]');
+              if (!vendorInput || !String(vendorInput.value || "").trim()) {
+                window.alert("Select a vendor tab before entering quotes.");
+                return false;
+              }
+              captureRfqQuoteOrder(targetForm);
+              quoteSaveInFlight = true;
+              return true;
+            }
+            captureRfqQuoteOrder(targetForm);
+            return true;
+          };
+        })();
+      </script>
     </div>
     ${awardSummaryCard}
     ${quoteFileCard}
@@ -12791,7 +12863,10 @@ app.get("/rfq-item/:id/quotes", requireAuth, requireJobContext, async (req, res)
     order by qr.id desc
     limit 20
   `, [req.params.id, jobId])).rows;
-  const vendorOptions = vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("");
+  const canEnterItemQuote = vendors.length > 0;
+  const vendorOptions = canEnterItemQuote
+    ? vendors.map((vendor) => `<option value="${vendor.id}">${esc(vendor.name)}</option>`).join("")
+    : `<option value="">Select a participating vendor on the RFQ first</option>`;
   const quoteRows = quotes.length > 0
     ? quotes.map((quote) => `<tr><td>${esc(quote.vendor_name)}</td><td>$${Number(quote.unit_price).toFixed(2)}</td><td>${quote.lead_days} days</td><td>${esc(formatShortDateTime(quote.quoted_at))}</td>${item.awarded_vendor_id === quote.vendor_id ? `<td><span class="chip">Awarded</span></td>` : `<td></td>`}</tr>`).join("")
     : `<tr><td colspan="5" class="muted">No quotes yet</td></tr>`;
@@ -12802,23 +12877,71 @@ app.get("/rfq-item/:id/quotes", requireAuth, requireJobContext, async (req, res)
     <h1>Manage Quotes</h1>
     <div class="card"><strong>${esc(item.item_code)}</strong> | ${esc(item.description)} | <strong>Award:</strong> ${item.award_status === "AWARDED" ? `${esc(quotes.find((quote) => quote.vendor_id === item.awarded_vendor_id)?.vendor_name || "Awarded")} @ $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d` : "Open"}</div>
     <div class="card">
-      <form method="post" action="/quotes" class="stack">
+      <form id="rfq-item-quote-form-${item.id}" method="post" action="/quotes" class="stack">
         <input type="hidden" name="rfq_item_id" value="${item.id}" />
         <input type="hidden" name="rfq_id" value="${item.rfq_id}" />
         <div class="grid">
-          <div><label>Vendor</label><select name="vendor_id">${vendorOptions}</select></div>
-          <div><label>Unit Price</label><input name="unit_price" required /></div>
-          <div><label>Lead Days</label><input name="lead_days" /></div>
+          <div><label>Vendor</label><select name="vendor_id" ${canEnterItemQuote ? "" : "disabled"}>${vendorOptions}</select></div>
+          <div><label>Unit Price</label><input data-rfq-item-quote-input="1" name="unit_price" required ${canEnterItemQuote ? "" : "disabled"} /></div>
+          <div><label>Lead Days</label><input data-rfq-item-quote-input="1" name="lead_days" ${canEnterItemQuote ? "" : "disabled"} /></div>
         </div>
-        <div class="actions"><button type="submit">Save Quote</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
+        <div class="actions"><button type="submit" data-rfq-item-quote-save="1" ${canEnterItemQuote ? "" : "disabled"}>Save Quote</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
+        ${canEnterItemQuote ? "" : `<div class="muted">Select a participating vendor on the RFQ before entering quotes.</div>`}
       </form>
+      <script>
+        (() => {
+          const form = document.getElementById("rfq-item-quote-form-${item.id}");
+          if (!form) return;
+          const inputs = Array.from(form.querySelectorAll("[data-rfq-item-quote-input]"));
+          const originalValues = new Map(inputs.map((input) => [input.name, String(input.value || "")]));
+          let dirty = false;
+          let saving = false;
+          const message = "Save this quote before leaving the page.";
+          const refreshDirty = () => {
+            dirty = inputs.some((input) => !input.disabled && String(input.value || "") !== String(originalValues.get(input.name) || ""));
+          };
+          const block = (event) => {
+            if (!dirty || saving) return false;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            window.alert(message);
+            return true;
+          };
+          inputs.forEach((input) => {
+            input.addEventListener("input", refreshDirty);
+            input.addEventListener("change", refreshDirty);
+          });
+          form.addEventListener("submit", () => {
+            saving = true;
+          });
+          document.addEventListener("click", (event) => {
+            if (!dirty || saving || event.target.closest("[data-rfq-item-quote-save]")) return;
+            const link = event.target.closest("a[href]");
+            if (link && link.target !== "_blank" && !link.hasAttribute("download")) {
+              block(event);
+              return;
+            }
+            const button = event.target.closest("button, input[type='button'], input[type='submit']");
+            if (button) block(event);
+          }, true);
+          document.addEventListener("submit", (event) => {
+            if (!dirty || saving || event.target === form) return;
+            block(event);
+          }, true);
+          window.addEventListener("beforeunload", (event) => {
+            if (!dirty || saving) return;
+            event.preventDefault();
+            event.returnValue = "";
+          });
+        })();
+      </script>
     </div>
     <div class="card scroll"><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Updated</th><th>Award</th></tr>${quoteRows}</table></div>
     <div class="card scroll"><h3>Quote Revision History</h3><table><tr><th>Vendor</th><th>Unit Price</th><th>Lead</th><th>Source</th><th>Logged</th></tr>${revisionRows}</table></div>
   `, req.user));
 });
 
-app.post("/quotes", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/quotes", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const rfqItemId = Number(req.body.rfq_item_id);
@@ -12854,9 +12977,9 @@ app.post("/quotes", requireAuth, requireJobContext, requirePermission("rfqs", "e
     await recalcRfqStatus(client, item.rfq_id);
   });
   res.redirect(`/rfq/${req.body.rfq_id}?vendor_tab_id=${encodeURIComponent(String(req.body.vendor_id || ""))}`);
-});
+}));
 
-app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
+app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
   const vendorId = Number(req.body.vendor_id);
   if (!vendorId) throw new Error("Select a vendor tab first.");
@@ -12937,7 +13060,7 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermissi
     await recalcRfqStatus(client, rfqId);
   });
   res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(vendorId))}`);
-});
+}));
 
 app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"), async (req, res) => {
   const jobId = currentJobId(req);
