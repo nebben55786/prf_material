@@ -4087,9 +4087,8 @@ async function ensureUnallocatedBom(client, jobId) {
 
 async function rebuildUnallocatedBom(client, jobId) {
   const bom = await ensureUnallocatedBom(client, jobId);
-  const [inventoryRows, demandRows, itemRows, existingLines, sourceDescriptionRows] = await Promise.all([
-    client.query(getInventoryTotalsByItemSubquery(jobId)),
-    client.query(`
+  const inventoryRows = await client.query(getInventoryTotalsByItemSubquery(jobId));
+  const demandRows = await client.query(`
       select
         bl.item_code,
         sum(greatest(coalesce(bl.qty_required, 0) - coalesce(bl.qty_issued, 0), 0)) as qty_needed
@@ -4098,20 +4097,20 @@ async function rebuildUnallocatedBom(client, jobId) {
       where bh.job_id = $1
         and coalesce(bh.system_key, '') <> $2
       group by bl.item_code
-    `, [jobId, unallocatedBomSystemKey]),
-    client.query(`
+    `, [jobId, unallocatedBomSystemKey]);
+  const itemRows = await client.query(`
       select item_code, description, material_type, uom
       from material_items
       where job_id = $1
-    `, [jobId]),
-    client.query(`
+    `, [jobId]);
+  const existingLines = await client.query(`
       select bl.*,
              coalesce((select count(*) from material_requisition_lines mrl where mrl.bom_line_id = bl.id), 0) as requisition_count
       from bom_lines bl
       where bl.bom_id = $1
       order by bl.id
-    `, [bom.id]),
-    client.query(`
+    `, [bom.id]);
+  const sourceDescriptionRows = await client.query(`
       select item_code, description, priority
       from (
         select bl.item_code, bl.description, 1 as priority
@@ -4131,8 +4130,7 @@ async function rebuildUnallocatedBom(client, jobId) {
       where coalesce(trim(item_code), '') <> ''
         and coalesce(trim(description), '') <> ''
       order by priority, length(description) desc
-    `, [jobId, unallocatedBomSystemKey])
-  ]);
+    `, [jobId, unallocatedBomSystemKey]);
 
   const inventoryByItem = new Map(inventoryRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), parseQtyValue(row.qty_on_hand || 0)]));
   const demandByItem = new Map(demandRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), parseQtyValue(row.qty_needed || 0)]));
@@ -13106,47 +13104,62 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     return;
   }
   const poLines = (await query(`
+    with scoped_lines as (
+      select *
+      from po_lines
+      where po_id = $1
+        and job_id = $2
+    ),
+    received_totals as (
+      select r.po_line_id, sum(r.qty_received) as qty_received
+      from receipts r
+      join scoped_lines sl on sl.id = r.po_line_id
+      where r.job_id = $2
+      group by r.po_line_id
+    ),
+    short_totals as (
+      select o.po_line_id, sum(o.osd_qty) as qty_short_osd
+      from osd_logs o
+      join scoped_lines sl on sl.id = o.po_line_id
+      where o.job_id = $2
+        and upper(coalesce(o.osd_status, '')) = 'SHORTAGE'
+      group by o.po_line_id
+    ),
+    latest_receipts as (
+      select distinct on (r.po_line_id)
+        r.po_line_id,
+        r.warehouse,
+        r.location
+      from receipts r
+      join scoped_lines sl on sl.id = r.po_line_id
+      where r.job_id = $2
+      order by r.po_line_id, r.id desc
+    )
     select
-      pl.id,
-      coalesce(pl.po_line, '') as po_line,
-      coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
-      coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
-      pl.qty_ordered,
-      pl.size_1,
-      pl.size_2,
-      pl.thk_1,
-      pl.thk_2,
+      sl.id,
+      coalesce(sl.po_line, '') as po_line,
+      coalesce(nullif(sl.item_code_snapshot, ''), mi.item_code) as item_code,
+      coalesce(nullif(sl.description_snapshot, ''), mi.description) as description,
+      sl.qty_ordered,
+      sl.size_1,
+      sl.size_2,
+      sl.thk_1,
+      sl.thk_2,
       coalesce(rcv.qty_received, 0) as qty_received,
       coalesce(osd.qty_short_osd, 0) as qty_short_osd,
       coalesce(rcv.qty_received, 0) + coalesce(osd.qty_short_osd, 0) as qty_accounted,
       coalesce(last_receipt.warehouse, '') as last_warehouse,
       coalesce(last_receipt.location, '') as last_location
-    from po_lines pl
-    join material_items mi on mi.id = pl.material_item_id
-    left join (
-      select po_line_id, sum(qty_received) as qty_received
-      from receipts
-      group by po_line_id
-    ) rcv on rcv.po_line_id = pl.id
-    left join (
-      select po_line_id, sum(osd_qty) as qty_short_osd
-      from osd_logs
-      where upper(coalesce(osd_status, '')) = 'SHORTAGE'
-      group by po_line_id
-    ) osd on osd.po_line_id = pl.id
-    left join lateral (
-      select r.warehouse, r.location
-      from receipts r
-      where r.po_line_id = pl.id
-      order by r.id desc
-      limit 1
-    ) last_receipt on true
-    where pl.po_id = $1
+    from scoped_lines sl
+    join material_items mi on mi.id = sl.material_item_id
+    left join received_totals rcv on rcv.po_line_id = sl.id
+    left join short_totals osd on osd.po_line_id = sl.id
+    left join latest_receipts last_receipt on last_receipt.po_line_id = sl.id
     order by
-      case when coalesce(pl.po_line, '') = '' then 1 else 0 end,
-      case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
-      pl.id
-  `, [poId])).rows;
+      case when coalesce(sl.po_line, '') = '' then 1 else 0 end,
+      case when coalesce(sl.po_line, '') ~ '^[0-9]+$' then lpad(sl.po_line, 20, '0') else lower(coalesce(sl.po_line, '')) end,
+      sl.id
+  `, [poId, jobId])).rows;
   const history = (await query(`
     select
       r.received_at,
@@ -13168,9 +13181,11 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       where o.receipt_id = r.id
     ) logs on true
     where pl.po_id = $1
+      and pl.job_id = $2
+      and r.job_id = $2
     order by r.id desc
     limit 30
-  `, [poId])).rows;
+  `, [poId, jobId])).rows;
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}">${esc(row.name)}</option>`))
     .join("");
@@ -13364,12 +13379,33 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
     if (!receivedDate) throw new Error("Received Date is required.");
     const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
     const openTotals = (await client.query(`
+      with scoped_lines as (
+        select id, qty_ordered
+        from po_lines
+        where po_id = $1
+          and job_id = $2
+      ),
+      received_totals as (
+        select r.po_line_id, sum(r.qty_received) as qty_received
+        from receipts r
+        join scoped_lines sl on sl.id = r.po_line_id
+        where r.job_id = $2
+        group by r.po_line_id
+      ),
+      short_totals as (
+        select o.po_line_id, sum(o.osd_qty) as qty_short_osd
+        from osd_logs o
+        join scoped_lines sl on sl.id = o.po_line_id
+        where o.job_id = $2
+          and upper(coalesce(o.osd_status, '')) = 'SHORTAGE'
+        group by o.po_line_id
+      )
       select count(*) filter (
-        where ${poLineAccountedQtySql("pl")} < pl.qty_ordered
+        where coalesce(rcv.qty_received, 0) + coalesce(osd.qty_short_osd, 0) < sl.qty_ordered
       ) as open_line_count
-      from po_lines pl
-      where pl.po_id = $1
-        and pl.job_id = $2
+      from scoped_lines sl
+      left join received_totals rcv on rcv.po_line_id = sl.id
+      left join short_totals osd on osd.po_line_id = sl.id
     `, [poId, jobId])).rows[0];
     if (Number(openTotals?.open_line_count || 0) <= 0) {
       throw new Error("This PO is fully received. No additional receipts can be posted against it.");
