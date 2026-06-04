@@ -2570,6 +2570,67 @@ function writeWorksheetValue(worksheet, rowNumber, colIndex, value, templateRowN
   cell.v = String(value);
 }
 
+function setWorksheetValue(worksheet, rowIndex, colIndex, value, style = null) {
+  const ref = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+  if (value === undefined || value === null || value === "") {
+    worksheet[ref] = { t: "s", v: "", ...(style ? { s: style } : {}) };
+    return;
+  }
+  worksheet[ref] = typeof value === "number"
+    ? { t: "n", v: value, ...(style ? { s: style } : {}) }
+    : { t: "s", v: String(value), ...(style ? { s: style } : {}) };
+}
+
+function buildRfqFlowWorkbook(rows) {
+  const headers = ["Ident Code", "Description", "Required Qty", "Ident/MTO match", "Size", "Size 2", "Category", "Material Description", "Qty Req"];
+  const worksheet = {};
+  const headerStyle = {
+    font: { bold: true, color: { rgb: "000000" } },
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFFF00" } },
+    border: {
+      top: { style: "thin", color: { rgb: "000000" } },
+      bottom: { style: "thin", color: { rgb: "000000" } },
+      left: { style: "thin", color: { rgb: "000000" } },
+      right: { style: "thin", color: { rgb: "000000" } }
+    }
+  };
+  const plainHeaderStyle = {
+    ...headerStyle,
+    fill: { patternType: "solid", fgColor: { rgb: "FFFFFFFF" } }
+  };
+  const yellowHeaderNames = new Set(["Ident Code", "Size", "Size 2", "Qty Req"]);
+
+  headers.forEach((header, colIndex) => {
+    setWorksheetValue(worksheet, 0, colIndex, header, yellowHeaderNames.has(header) ? headerStyle : plainHeaderStyle);
+  });
+  rows.forEach((row, rowOffset) => {
+    const rowIndex = rowOffset + 1;
+    setWorksheetValue(worksheet, rowIndex, 0, textValue(row.item_code));
+    setWorksheetValue(worksheet, rowIndex, 4, textValue(row.size_1));
+    setWorksheetValue(worksheet, rowIndex, 5, textValue(row.size_2));
+    setWorksheetValue(worksheet, rowIndex, 8, num(row.qty));
+  });
+  worksheet["!ref"] = XLSX.utils.encode_range({
+    s: { r: 0, c: 0 },
+    e: { r: Math.max(rows.length, 0), c: headers.length - 1 }
+  });
+  worksheet["!cols"] = [
+    { wch: 16 },
+    { wch: 18 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 10 },
+    { wch: 10 },
+    { wch: 14 },
+    { wch: 28 },
+    { wch: 12 }
+  ];
+  worksheet["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }) };
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "FLOW");
+  return workbook;
+}
+
 function getWorksheetHeaderColumnMap(worksheet, headerRowNumber = 1) {
   const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1");
   const headerRowIndex = Number(headerRowNumber) - 1;
@@ -11045,6 +11106,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <button type="submit" ${selectedVendors.length === 0 ? "disabled" : ""}>Award Whole RFQ</button>
           ${awardedItems.length > 0 ? `<button class="btn btn-secondary" type="submit" formaction="/rfq/${rfqId}/award/clear">Clear Whole RFQ Award</button>` : ""}
           ${poAwardAction}
+          <a class="btn btn-secondary" href="/rfq/${rfqId}/export-flow.xlsx">Export to FLOW</a>
           <a class="btn btn-secondary" href="/rfq/${rfqId}/export.xlsx">Export AX XLSX</a>
         </div>
         ${awardSummaryText}
@@ -11404,6 +11466,38 @@ app.get("/rfq/:id/export.xlsx", requireAuth, requireJobContext, requirePermissio
   await auditLog(pool, req.user.id, "export", "rfq_ax_workbook", rfqId, `rows=${itemsRes.rows.length}|${rfq.rfq_no || ""}`);
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", `attachment; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}-ax-import.xlsx"`);
+  res.send(buffer);
+}));
+
+app.get("/rfq/:id/export-flow.xlsx", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const [rfqRes, itemsRes] = await Promise.all([
+    query("select * from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
+    query(`
+      select
+        ri.id,
+        ri.po_line,
+        ri.qty,
+        coalesce(ri.size_1, '') as size_1,
+        coalesce(ri.size_2, '') as size_2,
+        coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code
+      from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.rfq_id = $1 and ri.job_id = $2 and mi.job_id = $2
+      order by
+        case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
+        case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
+        ri.id
+    `, [rfqId, jobId])
+  ]);
+  const rfq = rfqRes.rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const workbook = buildRfqFlowWorkbook(itemsRes.rows);
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer", cellStyles: true });
+  await auditLog(pool, req.user.id, "export", "rfq_flow_workbook", rfqId, `rows=${itemsRes.rows.length}|${rfq.rfq_no || ""}`);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${String(rfq.rfq_no || "RFQ").replace(/[^A-Za-z0-9._-]/g, "_")}-flow.xlsx"`);
   res.send(buffer);
 }));
 
