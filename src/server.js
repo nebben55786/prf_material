@@ -42,6 +42,7 @@ const permissionSections = [
   { key: "rfqs", label: "RFQs", href: "/rfq" },
   { key: "pos", label: "POs", href: "/po" },
   { key: "bom", label: "BOM", href: "/bom" },
+  { key: "items", label: "Items", href: "/items" },
   { key: "receiving", label: "Receiving", href: "/receive" },
   { key: "yard", label: "Yard", href: "/yard" },
   { key: "requisitions", label: "REQs", href: "/requisitions" },
@@ -69,6 +70,7 @@ const defaultPermissionMatrix = {
     rfqs: { view: true, edit: true },
     pos: { view: true, edit: true },
     bom: { view: true, edit: true },
+    items: { view: true, edit: true },
     receiving: { view: true, edit: true },
     yard: { view: true },
     inventory: { view: true, edit: true },
@@ -82,6 +84,7 @@ const defaultPermissionMatrix = {
     rfqs: { view: true, edit: true },
     pos: { view: true, edit: true },
     bom: { view: true, edit: true },
+    items: { view: true, edit: true },
     receiving: { view: true, edit: false },
     yard: { view: true },
     inventory: { view: true, edit: true },
@@ -95,6 +98,7 @@ const defaultPermissionMatrix = {
     rfqs: { view: false, edit: false },
     pos: { view: true, edit: false },
     bom: { view: false, edit: false },
+    items: { view: false, edit: false },
     receiving: { view: true, edit: true },
     yard: { view: true },
     inventory: { view: true, edit: false },
@@ -108,6 +112,7 @@ const defaultPermissionMatrix = {
     rfqs: { view: false, edit: false },
     pos: { view: false, edit: false },
     bom: { view: false, edit: false },
+    items: { view: false, edit: false },
     receiving: { view: false, edit: false },
     yard: { view: true },
     inventory: { view: true, edit: false },
@@ -121,6 +126,7 @@ const defaultPermissionMatrix = {
     rfqs: { view: true, edit: false },
     pos: { view: true, edit: false },
     bom: { view: true, edit: false },
+    items: { view: true, edit: false },
     receiving: { view: true, edit: false },
     yard: { view: true },
     inventory: { view: true, edit: false },
@@ -1754,22 +1760,12 @@ function layout(title, body, user) {
             rowsMissingCode.push(itemCodeInput);
           }
         }
-        let allowMissingInput = form.querySelector('input[name="allow_missing_item_codes"]');
         if (!rowsMissingCode.length) {
-          if (allowMissingInput) allowMissingInput.value = "";
           return true;
         }
-        if (!window.confirm("No item codes, Do you want to continue?")) {
-          return false;
-        }
-        if (!allowMissingInput) {
-          allowMissingInput = document.createElement("input");
-          allowMissingInput.type = "hidden";
-          allowMissingInput.name = "allow_missing_item_codes";
-          form.appendChild(allowMissingInput);
-        }
-        allowMissingInput.value = "1";
-        return true;
+        window.alert("Item Code is required and must exist in Item Master.");
+        rowsMissingCode[0].focus();
+        return false;
       }
       document.addEventListener("DOMContentLoaded", () => {
         attachPasswordValidation("new-user-form", "password", "new-user-password-error");
@@ -1827,15 +1823,6 @@ function normalizePhone(value) {
   return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
 }
 
-function randomFiveDigitItemCode(used = new Set()) {
-  let nextCode = "";
-  do {
-    nextCode = String(Math.floor(10000 + Math.random() * 90000));
-  } while (used.has(nextCode));
-  used.add(nextCode);
-  return nextCode;
-}
-
 function rfqRowHasAnyEnteredValues(row) {
   return [
     row.description,
@@ -1851,51 +1838,6 @@ function rfqRowHasAnyEnteredValues(row) {
     row.qty,
     row.notes
   ].some((value) => String(value || "").trim());
-}
-
-async function generateUniqueRfqItemCode(runner, used = new Set()) {
-  let attempts = 0;
-  while (attempts < 1000) {
-    const candidate = randomFiveDigitItemCode(used);
-    const existing = await runner.query("select 1 from material_items where item_code = $1 limit 1", [candidate]);
-    if (!existing.rows[0]) return candidate;
-    used.delete(candidate);
-    attempts += 1;
-  }
-  throw new Error("Unable to generate a unique 5-digit item code.");
-}
-
-async function assignGeneratedRfqItemCodes(runner, rows) {
-  const usedCodes = new Set(rows.map((row) => String(row.item_code || "").trim()).filter(Boolean));
-  let generatedCount = 0;
-  const nextRows = [];
-  for (const row of rows) {
-    const nextRow = { ...row };
-    const normalizedCode = String(nextRow.item_code || "").trim();
-    const needsGeneratedCode = !normalizedCode && rfqRowHasAnyEnteredValues(nextRow);
-    const needsRecheck = Boolean(nextRow.generated_item_code) && normalizedCode;
-    if (needsGeneratedCode || needsRecheck) {
-      let finalCode = normalizedCode;
-      if (!finalCode) {
-        finalCode = await generateUniqueRfqItemCode(runner, usedCodes);
-        generatedCount += 1;
-      } else {
-        const existing = await runner.query("select 1 from material_items where item_code = $1 limit 1", [finalCode]);
-        if (existing.rows[0]) {
-          usedCodes.delete(finalCode);
-          finalCode = await generateUniqueRfqItemCode(runner, usedCodes);
-        } else {
-          usedCodes.add(finalCode);
-        }
-      }
-      nextRow.item_code = finalCode;
-      nextRow.generated_item_code = true;
-    } else {
-      nextRow.item_code = normalizedCode;
-    }
-    nextRows.push(nextRow);
-  }
-  return { rows: nextRows, generatedCount };
 }
 
 function normalizeEmail(value) {
@@ -2096,13 +2038,10 @@ function parseRfqPasteRows(pastedText) {
 function getRfqPasteRowIssues(row, { matched = false } = {}) {
   const issues = [];
   const itemCode = String(row.item_code || "").trim();
-  const description = String(row.description || "").trim();
   const qty = parseQtyValue(row.qty, NaN);
-  const uom = String(row.uom || "").trim();
   if (!itemCode) issues.push("Ident is required");
-  if (!matched && !description) issues.push("Description is required");
+  if (itemCode && !matched) issues.push("Item is not in Item Master");
   if (!Number.isFinite(qty) || qty <= 0) issues.push("Qty is required");
-  if (!matched && !uom) issues.push("UOM is required");
   return issues;
 }
 
@@ -2372,7 +2311,7 @@ function asyncHandler(fn) {
 function getHttpErrorStatus(error) {
   if (Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode < 600) return error.statusCode;
   const message = String(error?.message || "").toLowerCase();
-  if (/(required|must be|choose|select|invalid|exceeds|cannot|already|only .* can|no .* found|not found|refresh and try again|at least one|greater than zero|before saving)/i.test(message)) {
+  if (/(required|must be|choose|select|invalid|exceeds|cannot|already|only .* can|no .* found|not found|not in item master|not tagged to spec|refresh and try again|at least one|greater than zero|before saving)/i.test(message)) {
     return 400;
   }
   return 500;
@@ -2432,27 +2371,247 @@ function requestAccessPage(error = "", success = "") {
 }
 
 const rfqItemColumns = ["po_line", "item_code", "description", "material_type", "uom", "spec", "commodity_code", "tag_number", "size_1", "size_2", "thk_1", "thk_2", "qty", "notes"];
+const materialItemImportHeaders = ["item_code", "description", "material_type", "uom", "commodity_code", "size_1", "size_2", "thk_1", "thk_2", "notes", "specs"];
 
-async function upsertMaterialItem(client, row, jobId) {
-  const itemCode = String(row.item_code || "").trim();
-  const description = String(row.description || "").trim();
-  const materialType = String(row.material_type || "").trim();
-  const uom = String(row.uom || "").trim();
-  if (!itemCode) throw new Error("Item code is required.");
-  const existing = await client.query("select id, description, material_type, uom from material_items where job_id = $1 and item_code = $2", [jobId, itemCode]);
-  if (existing.rows[0]) {
-    const current = existing.rows[0];
-    await client.query(
-      "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
-      [current.id, description || current.description, materialType || current.material_type, uom || current.uom]
-    );
-    return current.id;
-  }
-  const insert = await client.query(
-    "insert into material_items (job_id, item_code, description, material_type, uom) values ($1, $2, $3, $4, $5) returning id",
-    [jobId, itemCode, description || itemCode, materialType || "misc", uom || "EA"]
+function normalizeSpecName(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function parseSpecList(value) {
+  const seen = new Set();
+  return String(value || "")
+    .split(/[|,;\r\n]+/)
+    .map(normalizeSpecName)
+    .filter((spec) => spec && !seen.has(spec.toLowerCase()) && seen.add(spec.toLowerCase()));
+}
+
+function normalizeMaterialItemImportRow(row = {}) {
+  const text = (...values) => {
+    for (const value of values) {
+      const normalized = String(value ?? "").trim();
+      if (normalized) return normalized;
+    }
+    return "";
+  };
+  return {
+    item_code: text(row.item_code, row.ident, row.ident_code, row.item, row.item_no, row.item_number),
+    description: text(row.description, row.desc, row.material_description),
+    material_type: text(row.material_type, row.type, row.item_type, "misc"),
+    uom: text(row.uom, row.unit, row.unit_of_measure, "EA"),
+    commodity_code: text(row.commodity_code, row.commodity),
+    size_1: text(row.size_1, row.size1, row.primary_size),
+    size_2: text(row.size_2, row.size2, row.secondary_size),
+    thk_1: text(row.thk_1, row.thk1, row.thickness_1, row.wall_1),
+    thk_2: text(row.thk_2, row.thk2, row.thickness_2, row.wall_2),
+    notes: text(row.notes, row.note, row.remarks),
+    specs: parseSpecList(text(row.specs, row.spec, row.pipe_specs, row.piping_specs))
+  };
+}
+
+async function ensureMaterialSpec(client, jobId, specName) {
+  const name = normalizeSpecName(specName);
+  if (!name) return null;
+  const existing = (await client.query(
+    "select id, name from material_specs where job_id = $1 and lower(name) = lower($2) limit 1",
+    [jobId, name]
+  )).rows[0];
+  if (existing) return existing;
+  const inserted = await client.query(
+    "insert into material_specs (job_id, name) values ($1, $2) returning id, name",
+    [jobId, name]
   );
-  return insert.rows[0].id;
+  return inserted.rows[0];
+}
+
+async function syncMaterialItemSpecs(client, materialItemId, jobId, specNames = []) {
+  const specs = parseSpecList(Array.isArray(specNames) ? specNames.join("|") : specNames);
+  await client.query("delete from material_item_specs where material_item_id = $1 and job_id = $2", [materialItemId, jobId]);
+  for (const specName of specs) {
+    const spec = await ensureMaterialSpec(client, jobId, specName);
+    if (!spec) continue;
+    await client.query(
+      "insert into material_item_specs (job_id, material_item_id, spec_id) values ($1, $2, $3) on conflict do nothing",
+      [jobId, materialItemId, spec.id]
+    );
+  }
+}
+
+async function upsertMaterialMasterItem(client, row, jobId) {
+  const normalized = normalizeMaterialItemImportRow(row);
+  const itemCode = normalized.item_code;
+  if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
+  if (!normalized.description) return { status: "skipped", errorCode: "missing_description", message: "Description is required." };
+  const existing = await client.query("select id from material_items where job_id = $1 and lower(item_code) = lower($2) limit 1", [jobId, itemCode]);
+  let status = "inserted";
+  let itemId;
+  if (existing.rows[0]) {
+    itemId = existing.rows[0].id;
+    await client.query(`
+      update material_items
+      set item_code = $2,
+          description = $3,
+          material_type = $4,
+          uom = $5,
+          commodity_code = $6,
+          size_1 = $7,
+          size_2 = $8,
+          thk_1 = $9,
+          thk_2 = $10,
+          notes = $11,
+          updated_at = now()
+      where id = $1 and job_id = $12
+    `, [
+      itemId,
+      itemCode,
+      normalized.description,
+      normalized.material_type || "misc",
+      normalized.uom || "EA",
+      normalized.commodity_code,
+      normalized.size_1,
+      normalized.size_2,
+      normalized.thk_1,
+      normalized.thk_2,
+      normalized.notes,
+      jobId
+    ]);
+    status = "updated";
+  } else {
+    const insert = await client.query(`
+      insert into material_items (
+        job_id, item_code, description, material_type, uom, commodity_code,
+        size_1, size_2, thk_1, thk_2, notes, updated_at
+      )
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+      returning id
+    `, [
+      jobId,
+      itemCode,
+      normalized.description,
+      normalized.material_type || "misc",
+      normalized.uom || "EA",
+      normalized.commodity_code,
+      normalized.size_1,
+      normalized.size_2,
+      normalized.thk_1,
+      normalized.thk_2,
+      normalized.notes
+    ]);
+    itemId = insert.rows[0].id;
+  }
+  await syncMaterialItemSpecs(client, itemId, jobId, normalized.specs);
+  return { status, id: itemId, item: normalized };
+}
+
+async function updateMaterialMasterItemById(client, materialItemId, row, jobId) {
+  const normalized = normalizeMaterialItemImportRow(row);
+  const itemCode = normalized.item_code;
+  if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
+  if (!normalized.description) return { status: "skipped", errorCode: "missing_description", message: "Description is required." };
+  const duplicate = (await client.query(
+    "select id from material_items where job_id = $1 and lower(item_code) = lower($2) and id <> $3 limit 1",
+    [jobId, itemCode, materialItemId]
+  )).rows[0];
+  if (duplicate) {
+    return { status: "skipped", errorCode: "duplicate_item_code", message: `Item code ${itemCode} already exists in Item Master.` };
+  }
+  const update = await client.query(`
+    update material_items
+    set item_code = $3,
+        description = $4,
+        material_type = $5,
+        uom = $6,
+        commodity_code = $7,
+        size_1 = $8,
+        size_2 = $9,
+        thk_1 = $10,
+        thk_2 = $11,
+        notes = $12,
+        updated_at = now()
+    where id = $1 and job_id = $2
+  `, [
+    materialItemId,
+    jobId,
+    itemCode,
+    normalized.description,
+    normalized.material_type || "misc",
+    normalized.uom || "EA",
+    normalized.commodity_code,
+    normalized.size_1,
+    normalized.size_2,
+    normalized.thk_1,
+    normalized.thk_2,
+    normalized.notes
+  ]);
+  if (update.rowCount === 0) return { status: "skipped", errorCode: "item_not_found", message: "Item not found." };
+  await syncMaterialItemSpecs(client, materialItemId, jobId, normalized.specs);
+  return { status: "updated", id: materialItemId, item: normalized };
+}
+
+async function getMaterialItemForUse(client, itemCode, jobId, specName = "") {
+  const code = String(itemCode || "").trim();
+  if (!code) return { errorCode: "missing_item_code", message: "Item code is required." };
+  const item = (await client.query(`
+    select
+      id,
+      item_code,
+      description,
+      material_type,
+      uom,
+      coalesce(commodity_code, '') as commodity_code,
+      coalesce(size_1, '') as size_1,
+      coalesce(size_2, '') as size_2,
+      coalesce(thk_1, '') as thk_1,
+      coalesce(thk_2, '') as thk_2,
+      coalesce(notes, '') as notes
+    from material_items
+    where job_id = $1 and lower(item_code) = lower($2)
+    limit 1
+  `, [jobId, code])).rows[0];
+  if (!item) {
+    return { errorCode: "item_not_in_master", message: `Item code ${code} is not in Item Master for this job.` };
+  }
+  const spec = normalizeSpecName(specName);
+  if (spec) {
+    const tagged = (await client.query(`
+      select 1
+      from material_item_specs mis
+      join material_specs ms on ms.id = mis.spec_id
+      where mis.material_item_id = $1
+        and mis.job_id = $2
+        and lower(ms.name) = lower($3)
+      limit 1
+    `, [item.id, jobId, spec])).rows[0];
+    if (!tagged) {
+      return { errorCode: "item_not_tagged_to_spec", message: `Item code ${code} is not tagged to spec ${spec}.` };
+    }
+  }
+  return { item, spec };
+}
+
+function materialItemSnapshotParams(item) {
+  return [
+    item.item_code || "",
+    item.description || "",
+    item.material_type || "misc",
+    item.uom || "EA"
+  ];
+}
+
+async function getMaterialSpecOptions(jobId) {
+  return (await query("select id, name from material_specs where job_id = $1 order by name", [jobId])).rows;
+}
+
+async function getMaterialItemSpecsByItemIds(itemIds = []) {
+  const ids = itemIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
+  if (!ids.length) return new Map();
+  const rows = (await query(`
+    select mis.material_item_id, string_agg(ms.name, ', ' order by ms.name) as specs
+    from material_item_specs mis
+    join material_specs ms on ms.id = mis.spec_id
+    where mis.material_item_id = any($1::bigint[])
+    group by mis.material_item_id
+  `, [ids])).rows;
+  return new Map(rows.map((row) => [Number(row.material_item_id), row.specs || ""]));
 }
 
 async function findOrCreateVendorByName(client, vendorName, jobId) {
@@ -2475,30 +2634,50 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
   const itemCode = String(row.item_code || "").trim();
   const requestedLine = String(row.po_line || row.line_no || row.line || "").trim();
   const qty = parseQtyValue(row.qty);
+  const requestedSpec = normalizeSpecName(row.spec);
   if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
   if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
-  const materialItemId = await upsertMaterialItem(client, row, jobId);
+  const materialLookup = await getMaterialItemForUse(client, itemCode, jobId, requestedSpec);
+  if (materialLookup.errorCode) {
+    return { status: "skipped", errorCode: materialLookup.errorCode, message: materialLookup.message };
+  }
+  const item = materialLookup.item;
+  const materialItemId = item.id;
   const existingItem = await client.query(`
     select id, coalesce(po_line, '') as po_line
     from rfq_items
     where rfq_id = $1 and material_item_id = $2
       and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
       and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
-  `, [rfqId, materialItemId, row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || ""]);
+      and coalesce(spec, '') = $7
+  `, [rfqId, materialItemId, item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", requestedSpec]);
   if (existingItem.rows[0]) {
     const poLine = requestedLine || existingItem.rows[0].po_line || await getNextRfqLineNumber(client, rfqId);
     await client.query(`
       update rfq_items
-      set po_line = $2, spec = $3, commodity_code = $4, tag_number = $5, qty = $6, notes = $7, updated_at = now()
+      set po_line = $2,
+          item_code_snapshot = $3,
+          description_snapshot = $4,
+          material_type_snapshot = $5,
+          uom_snapshot = $6,
+          spec = $7,
+          commodity_code = $8,
+          tag_number = $9,
+          qty = $10,
+          notes = $11,
+          updated_at = now()
       where id = $1
-    `, [existingItem.rows[0].id, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
+    `, [existingItem.rows[0].id, poLine, ...materialItemSnapshotParams(item), requestedSpec, item.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
     return { status: "updated" };
   }
   const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
   await client.query(`
-    insert into rfq_items (job_id, rfq_id, material_item_id, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
-    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
-  `, [jobId, rfqId, materialItemId, poLine, row.spec || "", row.commodity_code || "", row.tag_number || "", row.size_1 || "", row.size_2 || "", row.thk_1 || "", row.thk_2 || "", qty, row.notes || ""]);
+    insert into rfq_items (
+      job_id, rfq_id, material_item_id, item_code_snapshot, description_snapshot, material_type_snapshot,
+      uom_snapshot, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at
+    )
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+  `, [jobId, rfqId, materialItemId, ...materialItemSnapshotParams(item), poLine, requestedSpec, item.commodity_code || "", row.tag_number || "", item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", qty, row.notes || ""]);
   return { status: "inserted" };
 }
 
@@ -2516,12 +2695,10 @@ async function upsertPurchaseOrderRow(client, row, jobId) {
   if (unitPrice < 0) return { status: "skipped", errorCode: "invalid_unit_price", message: "Unit price cannot be negative." };
 
   const vendorId = await findOrCreateVendorByName(client, vendorName, jobId);
-  const materialItemId = await upsertMaterialItem(client, {
-    item_code: itemCode,
-    description: row.description || row.item_description || itemCode,
-    material_type: row.material_type || row.type || "misc",
-    uom: row.uom || row.unit || "EA"
-  }, jobId);
+  const materialLookup = await getMaterialItemForUse(client, itemCode, jobId);
+  if (materialLookup.errorCode) return { status: "skipped", errorCode: materialLookup.errorCode, message: materialLookup.message };
+  const item = materialLookup.item;
+  const materialItemId = item.id;
 
   const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
   let poId;
@@ -2575,10 +2752,10 @@ async function upsertPurchaseOrderRow(client, row, jobId) {
     headerStatus = "inserted";
   }
 
-  const size1 = String(row.size_1 || "").trim();
-  const size2 = String(row.size_2 || "").trim();
-  const thk1 = String(row.thk_1 || "").trim();
-  const thk2 = String(row.thk_2 || "").trim();
+  const effectiveSize1 = item.size_1 || "";
+  const effectiveSize2 = item.size_2 || "";
+  const effectiveThk1 = item.thk_1 || "";
+  const effectiveThk2 = item.thk_2 || "";
   const existingLine = (await client.query(`
     select id
     from po_lines
@@ -2586,20 +2763,34 @@ async function upsertPurchaseOrderRow(client, row, jobId) {
       and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
       and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
     limit 1
-  `, [poId, materialItemId, size1, size2, thk1, thk2])).rows[0];
+  `, [poId, materialItemId, effectiveSize1, effectiveSize2, effectiveThk1, effectiveThk2])).rows[0];
   if (existingLine) {
     await client.query(`
       update po_lines
-      set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
+      set po_line = $2,
+          item_code_snapshot = $3,
+          description_snapshot = $4,
+          material_type_snapshot = $5,
+          uom_snapshot = $6,
+          qty_ordered = $7,
+          unit_price = $8,
+          size_1 = $9,
+          size_2 = $10,
+          thk_1 = $11,
+          thk_2 = $12,
+          updated_at = now()
       where id = $1
-    `, [existingLine.id, poLine, qtyOrdered, unitPrice, size1, size2, thk1, thk2]);
+    `, [existingLine.id, poLine, ...materialItemSnapshotParams(item), qtyOrdered, unitPrice, effectiveSize1, effectiveSize2, effectiveThk1, effectiveThk2]);
     return { status: headerStatus === "inserted" ? "inserted" : "updated" };
   }
 
   await client.query(`
-    insert into po_lines (job_id, po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
-    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
-  `, [jobId, poId, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
+    insert into po_lines (
+      job_id, po_id, rfq_item_id, material_item_id, item_code_snapshot, description_snapshot,
+      material_type_snapshot, uom_snapshot, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at
+    )
+    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+  `, [jobId, poId, materialItemId, ...materialItemSnapshotParams(item), poLine, effectiveSize1, effectiveSize2, effectiveThk1, effectiveThk2, qtyOrdered, unitPrice]);
   return { status: "inserted" };
 }
 
@@ -2667,7 +2858,6 @@ async function upsertPurchaseOrderLineRow(client, row, jobId) {
   const poLine = String(row.po_line || row.line_no || row.line || "").trim();
   if (!poNo) return { status: "skipped", errorCode: "missing_po_no", message: "PO number is required." };
   if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
-  if (!String(row.description || "").trim()) return { status: "skipped", errorCode: "missing_description", message: "Description is required." };
   if (qtyOrdered <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty ordered must be greater than zero." };
   if (unitPrice < 0) return { status: "skipped", errorCode: "invalid_unit_price", message: "Unit price cannot be negative." };
 
@@ -2677,17 +2867,15 @@ async function upsertPurchaseOrderLineRow(client, row, jobId) {
     : (await client.query("select id, job_id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
   if (!poRow) return { status: "skipped", errorCode: "missing_po_header", message: "PO header not found. Import or create the PO header first." };
 
-  const materialItemId = await upsertMaterialItem(client, {
-    item_code: itemCode,
-    description: row.description || row.item_description || itemCode,
-    material_type: row.material_type || row.type || "misc",
-    uom: row.uom || row.unit || "EA"
-  }, poRow.job_id);
+  const materialLookup = await getMaterialItemForUse(client, itemCode, poRow.job_id);
+  if (materialLookup.errorCode) return { status: "skipped", errorCode: materialLookup.errorCode, message: materialLookup.message };
+  const item = materialLookup.item;
+  const materialItemId = item.id;
 
-  const size1 = String(row.size_1 || "").trim();
-  const size2 = String(row.size_2 || "").trim();
-  const thk1 = String(row.thk_1 || "").trim();
-  const thk2 = String(row.thk_2 || "").trim();
+  const effectiveSize1 = item.size_1 || "";
+  const effectiveSize2 = item.size_2 || "";
+  const effectiveThk1 = item.thk_1 || "";
+  const effectiveThk2 = item.thk_2 || "";
   const existingLine = (await client.query(`
     select id
     from po_lines
@@ -2695,20 +2883,34 @@ async function upsertPurchaseOrderLineRow(client, row, jobId) {
       and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
       and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
     limit 1
-  `, [poRow.id, materialItemId, size1, size2, thk1, thk2])).rows[0];
+  `, [poRow.id, materialItemId, effectiveSize1, effectiveSize2, effectiveThk1, effectiveThk2])).rows[0];
   if (existingLine) {
     await client.query(`
       update po_lines
-      set po_line = $2, qty_ordered = $3, unit_price = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, updated_at = now()
+      set po_line = $2,
+          item_code_snapshot = $3,
+          description_snapshot = $4,
+          material_type_snapshot = $5,
+          uom_snapshot = $6,
+          qty_ordered = $7,
+          unit_price = $8,
+          size_1 = $9,
+          size_2 = $10,
+          thk_1 = $11,
+          thk_2 = $12,
+          updated_at = now()
       where id = $1
-    `, [existingLine.id, poLine, qtyOrdered, unitPrice, size1, size2, thk1, thk2]);
+    `, [existingLine.id, poLine, ...materialItemSnapshotParams(item), qtyOrdered, unitPrice, effectiveSize1, effectiveSize2, effectiveThk1, effectiveThk2]);
     return { status: "updated" };
   }
 
   await client.query(`
-    insert into po_lines (job_id, po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at)
-    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, now())
-  `, [poRow.job_id, poRow.id, materialItemId, poLine, size1, size2, thk1, thk2, qtyOrdered, unitPrice]);
+    insert into po_lines (
+      job_id, po_id, rfq_item_id, material_item_id, item_code_snapshot, description_snapshot,
+      material_type_snapshot, uom_snapshot, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, updated_at
+    )
+    values ($1, $2, null, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+  `, [poRow.job_id, poRow.id, materialItemId, ...materialItemSnapshotParams(item), poLine, effectiveSize1, effectiveSize2, effectiveThk1, effectiveThk2, qtyOrdered, unitPrice]);
   return { status: "inserted" };
 }
 
@@ -3020,10 +3222,10 @@ function getInventoryByLocationSubquery(jobId = null) {
       coalesce(receipt_inventory.location, adjustment_inventory.location) as location,
       coalesce(receipt_inventory.qty_on_hand, 0) + coalesce(adjustment_inventory.qty_adjustment, 0) as qty_on_hand,
       coalesce(receipt_inventory.qty_osd, 0) as qty_osd
-    from (
-      select
-        mi.item_code,
-        mi.description,
+      from (
+        select
+        coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+        coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
         coalesce(pl.size_1, '') as size_1,
         coalesce(pl.size_2, '') as size_2,
         coalesce(pl.thk_1, '') as thk_1,
@@ -3037,8 +3239,8 @@ function getInventoryByLocationSubquery(jobId = null) {
       join material_items mi on mi.id = pl.material_item_id
       ${jobFilterSql}
       group by
-        mi.item_code,
-        mi.description,
+        coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code),
+        coalesce(nullif(pl.description_snapshot, ''), mi.description),
         coalesce(pl.size_1, ''),
         coalesce(pl.size_2, ''),
         coalesce(pl.thk_1, ''),
@@ -6381,6 +6583,281 @@ app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireJobCont
   res.send(buffer);
 }));
 
+app.get("/items/import/template", requireAuth, requireJobContext, requirePermission("items", "view"), asyncHandler(async (_req, res) => {
+  const worksheet = XLSX.utils.aoa_to_sheet([materialItemImportHeaders]);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Item Master");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="item-master-import-template.xlsx"');
+  res.send(buffer);
+}));
+
+app.get("/items/export.xlsx", requireAuth, requireJobContext, requirePermission("items", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const rows = (await query(`
+    select
+      mi.item_code,
+      mi.description,
+      mi.material_type,
+      mi.uom,
+      coalesce(mi.commodity_code, '') as commodity_code,
+      coalesce(mi.size_1, '') as size_1,
+      coalesce(mi.size_2, '') as size_2,
+      coalesce(mi.thk_1, '') as thk_1,
+      coalesce(mi.thk_2, '') as thk_2,
+      coalesce(mi.notes, '') as notes,
+      coalesce(string_agg(ms.name, ' | ' order by ms.name) filter (where ms.id is not null), '') as specs
+    from material_items mi
+    left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
+    left join material_specs ms on ms.id = mis.spec_id
+    where mi.job_id = $1
+    group by mi.id
+    order by mi.item_code
+  `, [jobId])).rows;
+  const exportRows = rows.map((row) => ({
+    item_code: row.item_code,
+    description: row.description,
+    material_type: row.material_type,
+    uom: row.uom,
+    commodity_code: row.commodity_code,
+    size_1: row.size_1,
+    size_2: row.size_2,
+    thk_1: row.thk_1,
+    thk_2: row.thk_2,
+    notes: row.notes,
+    specs: row.specs
+  }));
+  const worksheet = XLSX.utils.json_to_sheet(exportRows, { header: materialItemImportHeaders });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Item Master");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="item-master.xlsx"');
+  res.send(buffer);
+}));
+
+app.get("/items", requireAuth, requireJobContext, requirePermission("items", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const q = String(req.query.q || "").trim();
+  const specId = Number(req.query.spec_id || 0);
+  const specs = await getMaterialSpecOptions(jobId);
+  const params = [jobId];
+  const where = ["mi.job_id = $1"];
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(
+      mi.item_code ilike $${params.length}
+      or mi.description ilike $${params.length}
+      or coalesce(mi.material_type, '') ilike $${params.length}
+      or coalesce(mi.uom, '') ilike $${params.length}
+      or coalesce(mi.commodity_code, '') ilike $${params.length}
+    )`);
+  }
+  if (specId > 0) {
+    params.push(specId);
+    where.push(`exists (
+      select 1
+      from material_item_specs filter_mis
+      where filter_mis.material_item_id = mi.id
+        and filter_mis.job_id = mi.job_id
+        and filter_mis.spec_id = $${params.length}
+    )`);
+  }
+  const rows = (await query(`
+    select
+      mi.id,
+      mi.item_code,
+      mi.description,
+      mi.material_type,
+      mi.uom,
+      coalesce(mi.commodity_code, '') as commodity_code,
+      coalesce(mi.size_1, '') as size_1,
+      coalesce(mi.size_2, '') as size_2,
+      coalesce(mi.thk_1, '') as thk_1,
+      coalesce(mi.thk_2, '') as thk_2,
+      coalesce(mi.notes, '') as notes,
+      coalesce(string_agg(ms.name, ', ' order by ms.name) filter (where ms.id is not null), '') as specs
+    from material_items mi
+    left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
+    left join material_specs ms on ms.id = mis.spec_id
+    where ${where.join(" and ")}
+    group by mi.id
+    order by mi.item_code
+    limit 500
+  `, params)).rows;
+  const specOptions = [`<option value="">All Specs</option>`]
+    .concat(specs.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === specId ? "selected" : ""}>${esc(spec.name)}</option>`))
+    .join("");
+  const itemRows = rows.map((item) => `<tr>
+    <td>${esc(item.item_code)}</td>
+    <td>${esc(item.description)}</td>
+    <td>${esc(item.material_type)}</td>
+    <td>${esc(item.uom)}</td>
+    <td>${esc(item.commodity_code)}</td>
+    <td>${esc(item.size_1)}</td>
+    <td>${esc(item.size_2)}</td>
+    <td>${esc(item.thk_1)}</td>
+    <td>${esc(item.thk_2)}</td>
+    <td>${esc(item.specs)}</td>
+    <td>${esc(item.notes)}</td>
+    <td>${canAccess(req.user, "items", "edit") ? `<a class="btn btn-secondary" href="/items/${item.id}/edit">Edit</a>` : ""}</td>
+  </tr>`).join("");
+  res.send(layout("Item Master", `
+    <h1>Item Master</h1>
+    <div class="card">
+      <form method="get" action="/items" class="stack">
+        <div class="grid">
+          <div><label>Search</label><input name="q" value="${esc(q)}" placeholder="Item code, description, type, UOM, commodity" /></div>
+          <div><label>Spec</label><select name="spec_id">${specOptions}</select></div>
+        </div>
+        <div class="actions">
+          <button type="submit">Filter Items</button>
+          <a class="btn btn-secondary" href="/items">Clear</a>
+          <a class="btn btn-secondary" href="/items/export.xlsx">Export XLSX</a>
+          <a class="btn btn-secondary" href="/items/import/template">Download Import Template</a>
+          <span class="muted">${rows.length} item(s), max 500 shown</span>
+        </div>
+      </form>
+    </div>
+    ${canAccess(req.user, "items", "edit") ? `
+      <div class="card">
+        <h3>Add Item</h3>
+        <form method="post" action="/items" class="stack">
+          <div class="grid-4">
+            <div><label>Item Code</label><input name="item_code" required /></div>
+            <div><label>Description</label><input name="description" required /></div>
+            <div><label>Type</label><input name="material_type" value="misc" /></div>
+            <div><label>UOM</label><input name="uom" value="EA" /></div>
+          </div>
+          <div class="grid-4">
+            <div><label>Commodity Code</label><input name="commodity_code" /></div>
+            <div><label>Size 1</label><input name="size_1" /></div>
+            <div><label>Size 2</label><input name="size_2" /></div>
+            <div><label>Thk 1</label><input name="thk_1" /></div>
+          </div>
+          <div class="grid">
+            <div><label>Thk 2</label><input name="thk_2" /></div>
+            <div><label>Specs</label><input name="specs" placeholder="Spec A | Spec B" /></div>
+          </div>
+          <div><label>Notes</label><textarea name="notes"></textarea></div>
+          <div class="actions"><button type="submit">Save Item</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Import Items</h3>
+        <p class="muted">Supported columns: ${esc(materialItemImportHeaders.join(", "))}. Use the specs column for one or more specs separated by | or commas.</p>
+        <form method="post" enctype="multipart/form-data" action="/items/import" class="stack">
+          <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+          <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
+          <div class="actions"><button type="submit">Import Items</button></div>
+        </form>
+      </div>
+    ` : ""}
+    <div class="card scroll">
+      <table>
+        <tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Commodity</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Specs</th><th>Notes</th><th>Action</th></tr>
+        ${itemRows || `<tr><td colspan="12" class="muted">No items match the current filter.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+}));
+
+app.post("/items", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const result = await upsertMaterialMasterItem(client, req.body, jobId);
+    if (result.status === "skipped") throw new Error(result.message);
+    await auditLog(client, req.user.id, result.status, "material_item", result.id, result.item.item_code);
+  });
+  res.redirect(`/items?q=${encodeURIComponent(String(req.body.item_code || "").trim())}`);
+}));
+
+app.post("/items/import", requireAuth, requireJobContext, requirePermission("items", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeMaterialItemImportRow);
+  if (!rows.length) throw new Error("No rows found.");
+  const jobId = currentJobId(req);
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "material_items",
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || "Item Master Import",
+      jobId
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertMaterialMasterItem(client, rows[index], jobId);
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 2, result.errorCode, result.message, rows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "material_items", batchId, `rows=${rows.length}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
+}));
+
+app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const item = (await query(`
+    select
+      mi.*,
+      extract(epoch from mi.updated_at)::text as updated_token,
+      coalesce(string_agg(ms.name, ' | ' order by ms.name) filter (where ms.id is not null), '') as specs
+    from material_items mi
+    left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
+    left join material_specs ms on ms.id = mis.spec_id
+    where mi.id = $1 and mi.job_id = $2
+    group by mi.id
+  `, [req.params.id, jobId])).rows[0];
+  if (!item) throw new Error("Item not found.");
+  res.send(layout("Edit Item", `
+    <h1>Edit Item</h1>
+    <div class="card">
+      <form method="post" action="/items/${item.id}/edit" class="stack">
+        <input type="hidden" name="updated_token" value="${esc(item.updated_token)}" />
+        <div class="grid-4">
+          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" required /></div>
+          <div><label>Description</label><input name="description" value="${esc(item.description)}" required /></div>
+          <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
+          <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
+        </div>
+        <div class="grid-4">
+          <div><label>Commodity Code</label><input name="commodity_code" value="${esc(item.commodity_code || "")}" /></div>
+          <div><label>Size 1</label><input name="size_1" value="${esc(item.size_1 || "")}" /></div>
+          <div><label>Size 2</label><input name="size_2" value="${esc(item.size_2 || "")}" /></div>
+          <div><label>Thk 1</label><input name="thk_1" value="${esc(item.thk_1 || "")}" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Thk 2</label><input name="thk_2" value="${esc(item.thk_2 || "")}" /></div>
+          <div><label>Specs</label><input name="specs" value="${esc(item.specs || "")}" placeholder="Spec A | Spec B" /></div>
+        </div>
+        <div><label>Notes</label><textarea name="notes">${esc(item.notes || "")}</textarea></div>
+        <div class="actions"><button type="submit">Save Item</button><a class="btn btn-secondary" href="/items">Back</a></div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
+app.post("/items/:id/edit", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
+  const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const current = (await client.query("select id from material_items where id = $1 and job_id = $2 and extract(epoch from updated_at)::text = $3", [itemId, jobId, req.body.updated_token || ""])).rows[0];
+    if (!current) throw new Error("This item was modified by another user. Refresh and try again.");
+    const result = await updateMaterialMasterItemById(client, itemId, req.body, jobId);
+    if (result.status === "skipped") throw new Error(result.message);
+    await auditLog(client, req.user.id, "update", "material_item", result.id, result.item.item_code);
+  });
+  res.redirect(`/items?q=${encodeURIComponent(String(req.body.item_code || "").trim())}`);
+}));
+
 app.post("/settings/permissions", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const nextMatrix = {};
   for (const role of permissionRoles) {
@@ -6867,7 +7344,7 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       </div>
       <div class="card">
         <h3>Upload BOM Lines</h3>
-        <p class="muted">CSV/XLSX columns: line_no, item_code, description, material_type, uom, spec, commodity_code, tag_number, iwp_no, iso_no, size_1, size_2, thk_1, thk_2, qty_required, notes</p>
+        <p class="muted">CSV/XLSX columns: line_no, item_code, spec, tag_number, iwp_no, iso_no, qty_required, notes. Item code must exist in Item Master; master description, UOM, type, commodity, and dimensions are used.</p>
           <form id="bom-lines-import-form" method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
             <div><label>CSV/XLSX File</label><input id="bom-lines-import-file" type="file" name="sheet" /></div>
             <div><label>Or Paste CSV</label><textarea id="bom-lines-import-text" name="csv_text"></textarea></div>
@@ -6916,25 +7393,34 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
     `, [jobId, rfqNo, req.body.project_name?.trim() || bom.bom_name || bom.description || bom.bom_no, req.body.due_date || null]);
     const newRfqId = rfqInsert.rows[0].id;
     for (const line of lines) {
-      let materialItemId;
-      const existingItem = await client.query("select id from material_items where job_id = $1 and item_code = $2", [jobId, line.item_code]);
-      if (existingItem.rows[0]) {
-        materialItemId = existingItem.rows[0].id;
-        await client.query(
-          "update material_items set description = $2, material_type = $3, uom = $4 where id = $1",
-          [materialItemId, line.description, line.material_type || "misc", line.uom || "EA"]
-        );
-      } else {
-        const inserted = await client.query(
-          "insert into material_items (job_id, item_code, description, material_type, uom) values ($1, $2, $3, $4, $5) returning id",
-          [jobId, line.item_code, line.description, line.material_type || "misc", line.uom || "EA"]
-        );
-        materialItemId = inserted.rows[0].id;
+      const materialLookup = await getMaterialItemForUse(client, line.item_code, jobId, line.spec || "");
+      if (materialLookup.errorCode) {
+        throw new Error(`BOM line ${line.line_no || line.id}: ${materialLookup.message}`);
       }
+      const item = materialLookup.item;
       await client.query(`
-        insert into rfq_items (job_id, rfq_id, bom_line_id, material_item_id, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
-      `, [jobId, newRfqId, line.id, materialItemId, line.spec || "", line.commodity_code || "", line.tag_number || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty_required, line.notes || ""]);
+        insert into rfq_items (
+          job_id, rfq_id, bom_line_id, material_item_id, item_code_snapshot, description_snapshot,
+          material_type_snapshot, uom_snapshot, spec, commodity_code, tag_number,
+          size_1, size_2, thk_1, thk_2, qty, notes, updated_at
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+      `, [
+        jobId,
+        newRfqId,
+        line.id,
+        item.id,
+        ...materialItemSnapshotParams(item),
+        line.spec || "",
+        item.commodity_code || "",
+        line.tag_number || "",
+        item.size_1 || "",
+        item.size_2 || "",
+        item.thk_1 || "",
+        item.thk_2 || "",
+        line.qty_required,
+        line.notes || ""
+      ]);
       await client.query(`
         update bom_lines
         set planning_status = 'ON_RFQ', qty_quoted = qty_required, updated_at = now()
@@ -7065,26 +7551,34 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
         await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, and qty_required are required.", row);
         continue;
       }
-      const sourceUid = `${lineNo}|${itemCode}`;
+      const spec = normalizeSpecName(row.spec || "");
+      const materialLookup = await getMaterialItemForUse(client, itemCode, jobId, spec);
+      if (materialLookup.errorCode) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, materialLookup.errorCode, materialLookup.message, row);
+        continue;
+      }
+      const item = materialLookup.item;
+      const sourceUid = `${lineNo}|${item.item_code}`;
       if (validRowsBySourceUid.has(sourceUid)) {
         skippedCount += 1;
         await addImportBatchError(client, batchId, rowNumber, "duplicate_bom_line", "Duplicate line no and item code found in the import. The last row was kept.", row);
       }
       validRowsBySourceUid.set(sourceUid, {
         lineNo,
-        itemCode,
-        description: row.description || itemCode,
-        materialType: row.material_type || "misc",
-        uom: row.uom || "EA",
-        spec: row.spec || "",
-        commodityCode: row.commodity_code || "",
+        itemCode: item.item_code,
+        description: item.description || item.item_code,
+        materialType: item.material_type || "misc",
+        uom: item.uom || "EA",
+        spec,
+        commodityCode: item.commodity_code || "",
         tagNumber: row.tag_number || "",
         iwpNo: row.iwp_no || row.iwp || "",
         isoNo: row.iso_no || row.iso || "",
-        size1: row.size_1 || "",
-        size2: row.size_2 || "",
-        thk1: row.thk_1 || "",
-        thk2: row.thk_2 || "",
+        size1: item.size_1 || "",
+        size2: item.size_2 || "",
+        thk1: item.thk_1 || "",
+        thk2: item.thk_2 || "",
         qtyRequired,
         notes: row.notes || ""
       });
@@ -7215,7 +7709,7 @@ app.post("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requ
 }));
 
 async function getBomLineEntryAutocomplete(bomId, jobId) {
-  const [lineNoRes, materialItemRes, bomItemDetailRes] = await Promise.all([
+  const [lineNoRes, materialItemRes] = await Promise.all([
     query(`
       select distinct line_no
       from bom_lines
@@ -7224,57 +7718,40 @@ async function getBomLineEntryAutocomplete(bomId, jobId) {
       order by line_no
     `, [bomId]),
     query(`
-      select item_code, description, material_type, uom
-      from material_items
-      where job_id = $1
-        and coalesce(item_code, '') <> ''
-      order by item_code
+      select
+        mi.item_code,
+        mi.description,
+        mi.material_type,
+        mi.uom,
+        coalesce(mi.commodity_code, '') as commodity_code,
+        coalesce(mi.size_1, '') as size_1,
+        coalesce(mi.size_2, '') as size_2,
+        coalesce(mi.thk_1, '') as thk_1,
+        coalesce(mi.thk_2, '') as thk_2,
+        coalesce(string_agg(ms.name, ' | ' order by ms.name) filter (where ms.id is not null), '') as specs
+      from material_items mi
+      left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
+      left join material_specs ms on ms.id = mis.spec_id
+      where mi.job_id = $1
+        and coalesce(mi.item_code, '') <> ''
+      group by mi.id
+      order by mi.item_code
       limit 1000
-    `, [jobId]),
-    query(`
-      select distinct on (bl.item_code)
-        bl.item_code,
-        bl.description,
-        bl.material_type,
-        bl.uom,
-        coalesce(bl.spec, '') as spec,
-        coalesce(bl.size_1, '') as size_1,
-        coalesce(bl.size_2, '') as size_2,
-        coalesce(bl.thk_1, '') as thk_1,
-        coalesce(bl.thk_2, '') as thk_2
-      from bom_lines bl
-      join bom_headers bh on bh.id = bl.bom_id
-      where bh.job_id = $1
-        and coalesce(bl.item_code, '') <> ''
-      order by bl.item_code, bl.updated_at desc, bl.id desc
     `, [jobId])
   ]);
   const itemDetails = {};
   for (const row of materialItemRes.rows) {
     const itemCode = String(row.item_code || "").trim();
     if (!itemCode) continue;
+    const specList = parseSpecList(row.specs || "");
     itemDetails[itemCode.toLowerCase()] = {
       item_code: itemCode,
       description: String(row.description || "").trim(),
       material_type: String(row.material_type || "").trim(),
       uom: String(row.uom || "").trim(),
-      spec: "",
-      size_1: "",
-      size_2: "",
-      thk_1: "",
-      thk_2: ""
-    };
-  }
-  for (const row of bomItemDetailRes.rows) {
-    const itemCode = String(row.item_code || "").trim();
-    const key = itemCode.toLowerCase();
-    if (!key) continue;
-    itemDetails[key] = {
-      item_code: itemCode || itemDetails[key]?.item_code || "",
-      description: String(row.description || itemDetails[key]?.description || "").trim(),
-      material_type: String(row.material_type || itemDetails[key]?.material_type || "").trim(),
-      uom: String(row.uom || itemDetails[key]?.uom || "").trim(),
-      spec: String(row.spec || "").trim(),
+      commodity_code: String(row.commodity_code || "").trim(),
+      spec: specList.length === 1 ? specList[0] : "",
+      specs: String(row.specs || "").trim(),
       size_1: String(row.size_1 || "").trim(),
       size_2: String(row.size_2 || "").trim(),
       thk_1: String(row.thk_1 || "").trim(),
@@ -7283,11 +7760,9 @@ async function getBomLineEntryAutocomplete(bomId, jobId) {
   }
   return {
     lineNoOptions: lineNoRes.rows.map((row) => `<option value="${esc(row.line_no)}"></option>`).join(""),
-    itemCodeOptions: Array.from(new Set([
-      ...materialItemRes.rows.map((row) => String(row.item_code || "").trim()),
-      ...bomItemDetailRes.rows.map((row) => String(row.item_code || "").trim())
-    ].filter(Boolean)))
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+    itemCodeOptions: materialItemRes.rows
+      .map((row) => String(row.item_code || "").trim())
+      .filter(Boolean)
       .map((itemCode) => `<option value="${esc(itemCode)}"></option>`).join(""),
     itemDetails
   };
@@ -7340,7 +7815,7 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
     <div class="card"><strong>BOM:</strong> ${esc(bom.bom_name || bom.description || bom.bom_no)} | <strong>BOM #:</strong> ${esc(bom.bom_no)}</div>
     ${errorMessages.length ? `<div class="card error"><strong>Could not save all BOM lines.</strong><ul>${errorMessages.map((message) => `<li>${esc(message)}</li>`).join("")}</ul></div>` : ""}
     <div class="card">
-      <p class="muted">Use this like an Excel grid. Leave blank rows blank. Each saved row needs Line No, Item Code, Description, UOM, and Qty Required.</p>
+      <p class="muted">Use this like an Excel grid. Leave blank rows blank. Item Code must exist in Item Master; description, UOM, type, and dimensions are filled from the master item.</p>
       <style>
         #bom-grid-form-${bom.id} table td { padding: 0; }
         #bom-grid-form-${bom.id} table td input,
@@ -7404,6 +7879,7 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
               material_type: detail.material_type || "",
               uom: detail.uom || "",
               spec: detail.spec || "",
+              commodity_code: detail.commodity_code || "",
               size_1: detail.size_1 || "",
               size_2: detail.size_2 || "",
               thk_1: detail.thk_1 || "",
@@ -7473,8 +7949,8 @@ app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermissio
   const validRows = [];
   for (const row of nonBlankRows) {
     const rowLabel = `Row ${row.rowNumber}`;
-    if (!row.line_no || !row.item_code || !row.description || !row.uom || !row.qty_required) {
-      errors.push(`${rowLabel}: Line No, Item Code, Description, UOM, and Qty Required are required.`);
+    if (!row.line_no || !row.item_code || !row.qty_required) {
+      errors.push(`${rowLabel}: Line No, Item Code, and Qty Required are required.`);
       continue;
     }
     const qtyRequired = parseQtyValue(row.qty_required, NaN);
@@ -7482,13 +7958,33 @@ app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermissio
       errors.push(`${rowLabel}: Qty Required must be greater than zero.`);
       continue;
     }
-    const sourceUid = `${row.line_no}|${row.item_code}`;
+    const materialLookup = await getMaterialItemForUse({ query }, row.item_code, jobId, row.spec || "");
+    if (materialLookup.errorCode) {
+      errors.push(`${rowLabel}: ${materialLookup.message}`);
+      continue;
+    }
+    const item = materialLookup.item;
+    const sourceUid = `${row.line_no}|${item.item_code}`;
     if (seenKeys.has(sourceUid)) {
       errors.push(`${rowLabel}: Duplicate line/item combination in this save batch.`);
       continue;
     }
     seenKeys.add(sourceUid);
-    validRows.push({ ...row, qtyRequired, sourceUid });
+    validRows.push({
+      ...row,
+      item_code: item.item_code,
+      description: item.description || item.item_code,
+      material_type: item.material_type || "misc",
+      uom: item.uom || "EA",
+      commodity_code: item.commodity_code || "",
+      size_1: item.size_1 || "",
+      size_2: item.size_2 || "",
+      thk_1: item.thk_1 || "",
+      thk_2: item.thk_2 || "",
+      spec: normalizeSpecName(row.spec || ""),
+      qtyRequired,
+      sourceUid
+    });
   }
   if (validRows.length) {
     const existingRows = (await query("select source_uid from bom_lines where bom_id = $1 and source_uid = any($2::text[])", [bomId, validRows.map((row) => row.sourceUid)])).rows;
@@ -7563,19 +8059,19 @@ app.get("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission(
         <div class="grid">
           <div><label>Line No</label><input name="line_no" value="${esc(line.line_no)}" required /></div>
           <div><label>Item Code</label><input name="item_code" value="${esc(line.item_code)}" required /></div>
-          <div><label>Description</label><input name="description" value="${esc(line.description)}" required /></div>
-          <div><label>Material Type</label><input name="material_type" value="${esc(line.material_type)}" /></div>
-          <div><label>UOM</label><input name="uom" value="${esc(line.uom)}" required /></div>
+          <div><label>Description</label><input value="${esc(line.description)}" readonly /></div>
+          <div><label>Material Type</label><input value="${esc(line.material_type)}" readonly /></div>
+          <div><label>UOM</label><input value="${esc(line.uom)}" readonly /></div>
           <div><label>Qty Required</label><input name="qty_required" value="${esc(formatQtyDisplay(line.qty_required))}" required /></div>
           <div><label>Spec</label><input name="spec" value="${esc(line.spec || "")}" /></div>
-          <div><label>Commodity Code</label><input name="commodity_code" value="${esc(line.commodity_code || "")}" /></div>
+          <div><label>Commodity Code</label><input value="${esc(line.commodity_code || "")}" readonly /></div>
           <div><label>Tag Number</label><input name="tag_number" value="${esc(line.tag_number || "")}" /></div>
           <div><label>IWP</label><input name="iwp_no" value="${esc(line.iwp_no || "")}" /></div>
           <div><label>ISO</label><input name="iso_no" value="${esc(line.iso_no || "")}" /></div>
-          <div><label>Size 1</label><input name="size_1" value="${esc(line.size_1 || "")}" /></div>
-          <div><label>Size 2</label><input name="size_2" value="${esc(line.size_2 || "")}" /></div>
-          <div><label>Thk 1</label><input name="thk_1" value="${esc(line.thk_1 || "")}" /></div>
-          <div><label>Thk 2</label><input name="thk_2" value="${esc(line.thk_2 || "")}" /></div>
+          <div><label>Size 1</label><input value="${esc(line.size_1 || "")}" readonly /></div>
+          <div><label>Size 2</label><input value="${esc(line.size_2 || "")}" readonly /></div>
+          <div><label>Thk 1</label><input value="${esc(line.thk_1 || "")}" readonly /></div>
+          <div><label>Thk 2</label><input value="${esc(line.thk_2 || "")}" readonly /></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(line.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save BOM Line</button><a class="btn btn-secondary" href="/bom/${line.bom_id}">Back</a></div>
@@ -7591,15 +8087,37 @@ app.post("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission
     const current = (await client.query("select bl.bom_id, bl.planning_status, bh.is_system_generated, bh.system_key from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
     if (!current) throw new Error("BOM line not found.");
     assertBomAllowsManualChanges(current, "edit");
+    const materialLookup = await getMaterialItemForUse(client, req.body.item_code, jobId, req.body.spec || "");
+    if (materialLookup.errorCode) throw new Error(materialLookup.message);
+    const item = materialLookup.item;
     await client.query(`
       update bom_lines
       set line_no = $2, item_code = $3, description = $4, material_type = $5, uom = $6, qty_required = $7,
           spec = $8, commodity_code = $9, tag_number = $10, iwp_no = $11, iso_no = $12, size_1 = $13, size_2 = $14, thk_1 = $15, thk_2 = $16,
           planning_status = $17, notes = $18, updated_at = now()
       where id = $1
-    `, [lineId, String(req.body.line_no || "").trim(), req.body.item_code || "", req.body.description || "", req.body.material_type || "misc", req.body.uom || "EA", parseQtyValue(req.body.qty_required), req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.iwp_no || "", req.body.iso_no || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", current.planning_status || "PLANNED", req.body.notes || ""]);
+    `, [
+      lineId,
+      String(req.body.line_no || "").trim(),
+      item.item_code,
+      item.description || item.item_code,
+      item.material_type || "misc",
+      item.uom || "EA",
+      parseQtyValue(req.body.qty_required),
+      normalizeSpecName(req.body.spec || ""),
+      item.commodity_code || "",
+      req.body.tag_number || "",
+      req.body.iwp_no || "",
+      req.body.iso_no || "",
+      item.size_1 || "",
+      item.size_2 || "",
+      item.thk_1 || "",
+      item.thk_2 || "",
+      current.planning_status || "PLANNED",
+      req.body.notes || ""
+    ]);
     await rebuildUnallocatedBom(client, jobId);
-    await auditLog(client, req.user.id, "update", "bom_line", lineId, req.body.item_code || "");
+    await auditLog(client, req.user.id, "update", "bom_line", lineId, item.item_code || "");
     return current.bom_id;
   });
   res.redirect(`/bom/${bomId}`);
@@ -7629,7 +8147,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     select id, bom_no, bom_name, description, status, is_system_generated, system_key
     from bom_headers
     where job_id = $1
-      and (bom_type = 'pipe' or system_key = $2)
+      and (status = 'ACTIVE' or system_key = $2)
     order by
       case when system_key = $2 then 0 else 1 end,
       id desc
@@ -9130,7 +9648,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       select 1
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
-      where ri.rfq_id = r.id and ri.job_id = r.job_id and mi.item_code ilike $${params.length}
+      where ri.rfq_id = r.id and ri.job_id = r.job_id
+        and coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) ilike $${params.length}
     )`);
   }
   if (vendorId) {
@@ -9259,8 +9778,8 @@ app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "e
 
 app.get("/rfq/import/template", requireAuth, requirePermission("rfqs", "edit"), async (_req, res) => {
   const csv = [
-    "item_code,po_line,description,material_type,uom,spec,commodity_code,tag_number,size_1,size_2,thk_1,thk_2,qty,notes",
-    "100001,10,Sample item,misc,EA,ASTM A106,B31.3,TAG-001,2,,SCH 40,,5,Optional notes"
+    "item_code,po_line,spec,tag_number,qty,notes",
+    "100001,10,ASTM A106,TAG-001,5,Optional notes"
   ].join("\n");
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="rfq-import-template.csv"');
@@ -9339,7 +9858,10 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     query(`
       select ri.id, ri.po_line, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
              ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
-             mi.item_code, mi.description, mi.material_type, mi.uom
+             coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
+             coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
+             coalesce(nullif(ri.material_type_snapshot, ''), mi.material_type) as material_type,
+             coalesce(nullif(ri.uom_snapshot, ''), mi.uom) as uom
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       where ri.rfq_id = $1
@@ -9825,9 +10347,9 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission(
         ri.size_2,
         ri.thk_1,
         ri.thk_2,
-        mi.item_code,
-        mi.description,
-        mi.uom
+        coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
+        coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
+        coalesce(nullif(ri.uom_snapshot, ''), mi.uom) as uom
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       where ri.rfq_id = $1 and ri.job_id = $2 and mi.job_id = $2
@@ -9874,8 +10396,8 @@ app.get("/rfq/:id/export.xlsx", requireAuth, requireJobContext, requirePermissio
         ri.size_2,
         ri.thk_1,
         ri.thk_2,
-        mi.item_code,
-        mi.description
+        coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
+        coalesce(nullif(ri.description_snapshot, ''), mi.description) as description
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       where ri.rfq_id = $1 and ri.job_id = $2 and mi.job_id = $2
@@ -9938,41 +10460,48 @@ app.get("/rfq/:id/export.xlsx", requireAuth, requireJobContext, requirePermissio
 app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
   const jobId = currentJobId(req);
-  const [rfqRes, materialItemsRes] = await Promise.all([
+  const selectedSpecId = Number(req.query.spec_id || 0);
+  const itemWhere = ["mi.job_id = $1"];
+  const itemParams = [jobId];
+  if (selectedSpecId > 0) {
+    itemParams.push(selectedSpecId);
+    itemWhere.push(`exists (
+      select 1
+      from material_item_specs mis_filter
+      where mis_filter.material_item_id = mi.id
+        and mis_filter.job_id = mi.job_id
+        and mis_filter.spec_id = $${itemParams.length}
+    )`);
+  }
+  const [rfqRes, specOptions, materialItemsRes] = await Promise.all([
     query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
+    getMaterialSpecOptions(jobId),
     query(`
       select
         mi.item_code,
         mi.description,
         mi.material_type,
         mi.uom,
-        coalesce(dimensions.size_1, '') as size_1,
-        coalesce(dimensions.size_2, '') as size_2,
-        coalesce(dimensions.thk_1, '') as thk_1,
-        coalesce(dimensions.thk_2, '') as thk_2
+        coalesce(mi.size_1, '') as size_1,
+        coalesce(mi.size_2, '') as size_2,
+        coalesce(mi.thk_1, '') as thk_1,
+        coalesce(mi.thk_2, '') as thk_2,
+        coalesce(string_agg(ms.name, ', ' order by ms.name) filter (where ms.id is not null), '') as specs
       from material_items mi
-      left join lateral (
-        select distinct
-          coalesce(bl.size_1, '') as size_1,
-          coalesce(bl.size_2, '') as size_2,
-          coalesce(bl.thk_1, '') as thk_1,
-          coalesce(bl.thk_2, '') as thk_2
-        from bom_lines bl
-        join bom_headers bh on bh.id = bl.bom_id
-        where bh.job_id = $1 and bl.item_code = mi.item_code
-      ) dimensions on true
-      where mi.job_id = $1
-      order by
-        mi.item_code,
-        coalesce(dimensions.size_1, ''),
-        coalesce(dimensions.size_2, ''),
-        coalesce(dimensions.thk_1, ''),
-        coalesce(dimensions.thk_2, '')
+      left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
+      left join material_specs ms on ms.id = mis.spec_id
+      where ${itemWhere.join(" and ")}
+      group by mi.id
+      order by mi.item_code
       limit 500
-    `, [jobId])
+    `, itemParams)
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
+  const selectedSpec = specOptions.find((spec) => Number(spec.id) === selectedSpecId) || null;
+  const specSelectOptions = [`<option value="">All Specs</option>`]
+    .concat(specOptions.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === selectedSpecId ? "selected" : ""}>${esc(spec.name)}</option>`))
+    .join("");
   const materialItemRows = materialItemsRes.rows
     .map((item) => `<tr>
       <td>${esc(item.item_code)}</td>
@@ -9983,6 +10512,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       <td>${esc(item.thk_2 || "")}</td>
       <td>${esc(item.material_type)}</td>
       <td>${esc(item.uom)}</td>
+      <td>${esc(item.specs || "")}</td>
       <td>
         <button
           type="button"
@@ -9994,6 +10524,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
           data-thk-2="${escAttr(item.thk_2 || "")}"
           data-material-type="${escAttr(item.material_type)}"
           data-uom="${escAttr(item.uom)}"
+          data-spec="${escAttr(selectedSpec?.name || "")}"
           onclick="openExistingRfqItemDialog(this, '${rfqId}')"
         >Add</button>
       </td>
@@ -10003,14 +10534,20 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
       <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
+      <form method="get" action="/rfq/${rfqId}/items/existing" class="stack" style="margin-bottom:12px;">
+        <div class="grid" style="grid-template-columns: 1fr auto;">
+          <div><label>Spec</label><select name="spec_id">${specSelectOptions}</select></div>
+          <div style="align-self:end;"><button type="submit">Apply Spec</button></div>
+        </div>
+      </form>
       <div class="grid" style="grid-template-columns: 1fr auto;">
         <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" placeholder="Search item code, description, size, thickness, type, or UOM" /></div>
         <div style="align-self:end;"><button type="button" onclick="filterTableRows('existing-items-filter-${rfqId}', 'existing-items-table-${rfqId}')">Apply Filter</button></div>
       </div>
       <div class="scroll">
         <table id="existing-items-table-${rfqId}">
-          <thead><tr><th>Item Code</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Add</th></tr></thead>
-          <tbody>${materialItemRows || `<tr><td colspan="9" class="muted">No existing items found.</td></tr>`}</tbody>
+          <thead><tr><th>Item Code</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Specs</th><th>Add</th></tr></thead>
+          <tbody>${materialItemRows || `<tr><td colspan="10" class="muted">No existing items found.</td></tr>`}</tbody>
         </table>
       </div>
       <div class="actions"><a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a></div>
@@ -10024,6 +10561,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         <input type="hidden" name="thk_1" id="rfq-existing-item-thk-1-${rfqId}" />
         <input type="hidden" name="thk_2" id="rfq-existing-item-thk-2-${rfqId}" />
         <input type="hidden" name="material_type" id="rfq-existing-item-type-${rfqId}" />
+        <input type="hidden" name="spec" id="rfq-existing-item-spec-${rfqId}" />
         <h3>Add Existing RFQ Item</h3>
         <div class="card" style="margin:0;">
           <div><strong id="rfq-existing-item-title-${rfqId}"></strong></div>
@@ -10058,12 +10596,14 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         const thk2 = String(button.getAttribute('data-thk-2') || '');
         const materialType = String(button.getAttribute('data-material-type') || '');
         const uom = String(button.getAttribute('data-uom') || '');
+        const spec = String(button.getAttribute('data-spec') || '');
         const sizeText = [size1, size2].filter(Boolean).join(' x ');
         const thkText = [thk1, thk2].filter(Boolean).join(' x ');
         const summaryBits = [];
         if (sizeText) summaryBits.push('Size ' + sizeText);
         if (thkText) summaryBits.push('Thk ' + thkText);
         if (materialType) summaryBits.push('Type ' + materialType);
+        if (spec) summaryBits.push('Spec ' + spec);
         const setValue = (id, value) => {
           const input = document.getElementById(id);
           if (input) input.value = value;
@@ -10075,6 +10615,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         setValue('rfq-existing-item-thk-1-' + rfqId, thk1);
         setValue('rfq-existing-item-thk-2-' + rfqId, thk2);
         setValue('rfq-existing-item-type-' + rfqId, materialType);
+        setValue('rfq-existing-item-spec-' + rfqId, spec);
         setValue('rfq-existing-item-qty-' + rfqId, '1');
         setValue('rfq-existing-item-uom-' + rfqId, uom);
         const title = document.getElementById('rfq-existing-item-title-' + rfqId);
@@ -10115,7 +10656,7 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
   res.send(layout(`Add New RFQ Items`, `
     <h1>Add New RFQ Items</h1>
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
-    <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Fill in the rows you want, leave the rest blank, and save. New item codes are also added to the master item table.</p>
+    <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Item codes must already exist in Item Master; master description, UOM, type, and dimensions are used when the rows save.</p>
     <style>
       #rfq-grid-form-${rfqId} table td { padding: 0; }
       #rfq-grid-form-${rfqId} table td input {
@@ -10173,7 +10714,6 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
   if (!rfq) throw new Error("RFQ not found.");
 
   const pasteAction = String(req.body.paste_action || "preview").trim();
-  const allowMissingItemCodes = String(req.body.allow_missing_item_codes || "").trim() === "1";
   let rows = [];
   const payload = String(req.body.rows_payload || "").trim();
   const pastedText = String(req.body.paste_text || "").trim();
@@ -10183,49 +10723,6 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
     rows = parseRfqPasteRows(pastedText);
   }
   if (!rows.length) throw new Error("Paste at least one RFQ value row first.");
-
-  const missingCodeRows = rows.filter((row) => !String(row.item_code || "").trim() && rfqRowHasAnyEnteredValues(row));
-  if (!payload && pasteAction === "preview" && missingCodeRows.length > 0 && !allowMissingItemCodes) {
-    const escapedPasteText = esc(pastedText);
-    res.send(layout(`Paste RFQ Values`, `
-      <h1>Paste RFQ Values</h1>
-      <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
-      <div class="card">
-        <p class="muted">${missingCodeRows.length} row(s) do not have an item code.</p>
-        <form id="rfq-missing-item-code-confirm-${rfqId}" method="post" action="/rfq/${rfqId}/items/paste" class="stack">
-          <input type="hidden" name="paste_action" value="preview" />
-          <input type="hidden" name="allow_missing_item_codes" value="1" />
-          <textarea name="paste_text" style="display:none;">${escapedPasteText}</textarea>
-          <noscript>
-            <div class="actions">
-              <button type="submit">Continue</button>
-              <a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Back</a>
-            </div>
-          </noscript>
-        </form>
-      </div>
-      <script>
-        (function () {
-          const proceed = window.confirm("No item codes, Do you want to continue?");
-          if (proceed) {
-            document.getElementById("rfq-missing-item-code-confirm-${rfqId}").submit();
-          } else {
-            if (window.history.length > 1) {
-              window.history.back();
-            } else {
-              window.location.href = "/rfq/${rfqId}/items/paste";
-            }
-          }
-        }());
-      </script>
-    `, req.user));
-    return;
-  }
-
-  if (missingCodeRows.length > 0 || rows.some((row) => row.generated_item_code)) {
-    const generated = await assignGeneratedRfqItemCodes({ query }, rows);
-    rows = generated.rows;
-  }
 
   const normalizedCodes = Array.from(new Set(rows.map((row) => String(row.item_code || "").trim().toLowerCase()).filter(Boolean)));
   const existingCodeSet = new Set((await query(
@@ -10241,7 +10738,6 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
   const invalidPreviewRows = previewMeta.filter((entry) => entry.issues.length > 0);
   const validMatchedRows = previewMeta.filter((entry) => entry.matched && entry.issues.length === 0).map((entry) => entry.row);
   const validAllRows = previewMeta.filter((entry) => entry.issues.length === 0).map((entry) => entry.row);
-  const generatedCodeCount = rows.filter((row) => row.generated_item_code).length;
 
   if (pasteAction === "import_matched" || pasteAction === "import_all") {
     const rowsToImport = pasteAction === "import_matched" ? validMatchedRows : validAllRows;
@@ -10257,7 +10753,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
         entityType: "rfq_items",
         rfqId,
         uploadedBy: req.user.id,
-        filename: pasteAction === "import_all" ? "pasted-values-add-missing" : "pasted-values-matched-only",
+        filename: pasteAction === "import_all" ? "pasted-values" : "pasted-values-matched-only",
         jobId
       });
       let insertedCount = 0;
@@ -10273,7 +10769,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
         }
       }
       await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
-      await auditLog(client, req.user.id, pasteAction === "import_all" ? "paste_add_missing" : "paste_match_only", "rfq_items", rfqId, `rows=${rowsToImport.length};batch=${batchId}`);
+      await auditLog(client, req.user.id, pasteAction === "import_all" ? "paste_import" : "paste_match_only", "rfq_items", rfqId, `rows=${rowsToImport.length};batch=${batchId}`);
       return batchId;
     });
     res.redirect(`/imports/${batchId}`);
@@ -10283,10 +10779,10 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
   const rowsPayload = Buffer.from(JSON.stringify(rows), "utf8").toString("base64");
   const previewRows = previewMeta.map(({ row, matched, issues }) => {
     const thk = [row.thk_1, row.thk_2].filter(Boolean).join(" x ");
-    const statusLabel = matched ? "Match" : "New Item";
+    const statusLabel = matched ? "Item Master" : "Not In Item Master";
     const statusChip = matched
-      ? `<span class="chip">Match</span>`
-      : `<span class="chip" style="background:#fff3cd;border-color:#f4d58d;color:#7a5a00;">New Item</span>`;
+      ? `<span class="chip">Item Master</span>`
+      : `<span class="chip" style="background:#fdecec;border-color:#f2a69b;color:#8a1f11;">Not In Master</span>`;
     return `<tr>
       <td>${esc(row.item_code || "")}</td>
       <td>${esc(row.description || "")}</td>
@@ -10308,8 +10804,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
         <div class="stat"><div>Matched Idents</div><strong>${matchedRows.length}</strong></div>
         <div class="stat"><div>Missing Idents</div><strong>${unmatchedRows.length}</strong></div>
       </div>
-      ${generatedCodeCount > 0 ? `<p class="muted" style="margin-top:10px;">${generatedCodeCount} row(s) were assigned generated 5-digit item codes.</p>` : ""}
-      ${unmatchedRows.length > 0 ? `<p class="muted" style="margin-top:10px;">${unmatchedRows.length} ident(s) are not on the current item list yet. Do you want to add them with the pasted description, size, thickness, and quantity values?</p>` : `<p class="muted" style="margin-top:10px;">All pasted idents already exist on the current item list.</p>`}
+      ${unmatchedRows.length > 0 ? `<p class="muted" style="margin-top:10px;">${unmatchedRows.length} ident(s) are not in Item Master for this job. Add them on the Items page first, then paste again.</p>` : `<p class="muted" style="margin-top:10px;">All pasted idents exist in Item Master.</p>`}
       ${invalidPreviewRows.length > 0 ? `<p class="muted" style="margin-top:10px;color:#b42318;">${invalidPreviewRows.length} row(s) are missing required values. Fix them and paste again before importing.</p>` : ""}
     </div>
     <div class="card scroll">
@@ -10323,7 +10818,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
         <input type="hidden" name="rows_payload" value="${esc(rowsPayload)}" />
         <div class="actions">
           ${validMatchedRows.length > 0 ? `<button type="submit" name="paste_action" value="import_matched">Import Matched Only</button>` : ""}
-          ${invalidPreviewRows.length === 0 ? `<button type="submit" name="paste_action" value="import_all">${unmatchedRows.length > 0 ? "Yes, Add Missing Items Too" : "Import Rows"}</button>` : ""}
+          ${invalidPreviewRows.length === 0 ? `<button type="submit" name="paste_action" value="import_all">Import Rows</button>` : ""}
           <a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Again</a>
           <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
         </div>
@@ -10424,7 +10919,6 @@ app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission
 
 app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
-  const allowMissingItemCodes = String(req.body.allow_missing_item_codes || "").trim() === "1";
   const rows = Array.from({ length: 8 }, (_, index) => ({
     item_code: req.body[`item_code_${index}`],
     description: req.body[`description_${index}`],
@@ -10440,14 +10934,8 @@ app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermissio
     qty: req.body[`qty_${index}`],
     notes: req.body[`notes_${index}`]
   })).filter((row) => String(row.item_code || "").trim() || rfqRowHasAnyEnteredValues(row));
-  if (rows.some((row) => !String(row.item_code || "").trim() && rfqRowHasAnyEnteredValues(row)) && !allowMissingItemCodes) {
-    throw new Error("Missing item codes require confirmation.");
-  }
   if (rows.length === 0) throw new Error("No grid rows were entered.");
   const batchId = await withTransaction(async (client) => {
-    const preparedRows = rows.some((row) => !String(row.item_code || "").trim() && rfqRowHasAnyEnteredValues(row))
-      ? (await assignGeneratedRfqItemCodes(client, rows)).rows
-      : rows;
     const batchId = await createImportBatch(client, {
       entityType: "rfq_items",
       rfqId,
@@ -10458,17 +10946,17 @@ app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermissio
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
-    for (let index = 0; index < preparedRows.length; index += 1) {
-      const result = await upsertRfqItemRow(client, rfqId, preparedRows[index], currentJobId(req));
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertRfqItemRow(client, rfqId, rows[index], currentJobId(req));
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
         skippedCount += 1;
-        await addImportBatchError(client, batchId, index + 1, result.errorCode, result.message, preparedRows[index]);
+        await addImportBatchError(client, batchId, index + 1, result.errorCode, result.message, rows[index]);
       }
     }
     await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
-    await auditLog(client, req.user.id, "grid_add", "rfq_items", rfqId, `rows=${preparedRows.length};batch=${batchId}`);
+    await auditLog(client, req.user.id, "grid_add", "rfq_items", rfqId, `rows=${rows.length};batch=${batchId}`);
     return batchId;
   });
   res.redirect(`/imports/${batchId}`);
@@ -10527,7 +11015,10 @@ app.post("/rfq/:id/quotes/import", requireAuth, requireJobContext, requirePermis
         select ri.id
         from rfq_items ri
         join material_items mi on mi.id = ri.material_item_id
-        where ri.rfq_id = $1 and ri.job_id = $3 and mi.job_id = $3 and mi.item_code = $2
+        where ri.rfq_id = $1
+          and ri.job_id = $3
+          and mi.job_id = $3
+          and lower(coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code)) = lower($2)
       `, [rfqId, itemCode, currentJobId(req)]);
       if (!rfqItemRes.rows[0]) {
         skippedCount += 1;
@@ -10592,8 +11083,12 @@ app.get("/imports/:id", requireAuth, requireJobContext, async (req, res) => {
   const errorRows = errors.length > 0
     ? errors.map((error) => `<tr><td>${error.row_number}</td><td>${esc(error.error_code)}</td><td>${esc(error.message)}</td><td><code>${esc(JSON.stringify(error.raw_payload))}</code></td></tr>`).join("")
     : `<tr><td colspan="4" class="muted">No row-level errors.</td></tr>`;
-  const importBackHref = batch.rfq_id ? `/rfq/${batch.rfq_id}` : "/po";
-  const importBackLabel = batch.rfq_id ? "Back To RFQ" : "Back To POs";
+  let importBackHref = batch.rfq_id ? `/rfq/${batch.rfq_id}` : "/po";
+  let importBackLabel = batch.rfq_id ? "Back To RFQ" : "Back To POs";
+  if (batch.entity_type === "material_items") {
+    importBackHref = "/items";
+    importBackLabel = "Back To Items";
+  }
   res.send(layout("Import Results", `
     <h1>Import Results</h1>
     <div class="card">
@@ -10636,7 +11131,12 @@ app.post("/rfq/:id/award", requireAuth, requireJobContext, requirePermission("rf
     const isSelectedVendor = selectedVendorRows.find((vendor) => Number(vendor.vendor_id) === vendorId);
     if (!isSelectedVendor) throw new Error("Choose a vendor from the RFQ vendor list.");
     const items = (await client.query(`
-      select ri.id, mi.item_code, mi.description, q.unit_price, q.lead_days
+      select
+        ri.id,
+        coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
+        coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
+        q.unit_price,
+        q.lead_days
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       left join quotes q on q.rfq_item_id = ri.id and q.vendor_id = $2
@@ -10737,9 +11237,15 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
     );
     const poId = poInsert.rows[0].id;
     const lines = await client.query(`
-      select ri.id as rfq_item_id, ri.material_item_id, ri.po_line, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.qty,
+      select ri.id as rfq_item_id, ri.material_item_id, ri.po_line,
+             coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
+             coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
+             coalesce(nullif(ri.material_type_snapshot, ''), mi.material_type) as material_type,
+             coalesce(nullif(ri.uom_snapshot, ''), mi.uom) as uom,
+             ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.qty,
              ri.awarded_unit_price as unit_price, ri.awarded_lead_days as lead_days
       from rfq_items ri
+      join material_items mi on mi.id = ri.material_item_id
       where ri.rfq_id = $1 and ri.job_id = $3 and ri.award_status = 'AWARDED' and ri.awarded_vendor_id = $2
         and not exists (
           select 1
@@ -10751,9 +11257,30 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
     if (lines.rows.length === 0) throw new Error("Selected vendor has no unissued awarded lines on this RFQ.");
     for (const line of lines.rows) {
       await client.query(`
-        insert into po_lines (job_id, po_id, rfq_item_id, material_item_id, po_line, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price, lead_days, updated_at)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
-      `, [jobId, poId, line.rfq_item_id, line.material_item_id, line.po_line || "", line.size_1 || "", line.size_2 || "", line.thk_1 || "", line.thk_2 || "", line.qty, line.unit_price, num(line.lead_days)]);
+        insert into po_lines (
+          job_id, po_id, rfq_item_id, material_item_id, item_code_snapshot, description_snapshot,
+          material_type_snapshot, uom_snapshot, po_line, size_1, size_2, thk_1, thk_2,
+          qty_ordered, unit_price, lead_days, updated_at
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+      `, [
+        jobId,
+        poId,
+        line.rfq_item_id,
+        line.material_item_id,
+        line.item_code || "",
+        line.description || "",
+        line.material_type || "misc",
+        line.uom || "EA",
+        line.po_line || "",
+        line.size_1 || "",
+        line.size_2 || "",
+        line.thk_1 || "",
+        line.thk_2 || "",
+        line.qty,
+        line.unit_price,
+        num(line.lead_days)
+      ]);
     }
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
@@ -10766,7 +11293,8 @@ app.get("/rfq-item/:id/award", requireAuth, requireJobContext, async (req, res) 
   const [itemRes, quotesRes] = await Promise.all([
     query(`
       select ri.id, ri.rfq_id, ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
-             mi.item_code, mi.description
+             coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
+             coalesce(nullif(ri.description_snapshot, ''), mi.description) as description
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
@@ -10868,7 +11396,10 @@ app.post("/rfq-item/:id/award/clear", requireAuth, requireJobContext, requirePer
 app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const item = (await query(`
     select ri.id, ri.rfq_id, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
-           mi.item_code, mi.description, mi.material_type, mi.uom
+           coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
+           coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
+           coalesce(nullif(ri.material_type_snapshot, ''), mi.material_type) as material_type,
+           coalesce(nullif(ri.uom_snapshot, ''), mi.uom) as uom
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
     where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
@@ -10883,17 +11414,17 @@ app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission(
       <form method="post" action="/rfq-item/${item.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(item.updated_token)}" />
         <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" required /></div>
-        <div><label>Description</label><input name="description" value="${esc(item.description)}" /></div>
-        <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
-        <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
+        <div><label>Description</label><input value="${esc(item.description)}" readonly /></div>
+        <div><label>Type</label><input value="${esc(item.material_type)}" readonly /></div>
+        <div><label>UOM</label><input value="${esc(item.uom)}" readonly /></div>
         <div><label>Qty</label><input name="qty" value="${esc(item.qty)}" required /></div>
         <div><label>Spec</label><input name="spec" value="${esc(item.spec || "")}" /></div>
-        <div><label>Commodity Code</label><input name="commodity_code" value="${esc(item.commodity_code || "")}" /></div>
+        <div><label>Commodity Code</label><input value="${esc(item.commodity_code || "")}" readonly /></div>
         <div><label>Tag Number</label><input name="tag_number" value="${esc(item.tag_number || "")}" /></div>
-        <div><label>Size 1</label><input name="size_1" value="${esc(item.size_1 || "")}" /></div>
-        <div><label>Size 2</label><input name="size_2" value="${esc(item.size_2 || "")}" /></div>
-        <div><label>Thk 1</label><input name="thk_1" value="${esc(item.thk_1 || "")}" /></div>
-        <div><label>Thk 2</label><input name="thk_2" value="${esc(item.thk_2 || "")}" /></div>
+        <div><label>Size 1</label><input value="${esc(item.size_1 || "")}" readonly /></div>
+        <div><label>Size 2</label><input value="${esc(item.size_2 || "")}" readonly /></div>
+        <div><label>Thk 1</label><input value="${esc(item.thk_1 || "")}" readonly /></div>
+        <div><label>Thk 2</label><input value="${esc(item.thk_2 || "")}" readonly /></div>
         <div><label>Notes</label><textarea name="notes">${esc(item.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save Item</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
       </form>
@@ -10907,17 +11438,48 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
   const rfqId = await withTransaction(async (client) => {
     const current = (await client.query("select rfq_id, material_item_id from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
     if (!current) throw new Error("RFQ item not found.");
-    await client.query(
-      "update material_items set item_code = $2, description = $3, material_type = $4, uom = $5 where id = $1 and job_id = $6",
-      [current.material_item_id, req.body.item_code?.trim(), req.body.description?.trim() || req.body.item_code?.trim(), req.body.material_type?.trim() || "misc", req.body.uom?.trim() || "EA", jobId]
-    );
+    const qty = parseQtyValue(req.body.qty || 0);
+    if (qty <= 0) throw new Error("Qty must be greater than zero.");
+    const requestedSpec = normalizeSpecName(req.body.spec || "");
+    const materialLookup = await getMaterialItemForUse(client, req.body.item_code, jobId, requestedSpec);
+    if (materialLookup.errorCode) throw new Error(materialLookup.message);
+    const item = materialLookup.item;
     const update = await client.query(`
       update rfq_items
-      set spec = $2, commodity_code = $3, tag_number = $4, size_1 = $5, size_2 = $6, thk_1 = $7, thk_2 = $8, qty = $9, notes = $10, updated_at = now()
-      where id = $1 and job_id = $11 and extract(epoch from updated_at)::text = $12
-    `, [itemId, req.body.spec || "", req.body.commodity_code || "", req.body.tag_number || "", req.body.size_1 || "", req.body.size_2 || "", req.body.thk_1 || "", req.body.thk_2 || "", parseQtyValue(req.body.qty || 0), req.body.notes || "", jobId, req.body.updated_token || ""]);
+      set material_item_id = $2,
+          item_code_snapshot = $3,
+          description_snapshot = $4,
+          material_type_snapshot = $5,
+          uom_snapshot = $6,
+          spec = $7,
+          commodity_code = $8,
+          tag_number = $9,
+          size_1 = $10,
+          size_2 = $11,
+          thk_1 = $12,
+          thk_2 = $13,
+          qty = $14,
+          notes = $15,
+          updated_at = now()
+      where id = $1 and job_id = $16 and extract(epoch from updated_at)::text = $17
+    `, [
+      itemId,
+      item.id,
+      ...materialItemSnapshotParams(item),
+      requestedSpec,
+      item.commodity_code || "",
+      req.body.tag_number || "",
+      item.size_1 || "",
+      item.size_2 || "",
+      item.thk_1 || "",
+      item.thk_2 || "",
+      qty,
+      req.body.notes || "",
+      jobId,
+      req.body.updated_token || ""
+    ]);
     if (update.rowCount === 0) throw new Error("This RFQ item was modified by another user. Refresh and try again.");
-    await auditLog(client, req.user.id, "update", "rfq_item", itemId, req.body.item_code?.trim() || "");
+    await auditLog(client, req.user.id, "update", "rfq_item", itemId, item.item_code || "");
     return current.rfq_id;
   });
   res.redirect(`/rfq/${rfqId}`);
@@ -10940,7 +11502,8 @@ app.get("/rfq-item/:id/quotes", requireAuth, requireJobContext, async (req, res)
   const jobId = currentJobId(req);
   const item = (await query(`
     select ri.id, ri.rfq_id, ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days,
-           mi.item_code, mi.description
+           coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
+           coalesce(nullif(ri.description_snapshot, ''), mi.description) as description
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
     where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
@@ -11216,7 +11779,7 @@ app.get("/po/import", requireAuth, requireJobContext, requirePermission("pos", "
     </div>
     <div class="card">
       <h3>Import PO Lines</h3>
-      <p class="muted">Use this import after the PO headers already exist. Missing items are added automatically. Supported columns: po_no, po_line, item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, qty_ordered, unit_price.</p>
+      <p class="muted">Use this import after the PO headers already exist. Item codes must exist in Item Master; master description, UOM, type, and dimensions are used. Supported columns: po_no, po_line, item_code, qty_ordered, unit_price.</p>
       <div class="actions"><a class="btn btn-secondary" href="/po/import/lines/template">Download Line Template</a></div>
       <form method="post" enctype="multipart/form-data" action="/po/import/lines/preview" class="stack">
         <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
@@ -11239,8 +11802,8 @@ app.get("/po/import/headers/template", requireAuth, requirePermission("pos", "ed
 
 app.get("/po/import/lines/template", requireAuth, requirePermission("pos", "edit"), async (_req, res) => {
   const csv = [
-    "po_no,po_line,item_code,description,material_type,uom,size_1,size_2,thk_1,thk_2,qty_ordered,unit_price",
-    "PO-00001,0010,ITEM-1001,Pipe Example,pipe,EA,2,,SCH40,,12,18.75"
+    "po_no,po_line,item_code,qty_ordered,unit_price",
+    "PO-00001,0010,ITEM-1001,12,18.75"
   ].join("\\n");
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="po-line-import-template.csv"');
@@ -11455,7 +12018,7 @@ app.get("/po/new/manual", requireAuth, requireJobContext, requirePermission("pos
     </div>
     <div class="card">
       <h3>Manual PO Lines</h3>
-      <p class="muted">Create the PO header first, then pick it below and enter the line details.</p>
+      <p class="muted">Create the PO header first, then pick it below and enter Item Master item codes with quantities and pricing. Master item details are used when lines save.</p>
       <form method="post" action="/po/import/lines/manual" class="stack">
         <input type="hidden" name="row_count" value="12" />
         <div class="grid">
@@ -11510,8 +12073,8 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     select
       pl.id,
       coalesce(pl.po_line, '') as po_line,
-      mi.item_code,
-      mi.description,
+      coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+      coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
       pl.qty_ordered,
       pl.size_1,
       pl.size_2,
@@ -11541,7 +12104,15 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       pl.id
   `, [poId])).rows;
   const history = (await query(`
-    select r.received_at, mi.item_code, mi.description, r.qty_received, r.warehouse, r.location, r.osd_status, r.osd_notes
+    select
+      r.received_at,
+      coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+      coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
+      r.qty_received,
+      r.warehouse,
+      r.location,
+      r.osd_status,
+      r.osd_notes
     from receipts r
     join po_lines pl on pl.id = r.po_line_id
     join material_items mi on mi.id = pl.material_item_id
@@ -11739,12 +12310,17 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
       const qtyReceived = parseQtyValue(req.body[`qty_received_${lineId}`] || 0);
       if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
       const line = (await client.query(`
-        select pl.id, pl.qty_ordered, mi.item_code, mi.description, coalesce(sum(r.qty_received), 0) as qty_received
+        select
+          pl.id,
+          pl.qty_ordered,
+          coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+          coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
+          coalesce(sum(r.qty_received), 0) as qty_received
         from po_lines pl
         join material_items mi on mi.id = pl.material_item_id
         left join receipts r on r.po_line_id = pl.id
         where pl.id = $1 and pl.po_id = $2
-        group by pl.id, pl.qty_ordered, mi.item_code, mi.description
+        group by pl.id, pl.qty_ordered, coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code), coalesce(nullif(pl.description_snapshot, ''), mi.description)
       `, [lineId, poId])).rows[0];
       if (!line) throw new Error("PO line not found.");
       const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_received || 0), 0);
@@ -11833,7 +12409,13 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
     `, [req.params.id, jobId]),
     query("select id, name from vendors order by name"),
     query(`
-      select pl.id, coalesce(pl.po_line, '') as po_line, mi.item_code, mi.description, pl.qty_ordered, pl.unit_price,
+      select
+        pl.id,
+        coalesce(pl.po_line, '') as po_line,
+        coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+        coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
+        pl.qty_ordered,
+        pl.unit_price,
              coalesce(pl.size_1, '') as size_1, coalesce(pl.size_2, '') as size_2, coalesce(pl.thk_1, '') as thk_1, coalesce(pl.thk_2, '') as thk_2
       from po_lines pl
       join material_items mi on mi.id = pl.material_item_id
@@ -11918,7 +12500,9 @@ app.get("/po-line/:id/edit", requireAuth, requireJobContext, requirePermission("
   const jobId = currentJobId(req);
   const line = (await query(`
     select pl.id, coalesce(pl.po_line, '') as po_line, pl.qty_ordered, pl.unit_price, pl.size_1, pl.size_2, pl.thk_1, pl.thk_2, extract(epoch from pl.updated_at)::text as updated_token,
-           mi.item_code, mi.description, po.po_no
+           coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+           coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
+           po.po_no
     from po_lines pl
     join material_items mi on mi.id = pl.material_item_id
     join purchase_orders po on po.id = pl.po_id
@@ -12048,8 +12632,8 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
     select
       pl.id,
       coalesce(pl.po_line, '') as po_line,
-      mi.item_code,
-      mi.description,
+      coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+      coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
       pl.qty_ordered,
       pl.size_1,
       pl.size_2,
@@ -12122,7 +12706,12 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
     const normalizedNames = normalizeWarehouseLocationValues(req.body.warehouse, req.body.location);
     if (String(req.body.mode || "") === "po") {
       const poLine = (await client.query(`
-        select po.id as po_id, po.po_no, po.rfq_id, mi.item_code, mi.description
+        select
+          po.id as po_id,
+          po.po_no,
+          po.rfq_id,
+          coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+          coalesce(nullif(pl.description_snapshot, ''), mi.description) as description
         from po_lines pl
         join purchase_orders po on po.id = pl.po_id
         join material_items mi on mi.id = pl.material_item_id
@@ -14018,8 +14607,8 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
           r.id,
           'PO Receipt' as source_type,
           coalesce(pl.po_line, '') as po_line,
-          mi.item_code,
-          mi.description,
+          coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+          coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
           r.qty_received,
           r.warehouse,
           r.location,
