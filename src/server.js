@@ -13258,7 +13258,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       ${canPostReceipt ? "" : `<p class="muted">${esc(receiveBlockedMessage)}</p>`}
       <form method="post" action="/po/${record.id}/receive" class="stack" id="po-receive-form-${record.id}">
         <div class="grid">
-          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly /></div>
+          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" required /></div>
           <div><label>Received Date</label><input name="received_date" type="date" value="${esc(today)}" required /></div>
           <div><label>Received By</label><input name="received_by" list="${receivedByListId}" placeholder="Type received by" required /><datalist id="${receivedByListId}">${receivedByOptionsHtml}</datalist></div>
           <div><label>Load Number</label><input name="load_number" /></div>
@@ -13370,13 +13370,24 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
         ? "This PO is fully received. No additional receipts can be posted against it."
         : `This PO is ${po.status}. No additional receipts can be posted against it.`);
     }
-    const mrrNumber = await getNextMrrNumber(client, jobId);
+    const mrrNumber = String(req.body.mrr_number || "").trim();
     const receivedBy = String(req.body.received_by || "").trim();
     const receivedDate = String(req.body.received_date || "").trim();
     const loadNumber = String(req.body.load_number || "").trim();
     const mrrNotes = String(req.body.mrr_notes || "").trim();
+    if (!mrrNumber) throw new Error("MRR Number is required.");
     if (!receivedBy) throw new Error("Received By is required.");
     if (!receivedDate) throw new Error("Received Date is required.");
+    const existingMrr = (await client.query(`
+      select id
+      from mrr_logs
+      where job_id = $1
+        and lower(trim(mrr_number)) = lower(trim($2::text))
+      limit 1
+    `, [jobId, mrrNumber])).rows[0];
+    if (existingMrr) {
+      throw new Error(`MRR Number ${mrrNumber} has already been used. Choose another MRR number before posting.`);
+    }
     const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
     const openTotals = (await client.query(`
       with scoped_lines as (
@@ -13510,7 +13521,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
     await rebuildUnallocatedBom(client, jobId);
     await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};mrr=${mrrNumber};lines=${postedCount}`);
   });
-  res.redirect(getUserHomePath(req.user));
+  res.redirect("/receive/by-po");
 });
 
 app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
