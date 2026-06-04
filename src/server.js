@@ -9717,6 +9717,61 @@ app.get("/material-logs/mrr/:id/form.pdf", requireAuth, requireJobContext, requi
   res.send(pdfBuffer);
 }));
 
+app.get("/material-logs/mrr/:id/export-flow.xlsx", requireAuth, requireJobContext, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const [headerRes, poReceiptLines, manualLines] = await Promise.all([
+    query("select id, mrr_number from mrr_logs where id = $1 and job_id = $2", [req.params.id, jobId]),
+    query(`
+      select
+        r.id,
+        coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+        coalesce(pl.size_1, '') as size_1,
+        coalesce(pl.size_2, '') as size_2,
+        coalesce(r.qty_received, 0) as qty,
+        r.received_at::text as line_date
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join material_items mi on mi.id = pl.material_item_id
+      where r.mrr_log_id = $1
+        and r.job_id = $2
+      order by r.id
+    `, [req.params.id, jobId]),
+    query(`
+      select
+        mrl.id,
+        coalesce(mrl.item_code, '') as item_code,
+        coalesce(mi.size_1, '') as size_1,
+        coalesce(mi.size_2, '') as size_2,
+        coalesce(mrl.received_qty, 0) as qty,
+        coalesce(mrl.recv_date, '') as line_date
+      from material_receiving_logs mrl
+      left join lateral (
+        select size_1, size_2
+        from material_items mi
+        where mi.job_id = mrl.job_id
+          and lower(trim(mi.item_code)) = lower(trim(mrl.item_code))
+        order by mi.id
+        limit 1
+      ) mi on true
+      where coalesce(mrl.mrr_number, '') = (
+        select coalesce(mrr_number, '') from mrr_logs where id = $1 and job_id = $2
+      )
+        and mrl.job_id = $2
+      order by coalesce(mrl.legacy_row_id, mrl.id)
+    `, [req.params.id, jobId])
+  ]);
+  const header = headerRes.rows[0];
+  if (!header) throw new Error("MRR log row not found.");
+  const rows = [...poReceiptLines.rows, ...manualLines.rows]
+    .sort((a, b) => String(b.line_date || "").localeCompare(String(a.line_date || "")) || Number(b.id || 0) - Number(a.id || 0));
+  const workbook = buildRfqFlowWorkbook(rows);
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer", cellStyles: true });
+  await auditLog(pool, req.user.id, "export", "mrr_flow_workbook", header.id, `rows=${rows.length}|${header.mrr_number || ""}`);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${String(header.mrr_number || "MRR").replace(/[^A-Za-z0-9._-]/g, "_")}-flow.xlsx"`);
+  res.send(buffer);
+}));
+
 app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
@@ -16162,7 +16217,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
         <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
-          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="${escAttr(receiveRemainingHref)}">${esc(receiveRemainingLabel)}</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="${escAttr(receiveRemainingHref)}">${esc(receiveRemainingLabel)}</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/export-flow.xlsx">Export to FLOW</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
         </form>
       </div>
       <div class="card scroll">
