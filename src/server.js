@@ -4952,12 +4952,13 @@ async function createOsdLog(client, payload) {
 async function syncMrrVendorsIntoVendorTable(client, jobId = null) {
   await client.query(`
     insert into vendors (job_id, name, contact_name, website, email, phone, categories)
-    select distinct null, trim(m.vendor_name), '', '', '', '', ''
+    select distinct null::bigint, trim(m.vendor_name), '', '', '', '', ''
     from mrr_logs m
     left join vendors v on lower(v.name) = lower(trim(m.vendor_name))
     where trim(coalesce(m.vendor_name, '')) <> ''
       and ($1::bigint is null or m.job_id = $1)
       and v.id is null
+    on conflict do nothing
   `, [jobId]);
 }
 
@@ -16303,9 +16304,30 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
     `, req.user));
   });
 
-app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    const mrrId = Number(req.params.id);
+    const requestedMrrNumber = String(req.body.mrr_number || "").trim();
+    if (!requestedMrrNumber) throw new Error("MRR Number is required.");
+    const currentMrr = (await client.query(`
+      select id, mrr_number, opi_number
+      from mrr_logs
+      where id = $1 and job_id = $2
+      for update
+    `, [mrrId, jobId])).rows[0];
+    if (!currentMrr) throw new Error("MRR log row not found.");
+    const duplicateMrr = (await client.query(`
+      select id
+      from mrr_logs
+      where job_id = $1
+        and lower(trim(mrr_number)) = lower(trim($2::text))
+        and id <> $3
+      limit 1
+    `, [jobId, requestedMrrNumber, mrrId])).rows[0];
+    if (duplicateMrr) {
+      throw new Error(`MRR Number ${requestedMrrNumber} has already been used. Choose another MRR number before saving.`);
+    }
     const appPoId = req.body.app_po_id ? Number(req.body.app_po_id) : null;
     const linkedPo = appPoId
       ? (await client.query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [appPoId, jobId])).rows[0]
@@ -16317,8 +16339,8 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requireP
           received_date = $9, received_by = $10, notes = $11, load_number = $12, opi_number = $13, opi_date = $14, updated_at = now()
       where id = $1 and job_id = $15
     `, [
-      req.params.id,
-      req.body.mrr_number?.trim(),
+      mrrId,
+      requestedMrrNumber,
       req.body.discipline?.trim() || "",
       req.body.vendor_name?.trim() || "",
       linkedPo?.id || null,
@@ -16333,16 +16355,72 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requireP
       req.body.opi_date?.trim() || "",
       jobId
     ]);
+    const previousMrrNumber = String(currentMrr.mrr_number || "").trim();
+    if (previousMrrNumber && previousMrrNumber.toLowerCase() !== requestedMrrNumber.toLowerCase()) {
+      await client.query(`
+        update material_receiving_logs
+        set mrr_number = $3, updated_at = now()
+        where job_id = $1
+          and lower(trim(coalesce(mrr_number, ''))) = lower(trim($2))
+      `, [jobId, previousMrrNumber, requestedMrrNumber]);
+      await client.query(`
+        update fmr_logs
+        set mrr_number = $3, updated_at = now()
+        where job_id = $1
+          and lower(trim(coalesce(mrr_number, ''))) = lower(trim($2))
+      `, [jobId, previousMrrNumber, requestedMrrNumber]);
+      await client.query(`
+        update osd_logs
+        set mrr_number = $4
+        where job_id = $1
+          and (mrr_log_id = $2 or lower(trim(coalesce(mrr_number, ''))) = lower(trim($3)))
+      `, [jobId, mrrId, previousMrrNumber, requestedMrrNumber]);
+      await client.query(`
+        update opi_logs
+        set mrr_number = $3, updated_at = now()
+        where job_id = $1
+          and lower(trim(coalesce(mrr_number, ''))) = lower(trim($2))
+      `, [jobId, previousMrrNumber, requestedMrrNumber]);
+    }
     await saveMaterialLogLookup(client, "discipline", req.body.discipline, jobId);
     await saveMaterialLogLookup(client, "vendor_name", req.body.vendor_name, jobId);
     await saveMaterialLogLookup(client, "po_number", effectivePoNumber, jobId);
     await saveMaterialLogLookup(client, "received_by", req.body.received_by, jobId);
-    await syncMrrVendorsIntoVendorTable(client, jobId);
-    await syncOpiLogsFromMrr(client, jobId);
-    await auditLog(client, req.user.id, "update", "mrr_log", req.params.id, req.body.mrr_number?.trim() || "");
+    if (String(req.body.vendor_name || "").trim()) {
+      await findOrCreateVendorByName(client, req.body.vendor_name, jobId);
+    }
+    const opiNumber = String(req.body.opi_number || "").trim();
+    const previousOpiNumber = String(currentMrr.opi_number || "").trim();
+    if (opiNumber) {
+      await client.query(`
+        insert into opi_logs (job_id, opi_number, vendor_name, material_description, load_number, mrr_number, updated_at)
+        values ($1, $2, $3, $4, $5, $6, now())
+        on conflict (job_id, opi_number) do update set
+          vendor_name = excluded.vendor_name,
+          material_description = excluded.material_description,
+          load_number = excluded.load_number,
+          mrr_number = excluded.mrr_number,
+          updated_at = now()
+      `, [
+        jobId,
+        opiNumber,
+        req.body.vendor_name?.trim() || "",
+        req.body.material_description?.trim() || "",
+        req.body.load_number?.trim() || "",
+        requestedMrrNumber
+      ]);
+    } else if (previousOpiNumber) {
+      await client.query(`
+        delete from opi_logs
+        where job_id = $1
+          and opi_number = $2
+          and lower(trim(coalesce(mrr_number, ''))) in (lower(trim($3)), lower(trim($4)))
+      `, [jobId, previousOpiNumber, previousMrrNumber, requestedMrrNumber]);
+    }
+    await auditLog(client, req.user.id, "update", "mrr_log", mrrId, requestedMrrNumber);
   });
   res.redirect("/material-logs/mrr");
-});
+}));
 
 app.get("/material-logs/fmr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
