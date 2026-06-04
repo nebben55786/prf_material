@@ -4,6 +4,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import zlib from "node:zlib";
 import { del, get, put } from "@vercel/blob";
+import { handleUpload } from "@vercel/blob/client";
 import express from "express";
 import cookieParser from "cookie-parser";
 import multer from "multer";
@@ -17,6 +18,9 @@ const PORT = Number(process.env.PORT || 3000);
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const authContextCacheMs = Math.max(0, Number(process.env.AUTH_CONTEXT_CACHE_MS || 15000));
 const slowRequestMs = Math.max(0, Number(process.env.SLOW_REQUEST_MS || 1000));
+const configuredQuoteFileUploadMaxBytes = Number(process.env.QUOTE_FILE_UPLOAD_MAX_BYTES || 100 * 1024 * 1024);
+const quoteFileUploadMaxBytes = Math.max(5 * 1024 * 1024, Number.isFinite(configuredQuoteFileUploadMaxBytes) ? configuredQuoteFileUploadMaxBytes : 100 * 1024 * 1024);
+const vercelBlobClientModuleUrl = process.env.VERCEL_BLOB_CLIENT_MODULE_URL || "https://esm.sh/@vercel/blob@2.3.3/client?bundle";
 const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
@@ -2491,6 +2495,59 @@ function quoteFileDisplayName({ rfqNo, vendorName, quoteSequence, sourceFilename
   return `${base}${quoteFileExtension(sourceFilename, contentType)}`;
 }
 
+async function recordRfqQuoteFileUpload(client, { jobId, rfqId, vendorId, uploadedBy, sourceFilename, contentType, sizeBytes, blob }) {
+  const normalizedJobId = Number(jobId || 0);
+  const normalizedRfqId = Number(rfqId || 0);
+  const normalizedVendorId = Number(vendorId || 0);
+  if (!normalizedJobId || !normalizedRfqId || !normalizedVendorId) throw new Error("Quote upload metadata is incomplete.");
+  const rfq = (await client.query("select rfq_no from rfqs where id = $1 and job_id = $2", [normalizedRfqId, normalizedJobId])).rows[0];
+  if (!rfq) throw new Error("RFQ not found for uploaded quote file.");
+  const vendor = (await client.query(`
+    select v.name
+    from rfq_vendors rv
+    join vendors v on v.id = rv.vendor_id
+    where rv.rfq_id = $1 and rv.vendor_id = $2 and rv.job_id = $3
+  `, [normalizedRfqId, normalizedVendorId, normalizedJobId])).rows[0];
+  if (!vendor) throw new Error("Choose a vendor from the RFQ vendor list before uploading.");
+  const blobPathname = String(blob?.pathname || "").trim();
+  const blobUrl = String(blob?.url || "").trim();
+  if (!blobPathname || !blobUrl) throw new Error("Uploaded quote file did not return a Blob URL.");
+  const quoteSequence = Number((await client.query(`
+    select count(*) as count
+    from rfq_quote_files
+    where rfq_id = $1 and job_id = $2 and vendor_id = $3
+  `, [normalizedRfqId, normalizedJobId, normalizedVendorId])).rows[0]?.count || 0) + 1;
+  const finalContentType = String(blob?.contentType || contentType || "").trim();
+  const generatedFilename = quoteFileDisplayName({
+    rfqNo: rfq.rfq_no,
+    vendorName: vendor.name,
+    quoteSequence,
+    sourceFilename: sourceFilename || blobPathname,
+    contentType: finalContentType
+  });
+  const insert = await client.query(`
+    insert into rfq_quote_files (job_id, rfq_id, vendor_id, filename, content_type, size_bytes, blob_url, blob_download_url, blob_pathname, uploaded_by)
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    on conflict (blob_pathname) do nothing
+    returning id
+  `, [
+    normalizedJobId,
+    normalizedRfqId,
+    normalizedVendorId,
+    generatedFilename,
+    finalContentType,
+    Number(sizeBytes || blob?.size || 0),
+    blobUrl,
+    String(blob?.downloadUrl || "").trim(),
+    blobPathname,
+    Number(uploadedBy || 0) || null
+  ]);
+  if (insert.rows[0]) {
+    await auditLog(client, Number(uploadedBy || 0) || null, "upload", "rfq_quote_file", normalizedRfqId, `${vendor.name}:${generatedFilename}`);
+  }
+  return { id: insert.rows[0]?.id || null, vendorId: normalizedVendorId };
+}
+
 function contentDispositionFilename(value) {
   return safeQuoteFilenamePart(value, "quote-file").replace(/["\\\r\n]/g, "_");
 }
@@ -2501,6 +2558,16 @@ function formatBytes(value) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function parseJsonObject(value, fallback = {}) {
+  if (!value) return fallback;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function combineRfqDimension(value1, value2) {
@@ -5286,6 +5353,29 @@ const requireAuth = asyncHandler(async (req, res, next) => {
   req.user = cloneAuthContextUser(authUser);
   next();
 });
+
+async function getRequestAuthContext(req) {
+  const sessionUser = currentUser(req);
+  if (!sessionUser) return null;
+  const cachedUser = getCachedAuthContext(sessionUser);
+  if (cachedUser) return cachedUser;
+  const user = (await query(`
+    select id, username, first_name, last_name, role, is_active
+    from users
+    where id = $1
+  `, [sessionUser.id])).rows[0];
+  if (!user || !user.is_active) return null;
+  const { jobs, activeJobs, activeJob } = await resolveJobContextForUser(user, null, sessionUser.job_id);
+  const authUser = {
+    ...user,
+    job_id: activeJob ? Number(activeJob.id) : null,
+    activeJob: activeJob || null,
+    accessibleJobs: jobs,
+    activeJobs
+  };
+  setCachedAuthContext(sessionUser, authUser);
+  return cloneAuthContextUser(authUser);
+}
 
 const requireJobContext = asyncHandler(async (req, res, next) => {
   if (req.user?.activeJob) {
@@ -11032,6 +11122,14 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     .sort((left, right) => left.vendorName.localeCompare(right.vendorName));
   const activeVendor = selectedVendors.find((vendor) => String(vendor.vendor_id) === activeQuoteVendorId) || null;
   const quoteInputsDisabledAttr = activeQuoteVendorId ? "" : " disabled";
+  const quoteUploadPathPrefix = activeVendor
+    ? [
+      "rfq-quotes",
+      `job-${jobId}`,
+      `rfq-${safeBlobPathSegment(rfq.rfq_no, String(rfqId))}`,
+      `vendor-${safeBlobPathSegment(activeVendor.name, String(activeQuoteVendorId))}`
+    ].join("/")
+    : "";
   const materialItemRows = materialItems
     .map((item) => `<tr>
       <td>${esc(item.item_code)}</td>
@@ -11164,15 +11262,20 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const quoteFileCard = `
     <div class="card">
       <h3>Quote Files</h3>
-      <form id="rfq-quote-file-form-${rfqId}" method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/quote-files" class="stack">
+      <form id="rfq-quote-file-form-${rfqId}" method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/quote-files" class="stack"
+        data-client-upload-url="/rfq/${rfqId}/quote-files/client-upload"
+        data-rfq-id="${rfqId}"
+        data-vendor-id="${escAttr(activeQuoteVendorId)}"
+        data-upload-prefix="${escAttr(quoteUploadPathPrefix)}">
         <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
         <label id="rfq-quote-drop-${rfqId}" for="rfq-quote-file-${rfqId}" style="display:grid; place-items:center; min-height:112px; border:2px dashed var(--line); border-radius:12px; background:#f8fafc; cursor:pointer; text-align:center; padding:18px;">
-          <span><strong>Drop quote file here</strong><br /><span class="muted">${activeVendor ? `Saved to ${esc(activeVendor.name)}` : "Select a vendor tab before uploading"}</span></span>
+          <span><strong>Drop quote file here</strong><br /><span class="muted">${activeVendor ? `Saved to ${esc(activeVendor.name)}. Max ${esc(formatBytes(quoteFileUploadMaxBytes))}` : "Select a vendor tab before uploading"}</span></span>
           <input id="rfq-quote-file-${rfqId}" type="file" name="quote_file" style="position:absolute; opacity:0; width:1px; height:1px;" ${activeQuoteVendorId ? "" : "disabled"} />
         </label>
         <div class="actions">
           <button type="submit" ${activeQuoteVendorId ? "" : "disabled"}>Upload Quote File</button>
         </div>
+        <div id="rfq-quote-file-status-${rfqId}" class="muted"></div>
       </form>
       <div class="scroll" style="margin-top:16px;">
         <table><tr><th>File</th><th>Vendor</th><th>Size</th><th>Uploaded By</th><th>Uploaded</th><th>Actions</th></tr>${quoteFileRows}</table>
@@ -11182,11 +11285,78 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           const form = document.getElementById("rfq-quote-file-form-${rfqId}");
           const drop = document.getElementById("rfq-quote-drop-${rfqId}");
           const input = document.getElementById("rfq-quote-file-${rfqId}");
+          const status = document.getElementById("rfq-quote-file-status-${rfqId}");
           if (!form || !drop || !input) return;
+          const button = form.querySelector('button[type="submit"]');
+          const clientModuleUrl = ${JSON.stringify(vercelBlobClientModuleUrl)};
+          const maxBytes = ${quoteFileUploadMaxBytes};
+          const maxLabel = ${JSON.stringify(formatBytes(quoteFileUploadMaxBytes))};
+          const setStatus = (message) => {
+            if (status) status.textContent = message || "";
+          };
+          const safeSegment = (value, fallback = "quote-file") => {
+            const cleaned = String(value || "")
+              .trim()
+              .replace(/[^a-zA-Z0-9._-]+/g, "-")
+              .replace(/^-+|-+$/g, "")
+              .slice(0, 120);
+            return cleaned || fallback;
+          };
           const highlight = (on) => {
             drop.style.borderColor = on ? "var(--brand)" : "var(--line)";
             drop.style.background = on ? "rgba(14,90,109,.08)" : "#f8fafc";
           };
+          const uploadQuoteFile = async (file) => {
+            if (!file) {
+              window.alert("Choose a quote file to upload.");
+              return;
+            }
+            const vendorId = String(form.dataset.vendorId || "").trim();
+            if (!vendorId) {
+              window.alert("Select a vendor tab before uploading a quote file.");
+              return;
+            }
+            if (file.size > maxBytes) {
+              window.alert("Quote file exceeds the " + maxLabel + " upload limit.");
+              return;
+            }
+            const uploadPrefix = String(form.dataset.uploadPrefix || "rfq-quotes").replace(/\\/+$/g, "");
+            const uploadPathname = uploadPrefix + "/" + Date.now() + "-" + safeSegment(file.name);
+            if (button) button.disabled = true;
+            input.disabled = true;
+            setStatus("Starting upload...");
+            try {
+              const { upload } = await import(clientModuleUrl);
+              await upload(uploadPathname, file, {
+                access: "private",
+                handleUploadUrl: form.dataset.clientUploadUrl,
+                clientPayload: JSON.stringify({
+                  rfqId: Number(form.dataset.rfqId || 0),
+                  vendorId: Number(vendorId),
+                  sourceFilename: file.name || "quote-file",
+                  contentType: file.type || "",
+                  sizeBytes: file.size || 0
+                }),
+                multipart: file.size > 100 * 1024 * 1024,
+                onUploadProgress: ({ percentage }) => {
+                  const pct = Number.isFinite(Number(percentage)) ? Math.round(Number(percentage)) : 0;
+                  setStatus("Uploading quote file... " + pct + "%");
+                }
+              });
+              setStatus("Upload complete. Refreshing quote files...");
+              window.setTimeout(() => {
+                window.location.href = "/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}";
+              }, 1200);
+            } catch (error) {
+              setStatus(error?.message || "Unable to upload quote file.");
+              if (button) button.disabled = false;
+              input.disabled = false;
+            }
+          };
+          form.addEventListener("submit", (event) => {
+            event.preventDefault();
+            uploadQuoteFile(input.files && input.files[0]);
+          });
           ["dragenter", "dragover"].forEach((eventName) => drop.addEventListener(eventName, (event) => {
             event.preventDefault();
             if (!input.disabled) highlight(true);
@@ -11198,7 +11368,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           drop.addEventListener("drop", (event) => {
             if (input.disabled || !event.dataTransfer?.files?.length) return;
             input.files = event.dataTransfer.files;
-            form.submit();
+            uploadQuoteFile(event.dataTransfer.files[0]);
           });
         })();
       </script>
@@ -11381,6 +11551,74 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     </div>
   `, req.user));
 });
+
+app.post("/rfq/:id/quote-files/client-upload", express.json({ limit: "1mb" }), asyncHandler(async (req, res) => {
+  try {
+    const jsonResponse = await handleUpload({
+      body: req.body,
+      request: req,
+      onBeforeGenerateToken: async (pathname, clientPayload) => {
+        const user = await getRequestAuthContext(req);
+        if (!user) throw new Error("Sign in before uploading quote files.");
+        if (!user.activeJob) throw new Error("Choose a job before uploading quote files.");
+        if (!canAccess(user, "rfqs", "edit")) throw new Error("You do not have permission to upload quote files.");
+        const jobId = Number(user.job_id || 0);
+        const rfqId = Number(req.params.id || 0);
+        const payload = parseJsonObject(clientPayload);
+        const payloadRfqId = Number(payload.rfqId || 0);
+        const vendorId = Number(payload.vendorId || 0);
+        const sourceFilename = String(payload.sourceFilename || payload.originalFilename || path.basename(String(pathname || "")) || "quote-file").trim();
+        const contentType = String(payload.contentType || "").trim();
+        const sizeBytes = Number(payload.sizeBytes || 0);
+        if (!rfqId || payloadRfqId !== rfqId) throw new Error("RFQ upload target is invalid.");
+        if (!vendorId) throw new Error("Select a vendor tab before uploading a quote file.");
+        if (sizeBytes > quoteFileUploadMaxBytes) {
+          throw new Error(`Quote file exceeds the ${formatBytes(quoteFileUploadMaxBytes)} upload limit.`);
+        }
+        const rfq = (await query("select rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+        if (!rfq) throw new Error("RFQ not found.");
+        const vendor = (await query(`
+          select v.name
+          from rfq_vendors rv
+          join vendors v on v.id = rv.vendor_id
+          where rv.rfq_id = $1 and rv.vendor_id = $2 and rv.job_id = $3
+        `, [rfqId, vendorId, jobId])).rows[0];
+        if (!vendor) throw new Error("Choose a vendor from the RFQ vendor list before uploading.");
+        return {
+          addRandomSuffix: true,
+          maximumSizeInBytes: quoteFileUploadMaxBytes,
+          tokenPayload: JSON.stringify({
+            jobId,
+            rfqId,
+            vendorId,
+            uploadedBy: Number(user.id || 0),
+            sourceFilename,
+            contentType,
+            sizeBytes
+          })
+        };
+      },
+      onUploadCompleted: async ({ blob, tokenPayload }) => {
+        const payload = parseJsonObject(tokenPayload);
+        await withTransaction(async (client) => {
+          await recordRfqQuoteFileUpload(client, {
+            jobId: payload.jobId,
+            rfqId: payload.rfqId,
+            vendorId: payload.vendorId,
+            uploadedBy: payload.uploadedBy,
+            sourceFilename: payload.sourceFilename,
+            contentType: payload.contentType,
+            sizeBytes: payload.sizeBytes,
+            blob
+          });
+        });
+      }
+    });
+    res.status(200).json(jsonResponse);
+  } catch (error) {
+    res.status(400).json({ error: error.message || "Unable to upload quote file." });
+  }
+}));
 
 app.post("/rfq/:id/quote-files", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("quote_file"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);

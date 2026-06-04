@@ -322,6 +322,7 @@ create table if not exists rfq_quote_files (
 
 create index if not exists idx_rfq_quote_files_rfq_id on rfq_quote_files(rfq_id);
 create index if not exists idx_rfq_quote_files_job_rfq_vendor on rfq_quote_files(job_id, rfq_id, vendor_id);
+create unique index if not exists idx_rfq_quote_files_blob_pathname_unique on rfq_quote_files(blob_pathname);
 
 create table if not exists quote_revisions (
   id bigserial primary key,
