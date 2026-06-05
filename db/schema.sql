@@ -120,6 +120,7 @@ create table if not exists rfqs (
   client_request_no text,
   po_number text,
   vendor_quote_number text,
+  comments text,
   requestor_name text,
   due_date date,
   status text not null default 'SEND_FOR_QUOTES',
@@ -129,6 +130,7 @@ create table if not exists rfqs (
 alter table rfqs add column if not exists client_request_no text;
 alter table rfqs add column if not exists po_number text;
 alter table rfqs add column if not exists vendor_quote_number text;
+alter table rfqs add column if not exists comments text;
 alter table rfqs add column if not exists requestor_name text;
 
 update rfqs

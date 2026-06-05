@@ -39,6 +39,8 @@ const rfqStatuses = [
   { value: "WAITING_ON_QUOTES", label: "Waiting on Quotes" },
   { value: "AWARDED", label: "Awarded" },
   { value: "WAITING_ON_CLIENT", label: "Waiting on Client" },
+  { value: "NEED_RFI", label: "Need RFI" },
+  { value: "RFI_SUBMITTED", label: "RFI submitted" },
   { value: "ON_HOLD", label: "On-hold" },
   { value: "CANCELLED", label: "Cancelled" },
   { value: "PURCHASED", label: "Purchased" },
@@ -11004,6 +11006,7 @@ app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("r
   const clientRequestNo = String(req.body.client_request_no || "").trim();
   const poNumber = String(req.body.po_number || "").trim();
   const vendorQuoteNumber = String(req.body.vendor_quote_number || "").trim();
+  const comments = String(req.body.comments || "").trim();
   const requestorName = String(req.body.requestor_name || "").trim();
   const dueDate = String(req.body.due_date || "").trim();
   const requestedStatus = String(req.body.status || "").trim();
@@ -11012,9 +11015,9 @@ app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("r
   if (!dueDate) throw new Error("Due date is required.");
   if (!status) throw new Error("Choose a valid RFQ status.");
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select rfq_no, project_name, client_request_no, po_number, vendor_quote_number, requestor_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    const rfq = (await client.query("select rfq_no, project_name, client_request_no, po_number, vendor_quote_number, comments, requestor_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
-    await client.query("update rfqs set project_name = $2, client_request_no = $3, po_number = $4, vendor_quote_number = $5, requestor_name = $6, due_date = $7, status = $8 where id = $1 and job_id = $9", [rfqId, projectName, clientRequestNo, poNumber, vendorQuoteNumber, requestorName, dueDate, status, jobId]);
+    await client.query("update rfqs set project_name = $2, client_request_no = $3, po_number = $4, vendor_quote_number = $5, comments = $6, requestor_name = $7, due_date = $8, status = $9 where id = $1 and job_id = $10", [rfqId, projectName, clientRequestNo, poNumber, vendorQuoteNumber, comments, requestorName, dueDate, status, jobId]);
     await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${clientRequestNo}:${poNumber}:${vendorQuoteNumber}:${requestorName}:${dueDate}:${status}`);
   });
   res.redirect(`/rfq/${rfqId}`);
@@ -11490,18 +11493,24 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <div><label>Requestor</label><input name="requestor_name" value="${esc(rfq.requestor_name || "")}" /></div>
         </div>
       </form>
-      <form id="rfq-${rfqId}-vendors-form" method="post" action="/rfq/${rfqId}/vendors" class="stack" style="margin-top:12px;">
-        ${renderVendorPicker(vendors, selectedVendors.map((vendor) => ({ id: vendor.vendor_id, name: vendor.name })), {
-          dialogId: `rfq-${rfqId}-vendor-dialog`,
-          inputId: `rfq-${rfqId}-vendor-input`,
-          selectedListId: `rfq-${rfqId}-vendor-list`,
-          hiddenContainerId: `rfq-${rfqId}-vendor-hidden`,
-          datalistId: `rfq-${rfqId}-vendor-options`,
-          addButtonLabel: "Add Vendor",
-          formId: `rfq-${rfqId}-vendors-form`,
-          showAddButton: false
-        })}
-      </form>
+      <div class="grid" style="grid-template-columns: minmax(280px, 0.55fr) minmax(320px, 1fr); align-items:start; margin-top:12px;">
+        <form id="rfq-${rfqId}-vendors-form" method="post" action="/rfq/${rfqId}/vendors" class="stack">
+          ${renderVendorPicker(vendors, selectedVendors.map((vendor) => ({ id: vendor.vendor_id, name: vendor.name })), {
+            dialogId: `rfq-${rfqId}-vendor-dialog`,
+            inputId: `rfq-${rfqId}-vendor-input`,
+            selectedListId: `rfq-${rfqId}-vendor-list`,
+            hiddenContainerId: `rfq-${rfqId}-vendor-hidden`,
+            datalistId: `rfq-${rfqId}-vendor-options`,
+            addButtonLabel: "Add Vendor",
+            formId: `rfq-${rfqId}-vendors-form`,
+            showAddButton: false
+          })}
+        </form>
+        <div>
+          <label>Comments</label>
+          <textarea form="rfq-${rfqId}-header-form" name="comments" style="min-height:108px;">${esc(rfq.comments || "")}</textarea>
+        </div>
+      </div>
       <div class="actions">
         <button type="submit" form="rfq-${rfqId}-header-form">Save Header</button>
         <button type="button" onclick='openVendorPicker("rfq-${rfqId}-vendor-dialog", "rfq-${rfqId}-vendor-input")'>Add Vendor</button>
