@@ -6565,29 +6565,13 @@ function renderUserJobChecks(jobs = [], selectedJobIds = [], fieldName = "job_id
 }
 
 app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async (req, res) => {
-  const [usersRes, assignmentsRes, loginHistoryRes] = await Promise.all([
+  const [usersRes, assignmentsRes] = await Promise.all([
     query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username"),
     query(`
       select uj.user_id, uj.job_id, j.job_number, j.plant_name
       from user_jobs uj
       join jobs j on j.id = uj.job_id
       order by j.job_number asc
-    `),
-    query(`
-      select
-        a.id,
-        a.user_id,
-        a.created_at,
-        coalesce(nullif(a.details, ''), u.username, concat('User #', a.entity_id)) as login_name,
-        u.first_name,
-        u.last_name,
-        u.role
-      from audit_log a
-      left join users u on u.id = a.user_id
-      where a.action = 'login'
-        and a.entity_type = 'auth'
-      order by a.created_at desc, a.id desc
-      limit 100
     `)
   ]);
   const assignmentsByUser = new Map();
@@ -6610,6 +6594,42 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       <td><a class="btn btn-secondary" href="/settings/users/${record.id}">Manage</a></td>
     </tr>
   `).join("");
+  res.send(layout("User Management", `
+    <h1>User Management</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+        <a class="btn btn-secondary" href="/settings/user-login-history">Login History</a>
+        <a class="btn btn-primary" href="/settings/users/new">Add User</a>
+      </div>
+    </div>
+    <div class="card scroll">
+      <h3>Existing Users</h3>
+      <table>
+        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Jobs</th><th>Role</th><th>Status</th><th>Created</th><th>Action</th></tr>
+        ${userRows || `<tr><td colspan="10" class="muted">No users found.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+});
+
+app.get("/settings/user-login-history", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const loginHistoryRes = await query(`
+    select
+      a.id,
+      a.user_id,
+      a.created_at,
+      coalesce(nullif(a.details, ''), u.username, concat('User #', a.entity_id)) as login_name,
+      u.first_name,
+      u.last_name,
+      u.role
+    from audit_log a
+    left join users u on u.id = a.user_id
+    where a.action = 'login'
+      and a.entity_type = 'auth'
+    order by a.created_at desc, a.id desc
+    limit 100
+  `);
   const loginRows = loginHistoryRes.rows.map((entry) => {
     const displayName = [String(entry.first_name || "").trim(), String(entry.last_name || "").trim()].filter(Boolean).join(" ");
     return `
@@ -6621,20 +6641,12 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       </tr>
     `;
   }).join("");
-  res.send(layout("User Management", `
-    <h1>User Management</h1>
+  res.send(layout("Login History", `
+    <h1>Login History</h1>
     <div class="card">
       <div class="actions">
-        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
-        <a class="btn btn-primary" href="/settings/users/new">Add User</a>
+        <a class="btn btn-secondary" href="/settings/user-management">Back To Users</a>
       </div>
-    </div>
-    <div class="card scroll">
-      <h3>Existing Users</h3>
-      <table>
-        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Jobs</th><th>Role</th><th>Status</th><th>Created</th><th>Action</th></tr>
-        ${userRows || `<tr><td colspan="10" class="muted">No users found.</td></tr>`}
-      </table>
     </div>
     <div class="card scroll">
       <h3>Recent Login History</h3>
@@ -6645,7 +6657,7 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       </table>
     </div>
   `, req.user));
-});
+}));
 
 app.get("/settings/users/new", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
   const jobs = (await query("select id, job_number, plant_name, is_active from jobs order by job_number asc")).rows;
