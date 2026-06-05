@@ -2720,6 +2720,43 @@ async function getNextRfqLineNumber(client, rfqId) {
   return String(result.rows[0]?.next_line || 1);
 }
 
+function parsePositiveLineNumber(value) {
+  const text = String(value || "").trim();
+  if (!/^[0-9]+$/.test(text)) return null;
+  const lineNumber = Number(text);
+  if (!Number.isSafeInteger(lineNumber) || lineNumber < 1) return null;
+  return lineNumber;
+}
+
+async function resequenceRfqItemLine(client, { rfqId, itemId, targetLine, jobId }) {
+  const targetLineNumber = parsePositiveLineNumber(targetLine);
+  if (!targetLineNumber) return false;
+  const rows = (await client.query(`
+    select id
+    from rfq_items
+    where rfq_id = $1
+      and job_id = $2
+      and coalesce(po_line, '') ~ '^[0-9]+$'
+    order by po_line::integer, id
+  `, [rfqId, jobId])).rows.map((row) => ({ id: Number(row.id) }));
+  const currentIndex = rows.findIndex((row) => row.id === Number(itemId));
+  if (currentIndex < 0) return false;
+  const [movedRow] = rows.splice(currentIndex, 1);
+  const insertIndex = Math.min(Math.max(targetLineNumber, 1), rows.length + 1) - 1;
+  rows.splice(insertIndex, 0, movedRow);
+  for (let index = 0; index < rows.length; index += 1) {
+    await client.query(`
+      update rfq_items
+      set po_line = $2,
+          updated_at = now()
+      where id = $1
+        and rfq_id = $3
+        and job_id = $4
+    `, [rows[index].id, String(index + 1), rfqId, jobId]);
+  }
+  return true;
+}
+
 function validatePasswordRules(password) {
   const value = String(password || "");
   if (value.length < 10) return "Password must be at least 10 characters.";
@@ -3131,17 +3168,18 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
           updated_at = now()
       where id = $1
     `, [existingItem.rows[0].id, poLine, ...materialItemSnapshotParams(item), requestedSpec, item.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
-    return { status: "updated" };
+    return { status: "updated", itemId: Number(existingItem.rows[0].id) };
   }
   const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
-  await client.query(`
+  const insert = await client.query(`
     insert into rfq_items (
       job_id, rfq_id, material_item_id, item_code_snapshot, description_snapshot, material_type_snapshot,
       uom_snapshot, po_line, spec, commodity_code, tag_number, size_1, size_2, thk_1, thk_2, qty, notes, updated_at
     )
     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+    returning id
   `, [jobId, rfqId, materialItemId, ...materialItemSnapshotParams(item), poLine, requestedSpec, item.commodity_code || "", row.tag_number || "", item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", qty, row.notes || ""]);
-  return { status: "inserted" };
+  return { status: "inserted", itemId: Number(insert.rows[0].id) };
 }
 
 async function upsertPurchaseOrderRow(client, row, jobId) {
@@ -11986,7 +12024,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         and mis_filter.spec_id = $${itemParams.length}
     )`);
   }
-  const [rfqRes, specOptions, materialItemsRes] = await Promise.all([
+  const [rfqRes, specOptions, materialItemsRes, nextPoLine] = await Promise.all([
     query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
     getMaterialSpecOptions(jobId),
     query(`
@@ -12009,7 +12047,8 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       group by mi.id
       order by mi.item_code
       limit 500
-    `, itemParams)
+    `, itemParams),
+    getNextRfqLineNumber(pool, rfqId)
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
@@ -12081,12 +12120,14 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         <input type="hidden" name="thk_2" id="rfq-existing-item-thk-2-${rfqId}" />
         <input type="hidden" name="material_type" id="rfq-existing-item-type-${rfqId}" />
         <input type="hidden" name="spec" id="rfq-existing-item-spec-${rfqId}" />
+        <input type="hidden" id="rfq-existing-item-next-line-${rfqId}" value="${esc(nextPoLine)}" />
         <h3>Add Existing RFQ Item</h3>
         <div class="card" style="margin:0;">
           <div><strong id="rfq-existing-item-title-${rfqId}"></strong></div>
           <div class="muted" id="rfq-existing-item-summary-${rfqId}" style="margin-top:6px;"></div>
         </div>
-        <div class="grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+        <div class="grid" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+          <div><label>PO Line</label><input name="po_line" id="rfq-existing-item-po-line-${rfqId}" inputmode="numeric" /></div>
           <div><label>Qty</label><input name="qty" id="rfq-existing-item-qty-${rfqId}" value="1" inputmode="decimal" required /></div>
           <div><label>UOM</label><input name="uom" id="rfq-existing-item-uom-${rfqId}" required /></div>
         </div>
@@ -12146,6 +12187,8 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         setValue('rfq-existing-item-thk-2-' + rfqId, thk2);
         setValue('rfq-existing-item-type-' + rfqId, materialType);
         setValue('rfq-existing-item-spec-' + rfqId, spec);
+        const nextLineInput = document.getElementById('rfq-existing-item-next-line-' + rfqId);
+        setValue('rfq-existing-item-po-line-' + rfqId, nextLineInput ? nextLineInput.value : '');
         setValue('rfq-existing-item-qty-' + rfqId, '1');
         setValue('rfq-existing-item-uom-' + rfqId, uom);
         const title = document.getElementById('rfq-existing-item-title-' + rfqId);
@@ -12180,6 +12223,11 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
           const payload = await response.json().catch(() => ({}));
           if (!response.ok || !payload.ok) throw new Error(payload.message || 'Item could not be added.');
           closeExistingRfqItemDialog(rfqId);
+          const nextLineInput = document.getElementById('rfq-existing-item-next-line-' + rfqId);
+          if (nextLineInput && payload.status === 'inserted') {
+            const currentNext = Number(nextLineInput.value || 0);
+            if (Number.isFinite(currentNext) && currentNext > 0) nextLineInput.value = String(currentNext + 1);
+          }
           if (sourceButton) {
             sourceButton.textContent = payload.status === 'updated' ? 'Updated' : 'Added';
             sourceButton.classList.add('btn-secondary');
@@ -12485,6 +12533,14 @@ app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission
     const status = await withTransaction(async (client) => {
       const result = await upsertRfqItemRow(client, rfqId, req.body, currentJobId(req));
       if (result.status === "skipped") throw new Error(result.message);
+      if (result.itemId && parsePositiveLineNumber(req.body.po_line)) {
+        await resequenceRfqItemLine(client, {
+          rfqId,
+          itemId: result.itemId,
+          targetLine: req.body.po_line,
+          jobId: currentJobId(req)
+        });
+      }
       await auditLog(client, req.user.id, "upsert", "rfq_item", rfqId, `item=${req.body.item_code || ""}`);
       return result.status;
     });
@@ -13052,7 +13108,7 @@ app.post("/rfq-item/:id/award/clear", requireAuth, requireJobContext, requirePer
 
 app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const item = (await query(`
-    select ri.id, ri.rfq_id, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
+    select ri.id, ri.rfq_id, ri.po_line, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
            coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
            coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
            coalesce(nullif(ri.material_type_snapshot, ''), mi.material_type) as material_type,
@@ -13074,6 +13130,7 @@ app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission(
         <div><label>Description</label><input value="${esc(item.description)}" readonly /></div>
         <div><label>Type</label><input value="${esc(item.material_type)}" readonly /></div>
         <div><label>UOM</label><input value="${esc(item.uom)}" readonly /></div>
+        <div><label>PO Line</label><input name="po_line" value="${esc(item.po_line || "")}" inputmode="numeric" /></div>
         <div><label>Qty</label><input name="qty" value="${esc(item.qty)}" required /></div>
         <div><label>Spec</label><input name="spec" value="${esc(item.spec || "")}" /></div>
         <div><label>Commodity Code</label><input value="${esc(item.commodity_code || "")}" readonly /></div>
@@ -13094,7 +13151,7 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
   const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
     const current = (await client.query(`
-      select ri.rfq_id, ri.material_item_id, mi.item_code, mi.description
+      select ri.rfq_id, ri.po_line, ri.material_item_id, mi.item_code, mi.description
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
@@ -13106,6 +13163,7 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
     const materialLookup = await getMaterialItemForUse(client, req.body.item_code, jobId, requestedSpec);
     if (materialLookup.errorCode) throw new Error(materialLookup.message);
     const item = materialLookup.item;
+    const requestedPoLine = String(req.body.po_line || "").trim();
     const update = await client.query(`
       update rfq_items
       set material_item_id = $2,
@@ -13120,10 +13178,11 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
           size_2 = $11,
           thk_1 = $12,
           thk_2 = $13,
-          qty = $14,
-          notes = $15,
+          po_line = $14,
+          qty = $15,
+          notes = $16,
           updated_at = now()
-      where id = $1 and job_id = $16 and extract(epoch from updated_at)::text = $17
+      where id = $1 and job_id = $17 and extract(epoch from updated_at)::text = $18
     `, [
       itemId,
       item.id,
@@ -13135,13 +13194,22 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
       item.size_2 || "",
       item.thk_1 || "",
       item.thk_2 || "",
+      requestedPoLine,
       qty,
       req.body.notes || "",
       jobId,
       req.body.updated_token || ""
     ]);
     if (update.rowCount === 0) throw new Error("This RFQ item was modified by another user. Refresh and try again.");
-    await auditLog(client, req.user.id, "update", "rfq_item", itemId, item.item_code || "");
+    if (parsePositiveLineNumber(requestedPoLine)) {
+      await resequenceRfqItemLine(client, {
+        rfqId: current.rfq_id,
+        itemId,
+        targetLine: requestedPoLine,
+        jobId
+      });
+    }
+    await auditLog(client, req.user.id, "update", "rfq_item", itemId, `${item.item_code || ""}|line=${requestedPoLine}`);
     return current.rfq_id;
   });
   res.redirect(`/rfq/${rfqId}`);
