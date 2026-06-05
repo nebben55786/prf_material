@@ -11297,6 +11297,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/existing">Add Existing</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/new">Add New</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Values</a>` : ""}
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/import-page">Import Items</a>` : ""}
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/import-template.xlsx">Download Item Template</a>` : ""}
       ${poCount === 0 ? (activeQuoteVendorId
         ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}">Import Quotes</a>`
         : `<button class="btn btn-secondary" type="button" disabled title="Select a vendor tab before importing quotes">Import Quotes</button>`) : ""}
@@ -12395,6 +12397,49 @@ app.get("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissio
   `, req.user));
 }));
 
+app.get("/rfq/:id/items/import-template.xlsx", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const rfq = (await query("select id, rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  const worksheet = XLSX.utils.aoa_to_sheet([rfqItemColumns]);
+  worksheet["!cols"] = rfqItemColumns.map((header) => ({
+    wch: Math.max(12, header.length + 2)
+  }));
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "RFQ Items");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  const filename = `${safeBlobPathSegment(rfq.rfq_no || "rfq", "rfq")}-item-import-template.xlsx`;
+  await auditLog(pool, req.user.id, "download_template", "rfq_items", rfqId, filename);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(buffer);
+}));
+
+app.get("/rfq/:id/items/import-page", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, currentJobId(req)])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
+  res.send(layout(`Import RFQ Items`, `
+    <h1>Import RFQ Items</h1>
+    <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
+    <div class="card">
+      <p class="muted">Download the blank template, fill in the rows, then upload it here. Required columns are <strong>item_code</strong> and <strong>qty</strong>. Item codes must already exist in Item Master for this job. Optional columns include po_line, spec, tag_number, and notes.</p>
+      <div class="actions" style="margin-bottom:12px;">
+        <a class="btn btn-secondary" href="/rfq/${rfqId}/items/import-template.xlsx">Download Blank Template</a>
+      </div>
+      <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/items/import" class="stack">
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" accept=".csv,.xlsx,.xlsm,.xlsb,.xls" /></div>
+        <div><label>Or Paste CSV</label><textarea name="csv_text" placeholder="${esc(rfqItemColumns.join(","))}"></textarea></div>
+        <div class="actions">
+          <button type="submit">Import RFQ Items</button>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
+        </div>
+      </form>
+    </div>
+  `, req.user));
+}));
+
 app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
   const jobId = currentJobId(req);
@@ -12558,8 +12603,11 @@ app.get("/rfq/:id/quotes/import-page", requireAuth, requireJobContext, requirePe
   `, req.user));
 }));
 
-app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("sheet"), async (req, res) => {
+app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const rfq = (await query("select id from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+  if (!rfq) throw new Error("RFQ not found.");
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (rows.length === 0) throw new Error("No rows found.");
   const batchId = await withTransaction(async (client) => {
@@ -12567,8 +12615,8 @@ app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermiss
       entityType: "rfq_items",
       rfqId,
       uploadedBy: req.user.id,
-      filename: req.file?.originalname || "",
-      jobId: currentJobId(req)
+      filename: req.file?.originalname || "pasted-rfq-items",
+      jobId
     });
     let insertedCount = 0;
     let updatedCount = 0;
@@ -12576,7 +12624,7 @@ app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermiss
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const rowNumber = index + 2;
-      const result = await upsertRfqItemRow(client, rfqId, row, currentJobId(req));
+      const result = await upsertRfqItemRow(client, rfqId, row, jobId);
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
@@ -12589,7 +12637,7 @@ app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermiss
     return batchId;
   });
   res.redirect(`/imports/${batchId}`);
-});
+}));
 
 app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
