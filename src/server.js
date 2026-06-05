@@ -12050,6 +12050,10 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
       <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
+      <div class="actions" style="margin-bottom:12px;">
+        <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
+        ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
+      </div>
       <form method="get" action="/rfq/${rfqId}/items/existing" class="stack" style="margin-bottom:12px;">
         <div class="grid" style="grid-template-columns: 1fr auto;">
           <div><label>Spec</label><select name="spec_id">${specSelectOptions}</select></div>
@@ -12066,13 +12070,9 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
           <tbody>${materialItemRows || `<tr><td colspan="11" class="muted">No existing items found for the current filter.</td></tr>`}</tbody>
         </table>
       </div>
-      <div class="actions">
-        <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
-        ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
-      </div>
     </div>
     <dialog id="rfq-existing-item-dialog-${rfqId}" class="modal-card">
-      <form method="post" action="/rfq/${rfqId}/items/add" class="stack">
+      <form id="rfq-existing-item-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/add" class="stack" onsubmit="return submitExistingRfqItem(event, '${rfqId}')">
         <input type="hidden" name="item_code" id="rfq-existing-item-code-${rfqId}" />
         <input type="hidden" name="description" id="rfq-existing-item-description-${rfqId}" />
         <input type="hidden" name="size_1" id="rfq-existing-item-size-1-${rfqId}" />
@@ -12090,6 +12090,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
           <div><label>Qty</label><input name="qty" id="rfq-existing-item-qty-${rfqId}" value="1" inputmode="decimal" required /></div>
           <div><label>UOM</label><input name="uom" id="rfq-existing-item-uom-${rfqId}" required /></div>
         </div>
+        <p id="rfq-existing-item-message-${rfqId}" class="muted" style="display:none;margin:0;"></p>
         <div class="actions">
           <button type="submit">Add Item</button>
           <button type="button" class="btn btn-secondary" onclick="closeExistingRfqItemDialog('${rfqId}')">Cancel</button>
@@ -12104,9 +12105,19 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         else dialog.removeAttribute('open');
         return false;
       }
+      function setExistingRfqItemMessage(rfqId, message, isError) {
+        const messageEl = document.getElementById('rfq-existing-item-message-' + rfqId);
+        if (!messageEl) return;
+        messageEl.textContent = message || '';
+        messageEl.style.display = message ? '' : 'none';
+        messageEl.style.color = isError ? '#8a2d1b' : '';
+        messageEl.style.fontWeight = isError ? '700' : '';
+      }
       function openExistingRfqItemDialog(button, rfqId) {
         const dialog = document.getElementById('rfq-existing-item-dialog-' + rfqId);
         if (!dialog || !button) return false;
+        dialog._sourceButton = button;
+        setExistingRfqItemMessage(rfqId, '', false);
         const itemCode = String(button.getAttribute('data-item-code') || '');
         const description = String(button.getAttribute('data-description') || '');
         const size1 = String(button.getAttribute('data-size-1') || '');
@@ -12145,6 +12156,46 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         else dialog.setAttribute('open', 'open');
         const qtyInput = document.getElementById('rfq-existing-item-qty-' + rfqId);
         if (qtyInput) window.setTimeout(() => qtyInput.focus(), 0);
+        return false;
+      }
+      async function submitExistingRfqItem(event, rfqId) {
+        event.preventDefault();
+        const form = document.getElementById('rfq-existing-item-form-' + rfqId);
+        const dialog = document.getElementById('rfq-existing-item-dialog-' + rfqId);
+        if (!form) return false;
+        const submitButton = form.querySelector('button[type="submit"]');
+        const sourceButton = dialog && dialog._sourceButton ? dialog._sourceButton : null;
+        const originalSubmitText = submitButton ? submitButton.textContent : '';
+        if (submitButton) {
+          submitButton.disabled = true;
+          submitButton.textContent = 'Adding...';
+        }
+        setExistingRfqItemMessage(rfqId, '', false);
+        try {
+          const response = await fetch(form.action, {
+            method: 'POST',
+            body: new URLSearchParams(new FormData(form)),
+            headers: { Accept: 'application/json', 'X-Requested-With': 'fetch' }
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok || !payload.ok) throw new Error(payload.message || 'Item could not be added.');
+          closeExistingRfqItemDialog(rfqId);
+          if (sourceButton) {
+            sourceButton.textContent = payload.status === 'updated' ? 'Updated' : 'Added';
+            sourceButton.classList.add('btn-secondary');
+            window.setTimeout(() => {
+              sourceButton.textContent = 'Add';
+              sourceButton.classList.remove('btn-secondary');
+            }, 1600);
+          }
+        } catch (error) {
+          setExistingRfqItemMessage(rfqId, error && error.message ? error.message : 'Item could not be added.', true);
+        } finally {
+          if (submitButton) {
+            submitButton.disabled = false;
+            submitButton.textContent = originalSubmitText || 'Add Item';
+          }
+        }
         return false;
       }
     </script>
@@ -12424,16 +12475,31 @@ app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermiss
 
 app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
-  const qtyText = String(req.body.qty || "").trim();
-  const uom = String(req.body.uom || "").trim();
-  if (!qtyText) throw new Error("Qty is required.");
-  if (!uom) throw new Error("UOM is required.");
-  await withTransaction(async (client) => {
-    const result = await upsertRfqItemRow(client, rfqId, req.body, currentJobId(req));
-    if (result.status === "skipped") throw new Error(result.message);
-    await auditLog(client, req.user.id, "upsert", "rfq_item", rfqId, `item=${req.body.item_code || ""}`);
-  });
-  res.redirect(`/rfq/${rfqId}`);
+  const wantsJson = String(req.get("accept") || "").includes("application/json")
+    || String(req.get("x-requested-with") || "").toLowerCase() === "fetch";
+  try {
+    const qtyText = String(req.body.qty || "").trim();
+    const uom = String(req.body.uom || "").trim();
+    if (!qtyText) throw new Error("Qty is required.");
+    if (!uom) throw new Error("UOM is required.");
+    const status = await withTransaction(async (client) => {
+      const result = await upsertRfqItemRow(client, rfqId, req.body, currentJobId(req));
+      if (result.status === "skipped") throw new Error(result.message);
+      await auditLog(client, req.user.id, "upsert", "rfq_item", rfqId, `item=${req.body.item_code || ""}`);
+      return result.status;
+    });
+    if (wantsJson) {
+      res.json({ ok: true, status });
+      return;
+    }
+    res.redirect(`/rfq/${rfqId}`);
+  } catch (error) {
+    if (wantsJson) {
+      res.status(400).json({ ok: false, message: error.message || "Item could not be added." });
+      return;
+    }
+    throw error;
+  }
 });
 
 app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
