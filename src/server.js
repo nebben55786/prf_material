@@ -7432,15 +7432,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
   const specOptions = [`<option value="">All Specs</option>`]
     .concat(specs.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === specId ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`))
     .join("");
-  const specRows = specs.map((spec) => `<tr>
-    <td>
-      <form id="item-spec-form-${spec.id}" method="post" action="/items/specs/${spec.id}" class="inline-form">
-        <input name="name" value="${esc(spec.name)}" required />
-      </form>
-    </td>
-    <td><input form="item-spec-form-${spec.id}" name="vendor_rev" value="${esc(spec.vendor_rev || "")}" /></td>
-    <td><button form="item-spec-form-${spec.id}" type="submit">Save Spec</button></td>
-  </tr>`).join("");
+  const itemFormSpecOptions = specs.map((spec) => `<option value="${esc(spec.name)}">${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
   const itemRows = rows.map((item) => `<tr>
     <td>${esc(item.item_code)}</td>
     <td>${esc(item.description)}</td>
@@ -7465,6 +7457,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
         </div>
         <div class="actions">
           <button type="submit">Filter Items</button>
+          ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/specs">Specs</a>` : ""}
           <a class="btn btn-secondary" href="/items">Clear</a>
           <a class="btn btn-secondary" href="/items/export.xlsx">Export XLSX</a>
           <a class="btn btn-secondary" href="/items/import/template">Download Import Template</a>
@@ -7490,7 +7483,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
           </div>
           <div class="grid">
             <div><label>Thk 2</label><input name="thk_2" /></div>
-            <div><label>Specs</label><input name="specs" placeholder="Spec A | Spec B" /></div>
+            <div><label>Specs</label><select name="specs" multiple size="${Math.min(Math.max(specs.length, 2), 8)}">${itemFormSpecOptions || `<option disabled>No specs added yet.</option>`}</select></div>
           </div>
           <div><label>Notes</label><textarea name="notes"></textarea></div>
           <div class="actions"><button type="submit">Save Item</button></div>
@@ -7504,17 +7497,6 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
           <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
           <div class="actions"><button type="submit">Import Items</button></div>
         </form>
-      </div>
-      <div class="card scroll">
-        <h3>Specs</h3>
-        <form method="post" action="/items/specs" class="stack" style="margin-bottom:12px;">
-          <div class="grid" style="grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;">
-            <div><label>Spec Name</label><input name="name" required /></div>
-            <div><label>Vendor Rev</label><input name="vendor_rev" /></div>
-            <div style="align-self:end;"><button type="submit">Add Spec</button></div>
-          </div>
-        </form>
-        <table><tr><th>Spec Name</th><th>Vendor Rev</th><th>Action</th></tr>${specRows || `<tr><td colspan="3" class="muted">No specs added yet.</td></tr>`}</table>
       </div>
     ` : ""}
     <div class="card scroll">
@@ -7534,6 +7516,36 @@ app.post("/items", requireAuth, requireJobContext, requirePermission("inventory"
     await auditLog(client, req.user.id, result.status, "material_item", result.id, result.item.item_code);
   });
   res.redirect(`/items?q=${encodeURIComponent(String(req.body.item_code || "").trim())}`);
+}));
+
+app.get("/items/specs", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const specs = await getMaterialSpecOptions(jobId);
+  const specRows = specs.map((spec) => `<tr>
+    <td>
+      <form id="item-spec-form-${spec.id}" method="post" action="/items/specs/${spec.id}" class="inline-form">
+        <input name="name" value="${esc(spec.name)}" required />
+      </form>
+    </td>
+    <td><input form="item-spec-form-${spec.id}" name="vendor_rev" value="${esc(spec.vendor_rev || "")}" /></td>
+    <td><button form="item-spec-form-${spec.id}" type="submit">Save Spec</button></td>
+  </tr>`).join("");
+  res.send(layout("Specs", `
+    <h1>Specs</h1>
+    <div class="card">
+      <div class="actions"><a class="btn btn-secondary" href="/items">Back To Item Master</a></div>
+    </div>
+    <div class="card scroll">
+      <form method="post" action="/items/specs" class="stack" style="margin-bottom:12px;">
+        <div class="grid" style="grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;">
+          <div><label>Spec Name</label><input name="name" required /></div>
+          <div><label>Vendor</label><input name="vendor_rev" /></div>
+          <div style="align-self:end;"><button type="submit">Add Spec</button></div>
+        </div>
+      </form>
+      <table><tr><th>Spec Name</th><th>Vendor</th><th>Action</th></tr>${specRows || `<tr><td colspan="3" class="muted">No specs added yet.</td></tr>`}</table>
+    </div>
+  `, req.user));
 }));
 
 app.post("/items/specs", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
@@ -7557,7 +7569,7 @@ app.post("/items/specs", requireAuth, requireJobContext, requirePermission("inve
     )).rows[0];
     await auditLog(client, req.user.id, "create", "material_spec", inserted.id, `${name}|${vendorRev}`);
   });
-  res.redirect("/items");
+  res.redirect("/items/specs");
 }));
 
 app.post("/items/specs/:id", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
@@ -7579,7 +7591,7 @@ app.post("/items/specs/:id", requireAuth, requireJobContext, requirePermission("
     if (updated.rowCount === 0) throw new Error("Spec not found.");
     await auditLog(client, req.user.id, "update", "material_spec", specId, `${name}|${vendorRev}`);
   });
-  res.redirect("/items");
+  res.redirect("/items/specs");
 }));
 
 app.post("/items/import", requireAuth, requireJobContext, requirePermission("inventory", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
@@ -7614,18 +7626,21 @@ app.post("/items/import", requireAuth, requireJobContext, requirePermission("inv
 
 app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
-  const item = (await query(`
-    select
-      mi.*,
-      extract(epoch from mi.updated_at)::text as updated_token,
-      coalesce(string_agg(ms.name, ' | ' order by ms.name) filter (where ms.id is not null), '') as specs
-    from material_items mi
-    left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
-    left join material_specs ms on ms.id = mis.spec_id
-    where mi.id = $1 and mi.job_id = $2
-    group by mi.id
-  `, [req.params.id, jobId])).rows[0];
+  const [itemResult, specs, selectedSpecResult] = await Promise.all([
+    query(`
+      select
+        mi.*,
+        extract(epoch from mi.updated_at)::text as updated_token
+      from material_items mi
+      where mi.id = $1 and mi.job_id = $2
+    `, [req.params.id, jobId]),
+    getMaterialSpecOptions(jobId),
+    query("select spec_id from material_item_specs where material_item_id = $1 and job_id = $2", [req.params.id, jobId])
+  ]);
+  const item = itemResult.rows[0];
   if (!item) throw new Error("Item not found.");
+  const selectedSpecIds = new Set(selectedSpecResult.rows.map((row) => Number(row.spec_id)));
+  const itemSpecOptions = specs.map((spec) => `<option value="${esc(spec.name)}" ${selectedSpecIds.has(Number(spec.id)) ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
   res.send(layout("Edit Item", `
     <h1>Edit Item</h1>
     <div class="card">
@@ -7645,7 +7660,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
         </div>
         <div class="grid">
           <div><label>Thk 2</label><input name="thk_2" value="${esc(formatPlainNumberDisplay(item.thk_2))}" /></div>
-          <div><label>Specs</label><input name="specs" value="${esc(item.specs || "")}" placeholder="Spec A | Spec B" /></div>
+          <div><label>Specs</label><select name="specs" multiple size="${Math.min(Math.max(specs.length, 2), 8)}">${itemSpecOptions || `<option disabled>No specs added yet.</option>`}</select></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(item.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save Item</button><a class="btn btn-secondary" href="/items">Back</a></div>
