@@ -283,9 +283,21 @@ function formatQtyDisplay(value) {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
+function formatPlainNumberDisplay(value, maxDecimals = 4) {
+  if (value === null || value === undefined) return "";
+  const text = String(value).trim();
+  if (!text) return "";
+  const numericText = text.replace(/,/g, "");
+  if (!/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(numericText)) return text;
+  const parsed = Number(numericText);
+  if (!Number.isFinite(parsed)) return text;
+  const rounded = parsed.toFixed(maxDecimals).replace(/\.?0+$/, "");
+  return rounded === "-0" ? "0" : rounded;
+}
+
 function formatCombinedSize(size1, size2) {
-  const primary = String(size1 || "").trim();
-  const secondary = String(size2 || "").trim();
+  const primary = formatPlainNumberDisplay(size1);
+  const secondary = formatPlainNumberDisplay(size2);
   if (primary && secondary) return `${primary} x ${secondary}`;
   return primary || secondary;
 }
@@ -673,10 +685,10 @@ function buildRfqSheetPdf(rfq, items, options = {}) {
     if (item.spec) extraDescription.push(...wrapPdfText(`Spec: ${item.spec}`, descriptionWrapWidth));
     if (item.notes) extraDescription.push(...wrapPdfText(`Notes: ${item.notes}`, descriptionWrapWidth));
     const combinedDescription = descriptionLines.concat(extraDescription);
-    const size1Lines = wrapPdfText(String(item.size_1 || ""), 8);
-    const size2Lines = wrapPdfText(String(item.size_2 || ""), 8);
-    const thk1Lines = wrapPdfText(String(item.thk_1 || ""), 8);
-    const thk2Lines = wrapPdfText(String(item.thk_2 || ""), 8);
+    const size1Lines = wrapPdfText(formatPlainNumberDisplay(item.size_1), 8);
+    const size2Lines = wrapPdfText(formatPlainNumberDisplay(item.size_2), 8);
+    const thk1Lines = wrapPdfText(formatPlainNumberDisplay(item.thk_1), 8);
+    const thk2Lines = wrapPdfText(formatPlainNumberDisplay(item.thk_2), 8);
     const lineCount = Math.max(lineLines.length, itemLines.length, combinedDescription.length, size1Lines.length, size2Lines.length, thk1Lines.length, thk2Lines.length, 1);
     return {
       lineLines,
@@ -2573,7 +2585,7 @@ function parseJsonObject(value, fallback = {}) {
 }
 
 function combineRfqDimension(value1, value2) {
-  const parts = [textValue(value1), textValue(value2)].filter(Boolean);
+  const parts = [formatPlainNumberDisplay(value1), formatPlainNumberDisplay(value2)].filter(Boolean);
   return parts.join(" x ");
 }
 
@@ -2675,8 +2687,8 @@ function buildRfqFlowWorkbook(rows) {
   rows.forEach((row, rowOffset) => {
     const rowIndex = rowOffset + 1;
     setWorksheetValue(worksheet, rowIndex, 0, textValue(row.item_code));
-    setWorksheetValue(worksheet, rowIndex, 4, textValue(row.size_1));
-    setWorksheetValue(worksheet, rowIndex, 5, textValue(row.size_2));
+    setWorksheetValue(worksheet, rowIndex, 4, formatPlainNumberDisplay(row.size_1));
+    setWorksheetValue(worksheet, rowIndex, 5, formatPlainNumberDisplay(row.size_2));
     setWorksheetValue(worksheet, rowIndex, 8, num(row.qty));
   });
   worksheet["!ref"] = XLSX.utils.encode_range({
@@ -7300,10 +7312,10 @@ app.get("/items/export.xlsx", requireAuth, requireJobContext, requirePermission(
     material_type: row.material_type,
     uom: row.uom,
     commodity_code: row.commodity_code,
-    size_1: row.size_1,
-    size_2: row.size_2,
-    thk_1: row.thk_1,
-    thk_2: row.thk_2,
+    size_1: formatPlainNumberDisplay(row.size_1),
+    size_2: formatPlainNumberDisplay(row.size_2),
+    thk_1: formatPlainNumberDisplay(row.thk_1),
+    thk_2: formatPlainNumberDisplay(row.thk_2),
     notes: row.notes,
     specs: row.specs
   }));
@@ -7383,10 +7395,10 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
     <td>${esc(item.material_type)}</td>
     <td>${esc(item.uom)}</td>
     <td>${esc(item.commodity_code)}</td>
-    <td>${esc(item.size_1)}</td>
-    <td>${esc(item.size_2)}</td>
-    <td>${esc(item.thk_1)}</td>
-    <td>${esc(item.thk_2)}</td>
+    <td>${esc(formatPlainNumberDisplay(item.size_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(item.size_2))}</td>
+    <td>${esc(formatPlainNumberDisplay(item.thk_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(item.thk_2))}</td>
     <td>${esc(item.specs)}</td>
     <td>${esc(item.notes)}</td>
     <td>${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/${item.id}/edit">Edit</a>` : ""}</td>
@@ -7575,12 +7587,12 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
         </div>
         <div class="grid-4">
           <div><label>Commodity Code</label><input name="commodity_code" value="${esc(item.commodity_code || "")}" /></div>
-          <div><label>Size 1</label><input name="size_1" value="${esc(item.size_1 || "")}" /></div>
-          <div><label>Size 2</label><input name="size_2" value="${esc(item.size_2 || "")}" /></div>
-          <div><label>Thk 1</label><input name="thk_1" value="${esc(item.thk_1 || "")}" /></div>
+          <div><label>Size 1</label><input name="size_1" value="${esc(formatPlainNumberDisplay(item.size_1))}" /></div>
+          <div><label>Size 2</label><input name="size_2" value="${esc(formatPlainNumberDisplay(item.size_2))}" /></div>
+          <div><label>Thk 1</label><input name="thk_1" value="${esc(formatPlainNumberDisplay(item.thk_1))}" /></div>
         </div>
         <div class="grid">
-          <div><label>Thk 2</label><input name="thk_2" value="${esc(item.thk_2 || "")}" /></div>
+          <div><label>Thk 2</label><input name="thk_2" value="${esc(formatPlainNumberDisplay(item.thk_2))}" /></div>
           <div><label>Specs</label><input name="specs" value="${esc(item.specs || "")}" placeholder="Spec A | Spec B" /></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(item.notes || "")}</textarea></div>
@@ -8604,10 +8616,10 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
       <td><input name="tag_number_${index}" value="${esc(row.tag_number)}" /></td>
       <td><input name="iwp_no_${index}" value="${esc(row.iwp_no)}" /></td>
       <td><input name="iso_no_${index}" value="${esc(row.iso_no)}" /></td>
-      <td><input name="size_1_${index}" value="${esc(row.size_1)}" /></td>
-      <td><input name="size_2_${index}" value="${esc(row.size_2)}" /></td>
-      <td><input name="thk_1_${index}" value="${esc(row.thk_1)}" /></td>
-      <td><input name="thk_2_${index}" value="${esc(row.thk_2)}" /></td>
+      <td><input name="size_1_${index}" value="${esc(formatPlainNumberDisplay(row.size_1))}" /></td>
+      <td><input name="size_2_${index}" value="${esc(formatPlainNumberDisplay(row.size_2))}" /></td>
+      <td><input name="thk_1_${index}" value="${esc(formatPlainNumberDisplay(row.thk_1))}" /></td>
+      <td><input name="thk_2_${index}" value="${esc(formatPlainNumberDisplay(row.thk_2))}" /></td>
       <td><input name="notes_${index}" value="${esc(row.notes)}" /></td>
     </tr>
   `).join("");
@@ -8869,10 +8881,10 @@ app.get("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission(
           <div><label>Tag Number</label><input name="tag_number" value="${esc(line.tag_number || "")}" /></div>
           <div><label>IWP</label><input name="iwp_no" value="${esc(line.iwp_no || "")}" /></div>
           <div><label>ISO</label><input name="iso_no" value="${esc(line.iso_no || "")}" /></div>
-          <div><label>Size 1</label><input value="${esc(line.size_1 || "")}" readonly /></div>
-          <div><label>Size 2</label><input value="${esc(line.size_2 || "")}" readonly /></div>
-          <div><label>Thk 1</label><input value="${esc(line.thk_1 || "")}" readonly /></div>
-          <div><label>Thk 2</label><input value="${esc(line.thk_2 || "")}" readonly /></div>
+          <div><label>Size 1</label><input value="${esc(formatPlainNumberDisplay(line.size_1))}" readonly /></div>
+          <div><label>Size 2</label><input value="${esc(formatPlainNumberDisplay(line.size_2))}" readonly /></div>
+          <div><label>Thk 1</label><input value="${esc(formatPlainNumberDisplay(line.thk_1))}" readonly /></div>
+          <div><label>Thk 2</label><input value="${esc(formatPlainNumberDisplay(line.thk_2))}" readonly /></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(line.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save BOM Line</button><a class="btn btn-secondary" href="/bom/${line.bom_id}">Back</a></div>
@@ -9033,10 +9045,10 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td><input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(stagedSelection[String(line.id)] ?? Math.min(num(line.qty_remaining), num(line.qty_available))))}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.tag_number || "")}</td>
-      <td>${esc(line.size_1 || "")}</td>
-      <td>${esc(line.size_2 || "")}</td>
-      <td>${esc(line.thk_1 || "")}</td>
-      <td>${esc(line.thk_2 || "")}</td>
+      <td>${esc(formatPlainNumberDisplay(line.size_1))}</td>
+      <td>${esc(formatPlainNumberDisplay(line.size_2))}</td>
+      <td>${esc(formatPlainNumberDisplay(line.thk_1))}</td>
+      <td>${esc(formatPlainNumberDisplay(line.thk_2))}</td>
       <td>${esc(line.notes || "")}</td>
       <td><span class="chip">${esc(line.planning_status)}</span></td>
       <td><div class="actions">${selectedBomAllowsManualLineEdits ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a>` : `<span class="muted">System BOM</span>`}</div></td>
@@ -11245,8 +11257,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(item.qty))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(item.uom)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(item.spec || "")}</td>
-      <td style="width:1%; white-space:nowrap;">${esc([item.size_1, item.size_2].filter(Boolean).join(" x "))}</td>
-      <td style="width:1%; white-space:nowrap;">${esc([item.thk_1, item.thk_2].filter(Boolean).join(" x "))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc([formatPlainNumberDisplay(item.size_1), formatPlainNumberDisplay(item.size_2)].filter(Boolean).join(" x "))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc([formatPlainNumberDisplay(item.thk_1), formatPlainNumberDisplay(item.thk_2)].filter(Boolean).join(" x "))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(item.notes || "")}</td>
       <td style="width:96px; white-space:nowrap;"><input data-rfq-quote-input="1" name="unit_price_${item.id}" value="${esc(formatCurrencyInput(selectedQuote?.unit_price))}" inputmode="decimal"${quoteInputsDisabledAttr} /></td>
       <td style="width:88px; white-space:nowrap;"><input data-rfq-quote-input="1" name="lead_days_${item.id}" value="${esc(selectedQuote?.lead_days || "")}" inputmode="numeric"${quoteInputsDisabledAttr} /></td>
@@ -12110,10 +12122,10 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
     .map((item) => `<tr>
       <td>${esc(item.item_code)}</td>
       <td>${esc(item.description)}</td>
-      <td>${esc(item.size_1 || "")}</td>
-      <td>${esc(item.size_2 || "")}</td>
-      <td>${esc(item.thk_1 || "")}</td>
-      <td>${esc(item.thk_2 || "")}</td>
+      <td>${esc(formatPlainNumberDisplay(item.size_1))}</td>
+      <td>${esc(formatPlainNumberDisplay(item.size_2))}</td>
+      <td>${esc(formatPlainNumberDisplay(item.thk_1))}</td>
+      <td>${esc(formatPlainNumberDisplay(item.thk_2))}</td>
       <td>${esc(item.material_type)}</td>
       <td>${esc(item.uom)}</td>
       <td>${esc(item.commodity_code || "")}</td>
@@ -12127,6 +12139,10 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
           data-size-2="${escAttr(item.size_2 || "")}"
           data-thk-1="${escAttr(item.thk_1 || "")}"
           data-thk-2="${escAttr(item.thk_2 || "")}"
+          data-size-1-display="${escAttr(formatPlainNumberDisplay(item.size_1))}"
+          data-size-2-display="${escAttr(formatPlainNumberDisplay(item.size_2))}"
+          data-thk-1-display="${escAttr(formatPlainNumberDisplay(item.thk_1))}"
+          data-thk-2-display="${escAttr(formatPlainNumberDisplay(item.thk_2))}"
           data-material-type="${escAttr(item.material_type)}"
           data-uom="${escAttr(item.uom)}"
           data-spec="${escAttr(selectedSpec?.name || "")}"
@@ -12215,11 +12231,15 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         const size2 = String(button.getAttribute('data-size-2') || '');
         const thk1 = String(button.getAttribute('data-thk-1') || '');
         const thk2 = String(button.getAttribute('data-thk-2') || '');
+        const size1Display = String(button.getAttribute('data-size-1-display') || size1);
+        const size2Display = String(button.getAttribute('data-size-2-display') || size2);
+        const thk1Display = String(button.getAttribute('data-thk-1-display') || thk1);
+        const thk2Display = String(button.getAttribute('data-thk-2-display') || thk2);
         const materialType = String(button.getAttribute('data-material-type') || '');
         const uom = String(button.getAttribute('data-uom') || '');
         const spec = String(button.getAttribute('data-spec') || '');
-        const sizeText = [size1, size2].filter(Boolean).join(' x ');
-        const thkText = [thk1, thk2].filter(Boolean).join(' x ');
+        const sizeText = [size1Display, size2Display].filter(Boolean).join(' x ');
+        const thkText = [thk1Display, thk2Display].filter(Boolean).join(' x ');
         const summaryBits = [];
         if (sizeText) summaryBits.push('Size ' + sizeText);
         if (thkText) summaryBits.push('Thk ' + thkText);
@@ -12446,7 +12466,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
 
   const rowsPayload = Buffer.from(JSON.stringify(rows), "utf8").toString("base64");
   const previewRows = previewMeta.map(({ row, matched, issues }) => {
-    const thk = [row.thk_1, row.thk_2].filter(Boolean).join(" x ");
+    const thk = [formatPlainNumberDisplay(row.thk_1), formatPlainNumberDisplay(row.thk_2)].filter(Boolean).join(" x ");
     const statusLabel = matched ? "Item Master" : "Not In Item Master";
     const statusChip = matched
       ? `<span class="chip">Item Master</span>`
@@ -12454,8 +12474,8 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
     return `<tr>
       <td>${esc(row.item_code || "")}</td>
       <td>${esc(row.description || "")}</td>
-      <td>${esc(row.size_1 || "")}</td>
-      <td>${esc(row.size_2 || "")}</td>
+      <td>${esc(formatPlainNumberDisplay(row.size_1))}</td>
+      <td>${esc(formatPlainNumberDisplay(row.size_2))}</td>
       <td>${esc(thk)}</td>
       <td>${esc(formatQtyDisplay(row.qty))}</td>
       <td>${esc(row.uom || "")}</td>
@@ -13185,10 +13205,10 @@ app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission(
         <div><label>Spec</label><input name="spec" value="${esc(item.spec || "")}" /></div>
         <div><label>Commodity Code</label><input value="${esc(item.commodity_code || "")}" readonly /></div>
         <div><label>Tag Number</label><input name="tag_number" value="${esc(item.tag_number || "")}" /></div>
-        <div><label>Size 1</label><input value="${esc(item.size_1 || "")}" readonly /></div>
-        <div><label>Size 2</label><input value="${esc(item.size_2 || "")}" readonly /></div>
-        <div><label>Thk 1</label><input value="${esc(item.thk_1 || "")}" readonly /></div>
-        <div><label>Thk 2</label><input value="${esc(item.thk_2 || "")}" readonly /></div>
+        <div><label>Size 1</label><input value="${esc(formatPlainNumberDisplay(item.size_1))}" readonly /></div>
+        <div><label>Size 2</label><input value="${esc(formatPlainNumberDisplay(item.size_2))}" readonly /></div>
+        <div><label>Thk 1</label><input value="${esc(formatPlainNumberDisplay(item.thk_1))}" readonly /></div>
+        <div><label>Thk 2</label><input value="${esc(formatPlainNumberDisplay(item.thk_2))}" readonly /></div>
         <div><label>Notes</label><textarea name="notes">${esc(item.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save Item</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
       </form>
@@ -13681,7 +13701,7 @@ app.post("/po/import/lines/preview", requireAuth, requireJobContext, requirePerm
     <td>${esc(row.description)}</td>
     <td>${esc(row.material_type)}</td>
     <td>${esc(formatQtyDisplay(row.qty_ordered))}</td>
-    <td>${esc(row.unit_price)}</td>
+    <td>${esc(formatPlainNumberDisplay(row.unit_price))}</td>
   </tr>`).join("");
   res.send(layout("Preview PO Line Import", `
     <h1>Preview PO Line Import</h1>
@@ -14021,10 +14041,10 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       <td style="width:1%; white-space:nowrap;">${esc(line.po_line || "")}</td>
       <td style="width:1%; white-space:nowrap;">${esc(line.item_code)}</td>
       <td style="width:auto; min-width:320px;">${esc(line.description)}</td>
-      <td style="width:1%; white-space:nowrap;">${esc(line.size_1 || "")}</td>
-      <td style="width:1%; white-space:nowrap;">${esc(line.size_2 || "")}</td>
-      <td style="width:1%; white-space:nowrap;">${esc(line.thk_1 || "")}</td>
-      <td style="width:1%; white-space:nowrap;">${esc(line.thk_2 || "")}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatPlainNumberDisplay(line.size_1))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatPlainNumberDisplay(line.size_2))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatPlainNumberDisplay(line.thk_1))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatPlainNumberDisplay(line.thk_2))}</td>
     <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_ordered))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_received))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_short_osd || 0))}</td>
@@ -14367,12 +14387,12 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
     <td>${esc(line.po_line || "")}</td>
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
-    <td>${esc(line.size_1)}</td>
-    <td>${esc(line.size_2)}</td>
-    <td>${esc(line.thk_1)}</td>
-    <td>${esc(line.thk_2)}</td>
+    <td>${esc(formatPlainNumberDisplay(line.size_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(line.size_2))}</td>
+    <td>${esc(formatPlainNumberDisplay(line.thk_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(line.thk_2))}</td>
       <td>${esc(formatQtyDisplay(line.qty_ordered))}</td>
-    <td>${esc(line.unit_price)}</td>
+    <td>${esc(formatPlainNumberDisplay(line.unit_price))}</td>
     <td><div class="actions"><a class="btn btn-secondary" href="/po-line/${line.id}/edit">Edit Line</a>${deleteAction}</div></td>
   </tr>`;
   }).join("");
@@ -14453,11 +14473,11 @@ app.get("/po-line/:id/edit", requireAuth, requireJobContext, requirePermission("
         <div class="grid">
           <div><label>PO Line</label><input name="po_line" value="${esc(line.po_line || "")}" /></div>
           <div><label>Qty Ordered</label><input name="qty_ordered" value="${esc(formatQtyDisplay(line.qty_ordered))}" required /></div>
-          <div><label>Unit Price</label><input name="unit_price" value="${esc(line.unit_price)}" required /></div>
-          <div><label>Size 1</label><input name="size_1" value="${esc(line.size_1 || "")}" /></div>
-          <div><label>Size 2</label><input name="size_2" value="${esc(line.size_2 || "")}" /></div>
-          <div><label>Thk 1</label><input name="thk_1" value="${esc(line.thk_1 || "")}" /></div>
-          <div><label>Thk 2</label><input name="thk_2" value="${esc(line.thk_2 || "")}" /></div>
+          <div><label>Unit Price</label><input name="unit_price" value="${esc(formatPlainNumberDisplay(line.unit_price))}" required /></div>
+          <div><label>Size 1</label><input name="size_1" value="${esc(formatPlainNumberDisplay(line.size_1))}" /></div>
+          <div><label>Size 2</label><input name="size_2" value="${esc(formatPlainNumberDisplay(line.size_2))}" /></div>
+          <div><label>Thk 1</label><input name="thk_1" value="${esc(formatPlainNumberDisplay(line.thk_1))}" /></div>
+          <div><label>Thk 2</label><input name="thk_2" value="${esc(formatPlainNumberDisplay(line.thk_2))}" /></div>
         </div>
         <div class="actions"><button type="submit">Save PO Line</button><a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
@@ -14697,7 +14717,7 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
     : "All PO lines tied to this MRR are already fully received.";
   const lineOptions = openLines.map((line) => {
     const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0);
-    return `<option value="${line.id}" data-remaining="${escAttr(String(remainingQty))}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(formatQtyDisplay(line.qty_ordered))} | Rec ${esc(formatQtyDisplay(line.qty_received))} | Short OS&D ${esc(formatQtyDisplay(line.qty_short_osd || 0))} | Open ${esc(formatQtyDisplay(remainingQty))} | ${esc(line.size_1 || "")}/${esc(line.size_2 || "")} | ${esc(line.thk_1 || "")}/${esc(line.thk_2 || "")}</option>`;
+    return `<option value="${line.id}" data-remaining="${escAttr(String(remainingQty))}">${esc(line.po_line || "")}${line.po_line ? " | " : ""}${esc(line.item_code)} | ${esc(line.description)} | Ordered ${esc(formatQtyDisplay(line.qty_ordered))} | Rec ${esc(formatQtyDisplay(line.qty_received))} | Short OS&D ${esc(formatQtyDisplay(line.qty_short_osd || 0))} | Open ${esc(formatQtyDisplay(remainingQty))} | ${esc(formatPlainNumberDisplay(line.size_1))}/${esc(formatPlainNumberDisplay(line.size_2))} | ${esc(formatPlainNumberDisplay(line.thk_1))}/${esc(formatPlainNumberDisplay(line.thk_2))}</option>`;
   }).join("");
   res.send(layout("Receive MRR", `
     <h1>Receive ${esc(mrr.mrr_number)}</h1>
@@ -14915,8 +14935,8 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
     .join("");
   const tableRows = rows.map((row) => `<tr>
-    <td>${esc(row.item_code)}</td><td>${esc(row.description)}</td><td>${esc(row.size_1 || "")}</td><td>${esc(row.size_2 || "")}</td>
-    <td>${esc(row.thk_1 || "")}</td><td>${esc(row.thk_2 || "")}</td><td>${esc(row.warehouse)}</td><td>${esc(row.location)}</td>
+    <td>${esc(row.item_code)}</td><td>${esc(row.description)}</td><td>${esc(formatPlainNumberDisplay(row.size_1))}</td><td>${esc(formatPlainNumberDisplay(row.size_2))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.thk_1))}</td><td>${esc(formatPlainNumberDisplay(row.thk_2))}</td><td>${esc(row.warehouse)}</td><td>${esc(row.location)}</td>
     <td>${esc(formatQtyDisplay(row.qty_on_hand))}</td><td>${esc(formatQtyDisplay(row.qty_osd))}</td>
   </tr>`).join("");
   res.send(layout("Inventory", `
@@ -15031,10 +15051,10 @@ app.get("/inventory/export.xlsx", requireAuth, requireJobContext, requirePermiss
     "Description": row.description || "",
     "Material Type": row.material_type || "",
     "UOM": row.uom || "",
-    "Size 1": row.size_1 || "",
-    "Size 2": row.size_2 || "",
-    "Thk 1": row.thk_1 || "",
-    "Thk 2": row.thk_2 || "",
+    "Size 1": formatPlainNumberDisplay(row.size_1),
+    "Size 2": formatPlainNumberDisplay(row.size_2),
+    "Thk 1": formatPlainNumberDisplay(row.thk_1),
+    "Thk 2": formatPlainNumberDisplay(row.thk_2),
     "Warehouse": row.warehouse || "",
     "Location": row.location || "",
     "Qty On Hand": num(row.qty_on_hand),
@@ -15171,10 +15191,10 @@ app.get("/inventory-audit/new", requireAuth, requireJobContext, requireInventory
     return `<tr>
       <td>${esc(row.item_code)}</td>
       <td>${esc(row.description)}</td>
-      <td>${esc(row.size_1 || "")}</td>
-      <td>${esc(row.size_2 || "")}</td>
-      <td>${esc(row.thk_1 || "")}</td>
-      <td>${esc(row.thk_2 || "")}</td>
+      <td>${esc(formatPlainNumberDisplay(row.size_1))}</td>
+      <td>${esc(formatPlainNumberDisplay(row.size_2))}</td>
+      <td>${esc(formatPlainNumberDisplay(row.thk_1))}</td>
+      <td>${esc(formatPlainNumberDisplay(row.thk_2))}</td>
       <td>
         <select id="${warehouseSelectId}" name="warehouse_${index}" tabindex="-1" onchange='syncLocationOptions("${warehouseSelectId}", "${locationSelectId}", ${escAttr(JSON.stringify(locationMap))})'>${rowWarehouseOptionsHtml.replace(`value="${esc(row.warehouse)}"`, `value="${esc(row.warehouse)}" selected`)}</select>
       </td>
@@ -15405,10 +15425,10 @@ app.get("/inventory-audit/reports/:id", requireAuth, requireJobContext, requireP
   const lineRows = lines.map((row) => `<tr>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
-    <td>${esc(row.size_1 || "")}</td>
-    <td>${esc(row.size_2 || "")}</td>
-    <td>${esc(row.thk_1 || "")}</td>
-    <td>${esc(row.thk_2 || "")}</td>
+    <td>${esc(formatPlainNumberDisplay(row.size_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.size_2))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.thk_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.thk_2))}</td>
     <td>${esc(row.warehouse || "")}</td>
     <td>${esc(row.location || "")}</td>
     <td>${esc(formatQtyDisplay(row.book_qty))}</td>
@@ -16275,10 +16295,10 @@ app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requir
     <td>${esc(row.spec || "")}</td>
     <td>${esc(row.commodity_code || "")}</td>
     <td>${esc(row.tag_number || "")}</td>
-    <td>${esc(row.size_1 || "")}</td>
-    <td>${esc(row.size_2 || "")}</td>
-    <td>${esc(row.thk_1 || "")}</td>
-    <td>${esc(row.thk_2 || "")}</td>
+    <td>${esc(formatPlainNumberDisplay(row.size_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.size_2))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.thk_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.thk_2))}</td>
     <td>${esc(formatQtyDisplay(row.qty_required))}</td>
     <td>${esc(formatQtyDisplay(row.qty_ordered))}</td>
     <td>${esc(formatQtyDisplay(row.qty_available))}</td>
@@ -16413,10 +16433,10 @@ app.post("/material-logs/import", requireAuth, requireJobContext, requirePermiss
           textValue(row.ident_code),
           textValue(row.commodity_code),
           textValue(row.description),
-          textValue(row.size_1),
-          textValue(row.size_2),
-          textValue(row.thk_1),
-          textValue(row.thk_2),
+          formatPlainNumberDisplay(row.size_1),
+          formatPlainNumberDisplay(row.size_2),
+          formatPlainNumberDisplay(row.thk_1),
+          formatPlainNumberDisplay(row.thk_2),
           parseQtyValue(row.bom_qty),
           parseQtyValue(row.ship_qty),
           parseQtyValue(row.received_qty),
