@@ -6554,6 +6554,16 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
   `, req.user));
 });
 
+function renderUserJobChecks(jobs = [], selectedJobIds = [], fieldName = "job_ids") {
+  const selectedIds = new Set((selectedJobIds || []).map((id) => Number(id)));
+  return jobs.map((job) => `
+    <label class="check-option">
+      <input type="checkbox" name="${fieldName}" value="${job.id}" ${selectedIds.has(Number(job.id)) ? "checked" : ""} ${!job.is_active ? "disabled" : ""} />
+      <span>${esc(job.job_number)}${job.plant_name ? ` - ${esc(job.plant_name)}` : ""}${!job.is_active ? " (inactive)" : ""}</span>
+    </label>
+  `).join("");
+}
+
 app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async (req, res) => {
   const [usersRes, jobsRes, assignmentsRes, loginHistoryRes] = await Promise.all([
     query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username"),
@@ -6588,12 +6598,6 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
     list.push(row);
     assignmentsByUser.set(Number(row.user_id), list);
   }
-  const renderJobChecks = (selectedJobIds = [], fieldName = "job_ids") => jobs.map((job) => `
-    <label class="check-option">
-      <input type="checkbox" name="${fieldName}" value="${job.id}" ${selectedJobIds.includes(Number(job.id)) ? "checked" : ""} ${!job.is_active ? "disabled" : ""} />
-      <span>${esc(job.job_number)}${job.plant_name ? ` - ${esc(job.plant_name)}` : ""}${!job.is_active ? " (inactive)" : ""}</span>
-    </label>
-  `).join("");
   const userRows = usersRes.rows.map((record) => `
     <tr>
       <td>${esc(record.username)}</td>
@@ -6605,50 +6609,7 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       <td>${esc(record.role)}</td>
       <td>${record.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>${esc(formatShortDateTime(record.created_at))}</td>
-      <td>
-        <div class="stack">
-          <form id="edit-user-${record.id}" method="post" action="/settings/users/${record.id}/edit" class="stack" data-password-form="edit-user" data-password-message-id="edit-user-${record.id}-password-error">
-            <input type="hidden" name="return_to" value="/settings/user-management" />
-            <div class="grid">
-              <div><input name="username" value="${esc(record.username)}" required /></div>
-              <div><input name="first_name" value="${esc(record.first_name || "")}" placeholder="First name" autocomplete="off" /></div>
-              <div><input name="last_name" value="${esc(record.last_name || "")}" placeholder="Last name" autocomplete="off" /></div>
-            </div>
-            <div class="grid">
-              <div><input name="email" value="${esc(normalizeEmail(record.email || ""))}" placeholder="Email" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
-              <div><input name="phone" value="${esc(normalizePhone(record.phone || ""))}" placeholder="Phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /></div>
-              <div>
-                <select name="role">
-                  <option value="admin" ${record.role === "admin" ? "selected" : ""}>admin</option>
-                  <option value="buyer" ${record.role === "buyer" ? "selected" : ""}>buyer</option>
-                  <option value="warehouse" ${record.role === "warehouse" ? "selected" : ""}>warehouse</option>
-                  <option value="field" ${record.role === "field" ? "selected" : ""}>field</option>
-                  <option value="supervisor" ${record.role === "supervisor" ? "selected" : ""}>supervisor</option>
-                </select>
-              </div>
-              <div>
-                <select name="is_active">
-                  <option value="true" ${record.is_active ? "selected" : ""}>active</option>
-                  <option value="false" ${!record.is_active ? "selected" : ""}>inactive</option>
-                </select>
-              </div>
-            </div>
-            <div>
-              <label>Assigned Jobs</label>
-              <div class="check-grid">${renderJobChecks((assignmentsByUser.get(Number(record.id)) || []).map((job) => Number(job.job_id)))}</div>
-            </div>
-            <div class="actions">
-              <input type="password" name="password" placeholder="Enter a new password to reset it" />
-              <button type="submit">Save User</button>
-            </div>
-            <div id="edit-user-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
-            <div class="muted">Passwords are never displayed. Enter a new password only if you want to reset it. Phone accepts 000-000-0000, 1-000-000-0000, or 0000000000.</div>
-          </form>
-          <div class="actions">
-            ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="/settings/users/${record.id}/delete?return_to=%2Fsettings%2Fuser-management">Delete</a>`}
-          </div>
-        </div>
-      </td>
+      <td><a class="btn btn-secondary" href="/settings/users/${record.id}">Manage</a></td>
     </tr>
   `).join("");
   const loginRows = loginHistoryRes.rows.map((entry) => {
@@ -6693,7 +6654,7 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
         </div>
         <div>
           <label>Assigned Jobs</label>
-          <div class="check-grid">${renderJobChecks([], "job_ids")}</div>
+          <div class="check-grid">${renderUserJobChecks(jobs, [], "job_ids")}</div>
         </div>
         <div class="grid">
           <div>
@@ -6712,7 +6673,7 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
     <div class="card scroll">
       <h3>Existing Users</h3>
       <table>
-        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Jobs</th><th>Role</th><th>Status</th><th>Created</th><th>Edit / Delete</th></tr>
+        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Jobs</th><th>Role</th><th>Status</th><th>Created</th><th>Action</th></tr>
         ${userRows || `<tr><td colspan="10" class="muted">No users found.</td></tr>`}
       </table>
     </div>
@@ -6726,6 +6687,74 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
     </div>
   `, req.user));
 });
+
+app.get("/settings/users/:id", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const userId = Number(req.params.id);
+  const [userRes, jobsRes, assignmentsRes] = await Promise.all([
+    query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users where id = $1", [userId]),
+    query("select id, job_number, plant_name, is_active from jobs order by job_number asc"),
+    query("select job_id from user_jobs where user_id = $1", [userId])
+  ]);
+  const record = userRes.rows[0];
+  if (!record) throw new Error("User not found.");
+  const selectedJobIds = assignmentsRes.rows.map((row) => Number(row.job_id));
+  const returnToUser = `/settings/users/${record.id}`;
+  const deleteHref = `/settings/users/${record.id}/delete?return_to=${encodeURIComponent("/settings/user-management")}`;
+
+  res.send(layout("Manage User", `
+    <h1>Manage User</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings/user-management">Back To Users</a>
+      </div>
+    </div>
+    <div class="card">
+      <form id="edit-user-${record.id}" method="post" action="/settings/users/${record.id}/edit" class="stack" data-password-form="edit-user" data-password-message-id="edit-user-${record.id}-password-error">
+        <input type="hidden" name="return_to" value="${esc(returnToUser)}" />
+        <div class="grid">
+          <div><label>Username</label><input name="username" value="${esc(record.username)}" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+          <div><label>First Name</label><input name="first_name" value="${esc(record.first_name || "")}" autocomplete="off" /></div>
+          <div><label>Last Name</label><input name="last_name" value="${esc(record.last_name || "")}" autocomplete="off" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Email</label><input name="email" value="${esc(normalizeEmail(record.email || ""))}" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+          <div><label>Phone</label><input name="phone" value="${esc(normalizePhone(record.phone || ""))}" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /><div class="muted">Accepts 000-000-0000, 1-000-000-0000, or 0000000000</div></div>
+          <div>
+            <label>Role</label>
+            <select name="role">
+              <option value="admin" ${record.role === "admin" ? "selected" : ""}>admin</option>
+              <option value="buyer" ${record.role === "buyer" ? "selected" : ""}>buyer</option>
+              <option value="warehouse" ${record.role === "warehouse" ? "selected" : ""}>warehouse</option>
+              <option value="field" ${record.role === "field" ? "selected" : ""}>field</option>
+              <option value="supervisor" ${record.role === "supervisor" ? "selected" : ""}>supervisor</option>
+            </select>
+          </div>
+          <div>
+            <label>Status</label>
+            <select name="is_active">
+              <option value="true" ${record.is_active ? "selected" : ""}>active</option>
+              <option value="false" ${!record.is_active ? "selected" : ""}>inactive</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label>Assigned Jobs</label>
+          <div class="check-grid">${renderUserJobChecks(jobsRes.rows, selectedJobIds, "job_ids")}</div>
+        </div>
+        <div>
+          <label>New Password</label>
+          <input type="password" name="password" placeholder="Leave blank to keep current password" autocomplete="new-password" autocapitalize="off" spellcheck="false" />
+          <div id="edit-user-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
+          <div class="muted">Passwords are never displayed. Enter a new password only if you want to reset it.</div>
+        </div>
+        <div class="actions">
+          <button type="submit">Save User</button>
+          ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="${esc(deleteHref)}">Delete User</a>`}
+        </div>
+      </form>
+    </div>
+  `, req.user));
+}));
 
 app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("yard", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
