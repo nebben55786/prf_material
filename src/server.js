@@ -10776,6 +10776,15 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       where ri.award_status = 'AWARDED' and ri.awarded_vendor_id is not null
       group by ri.rfq_id
     ),
+    participating_vendors as (
+      select
+        rv.rfq_id,
+        string_agg(distinct v.name, ', ' order by v.name) as participating_vendor_refs
+      from rfq_vendors rv
+      join base_rfqs b on b.id = rv.rfq_id and b.job_id = rv.job_id
+      join vendors v on v.id = rv.vendor_id
+      group by rv.rfq_id
+    ),
     issued_pos as (
       select
         po.rfq_id,
@@ -10788,7 +10797,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     item_counts as (
       select
         ri.rfq_id,
-        count(distinct ri.id) as item_count
+        count(distinct ri.id) as item_count,
+        count(distinct ri.id) filter (where ri.award_status = 'AWARDED' and ri.awarded_vendor_id is not null) as awarded_item_count
       from rfq_items ri
       join base_rfqs b on b.id = ri.rfq_id and b.job_id = ri.job_id
       group by ri.rfq_id
@@ -10817,10 +10827,17 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         else b.status
       end as display_status,
       coalesce(av.awarded_vendor_refs, '') as awarded_vendor_refs,
+      coalesce(pv.participating_vendor_refs, '') as participating_vendor_refs,
+      case
+        when coalesce(ic.item_count, 0) > 0 and coalesce(ic.awarded_item_count, 0) >= coalesce(ic.item_count, 0)
+          then coalesce(av.awarded_vendor_refs, '')
+        else coalesce(pv.participating_vendor_refs, '')
+      end as vendor_display_refs,
       coalesce(ip.issued_po_refs, '') as issued_po_refs,
       coalesce(ip.issued_po_links, '[]'::jsonb) as issued_po_links
     from base_rfqs b
     left join awarded_vendors av on av.rfq_id = b.id
+    left join participating_vendors pv on pv.rfq_id = b.id
     left join issued_pos ip on ip.rfq_id = b.id
     left join item_counts ic on ic.rfq_id = b.id
     left join receiving_status rs on rs.rfq_id = b.id
@@ -10862,7 +10879,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.requestor_name || "")}</td>
-    <td>${esc(rfq.awarded_vendor_refs || "")}</td>
+    <td>${esc(rfq.vendor_display_refs || "")}</td>
     <td>${renderIssuedPoLinks(rfq.issued_po_links, rfq.issued_po_refs)}</td>
     <td style="width:1%; white-space:nowrap;">${esc(rfq.client_request_no || "")}</td>
     <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
