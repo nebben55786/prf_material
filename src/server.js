@@ -11947,8 +11947,35 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
   const rfqId = Number(req.params.id);
   const jobId = currentJobId(req);
   const selectedSpecId = Number(req.query.spec_id || 0);
+  const q = String(req.query.q || "").trim();
   const itemWhere = ["mi.job_id = $1"];
   const itemParams = [jobId];
+  if (q) {
+    itemParams.push(`%${q}%`);
+    itemWhere.push(`(
+      mi.item_code ilike $${itemParams.length}
+      or mi.description ilike $${itemParams.length}
+      or coalesce(mi.material_type, '') ilike $${itemParams.length}
+      or coalesce(mi.uom, '') ilike $${itemParams.length}
+      or coalesce(mi.commodity_code, '') ilike $${itemParams.length}
+      or coalesce(mi.size_1, '') ilike $${itemParams.length}
+      or coalesce(mi.size_2, '') ilike $${itemParams.length}
+      or coalesce(mi.thk_1, '') ilike $${itemParams.length}
+      or coalesce(mi.thk_2, '') ilike $${itemParams.length}
+      or coalesce(mi.notes, '') ilike $${itemParams.length}
+      or exists (
+        select 1
+        from material_item_specs search_mis
+        join material_specs search_ms on search_ms.id = search_mis.spec_id
+        where search_mis.material_item_id = mi.id
+          and search_mis.job_id = mi.job_id
+          and (
+            search_ms.name ilike $${itemParams.length}
+            or coalesce(search_ms.vendor_rev, '') ilike $${itemParams.length}
+          )
+      )
+    )`);
+  }
   if (selectedSpecId > 0) {
     itemParams.push(selectedSpecId);
     itemWhere.push(`exists (
@@ -11968,10 +11995,12 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         mi.description,
         mi.material_type,
         mi.uom,
+        coalesce(mi.commodity_code, '') as commodity_code,
         coalesce(mi.size_1, '') as size_1,
         coalesce(mi.size_2, '') as size_2,
         coalesce(mi.thk_1, '') as thk_1,
         coalesce(mi.thk_2, '') as thk_2,
+        coalesce(mi.notes, '') as notes,
         coalesce(string_agg(${materialSpecDisplaySql("ms")}, ', ' order by ms.name, ms.vendor_rev) filter (where ms.id is not null), '') as specs
       from material_items mi
       left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
@@ -11998,6 +12027,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       <td>${esc(item.thk_2 || "")}</td>
       <td>${esc(item.material_type)}</td>
       <td>${esc(item.uom)}</td>
+      <td>${esc(item.commodity_code || "")}</td>
       <td>${esc(item.specs || "")}</td>
       <td>
         <button
@@ -12025,15 +12055,15 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
           <div><label>Spec</label><select name="spec_id">${specSelectOptions}</select></div>
           <div style="align-self:end;"><button type="submit">Apply Spec</button></div>
         </div>
+        <div class="grid" style="grid-template-columns: 1fr auto;">
+          <div><label>Filter Existing Items</label><input name="q" value="${esc(q)}" placeholder="Search item code, description, commodity, spec, size, thickness, type, or UOM" /></div>
+          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+        </div>
       </form>
-      <div class="grid" style="grid-template-columns: 1fr auto;">
-        <div><label>Filter Existing Items</label><input id="existing-items-filter-${rfqId}" placeholder="Search item code, description, size, thickness, type, or UOM" /></div>
-        <div style="align-self:end;"><button type="button" onclick="filterTableRows('existing-items-filter-${rfqId}', 'existing-items-table-${rfqId}')">Apply Filter</button></div>
-      </div>
       <div class="scroll">
         <table id="existing-items-table-${rfqId}">
-          <thead><tr><th>Item Code</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Specs</th><th>Add</th></tr></thead>
-          <tbody>${materialItemRows || `<tr><td colspan="10" class="muted">No existing items found.</td></tr>`}</tbody>
+          <thead><tr><th>Item Code</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Commodity</th><th>Specs</th><th>Add</th></tr></thead>
+          <tbody>${materialItemRows || `<tr><td colspan="11" class="muted">No existing items found for the current filter.</td></tr>`}</tbody>
         </table>
       </div>
       <div class="actions">
