@@ -6565,9 +6565,8 @@ function renderUserJobChecks(jobs = [], selectedJobIds = [], fieldName = "job_id
 }
 
 app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async (req, res) => {
-  const [usersRes, jobsRes, assignmentsRes, loginHistoryRes] = await Promise.all([
+  const [usersRes, assignmentsRes, loginHistoryRes] = await Promise.all([
     query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username"),
-    query("select id, job_number, plant_name, is_active from jobs order by job_number asc"),
     query(`
       select uj.user_id, uj.job_id, j.job_number, j.plant_name
       from user_jobs uj
@@ -6591,7 +6590,6 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       limit 100
     `)
   ]);
-  const jobs = jobsRes.rows;
   const assignmentsByUser = new Map();
   for (const row of assignmentsRes.rows) {
     const list = assignmentsByUser.get(Number(row.user_id)) || [];
@@ -6628,6 +6626,34 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
     <div class="card">
       <div class="actions">
         <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+        <a class="btn btn-primary" href="/settings/users/new">Add User</a>
+      </div>
+    </div>
+    <div class="card scroll">
+      <h3>Existing Users</h3>
+      <table>
+        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Jobs</th><th>Role</th><th>Status</th><th>Created</th><th>Action</th></tr>
+        ${userRows || `<tr><td colspan="10" class="muted">No users found.</td></tr>`}
+      </table>
+    </div>
+    <div class="card scroll">
+      <h3>Recent Login History</h3>
+      <div class="muted">Shows the 100 most recent successful sign-ins.</div>
+      <table>
+        <tr><th>Username</th><th>Name</th><th>Role</th><th>Login Time</th></tr>
+        ${loginRows || `<tr><td colspan="4" class="muted">No login history recorded yet.</td></tr>`}
+      </table>
+    </div>
+  `, req.user));
+});
+
+app.get("/settings/users/new", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+  const jobs = (await query("select id, job_number, plant_name, is_active from jobs order by job_number asc")).rows;
+  res.send(layout("Add User", `
+    <h1>Add User</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/settings/user-management">Back To Users</a>
       </div>
     </div>
     <div class="card">
@@ -6670,23 +6696,8 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
         <div class="actions"><button type="submit">Add User</button></div>
       </form>
     </div>
-    <div class="card scroll">
-      <h3>Existing Users</h3>
-      <table>
-        <tr><th>Username</th><th>First</th><th>Last</th><th>Email</th><th>Phone</th><th>Jobs</th><th>Role</th><th>Status</th><th>Created</th><th>Action</th></tr>
-        ${userRows || `<tr><td colspan="10" class="muted">No users found.</td></tr>`}
-      </table>
-    </div>
-    <div class="card scroll">
-      <h3>Recent Login History</h3>
-      <div class="muted">Shows the 100 most recent successful sign-ins.</div>
-      <table>
-        <tr><th>Username</th><th>Name</th><th>Role</th><th>Login Time</th></tr>
-        ${loginRows || `<tr><td colspan="4" class="muted">No login history recorded yet.</td></tr>`}
-      </table>
-    </div>
   `, req.user));
-});
+}));
 
 app.get("/settings/users/:id", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
   const userId = Number(req.params.id);
