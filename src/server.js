@@ -11530,6 +11530,24 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           const form = document.getElementById("rfq-quote-grid-form-${rfqId}");
           if (!form) return;
           const inputs = Array.from(form.querySelectorAll("[data-rfq-quote-input]"));
+          const getQuoteInputs = () => Array.from(form.querySelectorAll("[data-rfq-quote-input]")).filter((input) => !input.disabled);
+          const moveQuoteFocus = (currentInput, direction = 1) => {
+            const quoteInputs = getQuoteInputs();
+            const index = quoteInputs.indexOf(currentInput);
+            if (index < 0 || quoteInputs.length === 0) return;
+            const nextIndex = (index + direction + quoteInputs.length) % quoteInputs.length;
+            const nextInput = quoteInputs[nextIndex];
+            if (nextInput) {
+              nextInput.focus();
+              nextInput.select();
+            }
+          };
+          const workspace = form.closest(".card");
+          if (workspace) {
+            workspace.querySelectorAll("a, button, input, select, textarea").forEach((control) => {
+              control.tabIndex = control.matches("[data-rfq-quote-input]") && !control.disabled ? 0 : -1;
+            });
+          }
           const originalValues = new Map(inputs.map((input) => [input.name, String(input.value || "")]));
           let quoteDirty = false;
           let quoteSaveInFlight = false;
@@ -11547,6 +11565,11 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           inputs.forEach((input) => {
             input.addEventListener("input", refreshDirty);
             input.addEventListener("change", refreshDirty);
+            input.addEventListener("keydown", (event) => {
+              if (event.key !== "Enter" && event.key !== "Tab") return;
+              event.preventDefault();
+              moveQuoteFocus(input, event.shiftKey ? -1 : 1);
+            });
           });
           document.addEventListener("click", (event) => {
             if (!quoteDirty || quoteSaveInFlight) return;
@@ -11574,7 +11597,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           window.validateRfqQuoteGridSubmit = (event, targetForm) => {
             const submitter = event?.submitter || document.activeElement;
             const isQuoteInputEnter = !event?.submitter && document.activeElement?.matches?.("[data-rfq-quote-input]");
-            const isQuoteSave = submitter?.getAttribute?.("data-rfq-quote-save") === "1" || isQuoteInputEnter;
+            if (isQuoteInputEnter) return false;
+            const isQuoteSave = submitter?.getAttribute?.("data-rfq-quote-save") === "1";
             if (!isQuoteSave && quoteDirty) {
               window.alert(message);
               return false;
