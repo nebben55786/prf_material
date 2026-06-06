@@ -7521,6 +7521,10 @@ app.post("/items", requireAuth, requireJobContext, requirePermission("inventory"
 app.get("/items/specs", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const specs = await getMaterialSpecOptions(jobId);
+  const currentSpecRows = specs.map((spec) => `<tr>
+    <td>${esc(spec.name)}</td>
+    <td>${esc(spec.vendor_rev || "")}</td>
+  </tr>`).join("");
   const specRows = specs.map((spec) => `<tr>
     <td>
       <form id="item-spec-form-${spec.id}" method="post" action="/items/specs/${spec.id}" class="inline-form">
@@ -7536,6 +7540,11 @@ app.get("/items/specs", requireAuth, requireJobContext, requirePermission("inven
       <div class="actions"><a class="btn btn-secondary" href="/items">Back To Item Master</a></div>
     </div>
     <div class="card scroll">
+      <h3>Current Specs</h3>
+      <table><tr><th>Spec Name</th><th>Vendor</th></tr>${currentSpecRows || `<tr><td colspan="2" class="muted">No specs added yet.</td></tr>`}</table>
+    </div>
+    <div class="card scroll">
+      <h3>Add / Edit Specs</h3>
       <form method="post" action="/items/specs" class="stack" style="margin-bottom:12px;">
         <div class="grid" style="grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;">
           <div><label>Spec Name</label><input name="name" required /></div>
