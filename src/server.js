@@ -352,6 +352,16 @@ function renderRfqStatusChip(status, dueDate) {
   return `<span class="${classes}">${esc(rfqStatusLabel(status))}</span>`;
 }
 
+function renderRequisitionStatusChip(status) {
+  const statusKey = String(status || "").trim().toUpperCase();
+  let className = "";
+  if (statusKey === "REQUESTED") className = "req-status-requested";
+  if (statusKey === "VERIFIED") className = "req-status-verified";
+  if (statusKey === "ISSUED") className = "req-status-issued";
+  const classes = ["chip", className].filter(Boolean).join(" ");
+  return `<span class="${classes}">${esc(status || "")}</span>`;
+}
+
 function formatShortDateTime(value) {
   if (value === null || value === undefined || value === "") return "";
   const text = String(value).trim();
@@ -1499,6 +1509,9 @@ function layout(title, body, user) {
       .rfq-status-purchased { background: #fff3b0; border-color: #d4b83d; color: #665200; }
       .rfq-status-partial { background: #d9ecff; border-color: #6aa5d9; color: #184f86; }
       .rfq-status-received { background: #dff0d8; border-color: #72a864; color: #275f25; }
+      .req-status-requested { background: #fbe1dd; border-color: #d66b5f; color: #8e2118; }
+      .req-status-verified { background: #ffe4bd; border-color: #d38a2d; color: #7a4300; }
+      .req-status-issued { background: #dff0d8; border-color: #72a864; color: #275f25; }
       .chip-remove { font-size: 0.2em; line-height: 1; padding: 0 1px; margin-left: 4px; min-width: 0; min-height: 0; vertical-align: middle; }
       .tab-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
       .tab-link { display: inline-flex; align-items: center; justify-content: center; min-width: 92px; min-height: 32px; padding: 6px 12px; border-radius: 2px; border: 1px solid var(--line-strong); background: linear-gradient(180deg, #eef3f7 0%, #d9e1e8 100%); color: #18354e; font-weight: 700; text-decoration: none; }
@@ -9327,7 +9340,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td>${esc(row.iwp_no || "")}</td>
     <td>${row.line_count}</td>
     <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
-    <td><span class="chip">${esc(row.status)}</span></td>
+    <td>${renderRequisitionStatusChip(row.status)}</td>
     <td>${esc(formatShortDateTime(row.created_at))}</td>
     <td><div class="actions">${
       hasLoggedRequisitionSignature(row)
