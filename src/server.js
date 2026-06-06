@@ -3914,7 +3914,7 @@ async function getIssuedInventoryTotals(runner = { query }, jobId = null) {
       join material_requisitions mr on mr.id = mrl.requisition_id
       join bom_lines bl on bl.id = mrl.bom_line_id
       where coalesce(mrl.qty_issued, 0) > 0
-        and coalesce(mr.status, '') <> 'CANCELLED'
+        and coalesce(mr.status, '') in ('ISSUED', 'CLOSED')
         and ($1::bigint is null or mr.job_id = $1)
         and not exists (
           select 1
@@ -3963,7 +3963,7 @@ async function getIssuedInventoryTotalsByItemAndLocation(runner = { query }, job
       join material_requisitions mr on mr.id = mrl.requisition_id
       join bom_lines bl on bl.id = mrl.bom_line_id
       where coalesce(mrl.qty_issued, 0) > 0
-        and coalesce(mr.status, '') <> 'CANCELLED'
+        and coalesce(mr.status, '') in ('ISSUED', 'CLOSED')
         and ($1::bigint is null or mr.job_id = $1)
         and not exists (
           select 1
@@ -4002,7 +4002,7 @@ async function getIssuedInventoryTotalsByItem(runner = { query }, jobId = null) 
       join material_requisitions mr on mr.id = mrl.requisition_id
       join bom_lines bl on bl.id = mrl.bom_line_id
       where coalesce(mrl.qty_issued, 0) > 0
-        and coalesce(mr.status, '') <> 'CANCELLED'
+        and coalesce(mr.status, '') in ('ISSUED', 'CLOSED')
         and ($1::bigint is null or mr.job_id = $1)
         and not exists (
           select 1
@@ -4043,7 +4043,7 @@ function getIssuedInventoryTotalsByItemSubquery(jobId = null) {
       join material_requisitions mr on mr.id = mrl.requisition_id
       join bom_lines bl on bl.id = mrl.bom_line_id
       where coalesce(mrl.qty_issued, 0) > 0
-        and coalesce(mr.status, '') <> 'CANCELLED'
+        and coalesce(mr.status, '') in ('ISSUED', 'CLOSED')
         ${jobFilterSql}
         and not exists (
           select 1
@@ -4198,7 +4198,7 @@ async function recomputeBomIssuedSummaries(client, jobId) {
       from material_requisition_lines mrl
       join material_requisitions mr on mr.id = mrl.requisition_id
       where coalesce(mrl.qty_issued, 0) > 0
-        and coalesce(mr.status, '') <> 'CANCELLED'
+        and coalesce(mr.status, '') in ('ISSUED', 'CLOSED')
         and mr.job_id = $1
         and not exists (
           select 1
@@ -6933,7 +6933,7 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(["admi
       join bom_lines bl on bl.id = mrl.bom_line_id
       left join users u on u.id = mr.issued_by_user_id
       where mrl.qty_issued > 0
-        and coalesce(mr.status, '') <> 'CANCELLED'
+        and coalesce(mr.status, '') in ('ISSUED', 'CLOSED')
         and mr.job_id = $2
         and not exists (
           select 1
