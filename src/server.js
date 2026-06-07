@@ -8385,6 +8385,8 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
 app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
   const jobId = currentJobId(req);
+  const issuedTo = String(req.body.issued_to || "").trim();
+  if (!issuedTo) throw new Error("Issued To is required.");
   const selectedLineQtys = new Map();
   try {
     const stagedSelection = JSON.parse(String(req.body.staged_selection || "{}"));
@@ -8417,7 +8419,7 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
         insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, issued_to, iwp_no, iso_no, status, notes)
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         returning id
-    `, [jobId, requisitionNo, bomId, req.user.id, getUserDisplayName(req.user), req.body.issued_to || "", req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
+    `, [jobId, requisitionNo, bomId, req.user.id, getUserDisplayName(req.user), issuedTo, req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
       let createdLineCount = 0;
     for (const lineId of selectedLineIds) {
       const qtyRequested = selectedLineQtys.get(lineId);
@@ -9224,7 +9226,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid-3">
             <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
-            <div><label>Issued To</label><input name="issued_to" /></div>
+            <div><label>Issued To</label><input name="issued_to" required /></div>
             <div><label>IWP</label><input name="iwp_no" /></div>
           </div>
           <div><label>Notes</label><input name="notes" /></div>
@@ -9415,7 +9417,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
         : requisitionStatusKey(row.status) === "ISSUED" && canSignRequisition(req.user, row)
           ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
         : requisitionStatusKey(row.status) === "WAITING_ON_MATERIAL"
-        ? `<a class="btn btn-secondary" href="/requisitions/${row.id}">Review</a>`
+        ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/edit">Review</a>`
         : isVerifiedStageRequisitionStatus(row.status)
         ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">Sign</a>` : ""}`
           : ""
@@ -9616,7 +9618,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   const linesTable = `<table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Available Qty</th><th>Qty Requested</th><th>Qty Issued</th><th>Qty Not Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table>`;
   const headerActions = [];
   if (canEditRequisition(req.user, header)) {
-    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Edit Request</a>`);
+    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Review / Edit Request</a>`);
   }
   if (["REQUESTED", "WAITING_ON_MATERIAL"].includes(requisitionStatusKey(header.status)) && canAccess(req.user, "requisitions", "verify")) {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Accept Request</button></form>`);
@@ -10279,6 +10281,42 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
     ...line,
     qty_available: parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0)
   }));
+  const candidateLines = (await query(`
+    select
+      bl.id,
+      bl.line_no,
+      bl.item_code,
+      bl.description,
+      bl.uom,
+      coalesce(bl.size_1, '') as size_1,
+      coalesce(bl.size_2, '') as size_2,
+      coalesce(bl.thk_1, '') as thk_1,
+      coalesce(bl.thk_2, '') as thk_2,
+      greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining
+    from bom_lines bl
+    where bl.bom_id = $1
+      and greatest(bl.qty_required - bl.qty_issued, 0) > 0
+      and not exists (
+        select 1
+        from material_requisition_lines mrl
+        where mrl.requisition_id = $2
+          and mrl.bom_line_id = bl.id
+          and mrl.job_id = $3
+      )
+    order by bl.line_no, bl.id
+    limit 500
+  `, [header.bom_id, req.params.id, jobId])).rows;
+  const candidateLineOptions = candidateLines.map((line) => {
+    const label = [
+      line.line_no,
+      line.item_code,
+      line.description,
+      `Remaining ${formatQtyDisplay(line.qty_remaining)}`,
+      line.uom || "",
+      formatCombinedSize(line.size_1, line.size_2)
+    ].filter(Boolean).join(" | ");
+    return `<option value="${line.id}">${esc(label)}</option>`;
+  }).join("");
   const lineRows = lines.map((line) => {
     const maxQty = Math.max(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_requested));
     return `<tr>
@@ -10302,11 +10340,21 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
       <form method="post" action="/requisitions/${header.id}/edit" class="stack">
         <div class="grid-3">
           <div><label>Requested By</label><input value="${esc(header.requested_by_name)}" readonly /></div>
-          <div><label>Issued To</label><input name="issued_to" value="${esc(header.issued_to || "")}" /></div>
+          <div><label>Issued To</label><input name="issued_to" value="${esc(header.issued_to || "")}" required /></div>
           <div><label>IWP</label><input name="iwp_no" value="${esc(header.iwp_no || "")}" /></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(header.notes || "")}</textarea></div>
         <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Available</th><th>UOM</th><th>New Qty</th><th>Remove</th><th>Limit</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+        <div class="card">
+          <h3>Add BOM Line</h3>
+          ${candidateLines.length ? `
+            <div class="grid">
+              <div><label>BOM Line</label><select name="add_line_id"><option value="">Choose line to add</option>${candidateLineOptions}</select></div>
+              <div><label>Qty</label><input name="add_line_qty" inputmode="decimal" /></div>
+            </div>
+            <p class="muted">Only lines from this BOM that are not already on the request are shown.</p>
+          ` : `<p class="muted">No additional available BOM lines to add.</p>`}
+        </div>
         <div class="actions"><button type="submit">Save Requisition</button><a class="btn btn-secondary" href="/requisitions/${header.id}">Back</a></div>
       </form>
     </div>
@@ -10319,11 +10367,13 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (!canEditRequisition(req.user, header)) throw new Error("Only requested or waiting-on-material requisitions can be edited.");
+    const issuedTo = String(req.body.issued_to || "").trim();
+    if (!issuedTo) throw new Error("Issued To is required.");
     await client.query(`
       update material_requisitions
       set requested_by_name = $2, issued_to = $3, iwp_no = $4, notes = $5
       where id = $1 and job_id = $6
-    `, [req.params.id, getUserDisplayName(req.user), req.body.issued_to || "", req.body.iwp_no || "", req.body.notes || "", jobId]);
+    `, [req.params.id, getUserDisplayName(req.user), issuedTo, req.body.iwp_no || "", req.body.notes || "", jobId]);
     const lines = (await client.query(`
       select
         mrl.id as requisition_line_id,
@@ -10351,6 +10401,31 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
       const maxQty = Math.max(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_requested));
       if (requestedQty > maxQty) throw new Error(`Requested qty for ${line.item_code} exceeds the remaining BOM qty.`);
       await client.query("update material_requisition_lines set qty_requested = $2 where id = $1 and job_id = $3", [line.requisition_line_id, requestedQty, jobId]);
+    }
+    const addLineId = Number(req.body.add_line_id || 0);
+    if (addLineId) {
+      const addQty = parseQtyValue(req.body.add_line_qty, NaN);
+      if (!Number.isFinite(addQty) || addQty <= 0) throw new Error("Enter a quantity greater than zero for the BOM line you are adding.");
+      const lineToAdd = (await client.query(`
+        select id, item_code, qty_required, qty_issued
+        from bom_lines
+        where id = $1 and bom_id = $2
+      `, [addLineId, header.bom_id])).rows[0];
+      if (!lineToAdd) throw new Error("Selected BOM line was not found on this requisition's BOM.");
+      const existing = (await client.query(`
+        select id
+        from material_requisition_lines
+        where requisition_id = $1 and bom_line_id = $2 and job_id = $3
+      `, [req.params.id, addLineId, jobId])).rows[0];
+      if (existing) throw new Error("That BOM line is already on this requisition.");
+      const remaining = Math.max(num(lineToAdd.qty_required) - num(lineToAdd.qty_issued), 0);
+      if (addQty > remaining) {
+        throw new Error(`Requested qty for ${lineToAdd.item_code} cannot exceed the remaining BOM qty.`);
+      }
+      await client.query(`
+        insert into material_requisition_lines (job_id, requisition_id, bom_line_id, qty_requested)
+        values ($1, $2, $3, $4)
+      `, [jobId, req.params.id, addLineId, addQty]);
     }
     const remainingCount = Number((await client.query("select count(*) from material_requisition_lines where requisition_id = $1 and job_id = $2", [req.params.id, jobId])).rows[0].count);
     if (remainingCount <= 0) throw new Error("At least one line is required on the requisition.");
