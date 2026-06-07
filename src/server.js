@@ -9094,7 +9094,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     await rebuildUnallocatedBom(client, jobId);
   });
   const availableBoms = (await query(`
-    select id, bom_no, bom_name, description, status, is_system_generated, system_key
+    select id, bom_no, bom_name, description, bom_type, status, is_system_generated, system_key
     from bom_headers
     where job_id = $1
     order by
@@ -9105,7 +9105,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
   const clearFilters = String(req.query.clear_filters || "") === "1";
   const lineFilter = {
-    iwp: clearFilters ? "" : String(req.query.iwp || "").trim(),
+    description: clearFilters ? "" : String(req.query.description || "").trim(),
     itemCode: clearFilters ? "" : String(req.query.item_code || "").trim(),
     lineNo: clearFilters ? "" : String(req.query.line_no || "").trim(),
     limit: Math.min(Math.max(num(req.query.limit, 250), 50), 1000)
@@ -9126,10 +9126,12 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   let filteredCount = 0;
   let lineRows = "";
   let lineNumberOptionsHtml = "";
+  const selectedBomUsesPackageLabel = selectedBom ? String(selectedBom.bom_type || "").trim().toLowerCase() === "equipment" : false;
+  const lineLabel = selectedBomUsesPackageLabel ? "Package" : "Line";
   if (selectedBom) {
     const lineWhere = ["bom_id = $1"];
     const lineParams = [selectedBom.id];
-    if (lineFilter.iwp) { lineParams.push(`%${lineFilter.iwp}%`); lineWhere.push(`coalesce(iwp_no, '') ilike $${lineParams.length}`); }
+    if (lineFilter.description) { lineParams.push(`%${lineFilter.description}%`); lineWhere.push(`coalesce(description, '') ilike $${lineParams.length}`); }
     if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
     if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
     const lineWhereSql = lineWhere.join(" and ");
@@ -9153,7 +9155,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
         ) alloc
           on alloc.item_code = bl.item_code
-        where ${lineWhereSql.replace(/\bbom_id\b/g, "bl.bom_id").replace(/\bitem_code\b/g, "bl.item_code").replace(/\bline_no\b/g, "bl.line_no")}
+        where ${lineWhereSql.replace(/\bbom_id\b/g, "bl.bom_id").replace(/\bdescription\b/g, "bl.description").replace(/\bitem_code\b/g, "bl.item_code").replace(/\bline_no\b/g, "bl.line_no")}
         order by coalesce(bl.iwp_no, ''), bl.line_no, bl.id
         limit ${lineFilter.limit}
       `, lineParams),
@@ -9172,7 +9174,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     lineRows = linesRes.rows.map((line) => `<tr>
       <td><input type="checkbox" name="selected_line_ids" value="${line.id}" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
       <td>${esc(line.line_no)}</td>
-      <td>${esc(line.iwp_no || "")}</td>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(formatQtyDisplay(line.qty_required))}</td>
@@ -9203,9 +9204,9 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           <div class="grid">
             <div><label>BOM</label><input value="${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}" readonly /></div>
             <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
-            <div><label>IWP</label><input name="iwp" value="${esc(lineFilter.iwp)}" /></div>
+            <div><label>Description</label><input name="description" value="${esc(lineFilter.description)}" /></div>
             <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
-            <div><label>Line No</label><input name="line_no" value="${esc(lineFilter.lineNo)}" list="requisition-line-no-options" /></div>
+            <div><label>${esc(lineLabel)}</label><input name="line_no" value="${esc(lineFilter.lineNo)}" list="requisition-line-no-options" /></div>
           </div>
           <datalist id="requisition-line-no-options">${lineNumberOptionsHtml}</datalist>
           <div class="actions">
@@ -9224,7 +9225,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           <div class="grid-3">
             <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
             <div><label>Issued To</label><input name="issued_to" /></div>
-            <div><label>IWP</label><input name="iwp_no" value="${esc(lineFilter.iwp)}" /></div>
+            <div><label>IWP</label><input name="iwp_no" /></div>
           </div>
           <div><label>Notes</label><input name="notes" /></div>
           <div class="actions">
@@ -9251,7 +9252,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:80px" />
                 <col style="width:150px" />
                 <col style="width:100px" />
-                <col style="width:100px" />
                 <col style="width:360px" />
                 <col style="width:72px" />
                 <col style="width:72px" />
@@ -9271,8 +9271,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               <thead>
               <tr>
                 <th class="nowrap" data-resizable="true"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="requisition-select-all-visible" /> Pick</label></th>
-                <th class="wrap" data-resizable="true">Line</th>
-                <th class="nowrap" data-resizable="true">IWP</th>
+                <th class="wrap" data-resizable="true">${esc(lineLabel)}</th>
                 <th class="nowrap" data-resizable="true">Item</th>
                 <th class="wrap" data-resizable="true">Description</th>
                 <th class="nowrap" data-resizable="true">Req Qty</th>
@@ -9292,7 +9291,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               </tr>
               </thead>
               <tbody>
-              ${lineRows || `<tr><td colspan="19" class="muted">No BOM lines match the current filter.</td></tr>`}
+              ${lineRows || `<tr><td colspan="18" class="muted">No BOM lines match the current filter.</td></tr>`}
               </tbody>
             </table>
           </div>
@@ -9363,12 +9362,24 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
 
 app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "view"), async (req, res) => {
   const jobId = currentJobId(req);
-  const iwp = String(req.query.iwp || "").trim();
+  const description = String(req.query.description || "").trim();
   let status = requisitionStatusKey(req.query.status);
   if (status === "VERIFIED") status = "ACCEPTED";
   const where = ["mr.job_id = $1"];
   const params = [jobId];
-  if (iwp) { params.push(`%${iwp}%`); where.push(`coalesce(mr.iwp_no, '') ilike $${params.length}`); }
+  if (description) {
+    params.push(`%${description}%`);
+    where.push(`(
+      coalesce(bh.bom_name, bh.description, bh.bom_no, '') ilike $${params.length}
+      or exists (
+        select 1
+        from material_requisition_lines mrl_filter
+        join bom_lines bl_filter on bl_filter.id = mrl_filter.bom_line_id
+        where mrl_filter.requisition_id = mr.id
+          and coalesce(bl_filter.description, '') ilike $${params.length}
+      )
+    )`);
+  }
   if (status === "ACCEPTED" || status === "VERIFIED") {
     where.push("mr.status in ('ACCEPTED', 'VERIFIED')");
   } else if (status) {
@@ -9418,7 +9429,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <div class="card">
       <form method="get" action="/requisitions" class="stack">
         <div class="grid">
-          <div><label>IWP</label><input name="iwp" value="${esc(iwp)}" /></div>
+          <div><label>Description</label><input name="description" value="${esc(description)}" /></div>
           <div><label>Status</label><select name="status"><option value="">All Statuses</option>${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${status === value ? "selected" : ""}>${esc(requisitionStatusLabel(value))}</option>`).join("")}</select></div>
         </div>
         <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
