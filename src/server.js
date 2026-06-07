@@ -2187,6 +2187,10 @@ async function mergeVendors(client, sourceVendorId, targetVendorId, userId) {
   return { source, target };
 }
 
+function importRowHasValues(row) {
+  return Object.values(row || {}).some((value) => String(value ?? "").trim() !== "");
+}
+
 function parseUploadedRows(file, pastedText) {
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (file?.buffer?.length) {
@@ -2195,7 +2199,9 @@ function parseUploadedRows(file, pastedText) {
       const workbook = XLSX.read(file.buffer, { type: "buffer" });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
-      return rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeHeader(key), String(value ?? "").trim()])));
+      return rows
+        .map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeHeader(key), String(value ?? "").trim()])))
+        .filter(importRowHasValues);
     }
     pastedText = file.buffer.toString("utf8");
   }
@@ -2203,9 +2209,11 @@ function parseUploadedRows(file, pastedText) {
   const rows = parseDelimitedTextRows(pastedText.trim(), ",");
   if (!rows.length) return [];
   const headers = rows.shift().map((cell) => normalizeHeader(cell));
-  return rows.map((values) => {
-    return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").replace(/\s*\r?\n\s*/g, " ").trim()]));
-  });
+  return rows
+    .map((values) => {
+      return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").replace(/\s*\r?\n\s*/g, " ").trim()]));
+    })
+    .filter(importRowHasValues);
 }
 
 function splitCombinedDimensionValue(value) {
