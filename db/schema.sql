@@ -7,6 +7,7 @@ create table if not exists users (
   last_name text not null default '',
   email text not null default '',
   phone text not null default '',
+  must_change_password boolean not null default false,
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
@@ -458,6 +459,7 @@ alter table users add column if not exists first_name text not null default '';
 alter table users add column if not exists last_name text not null default '';
 alter table users add column if not exists email text not null default '';
 alter table users add column if not exists phone text not null default '';
+alter table users add column if not exists must_change_password boolean not null default false;
 alter table rfq_items add column if not exists bom_line_id bigint references bom_lines(id) on delete set null;
 alter table rfq_items add column if not exists item_code_snapshot text;
 alter table rfq_items add column if not exists description_snapshot text;

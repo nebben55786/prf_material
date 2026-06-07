@@ -1942,6 +1942,9 @@ function layout(title, body, user) {
         document.querySelectorAll("form[data-password-form='access-approve']").forEach((form) => {
           attachPasswordValidation(form.id, "temp_password", form.dataset.passwordMessageId);
         });
+        document.querySelectorAll("form[data-password-form='change-password']").forEach((form) => {
+          attachPasswordValidation(form.id, "new_password", form.dataset.passwordMessageId);
+        });
         document.querySelectorAll(".scroll table").forEach((table) => makeTableSortable(table));
       });
     </script>
@@ -5457,13 +5460,17 @@ const requireAuth = asyncHandler(async (req, res, next) => {
     return;
   }
   const user = (await query(`
-    select id, username, first_name, last_name, role, is_active
+    select id, username, first_name, last_name, role, is_active, must_change_password
     from users
     where id = $1
   `, [sessionUser.id])).rows[0];
   if (!user || !user.is_active) {
     res.clearCookie("session_token", { path: "/" });
     res.redirect("/login");
+    return;
+  }
+  if (user.must_change_password && !["/change-password", "/logout"].includes(req.path)) {
+    res.redirect("/change-password");
     return;
   }
   const { jobs, activeJobs, activeJob } = await resolveJobContextForUser(user, null, sessionUser.job_id);
@@ -5485,7 +5492,7 @@ async function getRequestAuthContext(req) {
   const cachedUser = getCachedAuthContext(sessionUser);
   if (cachedUser) return cachedUser;
   const user = (await query(`
-    select id, username, first_name, last_name, role, is_active
+    select id, username, first_name, last_name, role, is_active, must_change_password
     from users
     where id = $1
   `, [sessionUser.id])).rows[0];
@@ -5906,9 +5913,10 @@ async function getNextBomNumber(client = null, jobId = null) {
   return `${jobNumber}-BOM-${String(nextNumber).padStart(5, "0")}`;
 }
 
-function loginPage(error = "") {
+function loginPage(error = "", success = "") {
   return layout("Login", `
       ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
+      ${success ? `<div class="card success"><strong>${esc(success)}</strong></div>` : ""}
       <div class="card">
         <h2>Sign In</h2>
         <form method="post" action="/login" class="stack">
@@ -5917,6 +5925,21 @@ function loginPage(error = "") {
             <div><label>Password</label><input type="password" name="password" autocomplete="current-password" required /></div>
           </div>
           <div class="actions"><button type="submit">Sign In</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Change Password</h2>
+        <form id="login-change-password-form" method="post" action="/change-password-public" class="stack" data-password-form="change-password" data-password-message-id="login-change-password-error">
+          <div class="grid">
+            <div><label>Username</label><input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></div>
+            <div><label>Current Password</label><input type="password" name="current_password" autocomplete="current-password" required /></div>
+          </div>
+          <div class="grid">
+            <div><label>New Password</label><input type="password" name="new_password" autocomplete="new-password" required /></div>
+            <div><label>Confirm New Password</label><input type="password" name="confirm_password" autocomplete="new-password" required /></div>
+          </div>
+          <div id="login-change-password-error" class="muted" style="color:#a23622;"></div>
+          <div class="actions"><button class="btn btn-secondary" type="submit">Change Password</button></div>
         </form>
       </div>
     `, null);
@@ -5930,15 +5953,17 @@ app.get("/login", (req, res) => {
   }
   const errorMap = {
     invalid: "Invalid username or password.",
-    inactive: "This user is inactive. Contact an administrator."
+    inactive: "This user is inactive. Contact an administrator.",
+    password: "Change your password before continuing."
   };
   const error = errorMap[String(req.query.error || "").trim()] || "";
-  res.send(loginPage(error));
+  const success = String(req.query.changed || "").trim() === "1" ? "Password changed. Sign in with your new password." : "";
+  res.send(loginPage(error, success));
 });
 
 app.post("/login", asyncHandler(async (req, res) => {
   const { username = "", password = "" } = req.body;
-  const result = await query("select id, username, role, password_hash, is_active from users where username = $1", [username.trim()]);
+  const result = await query("select id, username, role, password_hash, is_active, must_change_password from users where username = $1", [username.trim()]);
   const user = result.rows[0];
   if (user && !user.is_active) {
     res.redirect("/login?error=inactive");
@@ -5956,16 +5981,96 @@ app.post("/login", asyncHandler(async (req, res) => {
   }
   if (user.role === "admin") {
     setSessionCookie(res, buildSessionPayload(user, null));
-    res.redirect("/jobs/select");
+    res.redirect(user.must_change_password ? "/change-password" : "/jobs/select");
     return;
   }
   if (activeJobs.length === 1) {
     setSessionCookie(res, buildSessionPayload(user, activeJobs[0].id));
-    res.redirect(getUserHomePath(user));
+    res.redirect(user.must_change_password ? "/change-password" : getUserHomePath(user));
     return;
   }
   setSessionCookie(res, buildSessionPayload(user, null));
-  res.redirect(activeJobs.length > 1 ? "/jobs/select" : "/jobs/no-access");
+  res.redirect(user.must_change_password ? "/change-password" : activeJobs.length > 1 ? "/jobs/select" : "/jobs/no-access");
+}));
+
+function changePasswordPage(req, error = "") {
+  return layout("Change Password", `
+    <h1>Change Password</h1>
+    ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
+    <div class="card">
+      <form id="forced-change-password-form" method="post" action="/change-password" class="stack" data-password-form="change-password" data-password-message-id="forced-change-password-error">
+        <div><label>Current Password</label><input type="password" name="current_password" autocomplete="current-password" required /></div>
+        <div class="grid">
+          <div><label>New Password</label><input type="password" name="new_password" autocomplete="new-password" required /></div>
+          <div><label>Confirm New Password</label><input type="password" name="confirm_password" autocomplete="new-password" required /></div>
+        </div>
+        <div id="forced-change-password-error" class="muted" style="color:#a23622;"></div>
+        <div class="actions"><button type="submit">Save New Password</button><a class="btn btn-secondary" href="/logout">Logout</a></div>
+      </form>
+    </div>
+  `, req.user);
+}
+
+async function changeUserPassword({ userId, username, currentPassword, newPassword, confirmPassword }) {
+  if (!userId && !String(username || "").trim()) throw new Error("Username is required.");
+  const user = (await query(`
+    select id, username, role, password_hash, is_active
+    from users
+    where ($1::bigint is not null and id = $1)
+       or ($1::bigint is null and username = $2)
+    order by id
+    limit 1
+  `, [userId || null, String(username || "").trim() || null])).rows[0];
+  if (!user || !user.is_active || !(await bcrypt.compare(currentPassword, user.password_hash))) {
+    throw new Error("Current password is incorrect.");
+  }
+  if (newPassword !== confirmPassword) throw new Error("New passwords do not match.");
+  const passwordError = validatePasswordRules(newPassword);
+  if (passwordError) throw new Error(passwordError);
+  if (await bcrypt.compare(newPassword, user.password_hash)) {
+    throw new Error("New password must be different from the current password.");
+  }
+  const passwordHash = await bcrypt.hash(newPassword, 8);
+  await withTransaction(async (client) => {
+    await client.query("update users set password_hash = $2, must_change_password = false where id = $1", [user.id, passwordHash]);
+    await auditLog(client, user.id, "change_password", "user", user.id, user.username);
+  });
+  authContextCache.clear();
+  return user;
+}
+
+app.get("/change-password", requireAuth, (req, res) => {
+  res.send(changePasswordPage(req));
+});
+
+app.post("/change-password", requireAuth, asyncHandler(async (req, res) => {
+  try {
+    await changeUserPassword({
+      userId: req.user.id,
+      currentPassword: String(req.body.current_password || ""),
+      newPassword: String(req.body.new_password || ""),
+      confirmPassword: String(req.body.confirm_password || "")
+    });
+  } catch (error) {
+    res.status(400).send(changePasswordPage(req, error.message || "Unable to change password."));
+    return;
+  }
+  res.redirect(getUserHomePath(req.user));
+}));
+
+app.post("/change-password-public", asyncHandler(async (req, res) => {
+  try {
+    await changeUserPassword({
+      username: String(req.body.username || "").trim(),
+      currentPassword: String(req.body.current_password || ""),
+      newPassword: String(req.body.new_password || ""),
+      confirmPassword: String(req.body.confirm_password || "")
+    });
+  } catch (error) {
+    res.status(400).send(loginPage(error.message || "Unable to change password."));
+    return;
+  }
+  res.redirect("/login?changed=1");
 }));
 
 app.get("/logout", (req, res) => {
@@ -6172,7 +6277,7 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
           <div class="grid">
             <div><input name="email" placeholder="Email" value="${esc(normalizeEmail(record.email || ""))}" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
             <div><input name="phone" placeholder="Phone" value="${esc(normalizePhone(record.phone || ""))}" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /></div>
-            <div><input name="temp_password" placeholder="Temp Password" required autocomplete="new-password" autocapitalize="off" spellcheck="false" /></div>
+            <div><input name="temp_password" placeholder="Temp Password" value="Keq3-8613!" required autocomplete="new-password" autocapitalize="off" spellcheck="false" /></div>
             <div>
               <select name="role">
                 <option value="buyer">buyer</option>
@@ -6189,7 +6294,7 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
           </div>
           <div class="actions">
             <button type="submit">Approve</button>
-            <button class="btn btn-danger" type="submit" formaction="/settings/access-requests/${record.id}/deny">Deny</button>
+            <button class="btn btn-danger" type="submit" formaction="/settings/access-requests/${record.id}/deny" formnovalidate>Deny</button>
           </div>
           <div id="access-request-${record.id}-password-error" class="muted" style="color:#a23622;"></div>
         </form>
@@ -7861,7 +7966,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
     const email = submittedEmail || normalizeEmail(requestRecord.email);
     const phone = submittedPhone || normalizePhone(requestRecord.phone);
     const insert = await client.query(
-      "insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true) returning id",
+      "insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active, must_change_password) values ($1, $2, $3, $4, $5, $6, $7, true, true) returning id",
       [username, passwordHash, role, firstName, lastName, email, phone]
     );
     if (role !== "admin") {
@@ -7915,7 +8020,7 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandle
   if (passwordError) throw new Error(passwordError);
   const passwordHash = await bcrypt.hash(password, 8);
   await withTransaction(async (client) => {
-    const insert = await client.query("insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true) returning id", [username, passwordHash, role, firstName, lastName, email, phone]);
+    const insert = await client.query("insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active, must_change_password) values ($1, $2, $3, $4, $5, $6, $7, true, true) returning id", [username, passwordHash, role, firstName, lastName, email, phone]);
     if (role !== "admin") {
       for (const jobId of assignedJobIds) {
         await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [insert.rows[0].id, jobId]);
@@ -7958,7 +8063,7 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
     }
     if (req.user.id === userId && !isActive) throw new Error("You cannot deactivate your own user.");
     if (passwordHash) {
-      await client.query("update users set username = $2, role = $3, password_hash = $4, is_active = $5, first_name = $6, last_name = $7, email = $8, phone = $9 where id = $1", [userId, username, role, passwordHash, isActive, firstName, lastName, email, phone]);
+      await client.query("update users set username = $2, role = $3, password_hash = $4, is_active = $5, first_name = $6, last_name = $7, email = $8, phone = $9, must_change_password = true where id = $1", [userId, username, role, passwordHash, isActive, firstName, lastName, email, phone]);
     } else {
       await client.query("update users set username = $2, role = $3, is_active = $4, first_name = $5, last_name = $6, email = $7, phone = $8 where id = $1", [userId, username, role, isActive, firstName, lastName, email, phone]);
     }
