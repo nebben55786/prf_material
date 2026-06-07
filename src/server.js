@@ -5572,6 +5572,11 @@ function canEditRequisition(user, header) {
   return ["REQUESTED", "WAITING_ON_MATERIAL"].includes(requisitionStatusKey(header.status)) && canAccess(user, "requisitions", "edit");
 }
 
+function canDeleteRequisition(user, header) {
+  if (!user || !header) return false;
+  return user.role === "admin" && requisitionStatusKey(header.status) !== "ISSUED" && !header.issued_at;
+}
+
 function getUserDisplayName(user) {
   const first = String(user?.first_name || "").trim();
   const last = String(user?.last_name || "").trim();
@@ -9558,7 +9563,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
         : isVerifiedStageRequisitionStatus(row.status)
         ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">Sign</a>` : ""}`
           : ""
-    }</div></td>
+    }${canDeleteRequisition(req.user, row) ? `<form method="post" action="/requisitions/${row.id}/delete" onsubmit="return confirm('Permanently delete this requisition? This cannot be undone.');"><button class="btn btn-danger" type="submit">Delete</button></form>` : ""}</div></td>
   </tr>`).join("");
   res.send(layout("Requisitions", `
     <h1>Material Requisitions</h1>
@@ -9790,6 +9795,9 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   }
   if (req.user?.role === "admin" && header.status === "CANCELLED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore Requisition</button></form>`);
+  }
+  if (canDeleteRequisition(req.user, header)) {
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/delete" onsubmit="return confirm('Permanently delete this requisition? This cannot be undone.');"><button class="btn btn-danger" type="submit">Delete Requisition</button></form>`);
   }
   const handlingParts = [];
   if (header.flag_color) {
@@ -10795,6 +10803,24 @@ app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePerm
     await auditLog(client, req.user.id, "cancel", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
+}));
+
+app.post("/requisitions/:id/delete", requireAuth, requireJobContext, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
+  if (req.user?.role !== "admin") throw new Error("Only admins can delete requisitions.");
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    if (!header) throw new Error("Requisition not found.");
+    const issueCount = Number((await client.query("select count(*) as issue_count from material_issue_transactions where requisition_id = $1 and job_id = $2", [req.params.id, jobId])).rows[0]?.issue_count || 0);
+    if (requisitionStatusKey(header.status) === "ISSUED" || header.issued_at || issueCount > 0) {
+      throw new Error("Issued requisitions cannot be deleted.");
+    }
+    await auditLog(client, req.user.id, "delete", "material_requisition", req.params.id, header.requisition_no);
+    await client.query("delete from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId]);
+    await recomputeBomIssuedSummaries(client, jobId);
+    await rebuildUnallocatedBom(client, jobId);
+  });
+  res.redirect("/requisitions");
 }));
 
 app.post("/requisitions/:id/restore", requireAuth, requireJobContext, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
