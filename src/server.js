@@ -16318,43 +16318,115 @@ app.post("/material-logs/received-by/add", requireAuth, requireJobContext, requi
 app.get("/material-logs/issue-report", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
   const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
-  const params = q ? [jobId, `%${q}%`] : [jobId];
+  const search = q ? `%${q}%` : "";
   const rows = (await query(`
-    select id, legacy_row_id, discipline, vendor_name, po_number, item_code, description, received_qty, qty_unit, mrr_number, fmr_number, warehouse, location, recv_date
-    from material_receiving_logs
-    where job_id = $1
-    ${q ? "and (coalesce(discipline, '') ilike $2 or coalesce(vendor_name, '') ilike $2 or coalesce(po_number, '') ilike $2 or coalesce(item_code, '') ilike $2 or coalesce(description, '') ilike $2 or coalesce(mrr_number, '') ilike $2 or coalesce(fmr_number, '') ilike $2)" : ""}
-    order by coalesce(legacy_row_id, id) desc
+    select *
+    from (
+      select
+        concat('tx-', mit.id)::text as row_id,
+        mr.id as requisition_id,
+        mr.requisition_no as fmr_number,
+        coalesce(bh.bom_name, bh.description, bh.bom_no, '') as bom_name,
+        coalesce(mr.requested_by_name, '') as requested_by,
+        coalesce(mr.issued_to, '') as issued_to,
+        coalesce(issued_user.username, tx_user.username, '') as issued_by,
+        coalesce(mr.iwp_no, bl.iwp_no, '') as iwp_no,
+        coalesce(bl.line_no::text, '') as line_no,
+        coalesce(bl.item_code, '') as item_code,
+        coalesce(bl.description, '') as description,
+        coalesce(mit.qty_issued, 0) as qty_issued,
+        coalesce(bl.uom, '') as uom,
+        initcap(lower(coalesce(mit.warehouse, ''))) as warehouse,
+        upper(coalesce(mit.location, '')) as location,
+        coalesce(mit.created_at, mr.issued_at, mr.created_at) as issued_at
+      from material_issue_transactions mit
+      join material_requisitions mr on mr.id = mit.requisition_id
+      join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
+      join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
+      join bom_headers bh on bh.id = mr.bom_id
+      left join users issued_user on issued_user.id = mr.issued_by_user_id
+      left join users tx_user on tx_user.id = mit.created_by
+      where mr.job_id = $1
+        and coalesce(mit.qty_issued, 0) > 0
+        and coalesce(mr.status, '') <> 'CANCELLED'
+
+      union all
+
+      select
+        concat('line-', mrl.id)::text as row_id,
+        mr.id as requisition_id,
+        mr.requisition_no as fmr_number,
+        coalesce(bh.bom_name, bh.description, bh.bom_no, '') as bom_name,
+        coalesce(mr.requested_by_name, '') as requested_by,
+        coalesce(mr.issued_to, '') as issued_to,
+        coalesce(issued_user.username, '') as issued_by,
+        coalesce(mr.iwp_no, bl.iwp_no, '') as iwp_no,
+        coalesce(bl.line_no::text, '') as line_no,
+        coalesce(bl.item_code, '') as item_code,
+        coalesce(bl.description, '') as description,
+        coalesce(mrl.qty_issued, 0) as qty_issued,
+        coalesce(bl.uom, '') as uom,
+        '' as warehouse,
+        '' as location,
+        coalesce(mr.issued_at, mr.created_at) as issued_at
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      join bom_lines bl on bl.id = mrl.bom_line_id
+      join bom_headers bh on bh.id = mr.bom_id
+      left join users issued_user on issued_user.id = mr.issued_by_user_id
+      where mr.job_id = $1
+        and coalesce(mrl.qty_issued, 0) > 0
+        and coalesce(mr.status, '') in ('ISSUED', 'CLOSED')
+        and not exists (
+          select 1
+          from material_issue_transactions mit
+          where mit.requisition_line_id = mrl.id
+        )
+    ) issued_lines
+    where $2 = ''
+      or coalesce(fmr_number, '') ilike $2
+      or coalesce(bom_name, '') ilike $2
+      or coalesce(requested_by, '') ilike $2
+      or coalesce(issued_to, '') ilike $2
+      or coalesce(issued_by, '') ilike $2
+      or coalesce(iwp_no, '') ilike $2
+      or coalesce(line_no, '') ilike $2
+      or coalesce(item_code, '') ilike $2
+      or coalesce(description, '') ilike $2
+      or coalesce(warehouse, '') ilike $2
+      or coalesce(location, '') ilike $2
+    order by issued_at desc nulls last, fmr_number desc, line_no, item_code
     limit 200
-  `, params)).rows;
+  `, [jobId, search])).rows;
   const tableRows = rows.map((row) => `<tr>
-    <td>${esc(row.legacy_row_id || row.id)}</td>
-    <td>${esc(row.discipline)}</td>
-    <td>${esc(row.vendor_name)}</td>
-    <td>${esc(row.po_number)}</td>
+    <td>${esc(row.fmr_number)}</td>
+    <td>${esc(row.bom_name)}</td>
+    <td>${esc(row.requested_by)}</td>
+    <td>${esc(row.issued_to)}</td>
+    <td>${esc(row.issued_by)}</td>
+    <td>${esc(row.iwp_no)}</td>
+    <td>${esc(row.line_no)}</td>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
-    <td>${esc(formatQtyDisplay(row.received_qty))}</td>
-    <td>${esc(row.qty_unit)}</td>
-    <td>${esc(row.mrr_number)}</td>
-    <td>${esc(row.fmr_number)}</td>
+    <td>${esc(formatQtyDisplay(row.qty_issued))}</td>
+    <td>${esc(row.uom)}</td>
     <td>${esc(row.warehouse)}</td>
     <td>${esc(row.location)}</td>
-    <td>${esc(formatShortDateTime(row.recv_date))}</td>
-    <td><a class="btn btn-secondary" href="/material-logs/receiving/${row.id}/edit">Edit</a></td>
+    <td>${esc(formatShortDateTime(row.issued_at))}</td>
+    <td><a class="btn btn-secondary" href="/requisitions/${row.requisition_id}">Open</a></td>
   </tr>`).join("");
   res.send(layout("Issue Report", `
     <h1>Issue Report</h1>
     <div class="card">
       <form method="get" action="/material-logs/issue-report" class="stack">
         <div class="grid" style="grid-template-columns: 1fr auto;">
-          <div><label>Filter Issue Report</label><input name="q" value="${esc(q)}" placeholder="PO, item, vendor, MRR, FMR, description" /></div>
+          <div><label>Filter Issue Report</label><input name="q" value="${esc(q)}" placeholder="FMR, item, requested by, issued to, BOM, IWP, location" /></div>
           <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
         </div>
       </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>ID</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Item</th><th>Description</th><th>Recv Qty</th><th>UOM</th><th>MRR</th><th>FMR</th><th>Warehouse</th><th>Location</th><th>Recv Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="14" class="muted">No issue report rows found.</td></tr>`}</table>
+      <table><tr><th>FMR</th><th>BOM</th><th>Requested By</th><th>Issued To</th><th>Issued By</th><th>IWP</th><th>Line</th><th>Item</th><th>Description</th><th>Qty Issued</th><th>UOM</th><th>Warehouse</th><th>Location</th><th>Issue Date</th><th>Action</th></tr>${tableRows || `<tr><td colspan="15" class="muted">No issued line items found.</td></tr>`}</table>
     </div>
   `, req.user));
 });
