@@ -26,7 +26,10 @@ create table if not exists audit_log (
 
 create table if not exists access_requests (
   id bigserial primary key,
+  first_name text not null default '',
+  last_name text not null default '',
   email text not null,
+  phone text not null default '',
   status text not null default 'PENDING',
   approved_by_user_id bigint references users(id) on delete set null,
   assigned_username text,
@@ -35,6 +38,9 @@ create table if not exists access_requests (
 );
 
 create index if not exists idx_access_requests_status on access_requests(status);
+alter table access_requests add column if not exists first_name text not null default '';
+alter table access_requests add column if not exists last_name text not null default '';
+alter table access_requests add column if not exists phone text not null default '';
 
 create table if not exists vendors (
   id bigserial primary key,

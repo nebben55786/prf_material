@@ -2868,16 +2868,23 @@ function landingPage() {
   </html>`;
 }
 
-function requestAccessPage(error = "", success = "") {
+function requestAccessPage(error = "", success = "", values = {}) {
+  const firstName = String(values.first_name || "").trim();
+  const lastName = String(values.last_name || "").trim();
+  const email = normalizeEmail(values.email);
+  const phone = normalizePhone(values.phone);
   return layout("Request Access", `
     ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
     ${success ? `<div class="card"><strong>${esc(success)}</strong></div>` : ""}
     <div class="card">
       <h2>Request Access</h2>
-      <p class="muted">Enter your email address and an administrator will review the request, assign a username, and create a temporary password.</p>
+      <p class="muted">Enter your contact information and an administrator will review the request, assign a username, and create a temporary password.</p>
       <form method="post" action="/request-access" class="stack">
         <div class="grid">
-          <div><label>Email Address</label><input type="email" name="email" required /></div>
+          <div><label>First Name</label><input name="first_name" value="${esc(firstName)}" required autocomplete="given-name" /></div>
+          <div><label>Last Name</label><input name="last_name" value="${esc(lastName)}" required autocomplete="family-name" /></div>
+          <div><label>Email Address</label><input type="email" name="email" value="${esc(email)}" required autocomplete="email" /></div>
+          <div><label>Phone</label><input name="phone" value="${esc(phone)}" inputmode="tel" autocomplete="tel" onblur="formatPhoneOnBlur(this)" /></div>
         </div>
         <div class="actions"><button type="submit">Submit Request</button><a class="btn btn-secondary" href="/">Back</a></div>
       </form>
@@ -6150,19 +6157,21 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
   const jobChecks = jobsRes.rows.map((job) => `<label class="check-option"><input type="checkbox" name="job_ids" value="${job.id}" /><span>${esc(job.job_number)}${job.plant_name ? ` - ${esc(job.plant_name)}` : ""}</span></label>`).join("");
   const accessRequestRows = accessRequestsRes.rows.map((record) => `
     <tr>
+      <td>${esc([record.first_name, record.last_name].filter(Boolean).join(" "))}</td>
       <td>${esc(record.email)}</td>
-              <td>${esc(formatShortDateTime(record.created_at))}</td>
+      <td>${esc(normalizePhone(record.phone || ""))}</td>
+      <td>${esc(formatShortDateTime(record.created_at))}</td>
       <td>
         <form id="access-request-${record.id}" method="post" action="/settings/access-requests/${record.id}/approve" class="stack" data-password-form="access-approve" data-password-message-id="access-request-${record.id}-password-error">
           <input type="hidden" name="return_to" value="/settings" />
           <div class="grid">
             <div><input name="username" placeholder="Username" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
-            <div><input name="first_name" placeholder="First name" autocomplete="off" /></div>
-            <div><input name="last_name" placeholder="Last name" autocomplete="off" /></div>
+            <div><input name="first_name" placeholder="First name" value="${esc(record.first_name || "")}" autocomplete="off" /></div>
+            <div><input name="last_name" placeholder="Last name" value="${esc(record.last_name || "")}" autocomplete="off" /></div>
           </div>
           <div class="grid">
             <div><input name="email" placeholder="Email" value="${esc(normalizeEmail(record.email || ""))}" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
-            <div><input name="phone" placeholder="Phone" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /></div>
+            <div><input name="phone" placeholder="Phone" value="${esc(normalizePhone(record.phone || ""))}" inputmode="tel" autocomplete="off" onblur="formatPhoneOnBlur(this)" /></div>
             <div><input name="temp_password" placeholder="Temp Password" required autocomplete="new-password" autocapitalize="off" spellcheck="false" /></div>
             <div>
               <select name="role">
@@ -6211,8 +6220,8 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
     <div class="card scroll">
       <h3>Access Requests</h3>
       <table>
-        <tr><th>Email</th><th>Requested</th><th>Approve / Deny</th></tr>
-        ${accessRequestRows || `<tr><td colspan="3" class="muted">No pending access requests.</td></tr>`}
+        <tr><th>Name</th><th>Email</th><th>Phone</th><th>Requested</th><th>Approve / Deny</th></tr>
+        ${accessRequestRows || `<tr><td colspan="5" class="muted">No pending access requests.</td></tr>`}
       </table>
     </div>
   `, req.user));
@@ -7129,9 +7138,21 @@ app.get("/request-access", (req, res) => {
 });
 
 app.post("/request-access", async (req, res) => {
+  const firstName = String(req.body.first_name || "").trim();
+  const lastName = String(req.body.last_name || "").trim();
   const email = normalizeEmail(req.body.email);
+  const phone = normalizePhone(req.body.phone);
+  const values = { first_name: firstName, last_name: lastName, email, phone };
+  if (!firstName) {
+    res.status(400).send(requestAccessPage("First name is required.", "", values));
+    return;
+  }
+  if (!lastName) {
+    res.status(400).send(requestAccessPage("Last name is required.", "", values));
+    return;
+  }
   if (!email) {
-    res.status(400).send(requestAccessPage("Email address is required."));
+    res.status(400).send(requestAccessPage("Email address is required.", "", values));
     return;
   }
   const existing = (await query(
@@ -7139,12 +7160,15 @@ app.post("/request-access", async (req, res) => {
     [email]
   )).rows[0];
   if (existing) {
-    res.send(requestAccessPage("", "Your request is already pending review."));
+    res.send(requestAccessPage("", "Your request is already pending review.", values));
     return;
   }
   await withTransaction(async (client) => {
-    await client.query("insert into access_requests (email, status) values ($1, 'PENDING')", [email]);
-    await auditLog(client, null, "create", "access_request", email, "pending");
+    await client.query(
+      "insert into access_requests (first_name, last_name, email, phone, status) values ($1, $2, $3, $4, 'PENDING')",
+      [firstName, lastName, email, phone]
+    );
+    await auditLog(client, null, "create", "access_request", email, `${firstName}|${lastName}|${phone}|pending`);
   });
   res.send(requestAccessPage("", "Request submitted. An administrator will review it."));
 });
@@ -7818,10 +7842,10 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
   const username = String(req.body.username || "").trim();
   const tempPassword = String(req.body.temp_password || "");
   const role = String(req.body.role || "field").trim();
-  const firstName = String(req.body.first_name || "").trim();
-  const lastName = String(req.body.last_name || "").trim();
-  const email = normalizeEmail(req.body.email);
-  const phone = normalizePhone(req.body.phone);
+  const submittedFirstName = String(req.body.first_name || "").trim();
+  const submittedLastName = String(req.body.last_name || "").trim();
+  const submittedEmail = normalizeEmail(req.body.email);
+  const submittedPhone = normalizePhone(req.body.phone);
   const assignedJobIds = parseSelectedIdList(req.body.job_ids);
   if (!username) throw new Error("Username is required.");
   if (!tempPassword) throw new Error("Temporary password is required.");
@@ -7832,9 +7856,13 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
   await withTransaction(async (client) => {
     const requestRecord = (await client.query("select * from access_requests where id = $1 and status = 'PENDING'", [requestId])).rows[0];
     if (!requestRecord) throw new Error("Access request not found.");
+    const firstName = submittedFirstName || String(requestRecord.first_name || "").trim();
+    const lastName = submittedLastName || String(requestRecord.last_name || "").trim();
+    const email = submittedEmail || normalizeEmail(requestRecord.email);
+    const phone = submittedPhone || normalizePhone(requestRecord.phone);
     const insert = await client.query(
       "insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active) values ($1, $2, $3, $4, $5, $6, $7, true) returning id",
-      [username, passwordHash, role, firstName, lastName, email || normalizeEmail(requestRecord.email), phone]
+      [username, passwordHash, role, firstName, lastName, email, phone]
     );
     if (role !== "admin") {
       for (const jobId of assignedJobIds) {
