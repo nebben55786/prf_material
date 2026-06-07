@@ -9263,6 +9263,9 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   let lineNumberOptionsHtml = "";
   const selectedBomUsesPackageLabel = selectedBom ? String(selectedBom.bom_type || "").trim().toLowerCase() === "equipment" : false;
   const lineLabel = selectedBomUsesPackageLabel ? "Package" : "Line";
+  const tagNumberLabel = selectedBom && String(selectedBom.bom_no || "").trim().toUpperCase() === "KEQ3-BOM-00006"
+    ? "Trans Number"
+    : "Tag Number";
   if (selectedBom) {
     const lineWhere = ["bom_id = $1"];
     const lineParams = [selectedBom.id];
@@ -9415,7 +9418,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="nowrap" data-resizable="true">Available</th>
                 <th class="nowrap" data-resizable="true">Request</th>
                 <th class="nowrap" data-resizable="true">UOM</th>
-                <th class="wrap" data-resizable="true">Tag Number</th>
+                <th class="wrap" data-resizable="true">${esc(tagNumberLabel)}</th>
                 <th class="nowrap" data-resizable="true">Size 1</th>
                 <th class="nowrap" data-resizable="true">Size 2</th>
                 <th class="nowrap" data-resizable="true">Thk 1</th>
