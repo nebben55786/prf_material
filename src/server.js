@@ -677,7 +677,9 @@ function buildSimplePdf(title, detailLines, tableLines) {
 }
 
 function formatPickTicketTimestamp(value = new Date()) {
-  return formatShortDateTime(value);
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return formatShortDateTime(value);
+  return `${parsed.getMonth() + 1}/${parsed.getDate()}/${parsed.getFullYear()} ${String(parsed.getHours()).padStart(2, "0")}:${String(parsed.getMinutes()).padStart(2, "0")}`;
 }
 
 function buildRfqSheetPdf(rfq, items, options = {}) {
@@ -1022,19 +1024,22 @@ function buildPickTicketPdf(header, lines) {
     if (pickTicketLogoBuffer) {
       content.push(`q 44 0 0 28 ${left + 12} ${top - 34} cm /Logo Do Q`);
     }
-    content.push(makeText(left + (pickTicketLogoBuffer ? 64 : 12), top - 23, "PICK TICKET", "F2", 17));
+    const bomTitle = String(header.bom_name || header.bom_description || header.bom_no || "").trim();
+    const titleText = `PICK TICKET${bomTitle ? ` - ${bomTitle}` : ""}`;
+    content.push(makeText(left + (pickTicketLogoBuffer ? 64 : 12), top - 23, titleText.slice(0, 64), "F2", 16));
     content.push(makeText(right - 170, top - 18, `REQ # ${header.requisition_no || ""}`, "F2", 12));
     content.push(makeText(right - 170, top - 32, `Page ${pageIndex + 1} of ${chunks.length}`, "F1", 8));
 
     const metaTop = top - 52;
-    const metaWidths = [168, 168, 112, 112, right - left - 560];
-    const metaLabels = ["REQUESTED BY", "ISSUED TO", "CREATED", "PRINTED", "BOM"];
+    const metaWidths = [130, 130, 120, 120, 118, 118];
+    const metaLabels = ["REQUESTED BY", "ISSUED TO", "CREATED", "PRINTED", "FLAG COLOR", "TRAILER"];
     const metaValues = [
       String(header.requested_by_name || "").slice(0, 24),
       String(header.issued_to || "").slice(0, 24),
-      formatShortDateTime(header.created_at),
-      formatPickTicketTimestamp().slice(0, 19),
-      String(header.bom_name || header.bom_description || header.bom_no || "").slice(0, 24)
+      formatPickTicketTimestamp(header.created_at),
+      formatPickTicketTimestamp(),
+      String(header.flag_color || "").slice(0, 20),
+      String(header.trailer_number || "").slice(0, 20)
     ];
     let metaX = left;
     for (let i = 0; i < metaWidths.length; i += 1) {
@@ -1044,16 +1049,7 @@ function buildPickTicketPdf(header, lines) {
       metaX += metaWidths[i];
     }
 
-    const handlingTop = metaTop - 42;
-    const handlingWidth = (right - left) / 2;
-    content.push(rect(left, handlingTop - 34, handlingWidth, 34));
-    content.push(rect(left + handlingWidth, handlingTop - 34, handlingWidth, 34));
-    content.push(makeText(left + 8, handlingTop - 13, "FLAG COLOR", "F2", 8));
-    content.push(makeText(left + 8, handlingTop - 26, String(header.flag_color || "").slice(0, 46), "F1", 10));
-    content.push(makeText(left + handlingWidth + 8, handlingTop - 13, "TRAILER NUMBER", "F2", 8));
-    content.push(makeText(left + handlingWidth + 8, handlingTop - 26, String(header.trailer_number || "").slice(0, 46), "F1", 10));
-
-    const meta2Top = handlingTop - 42;
+    const meta2Top = metaTop - 42;
     if (header.notes) {
       content.push(rect(left, meta2Top - 26, right - left, 26));
       content.push(makeText(left + 8, meta2Top - 10, "NOTES", "F2", 7));
