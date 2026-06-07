@@ -26,7 +26,7 @@ const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", 
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
 const bomLineImportHeaders = ["line_no", "item_code", "spec", "tag_number", "iwp_no", "iso_no", "qty_required", "notes"];
 const materialItemImportHeaders = ["item_code", "description", "material_type", "uom", "commodity_code", "size_1", "size_2", "thk_1", "thk_2", "notes", "specs"];
-const requisitionStatuses = ["REQUESTED", "ACCEPTED", "FLAGGED", "LOADED", "ISSUED", "CANCELLED", "CLOSED"];
+const requisitionStatuses = ["REQUESTED", "WAITING_ON_MATERIAL", "ACCEPTED", "FLAGGED", "LOADED", "ISSUED", "CANCELLED", "CLOSED"];
 const unallocatedBomSystemKey = "UNALLOCATED";
 const unallocatedBomName = "Un-Allocated Inventory";
 const issueSourceTypes = {
@@ -363,6 +363,7 @@ function isVerifiedStageRequisitionStatus(status) {
 function requisitionStatusLabel(status) {
   const statusKey = requisitionStatusKey(status);
   if (statusKey === "ACCEPTED" || statusKey === "VERIFIED") return "Accepted";
+  if (statusKey === "WAITING_ON_MATERIAL") return "Waiting on Material";
   if (!statusKey) return "";
   return statusKey.charAt(0) + statusKey.slice(1).toLowerCase();
 }
@@ -371,6 +372,7 @@ function renderRequisitionStatusChip(status) {
   const statusKey = requisitionStatusKey(status);
   let className = "";
   if (statusKey === "REQUESTED") className = "req-status-requested";
+  if (statusKey === "WAITING_ON_MATERIAL") className = "req-status-waiting-material";
   if (statusKey === "ACCEPTED" || statusKey === "VERIFIED") className = "req-status-verified";
   if (statusKey === "FLAGGED") className = "req-status-flagged";
   if (statusKey === "LOADED") className = "req-status-loaded";
@@ -1522,6 +1524,7 @@ function layout(title, body, user) {
       .rfq-status-partial { background: #d9ecff; border-color: #6aa5d9; color: #184f86; }
       .rfq-status-received { background: #dff0d8; border-color: #72a864; color: #275f25; }
       .req-status-requested { background: #fbe1dd; border-color: #d66b5f; color: #8e2118; }
+      .req-status-waiting-material { background: #fff3b0; border-color: #d4b83d; color: #665200; }
       .req-status-verified { background: #ffe4bd; border-color: #d38a2d; color: #7a4300; }
       .req-status-flagged { background: #eadcf8; border-color: #b58ade; color: #4c2575; }
       .req-status-loaded { background: #5b3b8c; border-color: #43236f; color: #fff; }
@@ -4168,6 +4171,34 @@ async function getAvailableInventoryByItemMap(runner = { query }, jobId = null, 
   return availableMap;
 }
 
+async function getRequisitionMaterialShortages(runner = { query }, requisitionId, jobId) {
+  const lines = (await runner.query(`
+    select
+      bl.item_code,
+      coalesce(string_agg(distinct nullif(coalesce(bl.description, ''), ''), ' | '), '') as description,
+      coalesce(string_agg(distinct nullif(coalesce(bl.uom, ''), ''), ' | '), '') as uom,
+      coalesce(string_agg(distinct nullif(coalesce(bl.size_1, ''), ''), ' | '), '') as size_1,
+      coalesce(string_agg(distinct nullif(coalesce(bl.size_2, ''), ''), ' | '), '') as size_2,
+      coalesce(string_agg(distinct nullif(coalesce(bl.thk_1, ''), ''), ' | '), '') as thk_1,
+      coalesce(string_agg(distinct nullif(coalesce(bl.thk_2, ''), ''), ' | '), '') as thk_2,
+      sum(coalesce(mrl.qty_requested, 0)) as qty_requested
+    from material_requisition_lines mrl
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mrl.requisition_id = $1 and mrl.job_id = $2
+    group by bl.item_code
+    order by bl.item_code
+  `, [requisitionId, jobId])).rows;
+  const availableMap = await getAvailableInventoryByItemMap(runner, jobId);
+  return lines
+    .map((line) => {
+      const qtyRequested = parseQtyValue(line.qty_requested || 0);
+      const qtyAvailable = parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0);
+      const qtyShort = Math.max(qtyRequested - qtyAvailable, 0);
+      return { ...line, qty_requested: qtyRequested, qty_available: qtyAvailable, qty_short: qtyShort };
+    })
+    .filter((line) => parseQtyValue(line.qty_short || 0) > 0);
+}
+
 function deriveBomPlanningStatus(line, nextQtyIssued) {
   const qtyRequired = parseQtyValue(line.qty_required || 0);
   const qtyReceived = parseQtyValue(line.qty_received || 0);
@@ -5524,7 +5555,7 @@ function requireInventoryAuditEdit(req, res, next) {
 
 function canEditRequisition(user, header) {
   if (!user || !header) return false;
-  return header.status === "REQUESTED" && canAccess(user, "requisitions", "edit");
+  return ["REQUESTED", "WAITING_ON_MATERIAL"].includes(requisitionStatusKey(header.status)) && canAccess(user, "requisitions", "edit");
 }
 
 function getUserDisplayName(user) {
@@ -6061,11 +6092,13 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
 
 app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view"), async (req, res) => {
   const jobId = currentJobId(req);
-  const [unverifiedRes, verifiedRes] = await Promise.all([
+  const [unverifiedRes, waitingMaterialRes, verifiedRes] = await Promise.all([
     query("select count(*) from material_requisitions where job_id = $1 and status = 'REQUESTED'", [jobId]),
+    query("select count(*) from material_requisitions where job_id = $1 and status = 'WAITING_ON_MATERIAL'", [jobId]),
     query("select count(*) from material_requisitions where job_id = $1 and status in ('ACCEPTED', 'VERIFIED')", [jobId])
   ]);
   const unverifiedCount = Number(unverifiedRes.rows[0]?.count || 0);
+  const waitingMaterialCount = Number(waitingMaterialRes.rows[0]?.count || 0);
   const verifiedCount = Number(verifiedRes.rows[0]?.count || 0);
   res.send(layout("Yard", `
     <h1>Yard</h1>
@@ -6081,6 +6114,10 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
       <a class="stat" href="/requisitions?status=REQUESTED" style="text-decoration:none;color:inherit;">
         <div>Unaccepted Requests</div>
         <strong>${unverifiedCount}</strong>
+      </a>
+      <a class="stat" href="/requisitions?status=WAITING_ON_MATERIAL" style="text-decoration:none;color:inherit;">
+        <div>Waiting on Material</div>
+        <strong>${waitingMaterialCount}</strong>
       </a>
       <a class="stat" href="/requisitions?status=ACCEPTED" style="text-decoration:none;color:inherit;">
         <div>Accepted Requests</div>
@@ -8389,30 +8426,14 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
           bl.id,
           bl.item_code,
           bl.qty_required,
-          bl.qty_issued,
-          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+          bl.qty_issued
         from bom_lines bl
-        left join (
-          ${getInventoryTotalsByItemSubquery(jobId)}
-        ) inv
-          on inv.item_code = bl.item_code
-        left join (
-          ${getIssuedInventoryTotalsByItemSubquery(jobId)}
-        ) issued
-          on issued.item_code = bl.item_code
-        left join (
-          ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
-        ) alloc
-          on alloc.item_code = bl.item_code
         where bl.id = $1 and bl.bom_id = $2
       `, [lineId, bomId])).rows[0];
       if (!line) continue;
       const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
       if (qtyRequested <= 0 || qtyRequested > remaining) {
         throw new Error(`Requested qty for ${line.item_code} must be greater than zero and cannot exceed the remaining BOM qty.`);
-      }
-      if (qtyRequested > num(line.qty_available)) {
-        throw new Error(`Requested qty for ${line.item_code} exceeds available received stock.`);
       }
         await client.query(`
           insert into material_requisition_lines (job_id, requisition_id, bom_line_id, qty_requested)
@@ -8421,6 +8442,10 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
         createdLineCount += 1;
       }
     if (createdLineCount === 0) throw new Error("No valid requisition lines were created.");
+    const shortages = await getRequisitionMaterialShortages(client, insertReq.rows[0].id, jobId);
+    if (shortages.length) {
+      await client.query("update material_requisitions set status = 'WAITING_ON_MATERIAL' where id = $1 and job_id = $2", [insertReq.rows[0].id, jobId]);
+    }
     await auditLog(client, req.user.id, "create", "material_requisition", insertReq.rows[0].id, requisitionNo);
     return insertReq.rows[0].id;
   });
@@ -9154,7 +9179,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
       <td>${esc(formatQtyDisplay(line.qty_remaining))}</td>
       <td>${esc(formatQtyDisplay(line.qty_available))}</td>
-      <td><input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(stagedSelection[String(line.id)] ?? Math.min(num(line.qty_remaining), num(line.qty_available))))}" /></td>
+      <td><input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(stagedSelection[String(line.id)] ?? num(line.qty_remaining)))}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.tag_number || "")}</td>
       <td>${esc(formatPlainNumberDisplay(line.size_1))}</td>
@@ -9378,6 +9403,8 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
         ? `<a class="btn btn-secondary" href="/requisitions/${row.id}#warehouse-sign-off">Issued</a>`
         : requisitionStatusKey(row.status) === "ISSUED" && canSignRequisition(req.user, row)
           ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
+        : requisitionStatusKey(row.status) === "WAITING_ON_MATERIAL"
+        ? `<a class="btn btn-secondary" href="/requisitions/${row.id}">Review</a>`
         : isVerifiedStageRequisitionStatus(row.status)
         ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">Sign</a>` : ""}`
           : ""
@@ -9538,6 +9565,26 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   const availableMap = await getAvailableInventoryByItemMap({ query }, jobId, {
     allocatedOffsetMap: isVerifiedStageRequisitionStatus(header.status) ? currentReqAllocMap : null
   });
+  const materialShortages = requisitionStatusKey(header.status) === "WAITING_ON_MATERIAL"
+    ? await getRequisitionMaterialShortages({ query }, header.id, jobId)
+    : [];
+  const materialShortageRows = materialShortages.map((line) => `<tr>
+    <td>${esc(line.item_code)}</td>
+    <td>${esc(line.description)}</td>
+    <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
+    <td>${esc(formatPlainNumberDisplay(line.thk_1))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_requested))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_available))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_short))}</td>
+    <td>${esc(line.uom || "")}</td>
+  </tr>`).join("");
+  const waitingMaterialCard = requisitionStatusKey(header.status) === "WAITING_ON_MATERIAL" ? `
+    <div class="card ${req.query.waiting_on_material ? "error" : ""}">
+      <h3>Waiting on Material</h3>
+      <p class="muted">This request is recorded as demand, but it will not reserve inventory or allow pick ticket/issue steps until enough stock is available and the request is accepted.</p>
+      <div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Size</th><th>Thk</th><th>Requested</th><th>Available</th><th>Short</th><th>UOM</th></tr>${materialShortageRows || `<tr><td colspan="8" class="muted">No shortages found. Accept the request to reserve the material.</td></tr>`}</table></div>
+    </div>
+  ` : "";
   const flagColorOptionsHtml = flagColorValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
   const trailerNumberOptionsHtml = trailerNumberValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
   const canEditIssuedQty = isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user, "requisitions", "issue");
@@ -9560,7 +9607,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   if (canEditRequisition(req.user, header)) {
     headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Edit Request</a>`);
   }
-  if (header.status === "REQUESTED" && canAccess(req.user, "requisitions", "verify")) {
+  if (["REQUESTED", "WAITING_ON_MATERIAL"].includes(requisitionStatusKey(header.status)) && canAccess(req.user, "requisitions", "verify")) {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Accept Request</button></form>`);
   }
   if (isVerifiedStageRequisitionStatus(header.status)) {
@@ -9610,6 +9657,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
       ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}
     </div>
+    ${waitingMaterialCard}
     <div class="card" id="warehouse-sign-off">
       <h3>Warehouse Sign-Off</h3>
       <p class="muted">Use either a signed paper copy upload or an electronic signature from an iPad. Both stay attached to this requisition.</p>
@@ -10120,10 +10168,17 @@ app.get("/material-logs/mrr/:id/export-flow.xlsx", requireAuth, requireJobContex
 
 app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
-  await withTransaction(async (client) => {
+  const result = await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (header.status !== "REQUESTED") throw new Error("Only requested requisitions can be accepted.");
+    const statusKey = requisitionStatusKey(header.status);
+    if (!["REQUESTED", "WAITING_ON_MATERIAL"].includes(statusKey)) throw new Error("Only requested or waiting-on-material requisitions can be accepted.");
+    const shortages = await getRequisitionMaterialShortages(client, req.params.id, jobId);
+    if (shortages.length) {
+      await client.query("update material_requisitions set status = 'WAITING_ON_MATERIAL' where id = $1 and job_id = $2", [req.params.id, jobId]);
+      await auditLog(client, req.user.id, "waiting_material", "material_requisition", req.params.id, header.requisition_no);
+      return { waitingOnMaterial: true };
+    }
     await client.query(`
       update material_requisitions
       set status = 'ACCEPTED',
@@ -10137,8 +10192,9 @@ app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePerm
       where requisition_id = $1 and job_id = $2
     `, [req.params.id, jobId]);
     await auditLog(client, req.user.id, "accept", "material_requisition", req.params.id, header.requisition_no);
+    return { waitingOnMaterial: false };
   });
-  res.redirect(`/requisitions/${req.params.id}`);
+  res.redirect(`/requisitions/${req.params.id}${result.waitingOnMaterial ? "?waiting_on_material=1" : ""}`);
 }));
 
 app.post("/requisitions/:id/issued-qty", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
@@ -10186,7 +10242,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
     where mr.id = $1 and mr.job_id = $2 and bh.job_id = $2
   `, [req.params.id, jobId])).rows[0];
   if (!header) throw new Error("Requisition not found.");
-  if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
+  if (!canEditRequisition(req.user, header)) throw new Error("Only requested or waiting-on-material requisitions can be edited.");
   const availableMap = await getAvailableInventoryByItemMap({ query }, jobId);
   const lines = (await query(`
     select
@@ -10213,7 +10269,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
     qty_available: parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0)
   }));
   const lineRows = lines.map((line) => {
-    const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_available) + num(line.qty_requested));
+    const maxQty = Math.max(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_requested));
     return `<tr>
       <td>${esc(line.line_no)}</td>
       <td>${esc(line.iwp_no || "")}</td>
@@ -10251,8 +10307,7 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (!canEditRequisition(req.user, header)) throw new Error("Only requested requisitions can be edited.");
-    const availableMap = await getAvailableInventoryByItemMap(client, jobId);
+    if (!canEditRequisition(req.user, header)) throw new Error("Only requested or waiting-on-material requisitions can be edited.");
     await client.query(`
       update material_requisitions
       set requested_by_name = $2, issued_to = $3, iwp_no = $4, notes = $5
@@ -10282,13 +10337,17 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
       }
       const requestedQty = parseQtyValue(req.body[`qty_requested_${line.requisition_line_id}`]);
       if (requestedQty <= 0) throw new Error(`Requested qty for ${line.item_code} must be greater than zero.`);
-      const qtyAvailable = parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0);
-      const maxQty = Math.min(Math.max(num(line.qty_required) - num(line.qty_issued), 0), qtyAvailable + num(line.qty_requested));
-      if (requestedQty > maxQty) throw new Error(`Requested qty for ${line.item_code} exceeds available stock.`);
+      const maxQty = Math.max(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_requested));
+      if (requestedQty > maxQty) throw new Error(`Requested qty for ${line.item_code} exceeds the remaining BOM qty.`);
       await client.query("update material_requisition_lines set qty_requested = $2 where id = $1 and job_id = $3", [line.requisition_line_id, requestedQty, jobId]);
     }
     const remainingCount = Number((await client.query("select count(*) from material_requisition_lines where requisition_id = $1 and job_id = $2", [req.params.id, jobId])).rows[0].count);
     if (remainingCount <= 0) throw new Error("At least one line is required on the requisition.");
+    const shortages = await getRequisitionMaterialShortages(client, req.params.id, jobId);
+    await client.query(
+      "update material_requisitions set status = $3 where id = $1 and job_id = $2 and status in ('REQUESTED', 'WAITING_ON_MATERIAL')",
+      [req.params.id, jobId, shortages.length ? "WAITING_ON_MATERIAL" : "REQUESTED"]
+    );
     await auditLog(client, req.user.id, "update", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
