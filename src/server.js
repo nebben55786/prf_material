@@ -1057,8 +1057,8 @@ function buildPickTicketPdf(header, lines) {
     }
 
     const tableTop = meta2Top - (header.notes ? 40 : 14);
-    const widths = [96, 292, 54, 54, 40, 198];
-    const headers = ["ITEM", "DESCRIPTION", "REQ QTY", "ISS QTY", "UOM", "LOCATION"];
+    const widths = [96, 446, 54, 40, 100];
+    const headers = ["ITEM", "DESCRIPTION", "ISS QTY", "UOM", "LOCATION"];
     let x = left;
     content.push(rect(left, tableTop - rowHeight, right - left, rowHeight));
     for (let i = 0; i < widths.length; i += 1) {
@@ -1073,29 +1073,28 @@ function buildPickTicketPdf(header, lines) {
       content.push(rect(left, y - rowHeight, right - left, rowHeight));
       let cellX = left;
       const wrappedDescription = wrapPdfText(item.description, 50);
-      const wrappedLocation = wrapPdfText(item.pick_location || "", 26);
+      const wrappedLocation = wrapPdfText(item.pick_location || "", 24);
       const rowValues = [
         item.item_code || "",
         wrappedDescription[0] || "",
-        formatQtyDisplay(item.qty_requested),
         formatQtyDisplay(item.qty_issued),
         item.uom || "",
         wrappedLocation[0] || ""
       ];
       for (let i = 0; i < widths.length; i += 1) {
         const value = rowValues[i];
-        const textX = i === 4 ? cellX + widths[i] - 24 : cellX + 4;
-        const qtyTextX = (i === 2 || i === 3) ? cellX + widths[i] - 24 : textX;
-        const wrappedCell = (i === 1 && wrappedDescription[1]) || (i === 5 && wrappedLocation[1]);
+        const textX = i === 3 ? cellX + widths[i] - 24 : cellX + 4;
+        const qtyTextX = i === 2 ? cellX + widths[i] - 24 : textX;
+        const wrappedCell = (i === 1 && wrappedDescription[1]) || (i === 4 && wrappedLocation[1]);
         const textY = wrappedCell ? y - 13 : y - 15;
-        content.push(makeText((i === 2 || i === 3) ? qtyTextX : textX, textY, value, "F1", 8));
+        content.push(makeText(i === 2 ? qtyTextX : textX, textY, value, "F1", 8));
         cellX += widths[i];
       }
       if (wrappedDescription[1]) {
         content.push(makeText(left + widths[0] + 4, y - 25, wrappedDescription[1], "F1", 8));
       }
       if (wrappedLocation[1]) {
-        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + widths[4] + 4, y - 25, wrappedLocation[1], "F1", 8));
+        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + 4, y - 25, wrappedLocation[1], "F1", 8));
       }
       y -= rowHeight;
     }
