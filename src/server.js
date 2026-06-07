@@ -9233,9 +9233,10 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     from bom_headers
     where job_id = $1
     order by
-      case when system_key = $2 then 0 else 1 end,
-      id desc
-  `, [jobId, unallocatedBomSystemKey])).rows;
+      lower(coalesce(nullif(bom_name, ''), nullif(description, ''), bom_no, '')),
+      lower(coalesce(bom_no, '')),
+      id
+  `, [jobId])).rows;
   const selectedBomId = Number(req.query.bom_id || 0);
   const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
   const clearFilters = String(req.query.clear_filters || "") === "1";
