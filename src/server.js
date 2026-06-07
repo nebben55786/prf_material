@@ -26,7 +26,7 @@ const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", 
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
 const bomLineImportHeaders = ["line_no", "item_code", "spec", "tag_number", "iwp_no", "iso_no", "qty_required", "notes"];
 const materialItemImportHeaders = ["item_code", "description", "material_type", "uom", "commodity_code", "size_1", "size_2", "thk_1", "thk_2", "notes", "specs"];
-const requisitionStatuses = ["REQUESTED", "VERIFIED", "FLAGGED", "LOADED", "ISSUED", "CANCELLED", "CLOSED"];
+const requisitionStatuses = ["REQUESTED", "ACCEPTED", "FLAGGED", "LOADED", "ISSUED", "CANCELLED", "CLOSED"];
 const unallocatedBomSystemKey = "UNALLOCATED";
 const unallocatedBomName = "Un-Allocated Inventory";
 const issueSourceTypes = {
@@ -357,19 +357,26 @@ function requisitionStatusKey(status) {
 }
 
 function isVerifiedStageRequisitionStatus(status) {
-  return ["VERIFIED", "FLAGGED", "LOADED"].includes(requisitionStatusKey(status));
+  return ["ACCEPTED", "VERIFIED", "FLAGGED", "LOADED"].includes(requisitionStatusKey(status));
+}
+
+function requisitionStatusLabel(status) {
+  const statusKey = requisitionStatusKey(status);
+  if (statusKey === "ACCEPTED" || statusKey === "VERIFIED") return "Accepted";
+  if (!statusKey) return "";
+  return statusKey.charAt(0) + statusKey.slice(1).toLowerCase();
 }
 
 function renderRequisitionStatusChip(status) {
   const statusKey = requisitionStatusKey(status);
   let className = "";
   if (statusKey === "REQUESTED") className = "req-status-requested";
-  if (statusKey === "VERIFIED") className = "req-status-verified";
+  if (statusKey === "ACCEPTED" || statusKey === "VERIFIED") className = "req-status-verified";
   if (statusKey === "FLAGGED") className = "req-status-flagged";
   if (statusKey === "LOADED") className = "req-status-loaded";
   if (statusKey === "ISSUED") className = "req-status-issued";
   const classes = ["chip", className].filter(Boolean).join(" ");
-  return `<span class="${classes}">${esc(status || "")}</span>`;
+  return `<span class="${classes}">${esc(requisitionStatusLabel(status))}</span>`;
 }
 
 function formatShortDateTime(value) {
@@ -4068,7 +4075,7 @@ async function getVerifiedAllocatedInventoryTotals(runner = { query }, jobId = n
     from material_requisition_lines mrl
     join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
-    where mr.status in ('VERIFIED', 'FLAGGED', 'LOADED')
+    where mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
       and ($1::bigint is null or mr.job_id = $1)
     group by
       bl.item_code,
@@ -4087,7 +4094,7 @@ async function getVerifiedAllocatedInventoryTotalsByItem(runner = { query }, job
     from material_requisition_lines mrl
     join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
-    where mr.status in ('VERIFIED', 'FLAGGED', 'LOADED')
+    where mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
       and ($1::bigint is null or mr.job_id = $1)
     group by bl.item_code
   `, [jobId])).rows;
@@ -4102,7 +4109,7 @@ function getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId = null) {
     from material_requisition_lines mrl
     join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
-    where mr.status in ('VERIFIED', 'FLAGGED', 'LOADED')
+    where mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
       ${jobFilterSql}
     group by bl.item_code
   `;
@@ -6053,7 +6060,7 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
   const jobId = currentJobId(req);
   const [unverifiedRes, verifiedRes] = await Promise.all([
     query("select count(*) from material_requisitions where job_id = $1 and status = 'REQUESTED'", [jobId]),
-    query("select count(*) from material_requisitions where job_id = $1 and status = 'VERIFIED'", [jobId])
+    query("select count(*) from material_requisitions where job_id = $1 and status in ('ACCEPTED', 'VERIFIED')", [jobId])
   ]);
   const unverifiedCount = Number(unverifiedRes.rows[0]?.count || 0);
   const verifiedCount = Number(verifiedRes.rows[0]?.count || 0);
@@ -6069,11 +6076,11 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
     </div>
     <div class="stats">
       <a class="stat" href="/requisitions?status=REQUESTED" style="text-decoration:none;color:inherit;">
-        <div>Unverified Requests</div>
+        <div>Unaccepted Requests</div>
         <strong>${unverifiedCount}</strong>
       </a>
-      <a class="stat" href="/requisitions?status=VERIFIED" style="text-decoration:none;color:inherit;">
-        <div>Verified Requests</div>
+      <a class="stat" href="/requisitions?status=ACCEPTED" style="text-decoration:none;color:inherit;">
+        <div>Accepted Requests</div>
         <strong>${verifiedCount}</strong>
       </a>
     </div>
@@ -6395,9 +6402,9 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
           <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__edit" ${editChecked} /><span>Edit</span></label>
           ${section.key === "requisitions" ? `
             <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__create" ${createChecked} /><span>Create</span></label>
-            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__verify" ${verifyChecked} /><span>Verify</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__verify" ${verifyChecked} /><span>Accept</span></label>
             <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__issue" ${issueChecked} /><span>Issue</span></label>
-            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__unverify" ${unverifyChecked} /><span>Unverify</span></label>
+            <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__unverify" ${unverifyChecked} /><span>Unaccept</span></label>
             <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__delete" ${deleteChecked} /><span>Delete</span></label>
           ` : ""}
         </div>
@@ -9329,11 +9336,17 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
 app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "view"), async (req, res) => {
   const jobId = currentJobId(req);
   const iwp = String(req.query.iwp || "").trim();
-  const status = String(req.query.status || "").trim();
+  let status = requisitionStatusKey(req.query.status);
+  if (status === "VERIFIED") status = "ACCEPTED";
   const where = ["mr.job_id = $1"];
   const params = [jobId];
   if (iwp) { params.push(`%${iwp}%`); where.push(`coalesce(mr.iwp_no, '') ilike $${params.length}`); }
-  if (status) { params.push(status); where.push(`mr.status = $${params.length}`); }
+  if (status === "ACCEPTED" || status === "VERIFIED") {
+    where.push("mr.status in ('ACCEPTED', 'VERIFIED')");
+  } else if (status) {
+    params.push(status);
+    where.push(`mr.status = $${params.length}`);
+  }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const rows = (await query(`
     select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description, count(mrl.id) as line_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
@@ -9356,14 +9369,14 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td>${renderRequisitionStatusChip(row.status)}</td>
     <td>${esc(formatShortDateTime(row.created_at))}</td>
     <td><div class="actions">${
-      hasLoggedRequisitionSignature(row)
+      requisitionStatusKey(row.status) === "CANCELLED" && req.user?.role === "admin"
+        ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
+        : requisitionStatusKey(row.status) === "ISSUED" && hasLoggedRequisitionSignature(row)
         ? `<a class="btn btn-secondary" href="/requisitions/${row.id}#warehouse-sign-off">Issued</a>`
+        : requisitionStatusKey(row.status) === "ISSUED" && canSignRequisition(req.user, row)
+          ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
         : isVerifiedStageRequisitionStatus(row.status)
         ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">Sign</a>` : ""}`
-        : row.status === "ISSUED" && canSignRequisition(req.user, row)
-          ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
-        : row.status === "CANCELLED" && req.user?.role === "admin"
-          ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
           : ""
     }</div></td>
   </tr>`).join("");
@@ -9376,7 +9389,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
       <form method="get" action="/requisitions" class="stack">
         <div class="grid">
           <div><label>IWP</label><input name="iwp" value="${esc(iwp)}" /></div>
-          <div><label>Status</label><select name="status"><option value="">All Statuses</option>${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${status === value ? "selected" : ""}>${esc(value)}</option>`).join("")}</select></div>
+          <div><label>Status</label><select name="status"><option value="">All Statuses</option>${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${status === value ? "selected" : ""}>${esc(requisitionStatusLabel(value))}</option>`).join("")}</select></div>
         </div>
         <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
       </form>
@@ -9514,6 +9527,14 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     ...trailerNumberResult.rows.map((row) => String(row.trailer_number || "").trim()),
     String(header.trailer_number || "").trim()
   ].filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  const currentReqAllocMap = new Map();
+  for (const line of lines) {
+    const key = buildInventoryItemKey(line);
+    currentReqAllocMap.set(key, parseQtyValue(currentReqAllocMap.get(key) || 0) + parseQtyValue(line.qty_requested || 0));
+  }
+  const availableMap = await getAvailableInventoryByItemMap({ query }, jobId, {
+    allocatedOffsetMap: isVerifiedStageRequisitionStatus(header.status) ? currentReqAllocMap : null
+  });
   const flagColorOptionsHtml = flagColorValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
   const trailerNumberOptionsHtml = trailerNumberValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
   const canEditIssuedQty = isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user, "requisitions", "issue");
@@ -9523,6 +9544,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     <td>${esc(line.iwp_no || "")}</td>
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
+    <td>${esc(formatQtyDisplay(availableMap.get(buildInventoryItemKey(line)) || 0))}</td>
     <td>${esc(formatQtyDisplay(line.qty_requested))}</td>
     <td>${canEditIssuedQty ? `<input name="qty_issued_${line.requisition_line_id}" value="${esc(formatQtyDisplay(line.qty_issued))}" inputmode="decimal" />` : esc(formatQtyDisplay(line.qty_issued))}</td>
     <td>${esc(formatQtyDisplay(Math.max(parseQtyValue(line.qty_requested || 0) - parseQtyValue(line.qty_issued || 0), 0)))}</td>
@@ -9530,18 +9552,18 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     <td>${esc(line.spec || "")}</td>
     <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
   </tr>`).join("");
-  const linesTable = `<table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Qty Requested</th><th>Qty Issued</th><th>Qty Not Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="10" class="muted">No lines on this requisition.</td></tr>`}</table>`;
+  const linesTable = `<table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Available Qty</th><th>Qty Requested</th><th>Qty Issued</th><th>Qty Not Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table>`;
   const headerActions = [];
   if (canEditRequisition(req.user, header)) {
     headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Edit Request</a>`);
   }
   if (header.status === "REQUESTED" && canAccess(req.user, "requisitions", "verify")) {
-    headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Verify Request</button></form>`);
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Accept Request</button></form>`);
   }
   if (isVerifiedStageRequisitionStatus(header.status)) {
     headerActions.push(`<a class="btn btn-secondary" target="_blank" href="/requisitions/${header.id}/pick-ticket.pdf">Open Pick Ticket PDF</a>`);
     if (canAccess(req.user, "requisitions", "unverify")) {
-      headerActions.push(`<form method="post" action="/requisitions/${header.id}/unverify"><button class="btn btn-secondary" type="submit">Set To Un-Verified</button></form>`);
+      headerActions.push(`<form method="post" action="/requisitions/${header.id}/unverify"><button class="btn btn-secondary" type="submit">Set To Un-Accepted</button></form>`);
     }
     if (canAccess(req.user, "requisitions", "issue")) {
       const flagFormId = `requisition-flag-form-${header.id}`;
@@ -9618,7 +9640,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
     `, [jobId]).then((result) => result.rows)
   ]);
   if (!header) throw new Error("Requisition not found.");
-  if (!canSignRequisition(req.user, header)) throw new Error("Only verified, flagged, loaded, or issued requisitions can be signed.");
+  if (!canSignRequisition(req.user, header)) throw new Error("Only accepted, flagged, loaded, or issued requisitions can be signed.");
   const signerNames = Array.from(new Set([
     ...requesterNameRows.map((row) => String(row.requested_by_name || "").trim()).filter(Boolean),
     String(header.signed_by_name || "").trim(),
@@ -9756,7 +9778,7 @@ app.post("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermis
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (!canSignRequisition(req.user, header)) throw new Error("Only verified, flagged, loaded, or issued requisitions can be signed.");
+    if (!canSignRequisition(req.user, header)) throw new Error("Only accepted, flagged, loaded, or issued requisitions can be signed.");
     await client.query(`
       update material_requisitions
       set signed_at = now(),
@@ -9785,7 +9807,7 @@ app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requir
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (!canSignRequisition(req.user, header)) throw new Error("Only verified, flagged, loaded, or issued requisitions can be signed.");
+    if (!canSignRequisition(req.user, header)) throw new Error("Only accepted, flagged, loaded, or issued requisitions can be signed.");
     await client.query(`
       update material_requisitions
       set signed_at = now(),
@@ -9826,7 +9848,7 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, req
     where mr.id = $1 and mr.job_id = $2
   `, [req.params.id, jobId])).rows[0];
   if (!header) throw new Error("Requisition not found.");
-  if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Pick tickets are only available for verified, flagged, or loaded requisitions.");
+  if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Pick tickets are only available for accepted, flagged, or loaded requisitions.");
   const lines = (await query(`
     select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom,
            coalesce(bl.size_1, '') as size_1, coalesce(bl.size_2, '') as size_2,
@@ -10098,10 +10120,10 @@ app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePerm
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (header.status !== "REQUESTED") throw new Error("Only requested requisitions can be verified.");
+    if (header.status !== "REQUESTED") throw new Error("Only requested requisitions can be accepted.");
     await client.query(`
       update material_requisitions
-      set status = 'VERIFIED',
+      set status = 'ACCEPTED',
           verified_at = now(),
           verified_by_user_id = $2
       where id = $1 and job_id = $3
@@ -10111,7 +10133,7 @@ app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePerm
       set qty_issued = qty_requested
       where requisition_id = $1 and job_id = $2
     `, [req.params.id, jobId]);
-    await auditLog(client, req.user.id, "verify", "material_requisition", req.params.id, header.requisition_no);
+    await auditLog(client, req.user.id, "accept", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
@@ -10124,7 +10146,7 @@ app.post("/requisitions/:id/issued-qty", requireAuth, requireJobContext, require
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Issued quantities can only be edited on verified, flagged, or loaded requisitions.");
+    if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Issued quantities can only be edited on accepted, flagged, or loaded requisitions.");
     const lines = (await client.query(`
       select mrl.id, mrl.qty_requested, bl.item_code
       from material_requisition_lines mrl
@@ -10274,7 +10296,7 @@ app.post("/requisitions/:id/unverify", requireAuth, requireJobContext, requirePe
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Only verified, flagged, or loaded requisitions can be set to un-verified.");
+    if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Only accepted, flagged, or loaded requisitions can be set to un-accepted.");
     await client.query(`
       update material_requisitions
       set status = 'REQUESTED',
@@ -10293,7 +10315,7 @@ app.post("/requisitions/:id/unverify", requireAuth, requireJobContext, requirePe
       set qty_issued = 0
       where requisition_id = $1 and job_id = $2
     `, [req.params.id, jobId]);
-    await auditLog(client, req.user.id, "unverify", "material_requisition", req.params.id, header.requisition_no);
+    await auditLog(client, req.user.id, "unaccept", "material_requisition", req.params.id, header.requisition_no);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
@@ -10305,7 +10327,7 @@ app.post("/requisitions/:id/flag", requireAuth, requireJobContext, requirePermis
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Only verified, flagged, or loaded requisitions can be flagged.");
+    if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Only accepted, flagged, or loaded requisitions can be flagged.");
     await client.query(`
       update material_requisitions
       set status = case when status = 'LOADED' then status else 'FLAGGED' end,
@@ -10326,7 +10348,7 @@ app.post("/requisitions/:id/load", requireAuth, requireJobContext, requirePermis
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
-    if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Only verified, flagged, or loaded requisitions can be loaded.");
+    if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Only accepted, flagged, or loaded requisitions can be loaded.");
     await client.query(`
       update material_requisitions
       set status = 'LOADED',
@@ -10343,7 +10365,7 @@ app.post("/requisitions/:id/load", requireAuth, requireJobContext, requirePermis
 async function issueRequisitionToField(client, requisitionId, jobId, userId) {
   const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [requisitionId, jobId])).rows[0];
   if (!header) throw new Error("Requisition not found.");
-  if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Requisition must be verified, flagged, or loaded before issue.");
+  if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Requisition must be accepted, flagged, or loaded before issue.");
   const currentRows = await getCurrentOnHandRows(client, { jobId });
   const inventoryMap = new Map();
   for (const row of currentRows) {
