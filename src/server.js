@@ -2197,6 +2197,25 @@ function importRowHasValues(row) {
   return Object.values(row || {}).some((value) => String(value ?? "").trim() !== "");
 }
 
+function attachImportHeaders(row, headers) {
+  Object.defineProperty(row, "__headers", {
+    value: new Set((headers || []).filter(Boolean)),
+    enumerable: false
+  });
+  return row;
+}
+
+function importRowFromEntries(entries) {
+  const row = {};
+  for (const [key, value] of entries) {
+    if (!key) continue;
+    if (!(key in row) || (!String(row[key] ?? "").trim() && String(value ?? "").trim())) {
+      row[key] = value;
+    }
+  }
+  return attachImportHeaders(row, entries.map(([key]) => key));
+}
+
 function parseUploadedRows(file, pastedText) {
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (file?.buffer?.length) {
@@ -2204,9 +2223,12 @@ function parseUploadedRows(file, pastedText) {
     if (/\.(xlsx|xlsm|xlsb|xls)$/.test(lowerName)) {
       const workbook = XLSX.read(file.buffer, { type: "buffer" });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
+      const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: "", blankrows: false, skipHidden: true });
       return rows
-        .map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [normalizeHeader(key), String(value ?? "").trim()])))
+        .map((row) => {
+          const entries = Object.entries(row).map(([key, value]) => [normalizeHeader(key), String(value ?? "").trim()]);
+          return importRowFromEntries(entries);
+        })
         .filter(importRowHasValues);
     }
     pastedText = file.buffer.toString("utf8");
@@ -2217,7 +2239,7 @@ function parseUploadedRows(file, pastedText) {
   const headers = rows.shift().map((cell) => normalizeHeader(cell));
   return rows
     .map((values) => {
-      return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").replace(/\s*\r?\n\s*/g, " ").trim()]));
+      return importRowFromEntries(headers.map((header, index) => [header, String(values[index] ?? "").replace(/\s*\r?\n\s*/g, " ").trim()]));
     })
     .filter(importRowHasValues);
 }
@@ -2937,6 +2959,26 @@ function parseSpecList(value) {
     .filter((spec) => spec && !seen.has(spec.toLowerCase()) && seen.add(spec.toLowerCase()));
 }
 
+const materialItemImportAliases = {
+  item_code: ["item_code", "ident", "ident_code", "item", "item_no", "item_number", "material_code", "material_item"],
+  description: ["description", "item_description", "material_description", "abbrev_description", "abbrev_desc", "product_description", "desc"],
+  material_type: ["material_type", "type", "item_type", "category"],
+  uom: ["uom", "unit", "unit_of_measure"],
+  commodity_code: ["commodity_code", "commodity"],
+  size_1: ["size_1", "size1", "primary_size"],
+  size_2: ["size_2", "size2", "secondary_size"],
+  thk_1: ["thk_1", "thk1", "thickness_1", "wall_1"],
+  thk_2: ["thk_2", "thk2", "thickness_2", "wall_2"],
+  notes: ["notes", "note", "remarks"],
+  specs: ["specs", "spec", "pipe_specs", "piping_specs"]
+};
+
+function importRowHasField(row, fieldName) {
+  const headers = row?.__headers;
+  if (!headers) return true;
+  return (materialItemImportAliases[fieldName] || [fieldName]).some((alias) => headers.has(alias));
+}
+
 function normalizeMaterialItemImportRow(row = {}) {
   const text = (...values) => {
     for (const value of values) {
@@ -2946,7 +2988,7 @@ function normalizeMaterialItemImportRow(row = {}) {
     return "";
   };
   const itemCode = text(row.item_code, row.ident, row.ident_code, row.item, row.item_no, row.item_number, row.material_code, row.material_item);
-  return {
+  const normalized = {
     item_code: itemCode,
     description: pickRealMaterialDescription(
       itemCode,
@@ -2968,6 +3010,11 @@ function normalizeMaterialItemImportRow(row = {}) {
     notes: text(row.notes, row.note, row.remarks),
     specs: parseSpecList(text(row.specs, row.spec, row.pipe_specs, row.piping_specs))
   };
+  Object.defineProperty(normalized, "__presentFields", {
+    value: Object.fromEntries(Object.keys(materialItemImportAliases).map((field) => [field, importRowHasField(row, field)])),
+    enumerable: false
+  });
+  return normalized;
 }
 
 async function ensureMaterialSpec(client, jobId, specName) {
@@ -3000,14 +3047,17 @@ async function syncMaterialItemSpecs(client, materialItemId, jobId, specNames = 
 
 async function upsertMaterialMasterItem(client, row, jobId) {
   const normalized = normalizeMaterialItemImportRow(row);
+  const presentFields = normalized.__presentFields || {};
+  const hasField = (fieldName) => presentFields[fieldName] !== false;
   const itemCode = normalized.item_code;
   if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
   if (!normalized.description) return { status: "skipped", errorCode: "missing_description", message: "Description is required." };
-  const existing = await client.query("select id from material_items where job_id = $1 and lower(item_code) = lower($2) limit 1", [jobId, itemCode]);
+  const existing = await client.query("select * from material_items where job_id = $1 and lower(item_code) = lower($2) limit 1", [jobId, itemCode]);
   let status = "inserted";
   let itemId;
   if (existing.rows[0]) {
-    itemId = existing.rows[0].id;
+    const existingItem = existing.rows[0];
+    itemId = existingItem.id;
     await client.query(`
       update material_items
       set item_code = $2,
@@ -3026,14 +3076,14 @@ async function upsertMaterialMasterItem(client, row, jobId) {
       itemId,
       itemCode,
       normalized.description,
-      normalized.material_type || "misc",
-      normalized.uom || "EA",
-      normalized.commodity_code,
-      normalized.size_1,
-      normalized.size_2,
-      normalized.thk_1,
-      normalized.thk_2,
-      normalized.notes,
+      hasField("material_type") ? normalized.material_type || "misc" : existingItem.material_type,
+      hasField("uom") ? normalized.uom || "EA" : existingItem.uom,
+      hasField("commodity_code") ? normalized.commodity_code : existingItem.commodity_code,
+      hasField("size_1") ? normalized.size_1 : existingItem.size_1,
+      hasField("size_2") ? normalized.size_2 : existingItem.size_2,
+      hasField("thk_1") ? normalized.thk_1 : existingItem.thk_1,
+      hasField("thk_2") ? normalized.thk_2 : existingItem.thk_2,
+      hasField("notes") ? normalized.notes : existingItem.notes,
       jobId
     ]);
     status = "updated";
@@ -3060,7 +3110,9 @@ async function upsertMaterialMasterItem(client, row, jobId) {
     ]);
     itemId = insert.rows[0].id;
   }
-  await syncMaterialItemSpecs(client, itemId, jobId, normalized.specs);
+  if (status === "inserted" || hasField("specs")) {
+    await syncMaterialItemSpecs(client, itemId, jobId, normalized.specs);
+  }
   return { status, id: itemId, item: normalized };
 }
 
@@ -7838,7 +7890,7 @@ app.get("/items/import-page", requireAuth, requireJobContext, requirePermission(
 }));
 
 app.post("/items/import", requireAuth, requireJobContext, requirePermission("inventory", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
-  const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeMaterialItemImportRow);
+  const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (!rows.length) throw new Error("No rows found.");
   const jobId = currentJobId(req);
   const batchId = await withTransaction(async (client) => {
