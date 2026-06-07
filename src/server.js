@@ -7639,7 +7639,6 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
   const specOptions = [`<option value="">All Specs</option>`]
     .concat(specs.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === specId ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`))
     .join("");
-  const itemFormSpecOptions = specs.map((spec) => `<option value="${esc(spec.name)}">${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
   const itemRows = rows.map((item) => `<tr>
     <td>${esc(item.item_code)}</td>
     <td>${esc(item.description)}</td>
@@ -7664,6 +7663,8 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
         </div>
         <div class="actions">
           <button type="submit">Filter Items</button>
+          ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-primary" href="/items/new">Add Item</a>` : ""}
+          ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/import-page">Import Items</a>` : ""}
           ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/specs">Specs</a>` : ""}
           <a class="btn btn-secondary" href="/items">Clear</a>
           <a class="btn btn-secondary" href="/items/export.xlsx">Export XLSX</a>
@@ -7672,45 +7673,47 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
         </div>
       </form>
     </div>
-    ${canAccess(req.user, "inventory", "edit") ? `
-      <div class="card">
-        <h3>Add Item</h3>
-        <form method="post" action="/items" class="stack">
-          <div class="grid-4">
-            <div><label>Item Code</label><input name="item_code" required /></div>
-            <div><label>Description</label><input name="description" required /></div>
-            <div><label>Type</label><input name="material_type" value="misc" /></div>
-            <div><label>UOM</label><input name="uom" value="EA" /></div>
-          </div>
-          <div class="grid-4">
-            <div><label>Commodity Code</label><input name="commodity_code" /></div>
-            <div><label>Size 1</label><input name="size_1" /></div>
-            <div><label>Size 2</label><input name="size_2" /></div>
-            <div><label>Thk 1</label><input name="thk_1" /></div>
-          </div>
-          <div class="grid">
-            <div><label>Thk 2</label><input name="thk_2" /></div>
-            <div><label>Specs</label><select name="specs" multiple size="${Math.min(Math.max(specs.length, 2), 8)}">${itemFormSpecOptions || `<option disabled>No specs added yet.</option>`}</select></div>
-          </div>
-          <div><label>Notes</label><textarea name="notes"></textarea></div>
-          <div class="actions"><button type="submit">Save Item</button></div>
-        </form>
-      </div>
-      <div class="card">
-        <h3>Import Items</h3>
-        <p class="muted">Supported columns: ${esc(materialItemImportHeaders.join(", "))}. Use the specs column for one or more specs separated by | or commas.</p>
-        <form method="post" enctype="multipart/form-data" action="/items/import" class="stack">
-          <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
-          <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
-          <div class="actions"><button type="submit">Import Items</button></div>
-        </form>
-      </div>
-    ` : ""}
     <div class="card scroll">
       <table>
         <tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Commodity</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Specs</th><th>Notes</th><th>Action</th></tr>
         ${itemRows || `<tr><td colspan="12" class="muted">No items match the current filter.</td></tr>`}
       </table>
+    </div>
+  `, req.user));
+}));
+
+app.get("/items/new", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const specs = await getMaterialSpecOptions(currentJobId(req));
+  const itemFormSpecOptions = specs.map((spec) => `<option value="${esc(spec.name)}">${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
+  res.send(layout("Add Item", `
+    <h1>Add Item</h1>
+    <div class="card">
+      <div class="actions"><a class="btn btn-secondary" href="/items">Back To Item Master</a></div>
+    </div>
+    <div class="card">
+      <form method="post" action="/items" class="stack">
+        <div class="grid-4">
+          <div><label>Item Code</label><input name="item_code" required /></div>
+          <div><label>Description</label><input name="description" required /></div>
+          <div><label>Type</label><input name="material_type" value="misc" /></div>
+          <div><label>UOM</label><input name="uom" value="EA" /></div>
+        </div>
+        <div class="grid-4">
+          <div><label>Commodity Code</label><input name="commodity_code" /></div>
+          <div><label>Size 1</label><input name="size_1" /></div>
+          <div><label>Size 2</label><input name="size_2" /></div>
+          <div><label>Thk 1</label><input name="thk_1" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Thk 2</label><input name="thk_2" /></div>
+          <div><label>Specs</label><select name="specs" multiple size="${Math.min(Math.max(specs.length, 2), 8)}">${itemFormSpecOptions || `<option disabled>No specs added yet.</option>`}</select></div>
+        </div>
+        <div><label>Notes</label><textarea name="notes"></textarea></div>
+        <div class="actions">
+          <button type="submit">Save Item</button>
+          <a class="btn btn-secondary" href="/items">Back</a>
+        </div>
+      </form>
     </div>
   `, req.user));
 }));
@@ -7808,6 +7811,30 @@ app.post("/items/specs/:id", requireAuth, requireJobContext, requirePermission("
     await auditLog(client, req.user.id, "update", "material_spec", specId, `${name}|${vendorRev}`);
   });
   res.redirect("/items/specs");
+}));
+
+app.get("/items/import-page", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  res.send(layout("Import Items", `
+    <h1>Import Items</h1>
+    <div class="card">
+      <div class="actions">
+        <a class="btn btn-secondary" href="/items">Back To Item Master</a>
+        <a class="btn btn-secondary" href="/items/import/template">Download Import Template</a>
+      </div>
+    </div>
+    <div class="card">
+      <p class="muted">Supported columns: ${esc(materialItemImportHeaders.join(", "))}. Use the specs column for one or more specs separated by | or commas.</p>
+      <form method="post" enctype="multipart/form-data" action="/items/import" class="stack">
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
+        <div class="actions">
+          <button type="submit">Import Items</button>
+          <a class="btn btn-secondary" href="/items/import/template">Download Import Template</a>
+          <a class="btn btn-secondary" href="/items">Back</a>
+        </div>
+      </form>
+    </div>
+  `, req.user));
 }));
 
 app.post("/items/import", requireAuth, requireJobContext, requirePermission("inventory", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
