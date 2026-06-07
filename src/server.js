@@ -10529,7 +10529,7 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
     `, [req.params.id, jobId])).rows;
     const removeLineId = Number(req.body.remove_line_id || 0);
     for (const line of lines) {
-      if (removeLineId && line.requisition_line_id === removeLineId) {
+      if (removeLineId && Number(line.requisition_line_id) === removeLineId) {
         await client.query("delete from material_requisition_lines where id = $1 and job_id = $2", [removeLineId, jobId]);
         continue;
       }
