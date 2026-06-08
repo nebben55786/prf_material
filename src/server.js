@@ -9713,6 +9713,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   let lineRows = "";
   let lineNumberOptionsHtml = "";
   const selectedBomUsesPackageLabel = selectedBom ? String(selectedBom.bom_type || "").trim().toLowerCase() === "equipment" : false;
+  const selectedBomPrefillsRequestQty = selectedBom ? String(selectedBom.bom_type || "").trim().toLowerCase() === "pipe" : false;
   const lineLabel = selectedBomUsesPackageLabel ? "Package" : "Line";
   const tagNumberLabel = selectedBom && String(selectedBom.bom_no || "").trim().toUpperCase() === "KEQ3-BOM-00006"
     ? "Trans Number"
@@ -9760,7 +9761,12 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
     lineNumberOptionsHtml = lineNumberOptionsRes.rows.map((row) => `<option value="${esc(row.line_no)}"></option>`).join("");
     const selectedBomAllowsManualLineEdits = !isSystemGeneratedBom(selectedBom);
-    lineRows = linesRes.rows.map((line) => `<tr>
+    lineRows = linesRes.rows.map((line) => {
+      const stagedQty = stagedSelection[String(line.id)];
+      const requestQtyValue = stagedQty !== undefined
+        ? formatQtyDisplay(stagedQty)
+        : (selectedBomPrefillsRequestQty ? formatQtyDisplay(num(line.qty_remaining)) : "");
+      return `<tr>
       <td><input type="checkbox" name="selected_line_ids" value="${line.id}" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
       <td>${esc(line.line_no)}</td>
       <td>${esc(line.item_code)}</td>
@@ -9769,7 +9775,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
       <td>${esc(formatQtyDisplay(line.qty_remaining))}</td>
       <td>${esc(formatQtyDisplay(line.qty_available))}</td>
-      <td><input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(stagedSelection[String(line.id)] ?? num(line.qty_remaining)))}" /></td>
+      <td><input name="request_qty_${line.id}" value="${esc(requestQtyValue)}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.tag_number || "")}</td>
       <td>${esc(formatPlainNumberDisplay(line.size_1))}</td>
@@ -9779,7 +9785,8 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(line.notes || "")}</td>
       <td><span class="chip">${esc(line.planning_status)}</span></td>
       <td><div class="actions">${selectedBomAllowsManualLineEdits ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a>` : `<span class="muted">System BOM</span>`}</div></td>
-    </tr>`).join("");
+    </tr>`;
+    }).join("");
   }
   const bomOptions = availableBoms.map((row) => `<option value="${row.id}" ${Number(row.id) === selectedBomId ? "selected" : ""}>${esc(row.bom_name || row.description || row.bom_no)} | ${esc(row.bom_no)}</option>`).join("");
   const stagedSelectionJson = escAttr(JSON.stringify(stagedSelection));
