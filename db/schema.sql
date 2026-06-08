@@ -481,6 +481,10 @@ alter table po_lines add column if not exists description_snapshot text;
 alter table po_lines add column if not exists material_type_snapshot text;
 alter table po_lines add column if not exists uom_snapshot text;
 alter table po_lines add column if not exists po_line text;
+alter table material_requisition_lines add column if not exists source_po_line_id bigint references po_lines(id) on delete set null;
+create index if not exists idx_material_requisition_lines_source_po_line
+  on material_requisition_lines(source_po_line_id)
+  where source_po_line_id is not null;
 alter table purchase_orders add column if not exists vendor_contact text;
 alter table purchase_orders add column if not exists freight_terms text;
 alter table purchase_orders add column if not exists ship_to text;

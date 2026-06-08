@@ -5028,6 +5028,32 @@ function poLineAccountedQtySql(alias = "pl") {
   return `(${poLineReceivedQtySql(alias)} + ${poLineShortOsdQtySql(alias)})`;
 }
 
+function collectSelectedRequisitionLineQtys(body = {}) {
+  const selectedLineQtys = new Map();
+  try {
+    const stagedSelection = JSON.parse(String(body.staged_selection || "{}"));
+    if (stagedSelection && typeof stagedSelection === "object" && !Array.isArray(stagedSelection)) {
+      for (const [lineId, qty] of Object.entries(stagedSelection)) {
+        const numericLineId = Number(lineId);
+        const qtyRequested = parseQtyValue(qty, NaN);
+        if (Number.isFinite(numericLineId) && numericLineId > 0 && Number.isFinite(qtyRequested) && qtyRequested > 0) {
+          selectedLineQtys.set(numericLineId, qtyRequested);
+        }
+      }
+    }
+  } catch {
+    // Fall back to visible checkbox submission below.
+  }
+  for (const value of [].concat(body.selected_line_ids || [])) {
+    const lineId = Number(value);
+    const qtyRequested = parseQtyValue(body[`request_qty_${lineId}`], NaN);
+    if (Number.isFinite(lineId) && lineId > 0 && Number.isFinite(qtyRequested) && qtyRequested > 0) {
+      selectedLineQtys.set(lineId, qtyRequested);
+    }
+  }
+  return selectedLineQtys;
+}
+
 async function getLatestMrrForPo(client, poId) {
   if (!poId) return null;
   return (await client.query(`
@@ -6276,6 +6302,7 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
         <a class="btn btn-primary" href="/inventory">Inventory</a>
         <a class="btn btn-primary" href="/yard/locations">Locations</a>
         <a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>
+        ${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-primary" href="/yard/issue-by-po">Issue by PO</a>` : ""}
         ${req.user.role === "admin" ? `<a class="btn btn-primary" href="/yard/item-history">Item History</a>` : ""}
       </div>
     </div>
@@ -6295,6 +6322,195 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
     </div>
   `, req.user));
 });
+
+app.get("/yard/issue-by-po", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const rows = (await query(`
+    with po_line_balances as (
+      select
+        po.id as po_id,
+        po.po_no,
+        po.description,
+        po.status,
+        coalesce(v.name, '') as vendor_name,
+        coalesce(r.rfq_no, '') as rfq_no,
+        pl.id as po_line_id,
+        ${poLineReceivedQtySql("pl")} as qty_received,
+        coalesce((
+          select sum(mrl.qty_requested)
+          from material_requisition_lines mrl
+          join material_requisitions mr on mr.id = mrl.requisition_id and mr.job_id = mrl.job_id
+          where mrl.source_po_line_id = pl.id
+            and mrl.job_id = po.job_id
+            and coalesce(mr.status, '') <> 'CANCELLED'
+        ), 0) as qty_already_requested
+      from purchase_orders po
+      join vendors v on v.id = po.vendor_id
+      left join rfqs r on r.id = po.rfq_id and r.job_id = po.job_id
+      join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+      where po.job_id = $1
+        and coalesce(po.status, '') <> 'CANCELLED'
+    )
+    select
+      po_id,
+      po_no,
+      description,
+      status,
+      vendor_name,
+      rfq_no,
+      count(*) filter (where greatest(qty_received - qty_already_requested, 0) > 0) as available_lines,
+      sum(qty_received) as received_qty,
+      sum(greatest(qty_received - qty_already_requested, 0)) as available_qty
+    from po_line_balances
+    where qty_received > 0
+    group by po_id, po_no, description, status, vendor_name, rfq_no
+    having sum(greatest(qty_received - qty_already_requested, 0)) > 0
+    order by po_no, po_id
+  `, [jobId])).rows;
+  const tableRows = rows.map((row) => `
+    <tr>
+      <td>${esc(row.po_no)}</td>
+      <td>${esc(row.vendor_name)}</td>
+      <td>${esc(row.rfq_no || "")}</td>
+      <td>${esc(row.description || "")}</td>
+      <td>${esc(row.status || "")}</td>
+      <td>${esc(formatQtyDisplay(row.received_qty))}</td>
+      <td>${esc(formatQtyDisplay(row.available_qty))}</td>
+      <td>${esc(row.available_lines || 0)}</td>
+      <td>
+        <form method="post" action="/yard/issue-by-po/${row.po_id}" onsubmit="return confirm('Create an accepted material request from the available received material on this PO?');">
+          <button type="submit">Issue Material</button>
+        </form>
+      </td>
+    </tr>
+  `).join("");
+  res.send(layout("Issue by PO", `
+    <h1>Issue by PO</h1>
+    <div class="card">
+      <p class="muted">These POs have received material that has not already been placed on a non-cancelled material request.</p>
+      <div class="actions"><a class="btn btn-secondary" href="/yard">Back to Yard</a></div>
+    </div>
+    <div class="card scroll">
+      <table class="data-grid">
+        <thead><tr><th>PO #</th><th>Vendor</th><th>RFQ</th><th>Description</th><th>Status</th><th>Received Qty</th><th>Available Qty</th><th>Lines</th><th>Action</th></tr></thead>
+        <tbody>${tableRows || `<tr><td colspan="9" class="muted">No received PO material is available to issue.</td></tr>`}</tbody>
+      </table>
+    </div>
+  `, req.user));
+}));
+
+app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const poId = Number(req.params.poId || 0);
+  if (!Number.isFinite(poId) || poId <= 0) throw new Error("PO not found.");
+  const requisitionId = await withTransaction(async (client) => {
+    await rebuildUnallocatedBom(client, jobId);
+    const po = (await client.query(`
+      select po.*, coalesce(v.name, '') as vendor_name, coalesce(r.rfq_no, '') as rfq_no
+      from purchase_orders po
+      join vendors v on v.id = po.vendor_id
+      left join rfqs r on r.id = po.rfq_id and r.job_id = po.job_id
+      where po.id = $1 and po.job_id = $2
+    `, [poId, jobId])).rows[0];
+    if (!po) throw new Error("PO not found.");
+    const headerBom = await ensureUnallocatedBom(client, jobId);
+    const poLines = (await client.query(`
+      select
+        pl.id as po_line_id,
+        pl.po_line,
+        coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+        coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
+        coalesce(nullif(pl.material_type_snapshot, ''), mi.material_type, 'misc') as material_type,
+        coalesce(nullif(pl.uom_snapshot, ''), mi.uom, 'EA') as uom,
+        coalesce(pl.size_1, mi.size_1, '') as size_1,
+        coalesce(pl.size_2, mi.size_2, '') as size_2,
+        coalesce(pl.thk_1, mi.thk_1, '') as thk_1,
+        coalesce(pl.thk_2, mi.thk_2, '') as thk_2,
+        ri.bom_line_id as rfq_bom_line_id,
+        ${poLineReceivedQtySql("pl")} as qty_received,
+        coalesce((
+          select sum(mrl.qty_requested)
+          from material_requisition_lines mrl
+          join material_requisitions mr on mr.id = mrl.requisition_id and mr.job_id = mrl.job_id
+          where mrl.source_po_line_id = pl.id
+            and mrl.job_id = pl.job_id
+            and coalesce(mr.status, '') <> 'CANCELLED'
+        ), 0) as qty_already_requested
+      from po_lines pl
+      join material_items mi on mi.id = pl.material_item_id
+      left join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      where pl.po_id = $1 and pl.job_id = $2
+      order by
+        case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then 0 else 1 end,
+        case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then pl.po_line::numeric end,
+        pl.po_line,
+        pl.id
+    `, [poId, jobId])).rows
+      .map((line) => ({
+        ...line,
+        qty_available: Math.max(parseQtyValue(line.qty_received || 0) - parseQtyValue(line.qty_already_requested || 0), 0)
+      }))
+      .filter((line) => line.qty_available > 0);
+    if (!poLines.length) throw new Error("No received PO material is available to issue.");
+    const unallocatedLines = (await client.query(`
+      select bl.id, bl.item_code
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bh.job_id = $1
+        and coalesce(bh.system_key, '') = $2
+    `, [jobId, unallocatedBomSystemKey])).rows;
+    const unallocatedByItem = new Map(unallocatedLines.map((line) => [normalizeInventoryKeyPart(line.item_code), Number(line.id)]));
+    const bomLineIds = [...new Set(poLines.map((line) => Number(line.rfq_bom_line_id || 0)).filter((value) => value > 0))];
+    const bomLineRows = bomLineIds.length
+      ? (await client.query(`
+          select bl.id, bl.item_code
+          from bom_lines bl
+          join bom_headers bh on bh.id = bl.bom_id
+          where bl.id = any($1::bigint[]) and bh.job_id = $2
+        `, [bomLineIds, jobId])).rows
+      : [];
+    const validBomLineIds = new Set(bomLineRows.map((line) => Number(line.id)));
+    const requisitionNo = await getNextRequisitionNumber(client, jobId);
+    const insertReq = await client.query(`
+      insert into material_requisitions (
+        job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name,
+        issued_to, iwp_no, iso_no, status, notes, verified_at, verified_by_user_id
+      )
+      values ($1, $2, $3, $4, $5, $6, '', '', 'ACCEPTED', $7, now(), $4)
+      returning id
+    `, [
+      jobId,
+      requisitionNo,
+      headerBom.id,
+      req.user.id,
+      getUserDisplayName(req.user),
+      `PO ${po.po_no}`,
+      [`Issue by PO ${po.po_no}`, po.vendor_name, po.rfq_no].filter(Boolean).join(" | ")
+    ]);
+    let createdLineCount = 0;
+    for (const line of poLines) {
+      const itemCodeKey = normalizeInventoryKeyPart(line.item_code);
+      const bomLineId = validBomLineIds.has(Number(line.rfq_bom_line_id || 0))
+        ? Number(line.rfq_bom_line_id)
+        : unallocatedByItem.get(itemCodeKey);
+      if (!bomLineId) {
+        throw new Error(`No BOM allocation was found for received PO item ${line.item_code}. Add it to a BOM or rebuild Un-Allocated Inventory before issuing.`);
+      }
+      await client.query(`
+        insert into material_requisition_lines (
+          job_id, requisition_id, bom_line_id, qty_requested, qty_issued, source_po_line_id
+        )
+        values ($1, $2, $3, $4, $4, $5)
+      `, [jobId, insertReq.rows[0].id, bomLineId, line.qty_available, line.po_line_id]);
+      createdLineCount += 1;
+    }
+    if (!createdLineCount) throw new Error("No requisition lines were created.");
+    await rebuildUnallocatedBom(client, jobId);
+    await auditLog(client, req.user.id, "issue_by_po_request", "material_requisition", insertReq.rows[0].id, `${requisitionNo}|${po.po_no}`);
+    return insertReq.rows[0].id;
+  });
+  res.redirect(`/requisitions/${requisitionId}`);
+}));
 
 function getInventoryAuditQueryString(source = {}) {
   return new URLSearchParams({
@@ -8599,39 +8815,115 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
   res.redirect(`/rfq/${rfqId}`);
 });
 
+app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const issuedTo = String(req.body.issued_to || "").trim();
+  if (!issuedTo) throw new Error("Issued To is required.");
+  const selectedLineQtys = collectSelectedRequisitionLineQtys(req.body);
+  const selectedLineIds = Array.from(selectedLineQtys.keys());
+  if (selectedLineIds.length === 0) throw new Error("Select at least one BOM line for the requisition.");
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  const lines = (await query(`
+    select
+      bl.*,
+      greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining,
+      coalesce(inv.qty_on_hand, 0) as qty_on_hand,
+      greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+    from bom_lines bl
+    left join (
+      ${getInventoryTotalsByItemSubquery(jobId)}
+    ) inv
+      on inv.item_code = bl.item_code
+    left join (
+      ${getIssuedInventoryTotalsByItemSubquery(jobId)}
+    ) issued
+      on issued.item_code = bl.item_code
+    left join (
+      ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
+    ) alloc
+      on alloc.item_code = bl.item_code
+    where bl.bom_id = $1
+      and bl.id = any($2::bigint[])
+    order by bl.line_no, bl.id
+  `, [bomId, selectedLineIds])).rows;
+  if (lines.length !== selectedLineIds.length) throw new Error("One or more selected BOM lines could not be found.");
+  const lineRows = lines.map((line) => {
+    const qtyRequested = selectedLineQtys.get(Number(line.id));
+    const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
+    const available = num(line.qty_available);
+    if (qtyRequested <= 0 || qtyRequested > remaining) {
+      throw new Error(`Requested qty for ${line.item_code} must be greater than zero and cannot exceed the remaining BOM qty.`);
+    }
+    if (qtyRequested > available) {
+      throw new Error(`Requested qty for ${line.item_code} cannot exceed available inventory.`);
+    }
+    return `<tr>
+      <td>${esc(line.line_no || "")}</td>
+      <td>${esc(line.item_code)}</td>
+      <td>${esc(line.description)}</td>
+      <td>${esc(formatQtyDisplay(line.qty_required))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+      <td>${esc(formatQtyDisplay(remaining))}</td>
+      <td>${esc(formatQtyDisplay(available))}</td>
+      <td><strong>${esc(formatQtyDisplay(qtyRequested))}</strong></td>
+      <td>${esc(line.uom || "")}</td>
+      <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
+      <td>${esc(formatCombinedSize(line.thk_1, line.thk_2))}</td>
+    </tr>`;
+  }).join("");
+  const stagedSelection = Object.fromEntries(selectedLineIds.map((lineId) => [lineId, selectedLineQtys.get(lineId)]));
+  const stagedSelectionJson = escAttr(JSON.stringify(stagedSelection));
+  const backUrl = `/requisitions/new?bom_id=${bomId}&staged_selection=${encodeURIComponent(JSON.stringify(stagedSelection))}`;
+  res.send(layout("Preview Material Request", `
+    <h1>Preview Material Request</h1>
+    <div class="card">
+      <h3>Review Before Creating</h3>
+      <p class="muted">Verify the lines and quantities below before the material request is generated.</p>
+      <div class="grid-3">
+        <div><label>BOM</label><input value="${esc(bom.bom_name || bom.description || bom.bom_no)} | ${esc(bom.bom_no)}" readonly /></div>
+        <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
+        <div><label>Issued To</label><input value="${esc(issuedTo)}" readonly /></div>
+      </div>
+      <div class="grid">
+        <div><label>IWP</label><input value="${esc(req.body.iwp_no || "")}" readonly /></div>
+        <div><label>Notes</label><input value="${esc(req.body.notes || "")}" readonly /></div>
+      </div>
+    </div>
+    <div class="card scroll">
+      <table class="data-grid">
+        <thead><tr><th>Line</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Remaining</th><th>Available</th><th>Request Qty</th><th>UOM</th><th>Size</th><th>Thk</th></tr></thead>
+        <tbody>${lineRows}</tbody>
+      </table>
+    </div>
+    <div class="card">
+      <form method="post" action="/bom/${bom.id}/requisitions" class="actions">
+        <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" />
+        <input type="hidden" name="issued_to" value="${escAttr(issuedTo)}" />
+        <input type="hidden" name="iwp_no" value="${escAttr(req.body.iwp_no || "")}" />
+        <input type="hidden" name="iso_no" value="${escAttr(req.body.iso_no || "")}" />
+        <input type="hidden" name="notes" value="${escAttr(req.body.notes || "")}" />
+        <button type="submit">Confirm And Create Requisition</button>
+        <a class="btn btn-secondary" href="${escAttr(backUrl)}">Back To Edit</a>
+      </form>
+    </div>
+  `, req.user));
+}));
+
 app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
   const jobId = currentJobId(req);
   const issuedTo = String(req.body.issued_to || "").trim();
   if (!issuedTo) throw new Error("Issued To is required.");
-  const selectedLineQtys = new Map();
-  try {
-    const stagedSelection = JSON.parse(String(req.body.staged_selection || "{}"));
-    if (stagedSelection && typeof stagedSelection === "object" && !Array.isArray(stagedSelection)) {
-      for (const [lineId, qty] of Object.entries(stagedSelection)) {
-        const numericLineId = Number(lineId);
-        const qtyRequested = parseQtyValue(qty, NaN);
-        if (Number.isFinite(numericLineId) && numericLineId > 0 && Number.isFinite(qtyRequested) && qtyRequested > 0) {
-          selectedLineQtys.set(numericLineId, qtyRequested);
-        }
-      }
-    }
-  } catch {
-    // fall back to visible checkbox submission
-  }
-  for (const value of [].concat(req.body.selected_line_ids || [])) {
-    const lineId = Number(value);
-    const qtyRequested = parseQtyValue(req.body[`request_qty_${lineId}`], NaN);
-    if (Number.isFinite(lineId) && lineId > 0 && Number.isFinite(qtyRequested) && qtyRequested > 0) {
-      selectedLineQtys.set(lineId, qtyRequested);
-    }
-  }
+  const selectedLineQtys = collectSelectedRequisitionLineQtys(req.body);
   const selectedLineIds = Array.from(selectedLineQtys.keys());
   if (selectedLineIds.length === 0) throw new Error("Select at least one BOM line for the requisition.");
   const requisitionId = await withTransaction(async (client) => {
     const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
     if (!bom) throw new Error("BOM not found.");
     const requisitionNo = await getNextRequisitionNumber(client, jobId);
+    const availableMap = await getAvailableInventoryByItemMap(client, jobId);
       const insertReq = await client.query(`
         insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, issued_to, iwp_no, iso_no, status, notes)
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -8644,6 +8936,10 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
         select
           bl.id,
           bl.item_code,
+          coalesce(bl.size_1, '') as size_1,
+          coalesce(bl.size_2, '') as size_2,
+          coalesce(bl.thk_1, '') as thk_1,
+          coalesce(bl.thk_2, '') as thk_2,
           bl.qty_required,
           bl.qty_issued
         from bom_lines bl
@@ -8653,6 +8949,10 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
       const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
       if (qtyRequested <= 0 || qtyRequested > remaining) {
         throw new Error(`Requested qty for ${line.item_code} must be greater than zero and cannot exceed the remaining BOM qty.`);
+      }
+      const availableQty = parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0);
+      if (qtyRequested > availableQty) {
+        throw new Error(`Requested qty for ${line.item_code} cannot exceed available inventory.`);
       }
         await client.query(`
           insert into material_requisition_lines (job_id, requisition_id, bom_line_id, qty_requested)
@@ -9443,7 +9743,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <div class="card">
         <h3>Create Material Requisition</h3>
         <p class="muted">BOM: ${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
-        <form method="post" action="/bom/${selectedBom.id}/requisitions" class="stack" id="requisition-create-form">
+        <form method="post" action="/bom/${selectedBom.id}/requisitions/preview" class="stack" id="requisition-create-form">
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid-3">
             <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
