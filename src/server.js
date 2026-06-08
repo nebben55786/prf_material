@@ -6378,7 +6378,7 @@ app.get("/yard/issue-by-po", requireAuth, requireJobContext, requirePermission("
       <td>${esc(formatQtyDisplay(row.available_qty))}</td>
       <td>${esc(row.available_lines || 0)}</td>
       <td>
-        <form method="post" action="/yard/issue-by-po/${row.po_id}" onsubmit="return confirm('Create an accepted material request from the available received material on this PO?');">
+        <form method="post" action="/yard/issue-by-po/${row.po_id}">
           <button type="submit">Issue Material</button>
         </form>
       </td>
