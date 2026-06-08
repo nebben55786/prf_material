@@ -1434,6 +1434,7 @@ function layout(title, body, user) {
         .filter((section) => !(isWarehouseUser(user) && section.key === "yard"))
         .map((section) => `<a href="${isWarehouseUser(user) && section.key === "dashboard" ? "/yard" : section.href}">${section.label}</a>`)
         .concat(String(user.role || "").trim().toLowerCase() === "admin" ? `<a href="/notes">Notes</a>` : "")
+        .concat(`<a href="/change-password">Change Password</a>`)
         .concat(`<a href="/logout">Logout</a>`)
         .join("")
     : "";
@@ -6010,21 +6011,6 @@ function loginPage(error = "", success = "") {
           <div class="actions"><button type="submit">Sign In</button></div>
         </form>
       </div>
-      <div class="card">
-        <h2>Change Password</h2>
-        <form id="login-change-password-form" method="post" action="/change-password-public" class="stack" data-password-form="change-password" data-password-message-id="login-change-password-error">
-          <div class="grid">
-            <div><label>Username</label><input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></div>
-            <div><label>Current Password</label><input type="password" name="current_password" autocomplete="current-password" required /></div>
-          </div>
-          <div class="grid">
-            <div><label>New Password</label><input type="password" name="new_password" autocomplete="new-password" required /></div>
-            <div><label>Confirm New Password</label><input type="password" name="confirm_password" autocomplete="new-password" required /></div>
-          </div>
-          <div id="login-change-password-error" class="muted" style="color:#a23622;"></div>
-          <div class="actions"><button class="btn btn-secondary" type="submit">Change Password</button></div>
-        </form>
-      </div>
     `, null);
 }
 
@@ -6139,21 +6125,6 @@ app.post("/change-password", requireAuth, asyncHandler(async (req, res) => {
     return;
   }
   res.redirect(getUserHomePath(req.user));
-}));
-
-app.post("/change-password-public", asyncHandler(async (req, res) => {
-  try {
-    await changeUserPassword({
-      username: String(req.body.username || "").trim(),
-      currentPassword: String(req.body.current_password || ""),
-      newPassword: String(req.body.new_password || ""),
-      confirmPassword: String(req.body.confirm_password || "")
-    });
-  } catch (error) {
-    res.status(400).send(loginPage(error.message || "Unable to change password."));
-    return;
-  }
-  res.redirect("/login?changed=1");
 }));
 
 app.get("/logout", (req, res) => {
