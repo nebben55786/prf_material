@@ -9628,7 +9628,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     description: clearFilters ? "" : String(req.query.description || "").trim(),
     itemCode: clearFilters ? "" : String(req.query.item_code || "").trim(),
     lineNo: clearFilters ? "" : String(req.query.line_no || "").trim(),
-    limit: Math.min(Math.max(num(req.query.limit, 250), 50), 1000)
+    limit: 250
   };
   let stagedSelection = {};
   try {
@@ -9726,7 +9726,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
           <div class="grid">
             <div><label>BOM</label><input value="${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}" readonly /></div>
-            <div><label>Max Rows</label><input name="limit" value="${esc(lineFilter.limit)}" /></div>
+            <div><label>Max Rows</label><input value="${esc(lineFilter.limit)}" readonly /></div>
             <div><label>Description</label><input name="description" value="${esc(lineFilter.description)}" /></div>
             <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
             <div><label>${esc(lineLabel)}</label><input name="line_no" value="${esc(lineFilter.lineNo)}" list="requisition-line-no-options" /></div>
