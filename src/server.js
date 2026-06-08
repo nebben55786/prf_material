@@ -8820,8 +8820,17 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
   const jobId = currentJobId(req);
   const issuedTo = String(req.body.issued_to || "").trim();
   if (!issuedTo) throw new Error("Issued To is required.");
+  const previewAction = String(req.body.preview_action || "").trim();
   const selectedLineQtys = collectSelectedRequisitionLineQtys(req.body);
-  const selectedLineIds = Array.from(selectedLineQtys.keys());
+  const removeLineId = Number(req.body.remove_line_id || 0);
+  if (Number.isFinite(removeLineId) && removeLineId > 0) selectedLineQtys.delete(removeLineId);
+  const addLineId = Number(req.body.add_line_id || 0);
+  if (previewAction === "add" && Number.isFinite(addLineId) && addLineId > 0 && !selectedLineQtys.has(addLineId)) {
+    const addQty = parseQtyValue(req.body.add_line_qty, NaN);
+    if (!Number.isFinite(addQty) || addQty <= 0) throw new Error("Enter a quantity greater than zero for the BOM line you are adding.");
+    selectedLineQtys.set(addLineId, addQty);
+  }
+  let selectedLineIds = Array.from(selectedLineQtys.keys());
   if (selectedLineIds.length === 0) throw new Error("Select at least one BOM line for the requisition.");
   const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
   if (!bom) throw new Error("BOM not found.");
@@ -8849,6 +8858,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
     order by bl.line_no, bl.id
   `, [bomId, selectedLineIds])).rows;
   if (lines.length !== selectedLineIds.length) throw new Error("One or more selected BOM lines could not be found.");
+  selectedLineIds = lines.map((line) => Number(line.id));
   const lineRows = lines.map((line) => {
     const qtyRequested = selectedLineQtys.get(Number(line.id));
     const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
@@ -8867,11 +8877,58 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
       <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
       <td>${esc(formatQtyDisplay(remaining))}</td>
       <td>${esc(formatQtyDisplay(available))}</td>
-      <td><strong>${esc(formatQtyDisplay(qtyRequested))}</strong></td>
+      <td>
+        <input type="hidden" name="selected_line_ids" value="${line.id}" />
+        <input name="request_qty_${line.id}" value="${esc(formatQtyDisplay(qtyRequested))}" inputmode="decimal" />
+      </td>
       <td>${esc(line.uom || "")}</td>
       <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
       <td>${esc(formatCombinedSize(line.thk_1, line.thk_2))}</td>
+      <td><button class="btn btn-danger" type="submit" name="remove_line_id" value="${line.id}">Remove</button></td>
     </tr>`;
+  }).join("");
+  const candidateLines = (await query(`
+    select
+      bl.id,
+      bl.line_no,
+      bl.item_code,
+      bl.description,
+      bl.uom,
+      coalesce(bl.size_1, '') as size_1,
+      coalesce(bl.size_2, '') as size_2,
+      greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining,
+      greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+    from bom_lines bl
+    left join (
+      ${getInventoryTotalsByItemSubquery(jobId)}
+    ) inv
+      on inv.item_code = bl.item_code
+    left join (
+      ${getIssuedInventoryTotalsByItemSubquery(jobId)}
+    ) issued
+      on issued.item_code = bl.item_code
+    left join (
+      ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
+    ) alloc
+      on alloc.item_code = bl.item_code
+    where bl.bom_id = $1
+      and not (bl.id = any($2::bigint[]))
+      and greatest(bl.qty_required - bl.qty_issued, 0) > 0
+      and greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) > 0
+    order by bl.line_no, bl.id
+    limit 500
+  `, [bomId, selectedLineIds])).rows;
+  const candidateLineOptions = candidateLines.map((line) => {
+    const label = [
+      line.line_no,
+      line.item_code,
+      line.description,
+      `Remaining ${formatQtyDisplay(line.qty_remaining)}`,
+      `Available ${formatQtyDisplay(line.qty_available)}`,
+      line.uom || "",
+      formatCombinedSize(line.size_1, line.size_2)
+    ].filter(Boolean).join(" | ");
+    return `<option value="${line.id}">${esc(label)}</option>`;
   }).join("");
   const stagedSelection = Object.fromEntries(selectedLineIds.map((lineId) => [lineId, selectedLineQtys.get(lineId)]));
   const stagedSelectionJson = escAttr(JSON.stringify(stagedSelection));
@@ -8879,33 +8936,42 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
   res.send(layout("Preview Material Request", `
     <h1>Preview Material Request</h1>
     <div class="card">
-      <h3>Review Before Creating</h3>
-      <p class="muted">Verify the lines and quantities below before the material request is generated.</p>
-      <div class="grid-3">
-        <div><label>BOM</label><input value="${esc(bom.bom_name || bom.description || bom.bom_no)} | ${esc(bom.bom_no)}" readonly /></div>
-        <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
-        <div><label>Issued To</label><input value="${esc(issuedTo)}" readonly /></div>
-      </div>
-      <div class="grid">
-        <div><label>IWP</label><input value="${esc(req.body.iwp_no || "")}" readonly /></div>
-        <div><label>Notes</label><input value="${esc(req.body.notes || "")}" readonly /></div>
-      </div>
-    </div>
-    <div class="card scroll">
-      <table class="data-grid">
-        <thead><tr><th>Line</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Remaining</th><th>Available</th><th>Request Qty</th><th>UOM</th><th>Size</th><th>Thk</th></tr></thead>
-        <tbody>${lineRows}</tbody>
-      </table>
-    </div>
-    <div class="card">
-      <form method="post" action="/bom/${bom.id}/requisitions" class="actions">
+      <h3>Review And Edit Before Saving</h3>
+      <p class="muted">Adjust quantities or remove/add lines here. Saving creates the request only; it does not accept or issue it.</p>
+      <form method="post" action="/bom/${bom.id}/requisitions/preview" class="stack">
         <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" />
-        <input type="hidden" name="issued_to" value="${escAttr(issuedTo)}" />
-        <input type="hidden" name="iwp_no" value="${escAttr(req.body.iwp_no || "")}" />
         <input type="hidden" name="iso_no" value="${escAttr(req.body.iso_no || "")}" />
-        <input type="hidden" name="notes" value="${escAttr(req.body.notes || "")}" />
-        <button type="submit">Confirm And Create Requisition</button>
-        <a class="btn btn-secondary" href="${escAttr(backUrl)}">Back To Edit</a>
+        <div class="grid-3">
+          <div><label>BOM</label><input value="${esc(bom.bom_name || bom.description || bom.bom_no)} | ${esc(bom.bom_no)}" readonly /></div>
+          <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
+          <div><label>Issued To</label><input name="issued_to" value="${esc(issuedTo)}" required /></div>
+        </div>
+        <div class="grid">
+          <div><label>IWP</label><input name="iwp_no" value="${esc(req.body.iwp_no || "")}" /></div>
+          <div><label>Notes</label><input name="notes" value="${esc(req.body.notes || "")}" /></div>
+        </div>
+        <div class="scroll">
+          <table class="data-grid">
+            <thead><tr><th>Line</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Remaining</th><th>Available</th><th>Request Qty</th><th>UOM</th><th>Size</th><th>Thk</th><th>Remove</th></tr></thead>
+            <tbody>${lineRows}</tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h3>Add BOM Line</h3>
+          ${candidateLines.length ? `
+            <div class="grid">
+              <div><label>BOM Line</label><select name="add_line_id"><option value="">Choose line to add</option>${candidateLineOptions}</select></div>
+              <div><label>Qty</label><input name="add_line_qty" inputmode="decimal" /></div>
+            </div>
+            <p class="muted">Only available lines from this BOM that are not already on the request are shown.</p>
+          ` : `<p class="muted">No additional available BOM lines to add.</p>`}
+        </div>
+        <div class="actions">
+          <button type="submit" name="preview_action" value="update">Update Preview</button>
+          <button type="submit" name="preview_action" value="add">Add Selected Line</button>
+          <button type="submit" formaction="/bom/${bom.id}/requisitions">Save Request</button>
+          <a class="btn btn-secondary" href="${escAttr(backUrl)}">Cancel</a>
+        </div>
       </form>
     </div>
   `, req.user));
