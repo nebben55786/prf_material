@@ -3266,6 +3266,18 @@ async function getMaterialItemSpecsByItemIds(itemIds = []) {
   return new Map(rows.map((row) => [Number(row.material_item_id), row.specs || ""]));
 }
 
+async function getMaterialItemSpecsText(client, materialItemId, jobId) {
+  const id = Number(materialItemId);
+  if (!Number.isFinite(id) || id <= 0) return "";
+  const row = (await client.query(`
+    select coalesce(string_agg(ms.name, ', ' order by ms.name), '') as specs
+    from material_item_specs mis
+    join material_specs ms on ms.id = mis.spec_id
+    where mis.material_item_id = $1 and mis.job_id = $2
+  `, [id, jobId])).rows[0];
+  return String(row?.specs || "").trim();
+}
+
 async function findOrCreateVendorByName(client, vendorName, jobId) {
   const normalized = String(vendorName || "").trim();
   if (!normalized) throw new Error("Vendor name is required.");
@@ -3295,14 +3307,15 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
   }
   const item = materialLookup.item;
   const materialItemId = item.id;
+  const resolvedSpec = requestedSpec || await getMaterialItemSpecsText(client, materialItemId, jobId);
   const existingItem = await client.query(`
     select id, coalesce(po_line, '') as po_line
     from rfq_items
     where rfq_id = $1 and material_item_id = $2
       and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
       and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
-      and coalesce(spec, '') = $7
-  `, [rfqId, materialItemId, item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", requestedSpec]);
+      and (coalesce(spec, '') = $7 or ($8 = '' and coalesce(spec, '') = ''))
+  `, [rfqId, materialItemId, item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", resolvedSpec, requestedSpec]);
   if (existingItem.rows[0]) {
     const poLine = requestedLine || existingItem.rows[0].po_line || await getNextRfqLineNumber(client, rfqId);
     await client.query(`
@@ -3319,7 +3332,7 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
           notes = $11,
           updated_at = now()
       where id = $1
-    `, [existingItem.rows[0].id, poLine, ...materialItemSnapshotParams(item), requestedSpec, item.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
+    `, [existingItem.rows[0].id, poLine, ...materialItemSnapshotParams(item), resolvedSpec, item.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
     return { status: "updated", itemId: Number(existingItem.rows[0].id) };
   }
   const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
@@ -3330,7 +3343,7 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
     )
     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
     returning id
-  `, [jobId, rfqId, materialItemId, ...materialItemSnapshotParams(item), poLine, requestedSpec, item.commodity_code || "", row.tag_number || "", item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", qty, row.notes || ""]);
+  `, [jobId, rfqId, materialItemId, ...materialItemSnapshotParams(item), poLine, resolvedSpec, item.commodity_code || "", row.tag_number || "", item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", qty, row.notes || ""]);
   return { status: "inserted", itemId: Number(insert.rows[0].id) };
 }
 
@@ -12116,7 +12129,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   }
   const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes, quoteFilesRes] = await Promise.all([
     query(`
-      select ri.id, ri.po_line, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
+      select ri.id, ri.po_line, ri.qty, ri.notes, coalesce(nullif(ri.spec, ''), item_specs.specs, '') as spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
              ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
              coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
              coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
@@ -12124,12 +12137,19 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
              coalesce(nullif(ri.uom_snapshot, ''), mi.uom) as uom
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
-      where ri.rfq_id = $1
+      left join (
+        select mis.material_item_id, string_agg(ms.name, ', ' order by ms.name) as specs
+        from material_item_specs mis
+        join material_specs ms on ms.id = mis.spec_id
+        where mis.job_id = $2
+        group by mis.material_item_id
+      ) item_specs on item_specs.material_item_id = ri.material_item_id
+      where ri.rfq_id = $1 and ri.job_id = $2 and mi.job_id = $2
       order by
         case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
         case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then lpad(ri.po_line, 20, '0') else lower(coalesce(ri.po_line, '')) end,
         ri.id
-    `, [rfqId]),
+    `, [rfqId, jobId]),
     query("select id, name from vendors where is_active = true order by name"),
     query(`
       select rv.vendor_id, v.name
@@ -12954,7 +12974,7 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission(
         ri.po_line,
         ri.qty,
         ri.notes,
-        ri.spec,
+        coalesce(nullif(ri.spec, ''), item_specs.specs, '') as spec,
         ri.size_1,
         ri.size_2,
         ri.thk_1,
@@ -12964,6 +12984,13 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission(
         coalesce(nullif(ri.uom_snapshot, ''), mi.uom) as uom
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
+      left join (
+        select mis.material_item_id, string_agg(ms.name, ', ' order by ms.name) as specs
+        from material_item_specs mis
+        join material_specs ms on ms.id = mis.spec_id
+        where mis.job_id = $2
+        group by mis.material_item_id
+      ) item_specs on item_specs.material_item_id = ri.material_item_id
       where ri.rfq_id = $1 and ri.job_id = $2 and mi.job_id = $2
       order by
         case when coalesce(ri.po_line, '') = '' then 1 else 0 end,
@@ -14282,13 +14309,20 @@ app.post("/rfq-item/:id/award/clear", requireAuth, requireJobContext, requirePer
 
 app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const item = (await query(`
-    select ri.id, ri.rfq_id, ri.po_line, ri.qty, ri.notes, ri.spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
+    select ri.id, ri.rfq_id, ri.po_line, ri.qty, ri.notes, coalesce(nullif(ri.spec, ''), item_specs.specs, '') as spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
            coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
            coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
            coalesce(nullif(ri.material_type_snapshot, ''), mi.material_type) as material_type,
            coalesce(nullif(ri.uom_snapshot, ''), mi.uom) as uom
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
+    left join (
+      select mis.material_item_id, string_agg(ms.name, ', ' order by ms.name) as specs
+      from material_item_specs mis
+      join material_specs ms on ms.id = mis.spec_id
+      where mis.job_id = $2
+      group by mis.material_item_id
+    ) item_specs on item_specs.material_item_id = ri.material_item_id
     where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
   `, [req.params.id, currentJobId(req)])).rows[0];
   if (!item) {
