@@ -2675,6 +2675,165 @@ function formatBytes(value) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const zipCrcTable = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < table.length; index += 1) {
+    let crc = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
+    }
+    table[index] = crc >>> 0;
+  }
+  return table;
+})();
+
+function crc32(buffer) {
+  const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || "");
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc = zipCrcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zipDosDateTime(value = new Date()) {
+  const date = value instanceof Date && !Number.isNaN(value.getTime()) ? value : new Date();
+  const year = Math.max(1980, date.getFullYear());
+  const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
+  const dosDate = ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+  return { dosTime, dosDate };
+}
+
+function sanitizeZipPathSegment(value, fallback = "file") {
+  const cleaned = String(value || "")
+    .replace(/[<>:"\\|?*\x00-\x1f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^\.+$/g, "")
+    .slice(0, 160);
+  return cleaned || fallback;
+}
+
+function sanitizeZipPath(value, fallback = "file") {
+  const parts = String(value || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((part) => sanitizeZipPathSegment(part, ""))
+    .filter(Boolean);
+  return parts.join("/") || fallback;
+}
+
+function uniqueZipPath(pathname, usedPaths) {
+  const safePath = sanitizeZipPath(pathname);
+  if (!usedPaths.has(safePath)) {
+    usedPaths.add(safePath);
+    return safePath;
+  }
+  const directory = path.posix.dirname(safePath);
+  const extension = path.posix.extname(safePath);
+  const base = path.posix.basename(safePath, extension);
+  let counter = 2;
+  while (true) {
+    const candidateName = `${base}-${counter}${extension}`;
+    const candidate = directory === "." ? candidateName : `${directory}/${candidateName}`;
+    if (!usedPaths.has(candidate)) {
+      usedPaths.add(candidate);
+      return candidate;
+    }
+    counter += 1;
+  }
+}
+
+function buildZip(entries) {
+  if (entries.length > 0xffff) throw new Error("Backup has too many files for a single ZIP export.");
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const filename = sanitizeZipPath(entry.name);
+    const nameBuffer = Buffer.from(filename, "utf8");
+    const dataBuffer = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data || "");
+    if (nameBuffer.length > 0xffff) throw new Error(`Backup filename is too long: ${filename}`);
+    if (dataBuffer.length > 0xffffffff) throw new Error(`Backup file is too large for ZIP export: ${filename}`);
+    const { dosTime, dosDate } = zipDosDateTime(entry.date || new Date());
+    const checksum = crc32(dataBuffer);
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(dosTime, 10);
+    localHeader.writeUInt16LE(dosDate, 12);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(dataBuffer.length, 18);
+    localHeader.writeUInt32LE(dataBuffer.length, 22);
+    localHeader.writeUInt16LE(nameBuffer.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, nameBuffer, dataBuffer);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(dosTime, 12);
+    centralHeader.writeUInt16LE(dosDate, 14);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(dataBuffer.length, 20);
+    centralHeader.writeUInt32LE(dataBuffer.length, 24);
+    centralHeader.writeUInt16LE(nameBuffer.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+    centralParts.push(centralHeader, nameBuffer);
+
+    offset += localHeader.length + nameBuffer.length + dataBuffer.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([...localParts, centralDirectory, end]);
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+function buildCsv(rows) {
+  return rows.map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
+}
+
+async function readableStreamToBuffer(stream) {
+  if (!stream) return Buffer.alloc(0);
+  const nodeStream = typeof stream.getReader === "function" ? Readable.fromWeb(stream) : stream;
+  const chunks = [];
+  for await (const chunk of nodeStream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+function sendZip(res, filename, entries) {
+  const zipBuffer = buildZip(entries);
+  const safeFilename = contentDispositionFilename(filename);
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}"`);
+  res.setHeader("Content-Length", String(zipBuffer.length));
+  res.send(zipBuffer);
+}
+
 function parseJsonObject(value, fallback = {}) {
   if (!value) return fallback;
   try {
@@ -6132,6 +6291,15 @@ function changePasswordPage(req, error = "") {
 }
 
 function userPage(req, { error = "", success = "" } = {}) {
+  const backupCard = isAdminRole(req.user) ? `
+    <div class="card">
+      <h3>Backups</h3>
+      <p class="muted">Download read-only ZIP backups for signed material requests and files stored in Vercel Blob.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="/user/backups">Backup Files</a>
+      </div>
+    </div>
+  ` : "";
   return layout("User", `
     <h1>User</h1>
     ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
@@ -6156,6 +6324,7 @@ function userPage(req, { error = "", success = "" } = {}) {
         <div class="actions"><button type="submit">Save New Password</button></div>
       </form>
     </div>
+    ${backupCard}
   `, req.user);
 }
 
@@ -6223,6 +6392,191 @@ app.post("/user/change-password", requireAuth, asyncHandler(async (req, res) => 
     return;
   }
   res.send(userPage(req, { success: "Password changed." }));
+}));
+
+function backupTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+}
+
+function signedRequestBackupFilename(row) {
+  const existing = String(row.signed_copy_filename || "").trim();
+  if (existing) return existing;
+  return signedCopyFilenameForRequisition(row.requisition_no, row.signed_copy_mime || "");
+}
+
+app.get("/user/backups", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
+  const [signedCountRes, blobCountRes] = await Promise.all([
+    query("select count(*) as count from material_requisitions where signed_copy_data is not null"),
+    query("select count(*) as count from rfq_quote_files where coalesce(nullif(blob_pathname, ''), nullif(blob_url, ''), '') <> ''")
+  ]);
+  const signedCount = Number(signedCountRes.rows[0]?.count || 0);
+  const blobCount = Number(blobCountRes.rows[0]?.count || 0);
+  res.send(layout("Backup Files", `
+    <h1>Backup Files</h1>
+    <div class="card">
+      <h3>Signed Material Requests</h3>
+      <p class="muted">Creates a ZIP from uploaded signed paper copies stored in the database.</p>
+      <p class="muted">${signedCount} signed file(s) available.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="/user/backups/signed-requests.zip">Download Signed Request Backup</a>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Vercel Blob Files</h3>
+      <p class="muted">Creates a ZIP from file metadata stored in the app, currently RFQ quote files in Vercel Blob.</p>
+      <p class="muted">${blobCount} blob file(s) available.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="/user/backups/blob-files.zip">Download Blob File Backup</a>
+      </div>
+    </div>
+    <div class="card">
+      <a class="btn btn-secondary" href="/user">Back To User</a>
+    </div>
+  `, req.user));
+}));
+
+app.get("/user/backups/signed-requests.zip", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
+  const rows = (await query(`
+    select
+      mr.requisition_no,
+      mr.signed_by_name,
+      mr.signed_at,
+      mr.signed_copy_filename,
+      mr.signed_copy_mime,
+      mr.signed_copy_data,
+      coalesce(j.job_number, bh.job_number, '') as job_number
+    from material_requisitions mr
+    left join jobs j on j.id = mr.job_id
+    left join bom_headers bh on bh.id = mr.bom_id
+    where mr.signed_copy_data is not null
+    order by coalesce(j.job_number, bh.job_number, ''), mr.requisition_no
+  `)).rows;
+  const usedPaths = new Set();
+  const entries = [];
+  const manifestRows = [[
+    "requisition_no",
+    "job_number",
+    "signed_by",
+    "signed_at",
+    "filename",
+    "mime_type",
+    "byte_size"
+  ]];
+  for (const row of rows) {
+    const data = Buffer.isBuffer(row.signed_copy_data) ? row.signed_copy_data : Buffer.from(row.signed_copy_data || "");
+    if (!data.length) continue;
+    const filename = signedRequestBackupFilename(row);
+    const jobFolder = sanitizeZipPathSegment(row.job_number || "No Job", "No Job");
+    const zipPath = uniqueZipPath(`signed-material-requests/${jobFolder}/${filename}`, usedPaths);
+    entries.push({ name: zipPath, data, date: row.signed_at ? new Date(row.signed_at) : new Date() });
+    manifestRows.push([
+      row.requisition_no || "",
+      row.job_number || "",
+      row.signed_by_name || "",
+      row.signed_at ? new Date(row.signed_at).toISOString() : "",
+      filename,
+      row.signed_copy_mime || "",
+      data.length
+    ]);
+  }
+  entries.unshift({
+    name: "manifest.csv",
+    data: Buffer.from(buildCsv(manifestRows), "utf8"),
+    date: new Date()
+  });
+  await auditLog(pool, req.user.id, "backup", "signed_material_requests", null, `files=${entries.length - 1}`);
+  sendZip(res, `signed-material-requests-backup-${backupTimestamp()}.zip`, entries);
+}));
+
+app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    throw new Error("BLOB_READ_WRITE_TOKEN is not set. Add the Vercel Blob environment variable before downloading Blob backups.");
+  }
+  const files = (await query(`
+    select *
+    from (
+      select
+        qf.*,
+        coalesce(j.job_number, '') as job_number,
+        r.rfq_no,
+        coalesce(v.name, 'Vendor') as vendor_name,
+        row_number() over (partition by qf.rfq_id, qf.vendor_id order by qf.created_at, qf.id) as quote_sequence
+      from rfq_quote_files qf
+      join rfqs r on r.id = qf.rfq_id and r.job_id = qf.job_id
+      left join jobs j on j.id = qf.job_id
+      left join vendors v on v.id = qf.vendor_id
+      where coalesce(nullif(qf.blob_pathname, ''), nullif(qf.blob_url, ''), '') <> ''
+    ) ranked
+    order by job_number, rfq_no, vendor_name, quote_sequence, id
+  `)).rows;
+  const usedPaths = new Set();
+  const entries = [];
+  const manifestRows = [[
+    "source",
+    "job_number",
+    "rfq_no",
+    "vendor",
+    "filename",
+    "blob_pathname",
+    "mime_type",
+    "byte_size",
+    "created_at",
+    "backup_status",
+    "error"
+  ]];
+  for (const file of files) {
+    const displayFilename = quoteFileDisplayName({
+      rfqNo: file.rfq_no,
+      vendorName: file.vendor_name || "Vendor",
+      quoteSequence: file.quote_sequence,
+      sourceFilename: file.filename,
+      contentType: file.content_type
+    });
+    let status = "included";
+    let errorMessage = "";
+    let data = Buffer.alloc(0);
+    try {
+      const blob = await get(file.blob_pathname || file.blob_url, { access: "private" });
+      data = await readableStreamToBuffer(blob.stream);
+      if (!data.length) {
+        status = "skipped";
+        errorMessage = "Blob returned no data.";
+      }
+    } catch (error) {
+      status = "error";
+      errorMessage = error.message || "Unable to read blob.";
+    }
+    if (status === "included") {
+      const zipPath = uniqueZipPath([
+        "rfq-quotes",
+        sanitizeZipPathSegment(file.job_number || "No Job", "No Job"),
+        sanitizeZipPathSegment(file.rfq_no || `RFQ-${file.rfq_id}`, `RFQ-${file.rfq_id}`),
+        sanitizeZipPathSegment(file.vendor_name || "Vendor", "Vendor"),
+        displayFilename
+      ].join("/"), usedPaths);
+      entries.push({ name: zipPath, data, date: file.created_at ? new Date(file.created_at) : new Date() });
+    }
+    manifestRows.push([
+      "rfq_quote_files",
+      file.job_number || "",
+      file.rfq_no || "",
+      file.vendor_name || "",
+      displayFilename,
+      file.blob_pathname || file.blob_url || "",
+      file.content_type || "",
+      data.length || file.size_bytes || "",
+      file.created_at ? new Date(file.created_at).toISOString() : "",
+      status,
+      errorMessage
+    ]);
+  }
+  entries.unshift({
+    name: "manifest.csv",
+    data: Buffer.from(buildCsv(manifestRows), "utf8"),
+    date: new Date()
+  });
+  await auditLog(pool, req.user.id, "backup", "vercel_blob_files", null, `files=${entries.length - 1};records=${files.length}`);
+  sendZip(res, `vercel-blob-files-backup-${backupTimestamp()}.zip`, entries);
 }));
 
 app.get("/logout", (req, res) => {
