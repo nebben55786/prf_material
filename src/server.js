@@ -10760,9 +10760,12 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
     getUserDisplayName(req.user)
   ].filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const defaultSigner = String(header.signed_by_name || header.issued_to || header.requested_by_name || getUserDisplayName(req.user)).trim();
-  const signerOptionsHtml = signerNames.map((name) => `<option value="${esc(name)}" ${name === defaultSigner ? "selected" : ""}>${esc(name)}</option>`).join("");
+  const signerOptionsHtml = signerNames.map((name) => `<option value="${esc(name)}"></option>`).join("");
   res.send(layout(`Sign ${header.requisition_no}`, `
     <h1>Sign Requisition ${esc(header.requisition_no)}</h1>
+    <datalist id="requisition-signer-options">
+      ${signerOptionsHtml}
+    </datalist>
     <div class="card">
       <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | Status: ${renderRequisitionStatusChip(header.status)} | Requested By: ${esc(header.requested_by_name)} | Issued To: ${esc(header.issued_to || "")}</p>
       <div class="actions">
@@ -10775,7 +10778,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         <h3>Electronic Signature</h3>
         <p class="muted">This works well on iPads and touch screens.</p>
         <form method="post" action="/requisitions/${header.id}/sign" class="stack" onsubmit="return submitRequisitionSignature();">
-          <div><label>Signed By</label><select id="requisition-signed-by-name" name="signed_by_name" required>${signerOptionsHtml}</select></div>
+          <div><label>Signed By</label><input id="requisition-signed-by-name" name="signed_by_name" list="requisition-signer-options" value="${esc(defaultSigner)}" autocomplete="name" required /></div>
           <input type="hidden" id="requisition-signature-data" name="signature_data" />
           <div>
             <label>Draw Signature</label>
@@ -10794,7 +10797,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         <h3>Signed Paper Copy</h3>
         <p class="muted">Upload a photo, scan, or PDF of a physically signed pick ticket.</p>
         <form method="post" action="/requisitions/${header.id}/signed-copy" enctype="multipart/form-data" class="stack" id="signed-copy-upload-form">
-          <div><label>Signed By</label><select name="signed_by_name" required>${signerOptionsHtml}</select></div>
+          <div><label>Signed By</label><input name="signed_by_name" list="requisition-signer-options" value="${esc(defaultSigner)}" autocomplete="name" required /></div>
           <div>
             <label>Signed Copy File</label>
             <div id="signed-copy-drop-zone" class="drop-zone" tabindex="0">
@@ -10806,7 +10809,6 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
             <p class="muted">Uploaded file will be saved as ${esc(signedCopyFilenameForRequisition(header.requisition_no, "application/pdf"))} for PDFs.</p>
           </div>
           <div class="actions">
-            <button type="submit">${header.signed_copy_filename ? "Replace Uploaded Copy" : "Upload Signed Copy"}</button>
             ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/signed-copy" target="_blank">Open Current Upload</a>` : ""}
           </div>
         </form>
@@ -10912,21 +10914,28 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         };
       }());
       (function () {
+        const form = document.getElementById("signed-copy-upload-form");
         const dropZone = document.getElementById("signed-copy-drop-zone");
         const fileInput = document.getElementById("signed-copy-file-input");
         const fileName = document.getElementById("signed-copy-file-name");
-        if (!dropZone || !fileInput || !fileName) return;
-        function setFile(file) {
-          if (!file) return;
+        if (!form || !dropZone || !fileInput || !fileName) return;
+        function uploadFile(file) {
+          if (!file) return false;
           const allowedTypes = new Set(["application/pdf", "image/png", "image/jpeg"]);
           if (!allowedTypes.has(String(file.type || "").toLowerCase())) {
             alert("Signed copy must be a PDF, PNG, or JPEG file.");
-            return;
+            return false;
           }
           const transfer = new DataTransfer();
           transfer.items.add(file);
           fileInput.files = transfer.files;
           fileName.textContent = file.name;
+          if (typeof form.requestSubmit === "function") {
+            form.requestSubmit();
+          } else {
+            form.submit();
+          }
+          return true;
         }
         dropZone.addEventListener("click", () => fileInput.click());
         dropZone.addEventListener("keydown", (event) => {
@@ -10936,7 +10945,12 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
           }
         });
         fileInput.addEventListener("change", () => {
-          fileName.textContent = fileInput.files && fileInput.files[0] ? fileInput.files[0].name : "No file selected";
+          const file = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+          if (file) {
+            uploadFile(file);
+          } else {
+            fileName.textContent = "No file selected";
+          }
         });
         ["dragenter", "dragover"].forEach((eventName) => {
           dropZone.addEventListener(eventName, (event) => {
@@ -10952,7 +10966,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         });
         dropZone.addEventListener("drop", (event) => {
           const file = event.dataTransfer && event.dataTransfer.files ? event.dataTransfer.files[0] : null;
-          setFile(file);
+          uploadFile(file);
         });
       }());
     </script>
