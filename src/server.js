@@ -60,7 +60,30 @@ const permissionSections = [
   { key: "requisitions", label: "REQs", href: "/requisitions" },
   { key: "settings", label: "Settings", href: "/settings" }
 ];
-const permissionRoles = ["admin", "buyer", "warehouse", "field", "supervisor"];
+const roleAdmin = "admin";
+const roleMaterialController = "material_controller";
+const adminEquivalentRoles = [roleAdmin, roleMaterialController];
+const validUserRoles = [roleAdmin, roleMaterialController, "buyer", "warehouse", "field", "supervisor"];
+const permissionRoles = validUserRoles;
+function normalizeRole(role) {
+  return String(role || "").trim().toLowerCase();
+}
+function isAdminRole(userOrRole) {
+  const role = typeof userOrRole === "string" ? userOrRole : userOrRole?.role;
+  return adminEquivalentRoles.includes(normalizeRole(role));
+}
+function displayRole(role) {
+  const normalized = normalizeRole(role);
+  if (normalized === roleMaterialController) return "Material Controller";
+  return String(role || "");
+}
+function renderRoleOptions(selectedRole = "field") {
+  const selected = normalizeRole(selectedRole);
+  return validUserRoles.map((role) => {
+    const isSelected = selected === role ? "selected" : "";
+    return `<option value="${esc(role)}" ${isSelected}>${esc(displayRole(role))}</option>`;
+  }).join("");
+}
 const defaultJobNumberValue = String(process.env.DEFAULT_JOB_NUMBER || "0000").trim() || "0000";
 let headerJobNumber = defaultJobNumberValue;
 let headerPlantName = "";
@@ -146,6 +169,7 @@ const defaultPermissionMatrix = {
     settings: { view: false, edit: false }
   }
 };
+defaultPermissionMatrix[roleMaterialController] = defaultPermissionMatrix[roleAdmin];
 
 function safeCookieDecode(value) {
   try {
@@ -156,17 +180,19 @@ function safeCookieDecode(value) {
 }
 
 function getPermissionsForRole(role) {
+  const key = normalizeRole(role);
   return {
-    ...(defaultPermissionMatrix[role] || {}),
-    ...(permissionMatrix[role] || {})
+    ...(defaultPermissionMatrix[key] || {}),
+    ...(permissionMatrix[key] || {})
   };
 }
 
 function canAccess(user, section, action = "view") {
   if (!user) return false;
-  const rolePermissions = getPermissionsForRole(user.role);
+  const roleKey = normalizeRole(user.role);
+  const rolePermissions = getPermissionsForRole(roleKey);
   const sectionPermissions = {
-    ...(defaultPermissionMatrix[user.role]?.[section] || {}),
+    ...(defaultPermissionMatrix[roleKey]?.[section] || {}),
     ...(rolePermissions[section] || {})
   };
   return Boolean(sectionPermissions[action]);
@@ -174,11 +200,11 @@ function canAccess(user, section, action = "view") {
 
 function canEditInventoryAudit(user) {
   if (!user) return false;
-  return user.role === "admin" || user.role === "warehouse" || canAccess(user, "inventory", "edit");
+  return isAdminRole(user) || normalizeRole(user.role) === "warehouse" || canAccess(user, "inventory", "edit");
 }
 
 function canViewMaterialPurchaseReport(user) {
-  return ["admin", "buyer", "supervisor"].includes(String(user?.role || "").trim().toLowerCase());
+  return [roleAdmin, roleMaterialController, "buyer", "supervisor"].includes(normalizeRole(user?.role));
 }
 
 function getAppHeaderTitle(user = null) {
@@ -1433,7 +1459,7 @@ function layout(title, body, user) {
         .filter((section) => canAccess(user, section.key, "view"))
         .filter((section) => !(isWarehouseUser(user) && section.key === "yard"))
         .map((section) => `<a href="${isWarehouseUser(user) && section.key === "dashboard" ? "/yard" : section.href}">${section.label}</a>`)
-        .concat(String(user.role || "").trim().toLowerCase() === "admin" ? `<a href="/notes">Notes</a>` : "")
+        .concat(isAdminRole(user) ? `<a href="/notes">Notes</a>` : "")
         .concat(`<a href="/user">User</a>`)
         .concat(`<a href="/logout">Logout</a>`)
         .join("")
@@ -1958,7 +1984,7 @@ function layout(title, body, user) {
             <img class="brand-logo" src="/public/prf-logo.png" alt="Performance Contractors logo" />
             <div class="brand-copy">
               <div class="brand">${esc(appHeaderTitle)}</div>
-              ${user ? `<div class="userline">${esc(user.username)} | ${esc(user.role)}</div>` : ""}
+              ${user ? `<div class="userline">${esc(user.username)} | ${esc(displayRole(user.role))}</div>` : ""}
             </div>
           </a>
           ${user ? renderJobSwitcher(user) : ""}
@@ -5429,7 +5455,7 @@ async function getJobRecord(jobId, client = null) {
 
 async function getAccessibleJobsForUser(userId, role, client = null) {
   const runner = client || { query };
-  if (role === "admin") {
+  if (isAdminRole(role)) {
     return (await runner.query(`
       select id, job_number, plant_name, performance_job_number, is_active, created_at, updated_at
       from jobs
@@ -5467,7 +5493,7 @@ async function resolveJobContextForUser(user, client = null, requestedJobId = nu
   if (normalizedRequestedJobId > 0) {
     activeJob = activeJobs.find((job) => Number(job.id) === normalizedRequestedJobId) || null;
   }
-  if (!activeJob && user.role !== "admin" && activeJobs.length === 1) {
+  if (!activeJob && !isAdminRole(user) && activeJobs.length === 1) {
     activeJob = activeJobs[0];
   }
   return {
@@ -5593,7 +5619,7 @@ const requireJobContext = asyncHandler(async (req, res, next) => {
     next();
     return;
   }
-  if (req.user?.role === "admin" || (req.user?.activeJobs || []).length > 1) {
+  if (isAdminRole(req.user) || (req.user?.activeJobs || []).length > 1) {
     res.redirect("/jobs/select");
     return;
   }
@@ -5620,7 +5646,8 @@ function normalizeJobIdValue(jobId) {
 
 function requireRole(roles) {
   return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
+    const allowedRoles = roles.map((role) => normalizeRole(role));
+    if (!allowedRoles.includes(normalizeRole(req.user.role))) {
       res.status(403).send(layout("Forbidden", `<div class="card error"><h3>Forbidden</h3><p>You do not have access to this action.</p></div>`, req.user));
       return;
     }
@@ -5653,7 +5680,7 @@ function canEditRequisition(user, header) {
 
 function canDeleteRequisition(user, header) {
   if (!user || !header) return false;
-  return user.role === "admin" && requisitionStatusKey(header.status) !== "ISSUED" && !header.issued_at;
+  return isAdminRole(user) && requisitionStatusKey(header.status) !== "ISSUED" && !header.issued_at;
 }
 
 function getUserDisplayName(user) {
@@ -5671,7 +5698,7 @@ function canSignRequisition(user, header) {
   if (!user || !header) return false;
   if (!canAccess(user, "requisitions", "issue")) return false;
   const statusKey = requisitionStatusKey(header.status);
-  if (user.role === "admin") return isVerifiedStageRequisitionStatus(statusKey) || statusKey === "ISSUED";
+  if (isAdminRole(user)) return isVerifiedStageRequisitionStatus(statusKey) || statusKey === "ISSUED";
   if (hasLoggedRequisitionSignature(header)) return false;
   return isVerifiedStageRequisitionStatus(statusKey);
 }
@@ -6048,7 +6075,7 @@ app.post("/login", asyncHandler(async (req, res) => {
   } catch (error) {
     console.error("Failed to write login audit log", error);
   }
-  if (user.role === "admin") {
+  if (isAdminRole(user)) {
     setSessionCookie(res, buildSessionPayload(user, null));
     res.redirect(user.must_change_password ? "/change-password" : "/jobs/select");
     return;
@@ -6090,7 +6117,7 @@ function userPage(req, { error = "", success = "" } = {}) {
       <div class="grid-3">
         <div><label>Username</label><input value="${esc(req.user.username || "")}" readonly /></div>
         <div><label>Name</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
-        <div><label>Role</label><input value="${esc(req.user.role || "")}" readonly /></div>
+        <div><label>Role</label><input value="${esc(displayRole(req.user.role || ""))}" readonly /></div>
       </div>
     </div>
     <div class="card">
@@ -6201,14 +6228,14 @@ app.get("/jobs/no-access", requireAuth, (req, res) => {
 });
 
 app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
-  const jobs = req.user.role === "admin"
+  const jobs = isAdminRole(req.user)
     ? req.user.accessibleJobs
     : req.user.activeJobs;
-  if (req.user.role !== "admin" && jobs.length === 0) {
+  if (!isAdminRole(req.user) && jobs.length === 0) {
     res.redirect("/jobs/no-access");
     return;
   }
-  if (req.user.role !== "admin" && jobs.length === 1) {
+  if (!isAdminRole(req.user) && jobs.length === 1) {
     setSessionCookie(res, buildSessionPayload(req.user, jobs[0].id));
     res.redirect(getUserHomePath(req.user));
     return;
@@ -6232,7 +6259,7 @@ app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
   res.send(layout("Select Job", `
     <h1>Select Job</h1>
     <div class="card">
-      <p>${req.user.role === "admin" ? "Choose the job you want to work in." : "Choose one of your assigned jobs to continue."}</p>
+      <p>${isAdminRole(req.user) ? "Choose the job you want to work in." : "Choose one of your assigned jobs to continue."}</p>
     </div>
     <div class="card scroll">
       <table>
@@ -6245,7 +6272,7 @@ app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
 
 app.post("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
   const requestedJobId = Number(req.body.job_id || 0);
-  const availableJobs = req.user.role === "admin" ? req.user.accessibleJobs : req.user.activeJobs;
+  const availableJobs = isAdminRole(req.user) ? req.user.accessibleJobs : req.user.activeJobs;
   const selectedJob = availableJobs.find((job) => Number(job.id) === requestedJobId && job.is_active);
   if (!selectedJob) {
     throw new Error("Choose a valid active job.");
@@ -6267,10 +6294,10 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
     query("select count(*) from vendors"),
     query("select count(*) from osd_logs where job_id = $1", [jobId]),
     Promise.resolve(req.user.activeJob?.job_number || ""),
-    req.user.role === "admin"
+    isAdminRole(req.user)
       ? query("select count(*) from access_requests where status = 'PENDING'").catch(() => ({ rows: [{ count: 0 }] }))
       : Promise.resolve({ rows: [{ count: 0 }] }),
-    ["admin", "buyer"].includes(req.user.role)
+    [roleAdmin, roleMaterialController, "buyer"].includes(normalizeRole(req.user.role))
       ? query(`
           select status, count(*)::int as count
           from rfqs
@@ -6280,14 +6307,14 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
       : Promise.resolve({ rows: [] })
   ]);
   const rfqStatusMap = Object.fromEntries(rfqStatusCounts.rows.map((row) => [row.status, Number(row.count || 0)]));
-  const rfqStatusCards = ["admin", "buyer"].includes(req.user.role)
+  const rfqStatusCards = [roleAdmin, roleMaterialController, "buyer"].includes(normalizeRole(req.user.role))
     ? `<div class="card"><h3>RFQ Status</h3><div class="stats">${
         rfqStatuses.map((status) => `<div class="stat"><div>${esc(status.label)}</div><strong>${rfqStatusMap[status.value] || 0}</strong></div>`).join("")
       }</div></div>`
     : "";
   res.send(layout("Dashboard", `
     <h1>Operations Dashboard</h1>
-    ${req.user.role === "admin" && Number(pendingAccessRequests.rows[0].count) > 0 ? `<div class="card error"><strong>${pendingAccessRequests.rows[0].count} pending access request(s)</strong><div class="actions" style="margin-top:10px;"><a class="btn btn-primary" href="/settings">Review Requests</a></div></div>` : ""}
+    ${isAdminRole(req.user) && Number(pendingAccessRequests.rows[0].count) > 0 ? `<div class="card error"><strong>${pendingAccessRequests.rows[0].count} pending access request(s)</strong><div class="actions" style="margin-top:10px;"><a class="btn btn-primary" href="/settings">Review Requests</a></div></div>` : ""}
     <div class="card"><strong>Job Number:</strong> ${esc(jobNumber)}</div>
     <div class="dashboard-sections">
       <div class="card">
@@ -6321,7 +6348,7 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
         <a class="btn btn-primary" href="/yard/locations">Locations</a>
         <a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>
         ${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-primary" href="/yard/issue-by-po">Issue by PO</a>` : ""}
-        ${req.user.role === "admin" ? `<a class="btn btn-primary" href="/yard/item-history">Item History</a>` : ""}
+        ${isAdminRole(req.user) ? `<a class="btn btn-primary" href="/yard/item-history">Item History</a>` : ""}
       </div>
     </div>
     <div class="stats">
@@ -6571,11 +6598,7 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
             <div><input name="temp_password" placeholder="Temp Password" value="Keq3-8613!" required autocomplete="new-password" autocapitalize="off" spellcheck="false" /></div>
             <div>
               <select name="role">
-                <option value="buyer">buyer</option>
-                <option value="warehouse">warehouse</option>
-                <option value="field" selected>field</option>
-                <option value="supervisor">supervisor</option>
-                <option value="admin">admin</option>
+                ${renderRoleOptions("field")}
               </select>
             </div>
           </div>
@@ -6600,11 +6623,11 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
         <a class="btn btn-primary" href="/settings/job-setup">Job Setup</a>
         <a class="btn btn-primary" href="/settings/warehouse-setup">Warehouse Setup</a>
         <a class="btn btn-primary" href="/settings/user-management">User Management</a>
-        ${req.user.role === "admin" ? `<a class="btn btn-primary" href="/settings/audit-log">Audit Log</a>` : ""}
+        ${isAdminRole(req.user) ? `<a class="btn btn-primary" href="/settings/audit-log">Audit Log</a>` : ""}
       </div>
       <p class="muted" style="margin-top:12px;">Use these setup pages to manage job settings, warehouse/location setup, and users without crowding the main settings screen.</p>
     </div>
-    ${req.user.role === "admin" ? `
+    ${isAdminRole(req.user) ? `
       <div class="card error">
         <h3 style="margin-top:0;">Danger Zone</h3>
         <p>This admin-only page lets you delete specific data sections or run a broader reset with verification.</p>
@@ -6623,7 +6646,7 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
   `, req.user));
 });
 
-app.get("/settings/audit-log", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.get("/settings/audit-log", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const userFilter = String(req.query.user || "").trim();
   const actionFilter = String(req.query.action || "").trim();
   const entityFilter = String(req.query.entity_type || "").trim();
@@ -6732,7 +6755,7 @@ app.get("/settings/audit-log", requireAuth, requireRole(["admin"]), asyncHandler
   `, req.user));
 }));
 
-app.get("/settings/reset-app", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.get("/settings/reset-app", requireAuth, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const completedTarget = String(req.query.done || "").trim();
   const completedConfig = getResetTargetConfig(completedTarget);
   const sectionMarkup = resetTargetSections.map((section) => `
@@ -6772,7 +6795,7 @@ app.get("/settings/reset-app", requireAuth, requireRole(["admin"]), requirePermi
   `, req.user));
 }));
 
-app.get("/settings/reset-app/:target", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.get("/settings/reset-app/:target", requireAuth, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const config = getResetTargetConfig(String(req.params.target || "").trim());
   if (!config) throw new Error("Reset target not found.");
   res.send(layout(config.label, `
@@ -6797,7 +6820,7 @@ app.get("/settings/reset-app/:target", requireAuth, requireRole(["admin"]), requ
   `, req.user));
 }));
 
-app.post("/settings/reset-app/:target", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/reset-app/:target", requireAuth, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const target = String(req.params.target || "").trim();
   const config = getResetTargetConfig(target);
   if (!config) throw new Error("Reset target not found.");
@@ -6865,7 +6888,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
       <td>${job.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>${esc(formatShortDateTime(job.created_at))}</td>
       <td>
-        ${req.user.role === "admin" ? `
+        ${isAdminRole(req.user) ? `
           <form method="post" action="/settings/jobs/${job.id}/edit" class="stack">
             <input type="hidden" name="return_to" value="/settings/job-setup" />
             <div class="grid">
@@ -6892,7 +6915,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
     <div class="card">
       <h3>Jobs</h3>
       <div class="muted">Each job now runs as its own working area. Users can be assigned to one or more jobs, and admins can switch between them after login.</div>
-      ${req.user.role === "admin" ? `
+      ${isAdminRole(req.user) ? `
         <form method="post" action="/settings/jobs/add" class="stack" style="margin-top:12px;">
           <input type="hidden" name="return_to" value="/settings/job-setup" />
           <div class="grid">
@@ -6925,7 +6948,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
       <div class="muted">Import receiving, MRR, and FMR workbook data from a separate admin page.</div>
       <div class="actions" style="margin-top:12px;"><a class="btn btn-primary" href="/settings/material-log-imports">Open Material Log Imports</a></div>
     </div>
-    ${req.user.role === "admin" ? `
+    ${isAdminRole(req.user) ? `
       <div class="card scroll">
         <h3>Sheet Permissions</h3>
         <form method="post" action="/settings/permissions" class="stack">
@@ -6943,10 +6966,10 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
 
 app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePermission("settings", "view"), async (req, res) => {
   const jobId = currentJobId(req);
-  const warehousesRes = req.user.role === "admin"
+  const warehousesRes = isAdminRole(req.user)
     ? await query("select id, name, is_active from warehouses where job_id = $1 order by name", [jobId])
     : { rows: [] };
-  const warehouseLocationsRes = req.user.role === "admin"
+  const warehouseLocationsRes = isAdminRole(req.user)
     ? await query(`
         select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
         from warehouse_locations wl
@@ -6988,7 +7011,7 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
         <a class="btn btn-secondary" href="/settings">Back To Settings</a>
       </div>
     </div>
-    ${req.user.role === "admin" ? `
+    ${isAdminRole(req.user) ? `
       <div class="card">
         <h3>Warehouses</h3>
         <form method="post" action="/settings/warehouses/add" class="stack">
@@ -7042,7 +7065,7 @@ function renderUserJobChecks(jobs = [], selectedJobIds = [], fieldName = "job_id
   `).join("");
 }
 
-app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.get("/settings/user-management", requireAuth, requireRole(adminEquivalentRoles), async (req, res) => {
   const [usersRes, assignmentsRes] = await Promise.all([
     query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username"),
     query(`
@@ -7066,7 +7089,7 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
       <td>${esc(normalizeEmail(record.email || ""))}</td>
       <td>${esc(normalizePhone(record.phone || ""))}</td>
       <td>${(assignmentsByUser.get(Number(record.id)) || []).map((job) => `<span class="chip">${esc(job.job_number)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
-      <td>${esc(record.role)}</td>
+      <td>${esc(displayRole(record.role))}</td>
       <td>${record.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>${esc(formatShortDateTime(record.created_at))}</td>
       <td><a class="btn btn-secondary" href="/settings/users/${record.id}">Manage</a></td>
@@ -7091,7 +7114,7 @@ app.get("/settings/user-management", requireAuth, requireRole(["admin"]), async 
   `, req.user));
 });
 
-app.get("/settings/user-login-history", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.get("/settings/user-login-history", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const loginHistoryRes = await query(`
     select
       a.id,
@@ -7137,7 +7160,7 @@ app.get("/settings/user-login-history", requireAuth, requireRole(["admin"]), asy
   `, req.user));
 }));
 
-app.get("/settings/users/new", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.get("/settings/users/new", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const jobs = (await query("select id, job_number, plant_name, is_active from jobs order by job_number asc")).rows;
   res.send(layout("Add User", `
     <h1>Add User</h1>
@@ -7160,11 +7183,7 @@ app.get("/settings/users/new", requireAuth, requireRole(["admin"]), asyncHandler
           <div>
             <label>Role</label>
             <select name="role">
-              <option value="buyer">buyer</option>
-              <option value="warehouse">warehouse</option>
-              <option value="field" selected>field</option>
-              <option value="supervisor">supervisor</option>
-              <option value="admin">admin</option>
+              ${renderRoleOptions("field")}
             </select>
           </div>
         </div>
@@ -7189,7 +7208,7 @@ app.get("/settings/users/new", requireAuth, requireRole(["admin"]), asyncHandler
   `, req.user));
 }));
 
-app.get("/settings/users/:id", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.get("/settings/users/:id", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const userId = Number(req.params.id);
   const [userRes, jobsRes, assignmentsRes] = await Promise.all([
     query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users where id = $1", [userId]),
@@ -7223,11 +7242,7 @@ app.get("/settings/users/:id", requireAuth, requireRole(["admin"]), asyncHandler
           <div>
             <label>Role</label>
             <select name="role">
-              <option value="admin" ${record.role === "admin" ? "selected" : ""}>admin</option>
-              <option value="buyer" ${record.role === "buyer" ? "selected" : ""}>buyer</option>
-              <option value="warehouse" ${record.role === "warehouse" ? "selected" : ""}>warehouse</option>
-              <option value="field" ${record.role === "field" ? "selected" : ""}>field</option>
-              <option value="supervisor" ${record.role === "supervisor" ? "selected" : ""}>supervisor</option>
+              ${renderRoleOptions(record.role)}
             </select>
           </div>
           <div>
@@ -7257,7 +7272,7 @@ app.get("/settings/users/:id", requireAuth, requireRole(["admin"]), asyncHandler
   `, req.user));
 }));
 
-app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("yard", "view"), asyncHandler(async (req, res) => {
+app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("yard", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const itemFilter = String(req.query.item || "").trim();
   const historyRows = itemFilter ? (await query(`
@@ -7466,7 +7481,7 @@ app.get("/yard/locations", requireAuth, requireJobContext, requirePermission("ya
     order by w.name, wl.name
   `, [jobId]);
   const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
-  const canManageLocations = req.user.role === "admin" || canAccess(req.user, "settings", "edit");
+  const canManageLocations = isAdminRole(req.user) || canAccess(req.user, "settings", "edit");
   const warehouseRows = warehousesRes.rows.map((row) => `
     <tr>
       <td>${esc(normalizeWarehouseName(row.name))}</td>
@@ -7589,7 +7604,7 @@ app.post("/settings/job-number", requireAuth, requirePermission("settings", "edi
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 }));
 
-app.post("/settings/jobs/add", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/jobs/add", requireAuth, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
   const plantName = String(req.body.plant_name || "").trim();
   const performanceJobNumber = String(req.body.performance_job_number || "").trim();
@@ -7605,7 +7620,7 @@ app.post("/settings/jobs/add", requireAuth, requireRole(["admin"]), requirePermi
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 }));
 
-app.post("/settings/jobs/:id/edit", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/jobs/:id/edit", requireAuth, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const jobId = Number(req.params.id || 0);
   const jobNumber = String(req.body.job_number || "").trim().toUpperCase();
   const plantName = String(req.body.plant_name || "").trim();
@@ -7626,7 +7641,7 @@ app.post("/settings/jobs/:id/edit", requireAuth, requireRole(["admin"]), require
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 }));
 
-app.post("/settings/jobs/:id/toggle", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/jobs/:id/toggle", requireAuth, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const jobId = Number(req.params.id || 0);
   if (!jobId) throw new Error("Job not found.");
   await withTransaction(async (client) => {
@@ -7654,7 +7669,7 @@ app.post("/settings/vendor-categories", requireAuth, requirePermission("settings
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 });
 
-app.post("/settings/warehouses/add", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouses/add", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const name = normalizeWarehouseName(req.body.name);
   if (!name) throw new Error("Warehouse name is required.");
   const jobId = currentJobId(req);
@@ -7671,7 +7686,7 @@ app.post("/settings/warehouses/add", requireAuth, requireJobContext, requireRole
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const current = (await client.query("select * from warehouses where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
@@ -7683,7 +7698,7 @@ app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requ
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const warehouseId = Number(req.body.warehouse_id);
   const name = normalizeLocationName(req.body.name);
   const jobId = currentJobId(req);
@@ -7704,7 +7719,7 @@ app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, re
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const current = (await client.query(`
@@ -7721,7 +7736,7 @@ app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobCont
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
   const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeWarehouseLocationImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
   const jobId = currentJobId(req);
@@ -7779,7 +7794,7 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext,
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const rows = (await query(`
     select
@@ -8211,7 +8226,7 @@ app.post("/items/:id/edit", requireAuth, requireJobContext, requirePermission("i
   res.redirect(`/items?q=${encodeURIComponent(String(req.body.item_code || "").trim())}`);
 }));
 
-app.post("/settings/permissions", requireAuth, requireRole(["admin"]), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/permissions", requireAuth, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const nextMatrix = {};
   for (const role of permissionRoles) {
     nextMatrix[role] = {};
@@ -8260,7 +8275,7 @@ app.get("/settings/material-log-imports", requireAuth, requireJobContext, requir
   `, req.user));
 });
 
-app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const requestId = Number(req.params.id);
   const username = String(req.body.username || "").trim();
   const tempPassword = String(req.body.temp_password || "");
@@ -8272,7 +8287,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
   const assignedJobIds = parseSelectedIdList(req.body.job_ids);
   if (!username) throw new Error("Username is required.");
   if (!tempPassword) throw new Error("Temporary password is required.");
-  if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
+  if (!validUserRoles.includes(role)) throw new Error("Invalid role.");
   const passwordError = validatePasswordRules(tempPassword);
   if (passwordError) throw new Error(passwordError);
   const passwordHash = await bcrypt.hash(tempPassword, 8);
@@ -8287,7 +8302,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
       "insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active, must_change_password) values ($1, $2, $3, $4, $5, $6, $7, true, true) returning id",
       [username, passwordHash, role, firstName, lastName, email, phone]
     );
-    if (role !== "admin") {
+    if (!isAdminRole(role)) {
       for (const jobId of assignedJobIds) {
         await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [insert.rows[0].id, jobId]);
       }
@@ -8305,7 +8320,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(["adm
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 }));
 
-app.post("/settings/access-requests/:id/deny", requireAuth, requireRole(["admin"]), async (req, res) => {
+app.post("/settings/access-requests/:id/deny", requireAuth, requireRole(adminEquivalentRoles), async (req, res) => {
   const requestId = Number(req.params.id);
   await withTransaction(async (client) => {
     const requestRecord = (await client.query("select * from access_requests where id = $1 and status = 'PENDING'", [requestId])).rows[0];
@@ -8322,7 +8337,7 @@ app.post("/settings/access-requests/:id/deny", requireAuth, requireRole(["admin"
   res.redirect(getSafeReturnPath(req, "/settings"));
 });
 
-app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.post("/settings/users/add", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
   const role = String(req.body.role || "field").trim();
@@ -8333,13 +8348,13 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandle
   const assignedJobIds = parseSelectedIdList(req.body.job_ids);
   if (!username) throw new Error("Username is required.");
   if (!password) throw new Error("Password is required.");
-  if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
+  if (!validUserRoles.includes(role)) throw new Error("Invalid role.");
   const passwordError = validatePasswordRules(password);
   if (passwordError) throw new Error(passwordError);
   const passwordHash = await bcrypt.hash(password, 8);
   await withTransaction(async (client) => {
     const insert = await client.query("insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active, must_change_password) values ($1, $2, $3, $4, $5, $6, $7, true, true) returning id", [username, passwordHash, role, firstName, lastName, email, phone]);
-    if (role !== "admin") {
+    if (!isAdminRole(role)) {
       for (const jobId of assignedJobIds) {
         await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [insert.rows[0].id, jobId]);
       }
@@ -8349,7 +8364,7 @@ app.post("/settings/users/add", requireAuth, requireRole(["admin"]), asyncHandle
   res.redirect(getSafeReturnPath(req, "/settings"));
 }));
 
-app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.post("/settings/users/:id/edit", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const userId = Number(req.params.id);
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
@@ -8361,7 +8376,7 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
   const isActive = String(req.body.is_active || "true") === "true";
   const assignedJobIds = parseSelectedIdList(req.body.job_ids);
   if (!username) throw new Error("Username is required.");
-  if (!["admin", "buyer", "warehouse", "field", "supervisor"].includes(role)) throw new Error("Invalid role.");
+  if (!validUserRoles.includes(role)) throw new Error("Invalid role.");
   let passwordHash = "";
   if (password) {
     const passwordError = validatePasswordRules(password);
@@ -8371,12 +8386,12 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
   await withTransaction(async (client) => {
     const current = (await client.query("select id, username, role, is_active from users where id = $1", [userId])).rows[0];
     if (!current) throw new Error("User not found.");
-    if (current.role === "admin" && role !== "admin") {
-      const adminCount = Number((await client.query("select count(*) from users where role = 'admin'")).rows[0].count);
+    if (isAdminRole(current) && !isAdminRole(role)) {
+      const adminCount = Number((await client.query("select count(*) from users where role = any($1::text[])", [adminEquivalentRoles])).rows[0].count);
       if (adminCount <= 1) throw new Error("At least one admin user is required.");
     }
-    if (current.role === "admin" && !isActive) {
-      const activeAdminCount = Number((await client.query("select count(*) from users where role = 'admin' and is_active = true")).rows[0].count);
+    if (isAdminRole(current) && !isActive) {
+      const activeAdminCount = Number((await client.query("select count(*) from users where role = any($1::text[]) and is_active = true", [adminEquivalentRoles])).rows[0].count);
       if (activeAdminCount <= 1) throw new Error("At least one active admin user is required.");
     }
     if (req.user.id === userId && !isActive) throw new Error("You cannot deactivate your own user.");
@@ -8386,7 +8401,7 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
       await client.query("update users set username = $2, role = $3, is_active = $4, first_name = $5, last_name = $6, email = $7, phone = $8 where id = $1", [userId, username, role, isActive, firstName, lastName, email, phone]);
     }
     await client.query("delete from user_jobs where user_id = $1", [userId]);
-    if (role !== "admin") {
+    if (!isAdminRole(role)) {
       for (const jobId of assignedJobIds) {
         await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [userId, jobId]);
       }
@@ -8396,7 +8411,7 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(["admin"]), asyncH
   res.redirect(getSafeReturnPath(req, "/settings/user-management"));
 }));
 
-app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.get("/settings/users/:id/delete", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const userId = Number(req.params.id);
   const current = (await query("select id, username, role, is_active, created_at from users where id = $1", [userId])).rows[0];
   if (!current) throw new Error("User not found.");
@@ -8405,7 +8420,7 @@ app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), async
     <h1>Confirm User Deactivation</h1>
     <div class="card">
       <p><strong>User:</strong> ${esc(current.username)}</p>
-      <p><strong>Role:</strong> ${esc(current.role)}</p>
+      <p><strong>Role:</strong> ${esc(displayRole(current.role))}</p>
       <p><strong>Status:</strong> ${current.is_active ? "Active" : "Inactive"}</p>
       <p class="muted">This will mark the user inactive. They will no longer be able to sign in, but their history will remain in the system.</p>
       <div class="actions">
@@ -8419,14 +8434,14 @@ app.get("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), async
   `, req.user));
 }));
 
-app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.post("/settings/users/:id/delete", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const userId = Number(req.params.id);
   if (req.user.id === userId) throw new Error("You cannot deactivate your own user.");
   await withTransaction(async (client) => {
     const current = (await client.query("select id, username, role, is_active from users where id = $1", [userId])).rows[0];
     if (!current) throw new Error("User not found.");
-    if (current.role === "admin" && current.is_active) {
-      const activeAdminCount = Number((await client.query("select count(*) from users where role = 'admin' and is_active = true")).rows[0].count);
+    if (isAdminRole(current) && current.is_active) {
+      const activeAdminCount = Number((await client.query("select count(*) from users where role = any($1::text[]) and is_active = true", [adminEquivalentRoles])).rows[0].count);
       if (activeAdminCount <= 1) throw new Error("At least one active admin user is required.");
     }
     await client.query("update users set is_active = false where id = $1", [userId]);
@@ -8435,7 +8450,7 @@ app.post("/settings/users/:id/delete", requireAuth, requireRole(["admin"]), asyn
   res.redirect(getSafeReturnPath(req, "/settings/user-management"));
 }));
 
-app.get("/notes", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.get("/notes", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const notesRow = (await query("select value, updated_at from app_settings where key = 'admin_notes'")).rows[0];
   const notes = String(notesRow?.value ?? "");
   const updatedAt = notesRow?.updated_at ? formatShortDateTime(notesRow.updated_at) : "";
@@ -8457,7 +8472,7 @@ app.get("/notes", requireAuth, requireRole(["admin"]), asyncHandler(async (req, 
   `, req.user));
 }));
 
-app.post("/notes", requireAuth, requireRole(["admin"]), asyncHandler(async (req, res) => {
+app.post("/notes", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const notes = String(req.body.notes ?? "");
   await withTransaction(async (client) => {
     await client.query(`
@@ -8714,7 +8729,7 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       <p>${esc(bom.description || "")}</p>
       ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
       ${manualBom
-        ? `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a>${req.user.role === "admin" ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>`
+        ? `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a>${isAdminRole(req.user) ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>`
         : `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a><a class="btn btn-primary" href="/requisitions/new?bom_id=${bom.id}">Create Requisition</a></div><p class="muted">This BOM is generated automatically from item-code inventory balances and cannot be edited manually.</p>`
       }
     </div>
@@ -9224,7 +9239,7 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
   res.redirect(`/imports/${batchId}`);
 });
 
-app.get("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+app.get("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
   const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, currentJobId(req)])).rows[0];
   if (!bom) throw new Error("BOM not found.");
   assertBomAllowsManualChanges(bom, "receive");
@@ -9243,7 +9258,7 @@ app.get("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requi
   `, req.user));
 }));
 
-app.post("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requireRole(["admin"]), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+app.post("/bom/:id/receive-from-inventory", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
   const jobId = currentJobId(req);
   const result = await withTransaction(async (client) => {
@@ -10022,7 +10037,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td>${renderRequisitionStatusChip(row.status)}</td>
     <td>${esc(formatShortDateTime(row.created_at))}</td>
     <td><div class="actions">${
-      requisitionStatusKey(row.status) === "CANCELLED" && req.user?.role === "admin"
+      requisitionStatusKey(row.status) === "CANCELLED" && isAdminRole(req.user)
         ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
         : requisitionStatusKey(row.status) === "ISSUED" && hasLoggedRequisitionSignature(row)
         ? `<a class="btn btn-secondary" href="/requisitions/${row.id}#warehouse-sign-off">Issued</a>`
@@ -10260,10 +10275,10 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       ? `<button class="btn btn-secondary" type="submit" form="${issuedQtyFormId}" name="next_action" value="sign">${signLabel}</button>`
       : `<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${signLabel}</a>`);
   }
-  if (req.user?.role === "admin" && header.status !== "CANCELLED") {
+  if (isAdminRole(req.user) && header.status !== "CANCELLED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/cancel" onsubmit="return confirm('Cancel this requisition? The record will be kept. If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Cancel Requisition</button></form>`);
   }
-  if (req.user?.role === "admin" && header.status === "CANCELLED") {
+  if (isAdminRole(req.user) && header.status === "CANCELLED") {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore Requisition</button></form>`);
   }
   if (canDeleteRequisition(req.user, header)) {
@@ -11251,7 +11266,7 @@ app.post("/requisitions/:id/issue", requireAuth, requireJobContext, requirePermi
 }));
 
 app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
-  if (req.user?.role !== "admin") throw new Error("Only admins can cancel requisitions.");
+  if (!isAdminRole(req.user)) throw new Error("Only admins can cancel requisitions.");
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
@@ -11276,7 +11291,7 @@ app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePerm
 }));
 
 app.post("/requisitions/:id/delete", requireAuth, requireJobContext, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
-  if (req.user?.role !== "admin") throw new Error("Only admins can delete requisitions.");
+  if (!isAdminRole(req.user)) throw new Error("Only admins can delete requisitions.");
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
@@ -11294,7 +11309,7 @@ app.post("/requisitions/:id/delete", requireAuth, requireJobContext, requirePerm
 }));
 
 app.post("/requisitions/:id/restore", requireAuth, requireJobContext, requirePermission("requisitions", "delete"), asyncHandler(async (req, res) => {
-  if (req.user?.role !== "admin") throw new Error("Only admins can restore cancelled requisitions.");
+  if (!isAdminRole(req.user)) throw new Error("Only admins can restore cancelled requisitions.");
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
