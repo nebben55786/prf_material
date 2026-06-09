@@ -1434,7 +1434,7 @@ function layout(title, body, user) {
         .filter((section) => !(isWarehouseUser(user) && section.key === "yard"))
         .map((section) => `<a href="${isWarehouseUser(user) && section.key === "dashboard" ? "/yard" : section.href}">${section.label}</a>`)
         .concat(String(user.role || "").trim().toLowerCase() === "admin" ? `<a href="/notes">Notes</a>` : "")
-        .concat(`<a href="/change-password">Change Password</a>`)
+        .concat(`<a href="/user">User</a>`)
         .concat(`<a href="/logout">Logout</a>`)
         .join("")
     : "";
@@ -6080,6 +6080,34 @@ function changePasswordPage(req, error = "") {
   `, req.user);
 }
 
+function userPage(req, { error = "", success = "" } = {}) {
+  return layout("User", `
+    <h1>User</h1>
+    ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
+    ${success ? `<div class="card success"><strong>${esc(success)}</strong></div>` : ""}
+    <div class="card">
+      <h3>Account</h3>
+      <div class="grid-3">
+        <div><label>Username</label><input value="${esc(req.user.username || "")}" readonly /></div>
+        <div><label>Name</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
+        <div><label>Role</label><input value="${esc(req.user.role || "")}" readonly /></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Change Password</h3>
+      <form id="user-change-password-form" method="post" action="/user/change-password" class="stack" data-password-form="change-password" data-password-message-id="user-change-password-error">
+        <div><label>Current Password</label><input type="password" name="current_password" autocomplete="current-password" required /></div>
+        <div class="grid">
+          <div><label>New Password</label><input type="password" name="new_password" autocomplete="new-password" required /></div>
+          <div><label>Confirm New Password</label><input type="password" name="confirm_password" autocomplete="new-password" required /></div>
+        </div>
+        <div id="user-change-password-error" class="muted" style="color:#a23622;"></div>
+        <div class="actions"><button type="submit">Save New Password</button></div>
+      </form>
+    </div>
+  `, req.user);
+}
+
 async function changeUserPassword({ userId, username, currentPassword, newPassword, confirmPassword }) {
   if (!userId && !String(username || "").trim()) throw new Error("Username is required.");
   const user = (await query(`
@@ -6125,6 +6153,25 @@ app.post("/change-password", requireAuth, asyncHandler(async (req, res) => {
     return;
   }
   res.redirect(getUserHomePath(req.user));
+}));
+
+app.get("/user", requireAuth, (req, res) => {
+  res.send(userPage(req));
+});
+
+app.post("/user/change-password", requireAuth, asyncHandler(async (req, res) => {
+  try {
+    await changeUserPassword({
+      userId: req.user.id,
+      currentPassword: String(req.body.current_password || ""),
+      newPassword: String(req.body.new_password || ""),
+      confirmPassword: String(req.body.confirm_password || "")
+    });
+  } catch (error) {
+    res.status(400).send(userPage(req, { error: error.message || "Unable to change password." }));
+    return;
+  }
+  res.send(userPage(req, { success: "Password changed." }));
 }));
 
 app.get("/logout", (req, res) => {
