@@ -8965,7 +8965,14 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
   }).join("");
   const stagedSelection = Object.fromEntries(selectedLineIds.map((lineId) => [lineId, selectedLineQtys.get(lineId)]));
   const stagedSelectionJson = escAttr(JSON.stringify(stagedSelection));
-  const backUrl = `/requisitions/new?bom_id=${bomId}&staged_selection=${encodeURIComponent(JSON.stringify(stagedSelection))}`;
+  const backParams = new URLSearchParams({
+    bom_id: String(bomId),
+    staged_selection: JSON.stringify(stagedSelection),
+    draft_issued_to: issuedTo,
+    draft_iwp_no: String(req.body.iwp_no || ""),
+    draft_notes: String(req.body.notes || "")
+  });
+  const backUrl = `/requisitions/new?${backParams.toString()}`;
   res.send(layout("Preview Material Request", `
     <h1>Preview Material Request</h1>
     <div class="card">
@@ -9735,13 +9742,16 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       stagedSelection = Object.fromEntries(
         Object.entries(parsed)
-          .map(([lineId, qty]) => [String(num(lineId, 0)), parseQtyValue(qty, NaN)])
-          .filter(([lineId, qty]) => num(lineId, 0) > 0 && Number.isFinite(qty) && qty > 0)
+          .map(([lineId, qty]) => [String(num(lineId, 0)), String(qty ?? "").trim()])
+          .filter(([lineId]) => num(lineId, 0) > 0)
       );
     }
   } catch {
     stagedSelection = {};
   }
+  const draftIssuedTo = String(req.query.draft_issued_to || "").trim();
+  const draftIwpNo = String(req.query.draft_iwp_no || "").trim();
+  const draftNotes = String(req.query.draft_notes || "").trim();
   let filteredCount = 0;
   let lineRows = "";
   let lineNumberOptionsHtml = "";
@@ -9830,6 +9840,9 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         <form method="get" action="/requisitions/new" class="stack" id="requisition-filter-form">
           <input type="hidden" name="bom_id" value="${selectedBom.id}" />
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
+          <input type="hidden" name="draft_issued_to" value="${escAttr(draftIssuedTo)}" id="requisition-filter-draft-issued-to" />
+          <input type="hidden" name="draft_iwp_no" value="${escAttr(draftIwpNo)}" id="requisition-filter-draft-iwp-no" />
+          <input type="hidden" name="draft_notes" value="${escAttr(draftNotes)}" id="requisition-filter-draft-notes" />
           <div class="grid">
             <div><label>BOM</label><input value="${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}" readonly /></div>
             <div><label>Max Rows</label><input value="${esc(lineFilter.limit)}" readonly /></div>
@@ -9853,10 +9866,10 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid-3">
             <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
-            <div><label>Issued To</label><input name="issued_to" required /></div>
-            <div><label>IWP</label><input name="iwp_no" /></div>
+            <div><label>Issued To</label><input name="issued_to" value="${esc(draftIssuedTo)}" required /></div>
+            <div><label>IWP</label><input name="iwp_no" value="${esc(draftIwpNo)}" /></div>
           </div>
-          <div><label>Notes</label><input name="notes" /></div>
+          <div><label>Notes</label><input name="notes" value="${esc(draftNotes)}" /></div>
           <div class="actions">
             <button type="submit">Create Material Requisition</button>
           </div>
@@ -9933,7 +9946,18 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           const rowCheckboxes = Array.from(document.querySelectorAll('input[name="selected_line_ids"]'));
           const filterInput = document.getElementById("requisition-filter-staged-selection");
           const createInput = document.getElementById("requisition-create-staged-selection");
+          const issuedToInput = document.querySelector('#requisition-create-form input[name="issued_to"]');
+          const iwpInput = document.querySelector('#requisition-create-form input[name="iwp_no"]');
+          const notesInput = document.querySelector('#requisition-create-form input[name="notes"]');
+          const filterIssuedToInput = document.getElementById("requisition-filter-draft-issued-to");
+          const filterIwpInput = document.getElementById("requisition-filter-draft-iwp-no");
+          const filterNotesInput = document.getElementById("requisition-filter-draft-notes");
           const selectAllVisible = document.getElementById("requisition-select-all-visible");
+          function syncDraftFields() {
+            if (filterIssuedToInput && issuedToInput) filterIssuedToInput.value = issuedToInput.value || "";
+            if (filterIwpInput && iwpInput) filterIwpInput.value = iwpInput.value || "";
+            if (filterNotesInput && notesInput) filterNotesInput.value = notesInput.value || "";
+          }
           function syncSelectAllVisible() {
             if (!selectAllVisible || rowCheckboxes.length === 0) return;
             const checkedCount = rowCheckboxes.filter((checkbox) => checkbox.checked).length;
@@ -9946,13 +9970,13 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               const qtyInput = document.querySelector('input[name="request_qty_' + lineId + '"]');
               delete stagedSelection[lineId];
               if (checkbox.checked && qtyInput) {
-                const qty = parseFloat(String(qtyInput.value || "").trim());
-                if (Number.isFinite(qty) && qty > 0) stagedSelection[lineId] = qty;
+                stagedSelection[lineId] = String(qtyInput.value || "").trim();
               }
             });
             const payload = JSON.stringify(stagedSelection);
             if (filterInput) filterInput.value = payload;
             if (createInput) createInput.value = payload;
+            syncDraftFields();
             syncSelectAllVisible();
           }
           rowCheckboxes.forEach((checkbox) => {
@@ -9971,8 +9995,12 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           }
           const filterForm = document.getElementById("requisition-filter-form");
           const createForm = document.getElementById("requisition-create-form");
+          [issuedToInput, iwpInput, notesInput].forEach((input) => {
+            if (input) input.addEventListener("input", syncDraftFields);
+          });
           if (filterForm) filterForm.addEventListener("submit", syncStagedSelection);
           if (createForm) createForm.addEventListener("submit", syncStagedSelection);
+          syncDraftFields();
           syncSelectAllVisible();
         }());
         </script>
