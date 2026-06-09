@@ -1468,6 +1468,7 @@ function layout(title, body, user) {
   const navLinks = user
     ? permissionSections
         .filter((section) => canAccess(user, section.key, "view"))
+        .filter((section) => section.key !== "settings")
         .filter((section) => !(isWarehouseUser(user) && section.key === "yard"))
         .map((section) => `<a href="${isWarehouseUser(user) && section.key === "dashboard" ? "/yard" : section.href}">${section.label}</a>`)
         .concat(isAdminRole(user) ? `<a href="/notes">Notes</a>` : "")
@@ -6291,6 +6292,15 @@ function changePasswordPage(req, error = "") {
 }
 
 function userPage(req, { error = "", success = "" } = {}) {
+  const settingsCard = canAccess(req.user, "settings", "view") ? `
+    <div class="card">
+      <h3>Settings</h3>
+      <p class="muted">Manage jobs, users, app settings, imports, and admin tools.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="/settings">Open Settings</a>
+      </div>
+    </div>
+  ` : "";
   const backupCard = isAdminRole(req.user) ? `
     <div class="card">
       <h3>Backups</h3>
@@ -6324,6 +6334,7 @@ function userPage(req, { error = "", success = "" } = {}) {
         <div class="actions"><button type="submit">Save New Password</button></div>
       </form>
     </div>
+    ${settingsCard}
     ${backupCard}
   `, req.user);
 }
