@@ -254,6 +254,17 @@ function escAttr(value) {
   return esc(value).replaceAll("`", "&#96;");
 }
 
+function signedCopyFilenameForRequisition(requisitionNo, mimeType = "") {
+  const safeRequisitionNo = String(requisitionNo || "MR").trim().replace(/[^A-Za-z0-9._-]/g, "-") || "MR";
+  const normalizedMime = String(mimeType || "").trim().toLowerCase();
+  const extension = normalizedMime === "image/png"
+    ? ".png"
+    : normalizedMime === "image/jpeg"
+      ? ".jpg"
+      : ".pdf";
+  return `${safeRequisitionNo}-SIGNED${extension}`;
+}
+
 function pdfEscape(value) {
   return String(value ?? "")
     .replaceAll("\\", "\\\\")
@@ -10404,9 +10415,18 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
       <div class="card">
         <h3>Signed Paper Copy</h3>
         <p class="muted">Upload a photo, scan, or PDF of a physically signed pick ticket.</p>
-        <form method="post" action="/requisitions/${header.id}/signed-copy" enctype="multipart/form-data" class="stack">
+        <form method="post" action="/requisitions/${header.id}/signed-copy" enctype="multipart/form-data" class="stack" id="signed-copy-upload-form">
           <div><label>Signed By</label><select name="signed_by_name" required>${signerOptionsHtml}</select></div>
-          <div><label>Signed Copy File</label><input type="file" name="signed_copy" accept=".pdf,image/png,image/jpeg,image/jpg" required /></div>
+          <div>
+            <label>Signed Copy File</label>
+            <div id="signed-copy-drop-zone" class="drop-zone" tabindex="0">
+              <strong>Drop signed copy here</strong>
+              <span>or click to choose a PDF, PNG, or JPG</span>
+              <span id="signed-copy-file-name" class="muted">${header.signed_copy_filename ? `Current file: ${esc(header.signed_copy_filename)}` : "No file selected"}</span>
+            </div>
+            <input id="signed-copy-file-input" class="visually-hidden-file" type="file" name="signed_copy" accept=".pdf,image/png,image/jpeg,image/jpg" required />
+            <p class="muted">Uploaded file will be saved as ${esc(signedCopyFilenameForRequisition(header.requisition_no, "application/pdf"))} for PDFs.</p>
+          </div>
           <div class="actions">
             <button type="submit">${header.signed_copy_filename ? "Replace Uploaded Copy" : "Upload Signed Copy"}</button>
             ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/signed-copy" target="_blank">Open Current Upload</a>` : ""}
@@ -10415,6 +10435,32 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         ${header.signed_copy_filename ? `<p class="muted" style="margin-top:12px;">Current file: ${esc(header.signed_copy_filename)}</p>` : ""}
       </div>
     </div>
+    <style>
+      .drop-zone {
+        border: 2px dashed #7d8ea0;
+        background: #f8fbff;
+        min-height: 130px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+        cursor: pointer;
+        text-align: center;
+      }
+      .drop-zone.drag-over {
+        border-color: #2f5d96;
+        background: #eaf2ff;
+      }
+      .visually-hidden-file {
+        position: absolute;
+        left: -9999px;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+      }
+    </style>
     <script>
       (function () {
         const canvas = document.getElementById("requisition-signature-canvas");
@@ -10487,6 +10533,50 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
           return true;
         };
       }());
+      (function () {
+        const dropZone = document.getElementById("signed-copy-drop-zone");
+        const fileInput = document.getElementById("signed-copy-file-input");
+        const fileName = document.getElementById("signed-copy-file-name");
+        if (!dropZone || !fileInput || !fileName) return;
+        function setFile(file) {
+          if (!file) return;
+          const allowedTypes = new Set(["application/pdf", "image/png", "image/jpeg"]);
+          if (!allowedTypes.has(String(file.type || "").toLowerCase())) {
+            alert("Signed copy must be a PDF, PNG, or JPEG file.");
+            return;
+          }
+          const transfer = new DataTransfer();
+          transfer.items.add(file);
+          fileInput.files = transfer.files;
+          fileName.textContent = file.name;
+        }
+        dropZone.addEventListener("click", () => fileInput.click());
+        dropZone.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            fileInput.click();
+          }
+        });
+        fileInput.addEventListener("change", () => {
+          fileName.textContent = fileInput.files && fileInput.files[0] ? fileInput.files[0].name : "No file selected";
+        });
+        ["dragenter", "dragover"].forEach((eventName) => {
+          dropZone.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            dropZone.classList.add("drag-over");
+          });
+        });
+        ["dragleave", "drop"].forEach((eventName) => {
+          dropZone.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            dropZone.classList.remove("drag-over");
+          });
+        });
+        dropZone.addEventListener("drop", (event) => {
+          const file = event.dataTransfer && event.dataTransfer.files ? event.dataTransfer.files[0] : null;
+          setFile(file);
+        });
+      }());
     </script>
   `, req.user));
 }));
@@ -10530,6 +10620,7 @@ app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requir
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (!canSignRequisition(req.user, header)) throw new Error("Only accepted, flagged, loaded, or issued requisitions can be signed.");
+    const signedCopyFilename = signedCopyFilenameForRequisition(header.requisition_no, file.mimetype);
     await client.query(`
       update material_requisitions
       set signed_at = now(),
@@ -10538,8 +10629,8 @@ app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requir
           signed_copy_mime = $4,
           signed_copy_data = $5
       where id = $1 and job_id = $6
-    `, [req.params.id, signedByName, String(file.originalname || "signed-copy").slice(0, 255), file.mimetype, file.buffer, jobId]);
-    await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|upload|${signedByName}|${file.originalname || "signed-copy"}`);
+    `, [req.params.id, signedByName, signedCopyFilename.slice(0, 255), file.mimetype, file.buffer, jobId]);
+    await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|upload|${signedByName}|${signedCopyFilename}`);
     if (isVerifiedStageRequisitionStatus(header.status)) {
       await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
     }
