@@ -11713,11 +11713,26 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   }
   if (vendorId) {
     params.push(num(vendorId));
-    where.push(`exists (
+    where.push(`(
+      exists (
       select 1
       from rfq_items ri
-      join quotes q on q.rfq_item_id = ri.id
-      where ri.rfq_id = r.id and ri.job_id = r.job_id and q.vendor_id = $${params.length}
+      where ri.rfq_id = r.id and ri.job_id = r.job_id
+        and (
+          ri.awarded_vendor_id = $${params.length}
+          or exists (
+            select 1
+            from quotes q
+            where q.rfq_item_id = ri.id
+              and q.vendor_id = $${params.length}
+          )
+        )
+      )
+      or exists (
+        select 1
+        from rfq_vendors rv
+        where rv.rfq_id = r.id and rv.job_id = r.job_id and rv.vendor_id = $${params.length}
+      )
     )`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
