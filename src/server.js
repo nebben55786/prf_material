@@ -9061,6 +9061,10 @@ app.post("/bom/:id/edit", requireAuth, requireJobContext, requirePermission("bom
 app.get("/bom/:id/export.xlsx", requireAuth, requireJobContext, requirePermission("bom", "view"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
   const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    await recomputeBomIssuedSummaries(client, jobId);
+    await rebuildUnallocatedBom(client, jobId);
+  });
   const [bomRes, linesRes] = await Promise.all([
     query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId]),
     query(`
