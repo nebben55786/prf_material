@@ -9058,6 +9058,142 @@ app.post("/bom/:id/edit", requireAuth, requireJobContext, requirePermission("bom
   res.redirect(`/bom/${req.params.id}`);
 });
 
+app.get("/bom/:id/export.xlsx", requireAuth, requireJobContext, requirePermission("bom", "view"), asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const [bomRes, linesRes] = await Promise.all([
+    query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId]),
+    query(`
+      select
+        line_no,
+        item_code,
+        description,
+        material_type,
+        uom,
+        qty_required,
+        qty_issued,
+        qty_quoted,
+        qty_awarded,
+        qty_ordered,
+        qty_received,
+        planning_status,
+        spec,
+        commodity_code,
+        tag_number,
+        iwp_no,
+        iso_no,
+        size_1,
+        size_2,
+        thk_1,
+        thk_2,
+        notes
+      from bom_lines
+      where bom_id = $1
+      order by
+        case when coalesce(line_no, '') ~ '^[0-9]+$' then lpad(line_no, 20, '0') else lower(coalesce(line_no, '')) end,
+        item_code,
+        id
+    `, [bomId])
+  ]);
+  const bom = bomRes.rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  const exportRows = linesRes.rows.map((line) => ({
+    bom_no: bom.bom_no || "",
+    bom_name: bom.bom_name || bom.description || "",
+    job_number: bom.job_number || "",
+    bom_type: bom.bom_type || "",
+    status: bom.status || "",
+    line_no: line.line_no || "",
+    item_code: line.item_code || "",
+    description: line.description || "",
+    material_type: line.material_type || "",
+    uom: line.uom || "",
+    qty_required: num(line.qty_required),
+    qty_issued: num(line.qty_issued),
+    qty_quoted: num(line.qty_quoted),
+    qty_awarded: num(line.qty_awarded),
+    qty_ordered: num(line.qty_ordered),
+    qty_received: num(line.qty_received),
+    planning_status: line.planning_status || "",
+    spec: line.spec || "",
+    commodity_code: line.commodity_code || "",
+    tag_number: line.tag_number || "",
+    iwp_no: line.iwp_no || "",
+    iso_no: line.iso_no || "",
+    size_1: line.size_1 || "",
+    size_2: line.size_2 || "",
+    thk_1: line.thk_1 || "",
+    thk_2: line.thk_2 || "",
+    notes: line.notes || ""
+  }));
+  const headers = [
+    "bom_no",
+    "bom_name",
+    "job_number",
+    "bom_type",
+    "status",
+    "line_no",
+    "item_code",
+    "description",
+    "material_type",
+    "uom",
+    "qty_required",
+    "qty_issued",
+    "qty_quoted",
+    "qty_awarded",
+    "qty_ordered",
+    "qty_received",
+    "planning_status",
+    "spec",
+    "commodity_code",
+    "tag_number",
+    "iwp_no",
+    "iso_no",
+    "size_1",
+    "size_2",
+    "thk_1",
+    "thk_2",
+    "notes"
+  ];
+  const worksheet = XLSX.utils.json_to_sheet(exportRows, { header: headers });
+  worksheet["!cols"] = [
+    { wch: 18 },
+    { wch: 28 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 42 },
+    { wch: 14 },
+    { wch: 10 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 20 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 18 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 10 },
+    { wch: 10 },
+    { wch: 32 }
+  ];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "BOM Lines");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  await auditLog(pool, req.user.id, "export", "bom_workbook", bomId, `rows=${linesRes.rows.length}|${bom.bom_no || ""}`);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${String(bom.bom_no || "BOM").replace(/[^A-Za-z0-9._-]/g, "_")}-bom.xlsx"`);
+  res.send(buffer);
+}));
+
 app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
   const jobId = currentJobId(req);
   const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
@@ -9118,8 +9254,8 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       <p>${esc(bom.description || "")}</p>
       ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
       ${manualBom
-        ? `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a>${isAdminRole(req.user) ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>`
-        : `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a><a class="btn btn-primary" href="/requisitions/new?bom_id=${bom.id}">Create Requisition</a></div><p class="muted">This BOM is generated automatically from item-code inventory balances and cannot be edited manually.</p>`
+        ? `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a><a class="btn btn-secondary" href="/bom/${bom.id}/export.xlsx">Export BOM XLSX</a>${isAdminRole(req.user) ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>`
+        : `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a><a class="btn btn-secondary" href="/bom/${bom.id}/export.xlsx">Export BOM XLSX</a><a class="btn btn-primary" href="/requisitions/new?bom_id=${bom.id}">Create Requisition</a></div><p class="muted">This BOM is generated automatically from item-code inventory balances and cannot be edited manually.</p>`
       }
     </div>
     <div class="stats">
@@ -10199,15 +10335,14 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         ? formatQtyDisplay(stagedQty)
         : (selectedBomPrefillsRequestQty ? formatQtyDisplay(num(line.qty_remaining)) : "");
       return `<tr>
-      <td><input type="checkbox" name="selected_line_ids" value="${line.id}" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
+      <td><input type="checkbox" name="selected_line_ids" value="${line.id}" tabindex="-1" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
       <td>${esc(line.line_no)}</td>
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(formatQtyDisplay(line.qty_required))}</td>
-      <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
-      <td>${esc(formatQtyDisplay(line.qty_remaining))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_received))}</td>
       <td>${esc(formatQtyDisplay(line.qty_available))}</td>
-      <td><input name="request_qty_${line.id}" value="${esc(requestQtyValue)}" /></td>
+      <td><input class="requisition-request-qty-input" name="request_qty_${line.id}" value="${esc(requestQtyValue)}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.tag_number || "")}</td>
       <td>${esc(formatPlainNumberDisplay(line.size_1))}</td>
@@ -10216,7 +10351,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(formatPlainNumberDisplay(line.thk_2))}</td>
       <td>${esc(line.notes || "")}</td>
       <td><span class="chip">${esc(line.planning_status)}</span></td>
-      <td><div class="actions">${selectedBomAllowsManualLineEdits ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a>` : `<span class="muted">System BOM</span>`}</div></td>
+      <td><div class="actions">${selectedBomAllowsManualLineEdits ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit" tabindex="-1">Edit</a>` : `<span class="muted">System BOM</span>`}</div></td>
     </tr>`;
     }).join("");
   }
@@ -10287,7 +10422,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:72px" />
                 <col style="width:72px" />
                 <col style="width:84px" />
-                <col style="width:84px" />
                 <col style="width:90px" />
                 <col style="width:56px" />
                 <col style="width:110px" />
@@ -10301,15 +10435,14 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               </colgroup>
               <thead>
               <tr>
-                <th class="nowrap" data-resizable="true"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="requisition-select-all-visible" /> Pick</label></th>
+                <th class="nowrap" data-resizable="true"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="requisition-select-all-visible" tabindex="-1" /> Pick</label></th>
                 <th class="wrap" data-resizable="true">${esc(lineLabel)}</th>
                 <th class="nowrap" data-resizable="true">Item</th>
                 <th class="wrap" data-resizable="true">Description</th>
-                <th class="nowrap" data-resizable="true">Req Qty</th>
-                <th class="nowrap" data-resizable="true">Issued</th>
-                <th class="nowrap" data-resizable="true">Remaining</th>
+                <th class="nowrap" data-resizable="true">Required Qty</th>
+                <th class="nowrap" data-resizable="true">Recvd Qty</th>
                 <th class="nowrap" data-resizable="true">Available</th>
-                <th class="nowrap" data-resizable="true">Request</th>
+                <th class="nowrap" data-resizable="true">Request Qty</th>
                 <th class="nowrap" data-resizable="true">UOM</th>
                 <th class="wrap" data-resizable="true">${esc(tagNumberLabel)}</th>
                 <th class="nowrap" data-resizable="true">Size 1</th>
@@ -10322,7 +10455,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               </tr>
               </thead>
               <tbody>
-              ${lineRows || `<tr><td colspan="18" class="muted">No BOM lines match the current filter.</td></tr>`}
+              ${lineRows || `<tr><td colspan="17" class="muted">No BOM lines match the current filter.</td></tr>`}
               </tbody>
             </table>
           </div>
@@ -10373,6 +10506,20 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
             const lineId = String(checkbox.value || "");
             const qtyInput = document.querySelector('input[name="request_qty_' + lineId + '"]');
             if (qtyInput) qtyInput.addEventListener("input", syncStagedSelection);
+          });
+          const requestQtyInputs = Array.from(document.querySelectorAll(".requisition-request-qty-input"));
+          requestQtyInputs.forEach((input, index) => {
+            input.addEventListener("focus", () => input.select());
+            input.addEventListener("keydown", (event) => {
+              if (event.key !== "Enter" && event.key !== "Tab") return;
+              event.preventDefault();
+              const direction = event.shiftKey ? -1 : 1;
+              const nextInput = requestQtyInputs[index + direction];
+              if (nextInput) {
+                nextInput.focus();
+                nextInput.select();
+              }
+            });
           });
           if (selectAllVisible) {
             selectAllVisible.addEventListener("change", () => {
