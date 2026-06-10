@@ -4620,7 +4620,7 @@ async function rebuildUnallocatedBom(client, jobId) {
   const demandRows = await client.query(`
       select
         bl.item_code,
-        sum(greatest(coalesce(bl.qty_required, 0) - coalesce(bl.qty_issued, 0), 0)) as qty_needed
+        sum(coalesce(bl.qty_required, 0)) as qty_needed
       from bom_lines bl
       join bom_headers bh on bh.id = bl.bom_id
       where bh.job_id = $1
@@ -9400,12 +9400,21 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
   if (selectedLineIds.length === 0) throw new Error("Select at least one BOM line for the requisition.");
   const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
   if (!bom) throw new Error("BOM not found.");
+  const bomIsUnallocated = isUnallocatedBom(bom);
+  if (bomIsUnallocated) {
+    await withTransaction(async (client) => {
+      await rebuildUnallocatedBom(client, jobId);
+    });
+  }
+  const qtyAvailableSql = bomIsUnallocated
+    ? "least(greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0), greatest(bl.qty_required - bl.qty_issued, 0))"
+    : "greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0)";
   const lines = (await query(`
     select
       bl.*,
       greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining,
       coalesce(inv.qty_on_hand, 0) as qty_on_hand,
-      greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+      ${qtyAvailableSql} as qty_available
     from bom_lines bl
     left join (
       ${getInventoryTotalsByItemSubquery(jobId)}
@@ -9463,7 +9472,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
       coalesce(bl.size_1, '') as size_1,
       coalesce(bl.size_2, '') as size_2,
       greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining,
-      greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+      ${qtyAvailableSql} as qty_available
     from bom_lines bl
     left join (
       ${getInventoryTotalsByItemSubquery(jobId)}
@@ -9480,7 +9489,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
     where bl.bom_id = $1
       and not (bl.id = any($2::bigint[]))
       and greatest(bl.qty_required - bl.qty_issued, 0) > 0
-      and greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) > 0
+      and ${qtyAvailableSql} > 0
     order by bl.line_no, bl.id
     limit 500
   `, [bomId, selectedLineIds])).rows;
@@ -9561,6 +9570,10 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
   const requisitionId = await withTransaction(async (client) => {
     const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
     if (!bom) throw new Error("BOM not found.");
+    const bomIsUnallocated = isUnallocatedBom(bom);
+    if (bomIsUnallocated) {
+      await rebuildUnallocatedBom(client, jobId);
+    }
     const requisitionNo = await getNextRequisitionNumber(client, jobId);
     const availableMap = await getAvailableInventoryByItemMap(client, jobId);
       const insertReq = await client.query(`
@@ -9589,7 +9602,8 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
       if (qtyRequested <= 0 || qtyRequested > remaining) {
         throw new Error(`Requested qty for ${line.item_code} must be greater than zero and cannot exceed the remaining BOM qty.`);
       }
-      const availableQty = parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0);
+      const itemAvailableQty = parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0);
+      const availableQty = bomIsUnallocated ? Math.min(itemAvailableQty, remaining) : itemAvailableQty;
       if (qtyRequested > availableQty) {
         throw new Error(`Requested qty for ${line.item_code} cannot exceed available inventory.`);
       }
@@ -10290,6 +10304,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   let lineNumberOptionsHtml = "";
   const selectedBomUsesPackageLabel = selectedBom ? String(selectedBom.bom_type || "").trim().toLowerCase() === "equipment" : false;
   const selectedBomPrefillsRequestQty = selectedBom ? String(selectedBom.bom_type || "").trim().toLowerCase() === "pipe" : false;
+  const selectedBomIsUnallocated = selectedBom ? isUnallocatedBom(selectedBom) : false;
   const lineLabel = selectedBomUsesPackageLabel ? "Package" : "Line";
   const tagNumberLabel = selectedBom && String(selectedBom.bom_no || "").trim().toUpperCase() === "KEQ3-BOM-00006"
     ? "Trans Number"
@@ -10301,13 +10316,16 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
     if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
     const lineWhereSql = lineWhere.join(" and ");
+    const qtyAvailableSql = selectedBomIsUnallocated
+      ? "least(greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0), greatest(bl.qty_required - bl.qty_issued, 0))"
+      : "greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0)";
     const [linesRes, filteredCountRes, lineNumberOptionsRes] = await Promise.all([
       query(`
         select
           bl.*,
           greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining,
           coalesce(inv.qty_on_hand, 0) as qty_on_hand,
-          greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0) as qty_available
+          ${qtyAvailableSql} as qty_available
         from bom_lines bl
         left join (
           ${getInventoryTotalsByItemSubquery(jobId)}
