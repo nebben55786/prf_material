@@ -9065,34 +9065,38 @@ app.get("/bom/:id/export.xlsx", requireAuth, requireJobContext, requirePermissio
     query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId]),
     query(`
       select
-        line_no,
-        item_code,
-        description,
-        material_type,
-        uom,
-        qty_required,
-        qty_issued,
-        qty_quoted,
-        qty_awarded,
-        qty_ordered,
-        qty_received,
-        planning_status,
-        spec,
-        commodity_code,
-        tag_number,
-        iwp_no,
-        iso_no,
-        size_1,
-        size_2,
-        thk_1,
-        thk_2,
-        notes
-      from bom_lines
-      where bom_id = $1
+        bl.line_no,
+        bl.item_code,
+        bl.description,
+        bl.material_type,
+        bl.uom,
+        bl.qty_required,
+        bl.qty_issued,
+        bl.qty_quoted,
+        bl.qty_awarded,
+        bl.qty_ordered,
+        coalesce(inv.qty_on_hand, 0) as qty_received,
+        bl.planning_status,
+        bl.spec,
+        bl.commodity_code,
+        bl.tag_number,
+        bl.iwp_no,
+        bl.iso_no,
+        bl.size_1,
+        bl.size_2,
+        bl.thk_1,
+        bl.thk_2,
+        bl.notes
+      from bom_lines bl
+      left join (
+        ${getInventoryTotalsByItemSubquery(jobId)}
+      ) inv
+        on inv.item_code = bl.item_code
+      where bl.bom_id = $1
       order by
-        case when coalesce(line_no, '') ~ '^[0-9]+$' then lpad(line_no, 20, '0') else lower(coalesce(line_no, '')) end,
-        item_code,
-        id
+        case when coalesce(bl.line_no, '') ~ '^[0-9]+$' then lpad(bl.line_no, 20, '0') else lower(coalesce(bl.line_no, '')) end,
+        bl.item_code,
+        bl.id
     `, [bomId])
   ]);
   const bom = bomRes.rows[0];
