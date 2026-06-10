@@ -10340,7 +10340,8 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(line.item_code)}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(formatQtyDisplay(line.qty_required))}</td>
-      <td>${esc(formatQtyDisplay(line.qty_received))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_on_hand))}</td>
+      <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
       <td>${esc(formatQtyDisplay(line.qty_available))}</td>
       <td><input class="requisition-request-qty-input" name="request_qty_${line.id}" value="${esc(requestQtyValue)}" /></td>
       <td>${esc(line.uom)}</td>
@@ -10421,6 +10422,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:360px" />
                 <col style="width:72px" />
                 <col style="width:72px" />
+                <col style="width:72px" />
                 <col style="width:84px" />
                 <col style="width:90px" />
                 <col style="width:56px" />
@@ -10439,10 +10441,11 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="wrap" data-resizable="true">${esc(lineLabel)}</th>
                 <th class="nowrap" data-resizable="true">Item</th>
                 <th class="wrap" data-resizable="true">Description</th>
-                <th class="nowrap" data-resizable="true">Required Qty</th>
-                <th class="nowrap" data-resizable="true">Recvd Qty</th>
-                <th class="nowrap" data-resizable="true">Available</th>
-                <th class="nowrap" data-resizable="true">Request Qty</th>
+                <th class="wrap" data-resizable="true">Required Qty</th>
+                <th class="wrap" data-resizable="true">Recvd Qty</th>
+                <th class="wrap" data-resizable="true">Issued Qty</th>
+                <th class="wrap" data-resizable="true">Available</th>
+                <th class="wrap" data-resizable="true">Request Qty</th>
                 <th class="nowrap" data-resizable="true">UOM</th>
                 <th class="wrap" data-resizable="true">${esc(tagNumberLabel)}</th>
                 <th class="nowrap" data-resizable="true">Size 1</th>
@@ -10455,7 +10458,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               </tr>
               </thead>
               <tbody>
-              ${lineRows || `<tr><td colspan="17" class="muted">No BOM lines match the current filter.</td></tr>`}
+              ${lineRows || `<tr><td colspan="18" class="muted">No BOM lines match the current filter.</td></tr>`}
               </tbody>
             </table>
           </div>
