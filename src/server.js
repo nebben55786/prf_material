@@ -16180,7 +16180,6 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
     if (postedCount === 0) throw new Error("Enter a received quantity on at least one editable PO line.");
     await recalcPoStatus(client, poId);
     if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
-    await rebuildUnallocatedBom(client, jobId);
     await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};mrr=${mrrNumber};lines=${postedCount}`);
   });
   res.redirect("/receive/by-po");
@@ -16690,7 +16689,6 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
       }
       if (poLine?.po_id) await recalcPoStatus(client, poLine.po_id);
       if (poLine?.rfq_id) await recalcRfqStatus(client, poLine.rfq_id);
-      await rebuildUnallocatedBom(client, jobId);
       await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `mrr=${mrr.mrr_number};po_line=${req.body.po_line_id}`);
     } else {
       const result = await client.query(`
