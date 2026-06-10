@@ -8329,6 +8329,10 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
   const specOptions = [`<option value="">All Specs</option>`]
     .concat(specs.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === specId ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`))
     .join("");
+  const bulkEditParams = new URLSearchParams();
+  if (q) bulkEditParams.set("q", q);
+  if (specId > 0) bulkEditParams.set("spec_id", String(specId));
+  const bulkEditHref = `/items/bulk-edit${bulkEditParams.toString() ? `?${bulkEditParams.toString()}` : ""}`;
   const itemRows = rows.map((item) => `<tr>
     <td>${esc(item.item_code)}</td>
     <td>${esc(item.description)}</td>
@@ -8355,6 +8359,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
           <button type="submit">Filter Items</button>
           ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-primary" href="/items/new">Add Item</a>` : ""}
           ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/import-page">Import Items</a>` : ""}
+          ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="${escAttr(bulkEditHref)}">Bulk Edit Filtered</a>` : ""}
           ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/specs">Specs</a>` : ""}
           <a class="btn btn-secondary" href="/items">Clear</a>
           <a class="btn btn-secondary" href="/items/export.xlsx">Export XLSX</a>
@@ -8370,6 +8375,149 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
       </table>
     </div>
   `, req.user));
+}));
+
+app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const q = String(req.query.q || "").trim();
+  const specId = Number(req.query.spec_id || 0);
+  const params = [jobId];
+  const where = ["mi.job_id = $1"];
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(
+      mi.item_code ilike $${params.length}
+      or mi.description ilike $${params.length}
+      or coalesce(mi.material_type, '') ilike $${params.length}
+      or coalesce(mi.uom, '') ilike $${params.length}
+      or coalesce(mi.commodity_code, '') ilike $${params.length}
+    )`);
+  }
+  if (specId > 0) {
+    params.push(specId);
+    where.push(`exists (
+      select 1
+      from material_item_specs filter_mis
+      where filter_mis.material_item_id = mi.id
+        and filter_mis.job_id = mi.job_id
+        and filter_mis.spec_id = $${params.length}
+    )`);
+  }
+  const rows = (await query(`
+    select
+      mi.id,
+      mi.item_code,
+      mi.description,
+      mi.material_type,
+      mi.uom,
+      coalesce(mi.commodity_code, '') as commodity_code,
+      coalesce(mi.size_1, '') as size_1,
+      coalesce(mi.size_2, '') as size_2,
+      coalesce(mi.thk_1, '') as thk_1,
+      coalesce(mi.thk_2, '') as thk_2,
+      coalesce(mi.notes, '') as notes,
+      coalesce(string_agg(ms.name, ', ' order by ms.name) filter (where ms.id is not null), '') as specs
+    from material_items mi
+    left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
+    left join material_specs ms on ms.id = mis.spec_id
+    where ${where.join(" and ")}
+    group by mi.id
+    order by mi.item_code
+    limit 500
+  `, params)).rows;
+  const itemRows = rows.map((item) => `<tr>
+    <td>
+      ${esc(item.item_code)}
+      <input type="hidden" name="item_ids" value="${escAttr(item.id)}" />
+    </td>
+    <td><input name="description_${item.id}" value="${escAttr(item.description)}" required /></td>
+    <td><input name="material_type_${item.id}" value="${escAttr(item.material_type || "")}" /></td>
+    <td><input name="uom_${item.id}" value="${escAttr(item.uom || "")}" /></td>
+    <td><input name="commodity_code_${item.id}" value="${escAttr(item.commodity_code || "")}" /></td>
+    <td><input name="size_1_${item.id}" value="${escAttr(formatPlainNumberDisplay(item.size_1))}" /></td>
+    <td><input name="size_2_${item.id}" value="${escAttr(formatPlainNumberDisplay(item.size_2))}" /></td>
+    <td><input name="thk_1_${item.id}" value="${escAttr(formatPlainNumberDisplay(item.thk_1))}" /></td>
+    <td><input name="thk_2_${item.id}" value="${escAttr(formatPlainNumberDisplay(item.thk_2))}" /></td>
+    <td><input name="specs_${item.id}" value="${escAttr(item.specs || "")}" /></td>
+    <td><input name="notes_${item.id}" value="${escAttr(item.notes || "")}" /></td>
+  </tr>`).join("");
+  const returnParams = new URLSearchParams();
+  if (q) returnParams.set("q", q);
+  if (specId > 0) returnParams.set("spec_id", String(specId));
+  const returnHref = `/items${returnParams.toString() ? `?${returnParams.toString()}` : ""}`;
+  res.send(layout("Bulk Edit Items", `
+    <h1>Bulk Edit Items</h1>
+    <div class="card">
+      <p class="muted">Editing ${rows.length} filtered item(s). Item Code is locked so RFQs, BOMs, POs, and inventory stay linked correctly.</p>
+      <div class="actions">
+        <a class="btn btn-secondary" href="${escAttr(returnHref)}">Back To Item Master</a>
+      </div>
+    </div>
+    <form method="post" action="/items/bulk-edit" class="stack">
+      <input type="hidden" name="return_q" value="${escAttr(q)}" />
+      <input type="hidden" name="return_spec_id" value="${escAttr(specId > 0 ? String(specId) : "")}" />
+      <div class="card scroll">
+        <table class="data-grid">
+          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Commodity</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Specs</th><th>Notes</th></tr></thead>
+          <tbody>${itemRows || `<tr><td colspan="11" class="muted">No items match the current filter.</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="actions">
+          <button type="submit" ${rows.length ? "" : "disabled"}>Save Changes</button>
+          <a class="btn btn-secondary" href="${escAttr(returnHref)}">Cancel</a>
+        </div>
+      </div>
+    </form>
+  `, req.user));
+}));
+
+app.post("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const itemIds = [].concat(req.body.item_ids || [])
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  let updatedCount = 0;
+  await withTransaction(async (client) => {
+    for (const itemId of itemIds) {
+      const existing = (await client.query("select id, item_code from material_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
+      if (!existing) continue;
+      const description = String(req.body[`description_${itemId}`] || "").trim();
+      if (!description) throw new Error(`Description is required for item ${existing.item_code}.`);
+      const materialType = String(req.body[`material_type_${itemId}`] || "").trim() || "misc";
+      const uom = String(req.body[`uom_${itemId}`] || "").trim() || "EA";
+      const commodityCode = String(req.body[`commodity_code_${itemId}`] || "").trim();
+      const size1 = String(req.body[`size_1_${itemId}`] || "").trim();
+      const size2 = String(req.body[`size_2_${itemId}`] || "").trim();
+      const thk1 = String(req.body[`thk_1_${itemId}`] || "").trim();
+      const thk2 = String(req.body[`thk_2_${itemId}`] || "").trim();
+      const notes = String(req.body[`notes_${itemId}`] || "").trim();
+      const specs = parseSpecList(String(req.body[`specs_${itemId}`] || ""));
+      await client.query(`
+        update material_items
+        set description = $3,
+            material_type = $4,
+            uom = $5,
+            commodity_code = $6,
+            size_1 = $7,
+            size_2 = $8,
+            thk_1 = $9,
+            thk_2 = $10,
+            notes = $11,
+            updated_at = now()
+        where id = $1 and job_id = $2
+      `, [itemId, jobId, description, materialType, uom, commodityCode, size1, size2, thk1, thk2, notes]);
+      await syncMaterialItemSpecs(client, itemId, jobId, specs);
+      updatedCount += 1;
+    }
+    await auditLog(client, req.user.id, "bulk_update", "material_items", "filtered", `rows=${updatedCount}`);
+  });
+  const returnParams = new URLSearchParams();
+  const returnQ = String(req.body.return_q || "").trim();
+  const returnSpecId = Number(req.body.return_spec_id || 0);
+  if (returnQ) returnParams.set("q", returnQ);
+  if (returnSpecId > 0) returnParams.set("spec_id", String(returnSpecId));
+  res.redirect(`/items${returnParams.toString() ? `?${returnParams.toString()}` : ""}`);
 }));
 
 app.get("/items/new", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
