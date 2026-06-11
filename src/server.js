@@ -8371,6 +8371,10 @@ app.get("/items/export.xlsx", requireAuth, requireJobContext, requirePermission(
 app.get("/items", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
+  const descriptionQ = String(req.query.description || "").trim();
+  const typeQ = String(req.query.type || "").trim();
+  const size1Q = String(req.query.size_1 || "").trim();
+  const size2Q = String(req.query.size_2 || "").trim();
   const specId = Number(req.query.spec_id || 0);
   const specs = await getMaterialSpecOptions(jobId);
   const params = [jobId];
@@ -8379,11 +8383,25 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
     params.push(`%${q}%`);
     where.push(`(
       mi.item_code ilike $${params.length}
-      or mi.description ilike $${params.length}
-      or coalesce(mi.material_type, '') ilike $${params.length}
       or coalesce(mi.uom, '') ilike $${params.length}
       or coalesce(mi.commodity_code, '') ilike $${params.length}
     )`);
+  }
+  if (descriptionQ) {
+    params.push(`%${descriptionQ}%`);
+    where.push(`mi.description ilike $${params.length}`);
+  }
+  if (typeQ) {
+    params.push(`%${typeQ}%`);
+    where.push(`coalesce(mi.material_type, '') ilike $${params.length}`);
+  }
+  if (size1Q) {
+    params.push(`%${size1Q}%`);
+    where.push(`coalesce(mi.size_1, '') ilike $${params.length}`);
+  }
+  if (size2Q) {
+    params.push(`%${size2Q}%`);
+    where.push(`coalesce(mi.size_2, '') ilike $${params.length}`);
   }
   if (specId > 0) {
     params.push(specId);
@@ -8422,6 +8440,10 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
     .join("");
   const bulkEditParams = new URLSearchParams();
   if (q) bulkEditParams.set("q", q);
+  if (descriptionQ) bulkEditParams.set("description", descriptionQ);
+  if (typeQ) bulkEditParams.set("type", typeQ);
+  if (size1Q) bulkEditParams.set("size_1", size1Q);
+  if (size2Q) bulkEditParams.set("size_2", size2Q);
   if (specId > 0) bulkEditParams.set("spec_id", String(specId));
   const bulkEditHref = `/items/bulk-edit${bulkEditParams.toString() ? `?${bulkEditParams.toString()}` : ""}`;
   const itemRows = rows.map((item) => `<tr>
@@ -8443,7 +8465,13 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
     <div class="card">
       <form method="get" action="/items" class="stack">
         <div class="grid">
-          <div><label>Search</label><input name="q" value="${esc(q)}" placeholder="Item code, description, type, UOM, commodity" /></div>
+          <div><label>Search</label><input name="q" value="${escAttr(q)}" placeholder="Item code, UOM, commodity" /></div>
+          <div><label>Description</label><input name="description" value="${escAttr(descriptionQ)}" placeholder="Description only" /></div>
+        </div>
+        <div class="grid-4">
+          <div><label>Type</label><input name="type" value="${escAttr(typeQ)}" placeholder="Type" /></div>
+          <div><label>Size 1</label><input name="size_1" value="${escAttr(size1Q)}" placeholder="Size 1" /></div>
+          <div><label>Size 2</label><input name="size_2" value="${escAttr(size2Q)}" placeholder="Size 2" /></div>
           <div><label>Spec</label><select name="spec_id">${specOptions}</select></div>
         </div>
         <div class="actions">
@@ -8471,6 +8499,10 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
 app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
+  const descriptionQ = String(req.query.description || "").trim();
+  const typeQ = String(req.query.type || "").trim();
+  const size1Q = String(req.query.size_1 || "").trim();
+  const size2Q = String(req.query.size_2 || "").trim();
   const specId = Number(req.query.spec_id || 0);
   const params = [jobId];
   const where = ["mi.job_id = $1"];
@@ -8478,11 +8510,25 @@ app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("i
     params.push(`%${q}%`);
     where.push(`(
       mi.item_code ilike $${params.length}
-      or mi.description ilike $${params.length}
-      or coalesce(mi.material_type, '') ilike $${params.length}
       or coalesce(mi.uom, '') ilike $${params.length}
       or coalesce(mi.commodity_code, '') ilike $${params.length}
     )`);
+  }
+  if (descriptionQ) {
+    params.push(`%${descriptionQ}%`);
+    where.push(`mi.description ilike $${params.length}`);
+  }
+  if (typeQ) {
+    params.push(`%${typeQ}%`);
+    where.push(`coalesce(mi.material_type, '') ilike $${params.length}`);
+  }
+  if (size1Q) {
+    params.push(`%${size1Q}%`);
+    where.push(`coalesce(mi.size_1, '') ilike $${params.length}`);
+  }
+  if (size2Q) {
+    params.push(`%${size2Q}%`);
+    where.push(`coalesce(mi.size_2, '') ilike $${params.length}`);
   }
   if (specId > 0) {
     params.push(specId);
@@ -8534,6 +8580,10 @@ app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("i
   </tr>`).join("");
   const returnParams = new URLSearchParams();
   if (q) returnParams.set("q", q);
+  if (descriptionQ) returnParams.set("description", descriptionQ);
+  if (typeQ) returnParams.set("type", typeQ);
+  if (size1Q) returnParams.set("size_1", size1Q);
+  if (size2Q) returnParams.set("size_2", size2Q);
   if (specId > 0) returnParams.set("spec_id", String(specId));
   const returnHref = `/items${returnParams.toString() ? `?${returnParams.toString()}` : ""}`;
   res.send(layout("Bulk Edit Items", `
@@ -8546,6 +8596,10 @@ app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("i
     </div>
     <form method="post" action="/items/bulk-edit" class="stack">
       <input type="hidden" name="return_q" value="${escAttr(q)}" />
+      <input type="hidden" name="return_description" value="${escAttr(descriptionQ)}" />
+      <input type="hidden" name="return_type" value="${escAttr(typeQ)}" />
+      <input type="hidden" name="return_size_1" value="${escAttr(size1Q)}" />
+      <input type="hidden" name="return_size_2" value="${escAttr(size2Q)}" />
       <input type="hidden" name="return_spec_id" value="${escAttr(specId > 0 ? String(specId) : "")}" />
       <div class="card scroll">
         <table class="data-grid">
@@ -8605,8 +8659,16 @@ app.post("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("
   });
   const returnParams = new URLSearchParams();
   const returnQ = String(req.body.return_q || "").trim();
+  const returnDescription = String(req.body.return_description || "").trim();
+  const returnType = String(req.body.return_type || "").trim();
+  const returnSize1 = String(req.body.return_size_1 || "").trim();
+  const returnSize2 = String(req.body.return_size_2 || "").trim();
   const returnSpecId = Number(req.body.return_spec_id || 0);
   if (returnQ) returnParams.set("q", returnQ);
+  if (returnDescription) returnParams.set("description", returnDescription);
+  if (returnType) returnParams.set("type", returnType);
+  if (returnSize1) returnParams.set("size_1", returnSize1);
+  if (returnSize2) returnParams.set("size_2", returnSize2);
   if (returnSpecId > 0) returnParams.set("spec_id", String(returnSpecId));
   res.redirect(`/items${returnParams.toString() ? `?${returnParams.toString()}` : ""}`);
 }));
