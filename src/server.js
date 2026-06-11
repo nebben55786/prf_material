@@ -5489,6 +5489,10 @@ function receiptAffectsInventorySql(alias = "r") {
   return `upper(coalesce(${alias}.osd_status, 'OK')) in ('OK', 'OVERAGE', 'SHORTAGE', 'BACKORDER')`;
 }
 
+function receiptStatusAffectsInventory(status) {
+  return ["OK", "OVERAGE", "SHORTAGE", "BACKORDER"].includes(String(status || "OK").trim().toUpperCase());
+}
+
 function poLineReceivedQtySql(alias = "pl") {
   return `coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = ${alias}.id), 0)`;
 }
@@ -18190,6 +18194,7 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
   const skipped = Number.parseInt(String(req.query.skipped || ""), 10);
   const rows = (await query(`
     select m.id, m.discipline, m.mrr_number, m.vendor_name, coalesce(po.po_no, m.po_number) as po_number,
+           coalesce(m.status, 'ACTIVE') as status,
            m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number
     from mrr_logs m
     left join purchase_orders po on po.id = m.app_po_id
@@ -18198,8 +18203,10 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
     order by m.id desc
     limit 200
   `, q ? [jobId, `%${q}%`] : [jobId])).rows;
-  const tableRows = rows.map((row) => `<tr>
-    <td>${esc(row.mrr_number)}</td>
+  const tableRows = rows.map((row) => {
+    const isReversed = String(row.status || "").toUpperCase() === "REVERSED";
+    return `<tr>
+    <td style="min-width:120px;white-space:nowrap;">${esc(row.mrr_number)}${isReversed ? `<div style="margin-top:4px;"><span class="chip">Reversed</span></div>` : ""}</td>
     <td>${esc(row.discipline)}</td>
     <td>${esc(row.vendor_name)}</td>
     <td>${esc(row.po_number)}</td>
@@ -18209,8 +18216,9 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
     <td>${esc(row.received_by)}</td>
     <td>${esc(row.load_number)}</td>
     <td>${esc(row.opi_number)}</td>
-    <td><div class="actions"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
-  </tr>`).join("");
+    <td style="min-width:275px;"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a>${isReversed ? "" : `<form method="post" action="/material-logs/mrr/${row.id}/reverse" style="display:inline;" onsubmit="return confirm('Reverse MRR ${escAttr(row.mrr_number)}? This will subtract its received quantities from inventory and PO received totals.');"><button type="submit" class="btn btn-danger">Reverse</button></form>`}</div></td>
+  </tr>`;
+  }).join("");
   res.send(layout("MRR Log", `
     <h1>MRR Log</h1>
     ${Number.isFinite(imported) && imported >= 0 ? `
@@ -18232,6 +18240,108 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
     </div>
   `, req.user));
 });
+
+app.post("/material-logs/mrr/:id/reverse", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const mrrId = Number(req.params.id);
+  await withTransaction(async (client) => {
+    const mrr = (await client.query(`
+      select id, mrr_number, coalesce(status, 'ACTIVE') as status
+      from mrr_logs
+      where id = $1 and job_id = $2
+      for update
+    `, [mrrId, jobId])).rows[0];
+    if (!mrr) throw new Error("MRR log row not found.");
+    if (String(mrr.status || "").toUpperCase() === "REVERSED") {
+      throw new Error(`${mrr.mrr_number} has already been reversed.`);
+    }
+
+    const receiptRows = (await client.query(`
+      select
+        r.id,
+        r.po_line_id,
+        r.qty_received,
+        r.warehouse,
+        r.location,
+        coalesce(r.osd_status, 'OK') as osd_status,
+        coalesce(r.osd_notes, '') as osd_notes,
+        pl.po_id,
+        coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+        coalesce(pl.size_1, '') as size_1,
+        coalesce(pl.size_2, '') as size_2,
+        coalesce(pl.thk_1, '') as thk_1,
+        coalesce(pl.thk_2, '') as thk_2
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join material_items mi on mi.id = pl.material_item_id
+      where r.mrr_log_id = $1
+        and r.job_id = $2
+        and r.qty_received > 0
+      order by r.id
+    `, [mrrId, jobId])).rows;
+
+    const qtyToReverseByKey = new Map();
+    for (const row of receiptRows) {
+      if (!receiptStatusAffectsInventory(row.osd_status)) continue;
+      const key = buildInventoryIssueKey(row);
+      qtyToReverseByKey.set(key, parseQtyValue(qtyToReverseByKey.get(key) || 0) + parseQtyValue(row.qty_received || 0));
+    }
+
+    if (qtyToReverseByKey.size > 0) {
+      const availableMap = await getAvailableInventoryTotalsMap(client, jobId);
+      for (const [key, qtyToReverse] of qtyToReverseByKey.entries()) {
+        const availableQty = parseQtyValue(availableMap.get(key) || 0);
+        if (availableQty + 0.0001 < qtyToReverse) {
+          const parts = JSON.parse(key);
+          throw new Error(`Cannot reverse ${mrr.mrr_number}. Item ${parts.item_code} only has ${formatQtyDisplay(availableQty)} available, but this MRR would remove ${formatQtyDisplay(qtyToReverse)}. Return or unissue material first.`);
+        }
+      }
+    }
+
+    const poIds = new Set();
+    for (const row of receiptRows) {
+      if (row.po_id) poIds.add(Number(row.po_id));
+      await client.query(`
+        insert into receipts (job_id, po_line_id, mrr_log_id, qty_received, warehouse, location, osd_status, osd_notes)
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
+      `, [
+        jobId,
+        row.po_line_id,
+        mrrId,
+        -Math.abs(parseQtyValue(row.qty_received || 0)),
+        row.warehouse || "",
+        row.location || "",
+        row.osd_status || "OK",
+        [`Reversal of receipt ${row.id}`, row.osd_notes || ""].filter(Boolean).join(" | ")
+      ]);
+    }
+
+    await client.query(`
+      update mrr_logs
+      set status = 'REVERSED',
+          reversed_at = now(),
+          reversed_by = $3,
+          notes = trim(both from concat_ws(E'\n', nullif(notes, ''), $4)),
+          updated_at = now()
+      where id = $1 and job_id = $2
+    `, [mrrId, jobId, req.user.id, `Reversed on ${new Date().toISOString()} by ${req.user.username || req.user.name || "user"}.`]);
+
+    await client.query(`
+      update material_receiving_logs
+      set received_status = 'REVERSED',
+          comments = trim(both from concat_ws(' | ', nullif(comments, ''), $3)),
+          updated_at = now()
+      where job_id = $1
+        and lower(trim(coalesce(mrr_number, ''))) = lower(trim($2))
+    `, [jobId, mrr.mrr_number, "MRR reversed in app"]);
+
+    for (const poId of poIds) {
+      await recalcPoStatus(client, poId);
+    }
+    await auditLog(client, req.user.id, "reverse", "mrr_log", mrrId, `${mrr.mrr_number};receipts=${receiptRows.length}`);
+  });
+  res.redirect("/material-logs/mrr");
+}));
 
 app.get("/material-logs/mrr/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);

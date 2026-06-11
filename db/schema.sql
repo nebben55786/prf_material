@@ -785,6 +785,9 @@ create table if not exists osd_logs (
 );
 
 alter table mrr_logs add column if not exists app_po_id bigint references purchase_orders(id) on delete set null;
+alter table mrr_logs add column if not exists status text not null default 'ACTIVE';
+alter table mrr_logs add column if not exists reversed_at timestamptz;
+alter table mrr_logs add column if not exists reversed_by bigint references users(id);
 
 alter table receipts add column if not exists mrr_log_id bigint references mrr_logs(id) on delete set null;
 alter table osd_logs add column if not exists osd_number text not null default '';
