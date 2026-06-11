@@ -19708,10 +19708,9 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR log row not found.</h3></div>`, req.user));
     return;
   }
-  const [disciplines, vendors, pos, receivers, appPos, poReceiptLines, manualLines] = await Promise.all([
+  const [disciplines, vendors, receivers, appPos, poReceiptLines, manualLines] = await Promise.all([
       getMaterialLogLookupOptions("discipline", jobId),
       getMaterialLogLookupOptions("vendor_name", jobId),
-      getMaterialLogLookupOptions("po_number", jobId),
       getMaterialLogLookupOptions("received_by", jobId),
       getAppPurchaseOrderOptions(jobId),
       query(`
@@ -19790,7 +19789,6 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
           <div><label>Discipline</label><select name="discipline">${optionList(disciplines, row.discipline, "Select discipline")}</select></div>
           <div><label>Vendor</label><div class="inline-field"><select name="vendor_name">${optionList(vendors, row.vendor_name, "Select vendor")}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
           <div><label>App PO</label><div class="inline-field"><select name="app_po_id">${appPoOptions}</select><a class="btn btn-secondary" href="/po/new">Add PO</a></div></div>
-          <div><label>Legacy PO Number</label><select name="po_number">${optionList(pos, row.po_number, "Select legacy PO")}</select></div>
           <div><label>Pick Ticket</label><input name="pick_ticket" value="${esc(row.pick_ticket)}" /></div>
           <div><label>Received Date</label><input type="date" name="received_date" value="${esc(row.received_date)}" /></div>
           <div><label>Received By</label><div class="inline-field"><select name="received_by">${optionList(receivers, row.received_by, "Select received by")}</select><a class="btn btn-secondary" href="/material-logs/received-by/new">Add Person</a></div></div>
@@ -19817,7 +19815,7 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requireP
     const requestedMrrNumber = String(req.body.mrr_number || "").trim();
     if (!requestedMrrNumber) throw new Error("MRR Number is required.");
     const currentMrr = (await client.query(`
-      select id, mrr_number, opi_number
+      select id, mrr_number, opi_number, po_number
       from mrr_logs
       where id = $1 and job_id = $2
       for update
@@ -19838,7 +19836,7 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requireP
     const linkedPo = appPoId
       ? (await client.query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [appPoId, jobId])).rows[0]
       : null;
-    const effectivePoNumber = linkedPo?.po_no || req.body.po_number?.trim() || "";
+    const effectivePoNumber = linkedPo?.po_no || currentMrr.po_number || "";
     await client.query(`
       update mrr_logs
       set mrr_number = $2, discipline = $3, vendor_name = $4, app_po_id = $5, po_number = $6, pick_ticket = $7, material_description = $8,
