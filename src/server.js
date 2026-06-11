@@ -3149,14 +3149,7 @@ function materialSpecDisplaySql(alias = "ms") {
 }
 
 function formatMaterialSpecLabel(spec) {
-  const materialSpecification = textValue(spec?.material_specification || spec?.name);
-  const parts = [
-    textValue(spec?.service_code),
-    textValue(spec?.service_description),
-    materialSpecification,
-    textValue(spec?.material)
-  ].filter(Boolean);
-  return parts.length ? parts.join(" - ") : materialSpecification;
+  return textValue(spec?.material_specification || spec?.name);
 }
 
 function parseSpecList(value) {
