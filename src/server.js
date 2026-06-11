@@ -1970,9 +1970,12 @@ function layout(title, body, user) {
         if (!rowsMissingCode.length) {
           return true;
         }
-        window.alert("Item Code is required and must exist in Item Master.");
-        rowsMissingCode[0].focus();
-        return false;
+        const shouldContinue = window.confirm("No item codes, Do you want to continue?");
+        if (!shouldContinue) {
+          rowsMissingCode[0].focus();
+          return false;
+        }
+        return true;
       }
       document.addEventListener("DOMContentLoaded", () => {
         attachPasswordValidation("new-user-form", "password", "new-user-password-error");
@@ -3410,6 +3413,18 @@ async function syncMaterialItemSpecs(client, materialItemId, jobId, specNames = 
   }
 }
 
+async function addMaterialItemSpecs(client, materialItemId, jobId, specNames = []) {
+  const specs = parseSpecList(specNames);
+  for (const specName of specs) {
+    const spec = await ensureMaterialSpec(client, jobId, specName);
+    if (!spec) continue;
+    await client.query(
+      "insert into material_item_specs (job_id, material_item_id, spec_id) values ($1, $2, $3) on conflict do nothing",
+      [jobId, materialItemId, spec.id]
+    );
+  }
+}
+
 async function upsertMaterialMasterItem(client, row, jobId) {
   const normalized = normalizeMaterialItemImportRow(row);
   const presentFields = normalized.__presentFields || {};
@@ -3479,6 +3494,61 @@ async function upsertMaterialMasterItem(client, row, jobId) {
     await syncMaterialItemSpecs(client, itemId, jobId, normalized.specs);
   }
   return { status, id: itemId, item: normalized };
+}
+
+async function generateRfqItemCode(client, jobId, reservedCodes = new Set()) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const code = String(Math.floor(10000 + Math.random() * 90000));
+    const normalizedCode = code.toLowerCase();
+    if (reservedCodes.has(normalizedCode)) continue;
+    const existing = (await client.query(
+      "select 1 from material_items where job_id = $1 and lower(item_code) = lower($2) limit 1",
+      [jobId, code]
+    )).rows[0];
+    if (!existing) {
+      reservedCodes.add(normalizedCode);
+      return code;
+    }
+  }
+  throw new Error("Could not generate a unique item code.");
+}
+
+async function ensureRfqMaterialItem(client, row, jobId, reservedCodes = new Set()) {
+  const preparedRow = { ...row };
+  let itemCode = String(preparedRow.item_code || "").trim();
+  if (!itemCode) {
+    itemCode = await generateRfqItemCode(client, jobId, reservedCodes);
+    preparedRow.item_code = itemCode;
+  } else {
+    reservedCodes.add(itemCode.toLowerCase());
+  }
+
+  const existing = (await client.query(
+    "select id from material_items where job_id = $1 and lower(item_code) = lower($2) limit 1",
+    [jobId, itemCode]
+  )).rows[0];
+  if (existing) {
+    await addMaterialItemSpecs(client, existing.id, jobId, preparedRow.spec || preparedRow.specs);
+    return preparedRow;
+  }
+
+  const masterResult = await upsertMaterialMasterItem(client, {
+    item_code: itemCode,
+    description: preparedRow.description,
+    material_type: preparedRow.material_type,
+    uom: preparedRow.uom,
+    specs: preparedRow.spec || preparedRow.specs,
+    commodity_code: preparedRow.commodity_code,
+    size_1: preparedRow.size_1,
+    size_2: preparedRow.size_2,
+    thk_1: preparedRow.thk_1,
+    thk_2: preparedRow.thk_2,
+    notes: preparedRow.notes
+  }, jobId);
+  if (masterResult.status === "skipped") {
+    return { ...preparedRow, __rfqMaterialError: masterResult };
+  }
+  return preparedRow;
 }
 
 async function updateMaterialMasterItemById(client, materialItemId, row, jobId) {
@@ -3635,13 +3705,24 @@ async function findOrCreateVendorByName(client, vendorName, jobId) {
   return insert.rows[0].id;
 }
 
-async function upsertRfqItemRow(client, rfqId, row, jobId) {
-  const itemCode = String(row.item_code || "").trim();
-  const requestedLine = String(row.po_line || row.line_no || row.line || "").trim();
+async function upsertRfqItemRow(client, rfqId, row, jobId, reservedCodes = new Set()) {
+  const initialItemCode = String(row.item_code || "").trim();
   const qty = parseQtyValue(row.qty);
-  const requestedSpec = normalizeSpecName(row.spec);
-  if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
   if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
+  if (!initialItemCode && !String(row.description || "").trim()) {
+    return { status: "skipped", errorCode: "missing_description", message: "Description is required when item code is blank." };
+  }
+  const preparedRow = await ensureRfqMaterialItem(client, row, jobId, reservedCodes);
+  if (preparedRow.__rfqMaterialError) {
+    return {
+      status: "skipped",
+      errorCode: preparedRow.__rfqMaterialError.errorCode,
+      message: preparedRow.__rfqMaterialError.message
+    };
+  }
+  const itemCode = String(preparedRow.item_code || "").trim();
+  const requestedLine = String(row.po_line || row.line_no || row.line || "").trim();
+  const requestedSpec = normalizeSpecName(preparedRow.spec);
   const materialLookup = await getMaterialItemForUse(client, itemCode, jobId, requestedSpec);
   if (materialLookup.errorCode) {
     return { status: "skipped", errorCode: materialLookup.errorCode, message: materialLookup.message };
@@ -3673,7 +3754,7 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
           notes = $11,
           updated_at = now()
       where id = $1
-    `, [existingItem.rows[0].id, poLine, ...materialItemSnapshotParams(item), resolvedSpec, item.commodity_code || "", row.tag_number || "", qty, row.notes || ""]);
+    `, [existingItem.rows[0].id, poLine, ...materialItemSnapshotParams(item), resolvedSpec, item.commodity_code || "", preparedRow.tag_number || "", qty, preparedRow.notes || ""]);
     return { status: "updated", itemId: Number(existingItem.rows[0].id) };
   }
   const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
@@ -3684,7 +3765,7 @@ async function upsertRfqItemRow(client, rfqId, row, jobId) {
     )
     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
     returning id
-  `, [jobId, rfqId, materialItemId, ...materialItemSnapshotParams(item), poLine, resolvedSpec, item.commodity_code || "", row.tag_number || "", item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", qty, row.notes || ""]);
+  `, [jobId, rfqId, materialItemId, ...materialItemSnapshotParams(item), poLine, resolvedSpec, item.commodity_code || "", preparedRow.tag_number || "", item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", qty, preparedRow.notes || ""]);
   return { status: "inserted", itemId: Number(insert.rows[0].id) };
 }
 
@@ -14924,7 +15005,7 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
   res.send(layout(`Add New RFQ Items`, `
     <h1>Add New RFQ Items</h1>
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
-    <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Item codes must already exist in Item Master; master description, UOM, type, and dimensions are used when the rows save.</p>
+    <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Leave item code blank to generate a unique 5-digit code; new item codes are added to Item Master with the entered description, UOM, type, specs, and dimensions.</p>
     <style>
       #rfq-grid-form-${rfqId} table td { padding: 0; }
       #rfq-grid-form-${rfqId} table td input {
@@ -15070,8 +15151,9 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
       let insertedCount = 0;
       let updatedCount = 0;
       let skippedCount = 0;
+      const reservedItemCodes = new Set();
       for (let index = 0; index < rowsToImport.length; index += 1) {
-        const result = await upsertRfqItemRow(client, rfqId, rowsToImport[index], jobId);
+        const result = await upsertRfqItemRow(client, rfqId, rowsToImport[index], jobId, reservedItemCodes);
         if (result.status === "inserted") insertedCount += 1;
         else if (result.status === "updated") updatedCount += 1;
         else {
@@ -15199,10 +15281,11 @@ app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermiss
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
+    const reservedItemCodes = new Set();
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const rowNumber = index + 2;
-      const result = await upsertRfqItemRow(client, rfqId, row, jobId);
+      const result = await upsertRfqItemRow(client, rfqId, row, jobId, reservedItemCodes);
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
@@ -15283,8 +15366,9 @@ app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermissio
     let insertedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
+    const reservedItemCodes = new Set();
     for (let index = 0; index < rows.length; index += 1) {
-      const result = await upsertRfqItemRow(client, rfqId, rows[index], currentJobId(req));
+      const result = await upsertRfqItemRow(client, rfqId, rows[index], currentJobId(req), reservedItemCodes);
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
