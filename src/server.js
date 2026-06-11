@@ -2010,6 +2010,73 @@ function layout(title, body, user) {
   </html>`;
 }
 
+function vendorLayout(title, body, vendorUser = null) {
+  const vendorName = vendorUser?.vendor_name || "Vendor Portal";
+  return `<!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${esc(title)}</title>
+    <link rel="icon" href="/public/prf-logo.png" type="image/png" />
+    <style>
+      :root { --bg:#dfe3e8; --panel:#fff; --ink:#16212b; --muted:#4d5b69; --line:#9ca8b3; --line-strong:#798693; --brand:#2d5d87; --brand-2:#4b5966; }
+      * { box-sizing: border-box; }
+      body { margin:0; font-family:"Segoe UI", Tahoma, Verdana, sans-serif; color:var(--ink); background:var(--bg); }
+      .shell { max-width:1500px; margin:0 auto; padding:12px; }
+      .topbar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:10px; padding:10px 12px; background:linear-gradient(180deg,#cfd6de 0%,#bcc6cf 100%); border:1px solid var(--line-strong); }
+      .brand-wrap { display:flex; align-items:center; gap:10px; min-width:0; }
+      .brand-logo { width:74px; height:46px; object-fit:contain; flex-shrink:0; }
+      .brand { font-size:22px; font-weight:700; }
+      .userline { color:var(--muted); font-size:12px; }
+      nav { display:flex; gap:6px; flex-wrap:wrap; }
+      nav a { color:#12324b; text-decoration:none; font-weight:600; padding:6px 9px; border:1px solid transparent; border-radius:2px; }
+      nav a:hover { background:#edf1f4; border-color:var(--line); }
+      .card { background:var(--panel); border:1px solid var(--line-strong); border-radius:2px; padding:12px; margin-bottom:10px; }
+      h1, h2, h3 { margin:0 0 12px; }
+      h1 { font-size:24px; }
+      h3 { font-size:16px; text-transform:uppercase; letter-spacing:.03em; }
+      .muted { color:var(--muted); font-size:12px; }
+      .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+      .grid-3 { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+      label { display:block; font-size:12px; font-weight:700; margin-bottom:3px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+      input, select { width:100%; padding:7px 8px; border-radius:2px; border:1px solid var(--line-strong); background:#fff; color:var(--ink); font:inherit; }
+      button, .btn { display:inline-flex; align-items:center; justify-content:center; min-width:92px; height:32px; padding:0 12px; border-radius:2px; border:1px solid rgba(0,0,0,.15); font:inherit; font-weight:700; text-decoration:none; cursor:pointer; }
+      button, .btn-primary { background:linear-gradient(180deg,#4278a9 0%,var(--brand) 100%); color:white; }
+      .btn-secondary { background:linear-gradient(180deg,#6a7681 0%,var(--brand-2) 100%); color:white; }
+      .actions { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+      .scroll { overflow-x:auto; }
+      table { width:100%; border-collapse:collapse; font-size:12px; background:#fff; }
+      th, td { padding:6px 7px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+      th { color:#223240; font-size:11px; text-transform:uppercase; letter-spacing:.04em; background:linear-gradient(180deg,#e5eaef 0%,#d3dbe3 100%); }
+      tr:nth-child(even) td { background:#f7f9fb; }
+      .chip { display:inline-block; padding:3px 8px; border-radius:2px; background:#e3ebf2; border:1px solid #b6c4d1; color:#264b69; font-weight:700; white-space:nowrap; }
+      .chip-pending { background:#fff3b0; border-color:#d4b83d; color:#665200; }
+      .chip-partial { background:#d9ecff; border-color:#6aa5d9; color:#184f86; }
+      .chip-received { background:#dff0d8; border-color:#72a864; color:#275f25; }
+      .error { border-color:#d0a19b; background:#f8ecea; color:#a23622; }
+      .stack { display:grid; gap:10px; }
+      @media (max-width:900px) { .grid, .grid-3 { grid-template-columns:1fr; } .topbar { flex-direction:column; align-items:flex-start; } }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="topbar">
+        <div class="brand-wrap">
+          <img class="brand-logo" src="/public/prf-logo.png" alt="Performance Contractors" />
+          <div>
+            <div class="brand">${esc(vendorName)}</div>
+            <div class="userline">${vendorUser ? `${esc(vendorUser.name || vendorUser.email)} | Vendor Portal` : "Vendor Portal"}</div>
+          </div>
+        </div>
+        ${vendorUser ? `<nav><a href="/vendor/orders">Orders</a><a href="/vendor/logout">Logout</a></nav>` : ""}
+      </div>
+      ${body}
+    </div>
+  </body>
+  </html>`;
+}
+
 function normalizeCategories(input) {
   const values = Array.isArray(input) ? input : input ? [input] : [];
   return vendorCategories.filter((category) => values.includes(category)).join(",");
@@ -2052,6 +2119,15 @@ function rfqRowHasAnyEnteredValues(row) {
 
 function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function validatePortalPassword(password) {
+  const value = String(password || "");
+  if (value.length < 10) return "Password must be at least 10 characters.";
+  if (!/[A-Z]/.test(value)) return "Password must include an uppercase letter.";
+  if (!/[a-z]/.test(value)) return "Password must include a lowercase letter.";
+  if (!/[0-9]/.test(value)) return "Password must include a number.";
+  return "";
 }
 
 function nextSortDir(currentSort, currentDir, column) {
@@ -5324,6 +5400,25 @@ function poLineAccountedQtySql(alias = "pl") {
   return `(${poLineReceivedQtySql(alias)} + ${poLineShortOsdQtySql(alias)})`;
 }
 
+function renderVendorOrderStatusChip(status) {
+  const normalized = String(status || "PENDING").trim().toUpperCase();
+  const labelMap = {
+    PENDING: "Pending",
+    PARTIAL: "Partially Received",
+    RECEIVED: "Received",
+    CLOSED: "Closed",
+    CANCELLED: "Cancelled"
+  };
+  const classMap = {
+    PENDING: "chip-pending",
+    PARTIAL: "chip-partial",
+    RECEIVED: "chip-received",
+    CLOSED: "",
+    CANCELLED: ""
+  };
+  return `<span class="chip ${classMap[normalized] || ""}">${esc(labelMap[normalized] || normalized)}</span>`;
+}
+
 function collectSelectedRequisitionLineQtys(body = {}) {
   const selectedLineQtys = new Map();
   try {
@@ -5745,6 +5840,11 @@ function setSessionCookie(res, payload) {
   res.cookie("session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
 }
 
+function setVendorSessionCookie(res, payload) {
+  const token = signSession({ ...payload, scope: "vendor" });
+  res.cookie("vendor_session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
+}
+
 function buildSessionPayload(user, jobId = null) {
   return {
     id: Number(user.id),
@@ -5775,6 +5875,12 @@ async function resolveJobContextForUser(user, client = null, requestedJobId = nu
 function currentUser(req) {
   const sessionToken = req?.cookies?.session_token;
   return sessionToken ? readSession(sessionToken) : null;
+}
+
+function currentVendorUser(req) {
+  const sessionToken = req?.cookies?.vendor_session_token;
+  const session = sessionToken ? readSession(sessionToken) : null;
+  return session?.scope === "vendor" ? session : null;
 }
 
 const authContextCache = new Map();
@@ -5857,6 +5963,33 @@ const requireAuth = asyncHandler(async (req, res, next) => {
   };
   setCachedAuthContext(sessionUser, authUser);
   req.user = cloneAuthContextUser(authUser);
+  next();
+});
+
+const requireVendorAuth = asyncHandler(async (req, res, next) => {
+  const sessionVendor = currentVendorUser(req);
+  if (!sessionVendor) {
+    res.redirect("/vendor/login");
+    return;
+  }
+  const vendorUser = (await query(`
+    select vu.id, vu.vendor_id, vu.name, vu.email, vu.is_active, v.name as vendor_name, v.is_active as vendor_is_active
+    from vendor_users vu
+    join vendors v on v.id = vu.vendor_id
+    where vu.id = $1
+  `, [sessionVendor.id])).rows[0];
+  if (!vendorUser || !vendorUser.is_active || !vendorUser.vendor_is_active) {
+    res.clearCookie("vendor_session_token", { path: "/" });
+    res.redirect("/vendor/login");
+    return;
+  }
+  req.vendorUser = {
+    id: Number(vendorUser.id),
+    vendor_id: Number(vendorUser.vendor_id),
+    name: vendorUser.name || "",
+    email: vendorUser.email || "",
+    vendor_name: vendorUser.vendor_name || ""
+  };
   next();
 });
 
@@ -6309,6 +6442,187 @@ function loginPage(error = "", success = "") {
       </div>
     `, null);
 }
+
+function vendorLoginPage(error = "") {
+  return vendorLayout("Vendor Login", `
+    ${error ? `<div class="card error"><strong>${esc(error)}</strong></div>` : ""}
+    <div class="card">
+      <h1>Vendor Portal</h1>
+      <p class="muted">Sign in to review purchase order line status, received quantities, and remaining quantities.</p>
+      <form method="post" action="/vendor/login" class="stack">
+        <div><label>Email</label><input name="email" type="email" autocomplete="username" required /></div>
+        <div><label>Password</label><input type="password" name="password" autocomplete="current-password" required /></div>
+        <div class="actions"><button type="submit">Sign In</button></div>
+      </form>
+    </div>
+  `);
+}
+
+app.get("/vendor", (req, res) => {
+  res.redirect(currentVendorUser(req) ? "/vendor/orders" : "/vendor/login");
+});
+
+app.get("/vendor/login", (req, res) => {
+  if (currentVendorUser(req)) {
+    res.redirect("/vendor/orders");
+    return;
+  }
+  const error = String(req.query.error || "").trim() === "invalid" ? "Invalid vendor email or password." : "";
+  res.send(vendorLoginPage(error));
+});
+
+app.post("/vendor/login", asyncHandler(async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  const password = String(req.body.password || "");
+  const vendorUser = (await query(`
+    select vu.id, vu.vendor_id, vu.name, vu.email, vu.password_hash, vu.is_active,
+           v.name as vendor_name, v.is_active as vendor_is_active
+    from vendor_users vu
+    join vendors v on v.id = vu.vendor_id
+    where lower(vu.email) = lower($1)
+  `, [email])).rows[0];
+  const validLogin = vendorUser
+    && vendorUser.is_active
+    && vendorUser.vendor_is_active
+    && await bcrypt.compare(password, vendorUser.password_hash);
+  if (!validLogin) {
+    res.redirect("/vendor/login?error=invalid");
+    return;
+  }
+  await query("update vendor_users set last_login_at = now(), updated_at = now() where id = $1", [vendorUser.id]);
+  setVendorSessionCookie(res, {
+    id: Number(vendorUser.id),
+    vendor_id: Number(vendorUser.vendor_id),
+    email: vendorUser.email
+  });
+  res.redirect("/vendor/orders");
+}));
+
+app.get("/vendor/logout", (req, res) => {
+  res.clearCookie("vendor_session_token", { path: "/" });
+  res.redirect("/vendor/login");
+});
+
+app.get("/vendor/orders", requireVendorAuth, asyncHandler(async (req, res) => {
+  const search = String(req.query.q || "").trim();
+  const status = String(req.query.status || "").trim().toUpperCase();
+  const params = [req.vendorUser.vendor_id];
+  const outerWhere = [];
+  if (search) {
+    params.push(`%${search}%`);
+    const idx = params.length;
+    outerWhere.push(`(
+      po_no ilike $${idx}
+      or rfq_no ilike $${idx}
+      or rfq_description ilike $${idx}
+      or client_request_no ilike $${idx}
+      or item_code ilike $${idx}
+      or description ilike $${idx}
+      or job_number ilike $${idx}
+    )`);
+  }
+  if (status) {
+    params.push(status);
+    outerWhere.push(`line_status = $${params.length}`);
+  }
+  const outerWhereSql = outerWhere.length ? `where ${outerWhere.join(" and ")}` : "";
+  const lines = (await query(`
+    with vendor_lines as (
+      select
+        pl.id,
+        coalesce(j.job_number, '') as job_number,
+        coalesce(r.rfq_no, '') as rfq_no,
+        coalesce(r.project_name, '') as rfq_description,
+        coalesce(r.client_request_no, '') as client_request_no,
+        po.po_no,
+        po.status as po_status,
+        coalesce(pl.po_line, '') as po_line,
+        coalesce(pl.item_code_snapshot, mi.item_code, '') as item_code,
+        coalesce(pl.description_snapshot, mi.description, '') as description,
+        coalesce(pl.uom_snapshot, mi.uom, '') as uom,
+        pl.qty_ordered,
+        ${poLineReceivedQtySql("pl")} as qty_received,
+        greatest(pl.qty_ordered - ${poLineReceivedQtySql("pl")}, 0) as qty_remaining,
+        (
+          select max(rct.received_at)
+          from receipts rct
+          where rct.po_line_id = pl.id
+        ) as last_received_at,
+        case
+          when upper(coalesce(po.status, '')) in ('CANCELLED', 'CLOSED') then upper(coalesce(po.status, ''))
+          when pl.qty_ordered > 0 and ${poLineReceivedQtySql("pl")} >= pl.qty_ordered then 'RECEIVED'
+          when ${poLineReceivedQtySql("pl")} > 0 then 'PARTIAL'
+          else 'PENDING'
+        end as line_status
+      from purchase_orders po
+      join po_lines pl on pl.po_id = po.id
+      join material_items mi on mi.id = pl.material_item_id
+      left join jobs j on j.id = po.job_id
+      left join rfqs r on r.id = po.rfq_id
+      where po.vendor_id = $1
+    )
+    select *
+    from vendor_lines
+    ${outerWhereSql}
+    order by
+      job_number,
+      po_no,
+      case when po_line ~ '^[0-9]+$' then po_line::integer end nulls last,
+      po_line,
+      id
+    limit 1000
+  `, params)).rows;
+  const totalOrdered = lines.reduce((sum, line) => sum + num(line.qty_ordered), 0);
+  const totalReceived = lines.reduce((sum, line) => sum + num(line.qty_received), 0);
+  const totalRemaining = lines.reduce((sum, line) => sum + num(line.qty_remaining), 0);
+  const rowHtml = lines.map((line) => `<tr>
+    <td>${esc(line.job_number)}</td>
+    <td>${esc(line.rfq_no)}</td>
+    <td>${esc(line.rfq_description)}</td>
+    <td>${esc(line.client_request_no)}</td>
+    <td>${esc(line.po_no)}</td>
+    <td>${esc(line.po_status)}</td>
+    <td>${esc(line.po_line)}</td>
+    <td>${esc(line.item_code)}</td>
+    <td>${esc(line.description)}</td>
+    <td>${esc(formatQtyDisplay(line.qty_ordered))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_received))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_remaining))}</td>
+    <td>${esc(line.uom)}</td>
+    <td>${esc(formatShortDate(line.last_received_at))}</td>
+    <td>${renderVendorOrderStatusChip(line.line_status)}</td>
+  </tr>`).join("");
+  res.send(vendorLayout("Vendor Orders", `
+    <h1>Order Status</h1>
+    <div class="card">
+      <form method="get" action="/vendor/orders" class="stack">
+        <div class="grid">
+          <div><label>Search</label><input name="q" value="${esc(search)}" placeholder="PO, RFQ, item, description, job" /></div>
+          <div><label>Status</label><select name="status">
+            <option value="" ${!status ? "selected" : ""}>All Statuses</option>
+            <option value="PENDING" ${status === "PENDING" ? "selected" : ""}>Pending</option>
+            <option value="PARTIAL" ${status === "PARTIAL" ? "selected" : ""}>Partially Received</option>
+            <option value="RECEIVED" ${status === "RECEIVED" ? "selected" : ""}>Received</option>
+            <option value="CLOSED" ${status === "CLOSED" ? "selected" : ""}>Closed</option>
+            <option value="CANCELLED" ${status === "CANCELLED" ? "selected" : ""}>Cancelled</option>
+          </select></div>
+        </div>
+        <div class="actions"><button type="submit">Filter Orders</button><a class="btn btn-secondary" href="/vendor/orders">Clear</a><span class="muted">${lines.length} line(s), max 1000 shown</span></div>
+      </form>
+    </div>
+    <div class="card grid-3">
+      <div><div class="muted">Ordered</div><h2>${esc(formatQtyDisplay(totalOrdered))}</h2></div>
+      <div><div class="muted">Received</div><h2>${esc(formatQtyDisplay(totalReceived))}</h2></div>
+      <div><div class="muted">Remaining</div><h2>${esc(formatQtyDisplay(totalRemaining))}</h2></div>
+    </div>
+    <div class="card scroll">
+      <table>
+        <tr><th>Job</th><th>RFQ</th><th>RFQ Description</th><th>Client Request #</th><th>PO #</th><th>PO Status</th><th>PO Line</th><th>Item</th><th>Description</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>UOM</th><th>Last Received</th><th>Status</th></tr>
+        ${rowHtml || `<tr><td colspan="15" class="muted">No order lines match the current filter.</td></tr>`}
+      </table>
+    </div>
+  `, req.vendorUser));
+}));
 
 app.get("/login", (req, res) => {
   const sessionUser = currentUser(req);
@@ -12684,9 +12998,10 @@ app.post("/vendors/merge", requireAuth, requireJobContext, requirePermission("ve
 });
 
 app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
-  const [vendorRes, contactsRes] = await Promise.all([
+  const [vendorRes, contactsRes, vendorUsersRes] = await Promise.all([
     query("select * from vendors where id = $1", [req.params.id]),
-    query("select * from vendor_contacts where vendor_id = $1 order by is_primary desc, contact_name asc, id asc", [req.params.id])
+    query("select * from vendor_contacts where vendor_id = $1 order by is_primary desc, contact_name asc, id asc", [req.params.id]),
+    query("select id, name, email, is_active, last_login_at, created_at from vendor_users where vendor_id = $1 order by is_active desc, lower(email) asc", [req.params.id])
   ]);
   const vendor = vendorRes.rows[0];
   if (!vendor) {
@@ -12694,6 +13009,7 @@ app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("
     return;
   }
   const contacts = contactsRes.rows;
+  const vendorUsers = vendorUsersRes.rows;
   const selected = new Set((vendor.categories || "").split(",").filter(Boolean));
   const checks = vendorCategories.map((category) => `<label class="check-option"><input type="checkbox" name="categories" value="${esc(category)}" ${selected.has(category) ? "checked" : ""}/><span>${esc(category)}</span></label>`).join("");
   const contactRows = contacts.map((contact) => `<tr>
@@ -12708,6 +13024,27 @@ app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("
       </div>
     </td>
   </tr>`).join("");
+  const vendorUserRows = vendorUsers.map((portalUser) => {
+    const activeAction = portalUser.is_active
+      ? `<form method="post" action="/vendors/${vendor.id}/portal-users/${portalUser.id}/deactivate"><button type="submit" class="btn btn-danger">Deactivate</button></form>`
+      : `<form method="post" action="/vendors/${vendor.id}/portal-users/${portalUser.id}/activate"><button type="submit" class="btn btn-primary">Activate</button></form>`;
+    return `<tr>
+      <td>${esc(portalUser.name || "")}</td>
+      <td>${esc(portalUser.email || "")}</td>
+      <td>${portalUser.is_active ? `<span class="chip chip-received">Active</span>` : `<span class="chip">Inactive</span>`}</td>
+      <td>${esc(formatShortDateTime(portalUser.last_login_at))}</td>
+      <td>
+        <div class="stack">
+          <form id="vendor-portal-password-${portalUser.id}" method="post" action="/vendors/${vendor.id}/portal-users/${portalUser.id}/password" class="actions" data-password-form="edit-user" data-password-message-id="vendor-portal-password-message-${portalUser.id}">
+            <input name="password" type="password" placeholder="New password" autocomplete="new-password" />
+            <button type="submit" class="btn btn-secondary">Reset Password</button>
+            <div id="vendor-portal-password-message-${portalUser.id}" class="muted" style="color:#a23622;"></div>
+          </form>
+          <div class="actions">${activeAction}</div>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
   res.send(layout("Edit Vendor", `
       <h1>Edit Vendor</h1>
       <div class="card">
@@ -12741,6 +13078,19 @@ app.get("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission("
         </form>
         <div class="scroll" style="margin-top:12px;"><table><tr><th>Contact</th><th>Email</th><th>Phone</th><th>Primary</th><th>Action</th></tr>${contactRows || `<tr><td colspan="5" class="muted">No contacts yet.</td></tr>`}</table></div>
       </div>
+      <div class="card" id="portal-users">
+        <h3>Vendor Portal Users</h3>
+        <p class="muted">These users can only sign into the vendor portal and view order status for ${esc(vendor.name)}.</p>
+        <form id="vendor-portal-user-add" method="post" action="/vendors/${vendor.id}/portal-users/add" class="stack" data-password-form="edit-user" data-password-message-id="vendor-portal-add-password-message">
+          <div class="grid-3">
+            <div><label>Name</label><input name="name" /></div>
+            <div><label>Email</label><input name="email" type="email" autocomplete="username" required /></div>
+            <div><label>Temporary Password</label><input name="password" type="password" autocomplete="new-password" required /><div id="vendor-portal-add-password-message" class="muted" style="color:#a23622;"></div></div>
+          </div>
+          <div class="actions"><button type="submit">Add Portal User</button><a class="btn btn-secondary" href="/vendor/login" target="_blank" rel="noopener">Open Vendor Login</a></div>
+        </form>
+        <div class="scroll" style="margin-top:12px;"><table><tr><th>Name</th><th>Email</th><th>Status</th><th>Last Login</th><th>Actions</th></tr>${vendorUserRows || `<tr><td colspan="5" class="muted">No vendor portal users yet.</td></tr>`}</table></div>
+      </div>
     `, req.user));
 });
 
@@ -12754,6 +13104,77 @@ app.post("/vendors/:id/edit", requireAuth, requireJobContext, requirePermission(
     await auditLog(client, req.user.id, "update", "vendor", req.params.id, req.body.name?.trim() || "");
   });
   res.redirect("/vendors");
+});
+
+app.post("/vendors/:id/portal-users/add", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const vendorId = Number(req.params.id);
+  const name = String(req.body.name || "").trim();
+  const email = normalizeEmail(req.body.email);
+  const password = String(req.body.password || "");
+  const passwordError = validatePortalPassword(password);
+  if (!email) throw new Error("Email is required.");
+  if (passwordError) throw new Error(passwordError);
+  await withTransaction(async (client) => {
+    const vendor = (await client.query("select id, name from vendors where id = $1", [vendorId])).rows[0];
+    if (!vendor) throw new Error("Vendor not found.");
+    const existing = (await client.query("select id, vendor_id from vendor_users where lower(email) = lower($1)", [email])).rows[0];
+    if (existing && Number(existing.vendor_id) !== vendorId) throw new Error("That vendor portal email is already assigned to another vendor.");
+    const passwordHash = await bcrypt.hash(password, 10);
+    if (existing) {
+      await client.query(`
+        update vendor_users
+        set name = $2, password_hash = $3, is_active = true, updated_at = now()
+        where id = $1
+      `, [existing.id, name, passwordHash]);
+    } else {
+      await client.query(`
+        insert into vendor_users (vendor_id, name, email, password_hash, is_active)
+        values ($1, $2, $3, $4, true)
+      `, [vendorId, name, email, passwordHash]);
+    }
+    await auditLog(client, req.user.id, "create", "vendor_portal_user", vendorId, email);
+  });
+  res.redirect(`/vendors/${vendorId}/edit#portal-users`);
+});
+
+app.post("/vendors/:id/portal-users/:userId/password", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const vendorId = Number(req.params.id);
+  const userId = Number(req.params.userId);
+  const password = String(req.body.password || "");
+  const passwordError = validatePortalPassword(password);
+  if (passwordError) throw new Error(passwordError);
+  await withTransaction(async (client) => {
+    const portalUser = (await client.query("select id, email from vendor_users where id = $1 and vendor_id = $2", [userId, vendorId])).rows[0];
+    if (!portalUser) throw new Error("Vendor portal user not found.");
+    const passwordHash = await bcrypt.hash(password, 10);
+    await client.query("update vendor_users set password_hash = $2, updated_at = now() where id = $1", [userId, passwordHash]);
+    await auditLog(client, req.user.id, "password_reset", "vendor_portal_user", userId, portalUser.email);
+  });
+  res.redirect(`/vendors/${vendorId}/edit#portal-users`);
+});
+
+app.post("/vendors/:id/portal-users/:userId/deactivate", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const vendorId = Number(req.params.id);
+  const userId = Number(req.params.userId);
+  await withTransaction(async (client) => {
+    const portalUser = (await client.query("select id, email from vendor_users where id = $1 and vendor_id = $2", [userId, vendorId])).rows[0];
+    if (!portalUser) throw new Error("Vendor portal user not found.");
+    await client.query("update vendor_users set is_active = false, updated_at = now() where id = $1", [userId]);
+    await auditLog(client, req.user.id, "deactivate", "vendor_portal_user", userId, portalUser.email);
+  });
+  res.redirect(`/vendors/${vendorId}/edit#portal-users`);
+});
+
+app.post("/vendors/:id/portal-users/:userId/activate", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
+  const vendorId = Number(req.params.id);
+  const userId = Number(req.params.userId);
+  await withTransaction(async (client) => {
+    const portalUser = (await client.query("select id, email from vendor_users where id = $1 and vendor_id = $2", [userId, vendorId])).rows[0];
+    if (!portalUser) throw new Error("Vendor portal user not found.");
+    await client.query("update vendor_users set is_active = true, updated_at = now() where id = $1", [userId]);
+    await auditLog(client, req.user.id, "activate", "vendor_portal_user", userId, portalUser.email);
+  });
+  res.redirect(`/vendors/${vendorId}/edit#portal-users`);
 });
 
 app.post("/vendors/:id/contacts/add", requireAuth, requireJobContext, requirePermission("vendors", "edit"), async (req, res) => {
