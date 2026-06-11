@@ -18321,7 +18321,7 @@ app.post("/material-logs/mrr/:id/reverse", requireAuth, requireJobContext, requi
       set status = 'REVERSED',
           reversed_at = now(),
           reversed_by = $3,
-          notes = trim(both from concat_ws(E'\n', nullif(notes, ''), $4)),
+          notes = trim(both from concat_ws(E'\n', nullif(notes, ''), $4::text)),
           updated_at = now()
       where id = $1 and job_id = $2
     `, [mrrId, jobId, req.user.id, `Reversed on ${new Date().toISOString()} by ${req.user.username || req.user.name || "user"}.`]);
@@ -18329,7 +18329,7 @@ app.post("/material-logs/mrr/:id/reverse", requireAuth, requireJobContext, requi
     await client.query(`
       update material_receiving_logs
       set received_status = 'REVERSED',
-          comments = trim(both from concat_ws(' | ', nullif(comments, ''), $3)),
+          comments = trim(both from concat_ws(' | ', nullif(comments, ''), $3::text)),
           updated_at = now()
       where job_id = $1
         and lower(trim(coalesce(mrr_number, ''))) = lower(trim($2))
