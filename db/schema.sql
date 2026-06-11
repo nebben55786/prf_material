@@ -105,10 +105,30 @@ create table if not exists material_specs (
   job_id bigint not null,
   name text not null,
   vendor_rev text not null default '',
+  service_code text not null default '',
+  service_description text not null default '',
+  material_specification text not null default '',
+  material text not null default '',
+  rating text not null default '',
+  specific_usage_requirements text not null default '',
+  comments text not null default '',
   created_at timestamptz not null default now()
 );
 
-create unique index if not exists idx_material_specs_job_name_lower on material_specs(job_id, lower(name));
+alter table material_specs add column if not exists service_code text not null default '';
+alter table material_specs add column if not exists service_description text not null default '';
+alter table material_specs add column if not exists material_specification text not null default '';
+alter table material_specs add column if not exists material text not null default '';
+alter table material_specs add column if not exists rating text not null default '';
+alter table material_specs add column if not exists specific_usage_requirements text not null default '';
+alter table material_specs add column if not exists comments text not null default '';
+update material_specs
+set material_specification = name
+where coalesce(material_specification, '') = ''
+  and coalesce(name, '') <> '';
+drop index if exists idx_material_specs_job_name_lower;
+create unique index if not exists idx_material_specs_job_service_spec_lower
+  on material_specs(job_id, lower(service_code), lower(material_specification));
 
 create table if not exists material_item_specs (
   job_id bigint not null,
@@ -565,8 +585,8 @@ where mi.id = pl.material_item_id
     or pl.uom_snapshot is null
   );
 
-insert into material_specs (job_id, name)
-select distinct source.job_id, source.spec
+insert into material_specs (job_id, name, material_specification)
+select distinct source.job_id, source.spec, source.spec
 from (
   select bh.job_id, trim(coalesce(bl.spec, '')) as spec
   from bom_lines bl
@@ -594,7 +614,8 @@ join (
   join material_items mi2 on mi2.id = ri.material_item_id
   where trim(coalesce(ri.spec, '')) <> ''
 ) source on source.job_id = mi.job_id and lower(source.item_code) = lower(mi.item_code)
-join material_specs ms on ms.job_id = source.job_id and lower(ms.name) = lower(source.spec)
+join material_specs ms on ms.job_id = source.job_id
+  and lower(coalesce(ms.material_specification, ms.name)) = lower(source.spec)
 on conflict do nothing;
 
 update purchase_orders

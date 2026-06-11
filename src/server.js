@@ -3140,21 +3140,50 @@ function normalizeSpecName(value) {
 }
 
 function materialSpecDisplaySql(alias = "ms") {
-  return `${alias}.name || case when coalesce(${alias}.vendor_rev, '') <> '' then ' | ' || ${alias}.vendor_rev else '' end`;
+  return `coalesce(nullif(concat_ws(' - ',
+    nullif(coalesce(${alias}.service_code, ''), ''),
+    nullif(coalesce(${alias}.service_description, ''), ''),
+    nullif(coalesce(${alias}.material_specification, ${alias}.name, ''), ''),
+    nullif(coalesce(${alias}.material, ''), '')
+  ), ''), coalesce(${alias}.material_specification, ${alias}.name, ''))`;
 }
 
 function formatMaterialSpecLabel(spec) {
-  const name = textValue(spec?.name);
-  const vendorRev = textValue(spec?.vendor_rev);
-  return vendorRev ? `${name} | ${vendorRev}` : name;
+  const materialSpecification = textValue(spec?.material_specification || spec?.name);
+  const parts = [
+    textValue(spec?.service_code),
+    textValue(spec?.service_description),
+    materialSpecification,
+    textValue(spec?.material)
+  ].filter(Boolean);
+  return parts.length ? parts.join(" - ") : materialSpecification;
 }
 
 function parseSpecList(value) {
   const seen = new Set();
-  return String(value || "")
-    .split(/[|,;\r\n]+/)
+  const values = Array.isArray(value) ? value : String(value || "").split(/[|,;\r\n]+/);
+  return values
     .map(normalizeSpecName)
     .filter((spec) => spec && !seen.has(spec.toLowerCase()) && seen.add(spec.toLowerCase()));
+}
+
+function normalizeLineClassIndexRow(row = {}) {
+  const text = (...values) => {
+    for (const value of values) {
+      const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+      if (normalized) return normalized;
+    }
+    return "";
+  };
+  return {
+    service_code: text(row.service_code, row.service),
+    service_description: text(row.service_description, row.service_desc, row.service_name),
+    material_specification: text(row.material_specification, row.spec, row.spec_name, row.name),
+    material: text(row.material, row.material_description),
+    rating: text(row.rating, row.rating_no, row.rating_number),
+    specific_usage_requirements: text(row.specific_usage_requirements, row.specific_usage, row.usage_requirements),
+    comments: text(row.comments, row.comment, row.notes)
+  };
 }
 
 const materialItemImportAliases = {
@@ -3170,6 +3199,16 @@ const materialItemImportAliases = {
   notes: ["notes", "note", "remarks"],
   specs: ["specs", "spec", "pipe_specs", "piping_specs"]
 };
+
+const lineClassIndexImportHeaders = [
+  "service_code",
+  "service_description",
+  "material_specification",
+  "material",
+  "rating",
+  "specific_usage_requirements",
+  "comments"
+];
 
 function importRowHasField(row, fieldName) {
   const headers = row?.__headers;
@@ -3216,22 +3255,60 @@ function normalizeMaterialItemImportRow(row = {}) {
 }
 
 async function ensureMaterialSpec(client, jobId, specName) {
+  const normalizedId = Number(specName);
+  if (Number.isInteger(normalizedId) && normalizedId > 0) {
+    const byId = (await client.query(`
+      select id, name, coalesce(vendor_rev, '') as vendor_rev,
+             coalesce(service_code, '') as service_code,
+             coalesce(service_description, '') as service_description,
+             coalesce(material_specification, name, '') as material_specification,
+             coalesce(material, '') as material,
+             coalesce(rating, '') as rating,
+             coalesce(specific_usage_requirements, '') as specific_usage_requirements,
+             coalesce(comments, '') as comments
+      from material_specs
+      where id = $1 and job_id = $2
+      limit 1
+    `, [normalizedId, jobId])).rows[0];
+    if (byId) return byId;
+  }
   const name = normalizeSpecName(specName);
   if (!name) return null;
   const existing = (await client.query(
-    "select id, name, coalesce(vendor_rev, '') as vendor_rev from material_specs where job_id = $1 and lower(name) = lower($2) limit 1",
+    `select id, name, coalesce(vendor_rev, '') as vendor_rev,
+            coalesce(service_code, '') as service_code,
+            coalesce(service_description, '') as service_description,
+            coalesce(material_specification, name, '') as material_specification,
+            coalesce(material, '') as material,
+            coalesce(rating, '') as rating,
+            coalesce(specific_usage_requirements, '') as specific_usage_requirements,
+            coalesce(comments, '') as comments
+     from material_specs
+     where job_id = $1
+       and lower(coalesce(service_code, '')) = ''
+       and lower(coalesce(material_specification, name, '')) = lower($2)
+     limit 1`,
     [jobId, name]
   )).rows[0];
   if (existing) return existing;
   const inserted = await client.query(
-    "insert into material_specs (job_id, name) values ($1, $2) returning id, name, coalesce(vendor_rev, '') as vendor_rev",
+    `insert into material_specs (job_id, name, material_specification)
+     values ($1, $2, $2)
+     returning id, name, coalesce(vendor_rev, '') as vendor_rev,
+               coalesce(service_code, '') as service_code,
+               coalesce(service_description, '') as service_description,
+               coalesce(material_specification, name, '') as material_specification,
+               coalesce(material, '') as material,
+               coalesce(rating, '') as rating,
+               coalesce(specific_usage_requirements, '') as specific_usage_requirements,
+               coalesce(comments, '') as comments`,
     [jobId, name]
   );
   return inserted.rows[0];
 }
 
 async function syncMaterialItemSpecs(client, materialItemId, jobId, specNames = []) {
-  const specs = parseSpecList(Array.isArray(specNames) ? specNames.join("|") : specNames);
+  const specs = parseSpecList(specNames);
   await client.query("delete from material_item_specs where material_item_id = $1 and job_id = $2", [materialItemId, jobId]);
   for (const specName of specs) {
     const spec = await ensureMaterialSpec(client, jobId, specName);
@@ -3390,7 +3467,7 @@ async function getMaterialItemForUse(client, itemCode, jobId, specName = "") {
       join material_specs ms on ms.id = mis.spec_id
       where mis.material_item_id = $1
         and mis.job_id = $2
-        and lower(ms.name) = lower($3)
+        and lower(coalesce(nullif(ms.material_specification, ''), ms.name)) = lower($3)
       limit 1
     `, [item.id, jobId, spec])).rows[0];
     if (!tagged) {
@@ -3410,14 +3487,28 @@ function materialItemSnapshotParams(item) {
 }
 
 async function getMaterialSpecOptions(jobId) {
-  return (await query("select id, name, coalesce(vendor_rev, '') as vendor_rev from material_specs where job_id = $1 order by name, vendor_rev", [jobId])).rows;
+  return (await query(`
+    select id,
+           name,
+           coalesce(vendor_rev, '') as vendor_rev,
+           coalesce(service_code, '') as service_code,
+           coalesce(service_description, '') as service_description,
+           coalesce(material_specification, name, '') as material_specification,
+           coalesce(material, '') as material,
+           coalesce(rating, '') as rating,
+           coalesce(specific_usage_requirements, '') as specific_usage_requirements,
+           coalesce(comments, '') as comments
+    from material_specs
+    where job_id = $1
+    order by service_code, service_description, material_specification, material, id
+  `, [jobId])).rows;
 }
 
 async function getMaterialItemSpecsByItemIds(itemIds = []) {
   const ids = itemIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
   if (!ids.length) return new Map();
   const rows = (await query(`
-    select mis.material_item_id, string_agg(ms.name, ', ' order by ms.name) as specs
+    select mis.material_item_id, string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ', ' order by ms.service_code, ms.material_specification, ms.name) as specs
     from material_item_specs mis
     join material_specs ms on ms.id = mis.spec_id
     where mis.material_item_id = any($1::bigint[])
@@ -3430,7 +3521,7 @@ async function getMaterialItemSpecsText(client, materialItemId, jobId) {
   const id = Number(materialItemId);
   if (!Number.isFinite(id) || id <= 0) return "";
   const row = (await client.query(`
-    select coalesce(string_agg(ms.name, ', ' order by ms.name), '') as specs
+    select coalesce(string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ', ' order by ms.service_code, ms.material_specification, ms.name), '') as specs
     from material_item_specs mis
     join material_specs ms on ms.id = mis.spec_id
     where mis.material_item_id = $1 and mis.job_id = $2
@@ -8247,7 +8338,7 @@ app.get("/items/export.xlsx", requireAuth, requireJobContext, requirePermission(
       coalesce(mi.thk_1, '') as thk_1,
       coalesce(mi.thk_2, '') as thk_2,
       coalesce(mi.notes, '') as notes,
-      coalesce(string_agg(ms.name, ' | ' order by ms.name) filter (where ms.id is not null), '') as specs
+      coalesce(string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ' | ' order by ms.service_code, ms.material_specification, ms.name) filter (where ms.id is not null), '') as specs
     from material_items mi
     left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
     left join material_specs ms on ms.id = mis.spec_id
@@ -8317,7 +8408,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
       coalesce(mi.thk_1, '') as thk_1,
       coalesce(mi.thk_2, '') as thk_2,
       coalesce(mi.notes, '') as notes,
-      coalesce(string_agg(${materialSpecDisplaySql("ms")}, ', ' order by ms.name, ms.vendor_rev) filter (where ms.id is not null), '') as specs
+      coalesce(string_agg(${materialSpecDisplaySql("ms")}, ', ' order by ms.service_code, ms.service_description, ms.material_specification, ms.material, ms.name) filter (where ms.id is not null), '') as specs
     from material_items mi
     left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
     left join material_specs ms on ms.id = mis.spec_id
@@ -8416,7 +8507,7 @@ app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("i
       coalesce(mi.thk_1, '') as thk_1,
       coalesce(mi.thk_2, '') as thk_2,
       coalesce(mi.notes, '') as notes,
-      coalesce(string_agg(ms.name, ', ' order by ms.name) filter (where ms.id is not null), '') as specs
+      coalesce(string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ', ' order by ms.service_code, ms.material_specification, ms.name) filter (where ms.id is not null), '') as specs
     from material_items mi
     left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
     left join material_specs ms on ms.id = mis.spec_id
@@ -8522,7 +8613,7 @@ app.post("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("
 
 app.get("/items/new", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
   const specs = await getMaterialSpecOptions(currentJobId(req));
-  const itemFormSpecOptions = specs.map((spec) => `<option value="${esc(spec.name)}">${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
+  const itemFormSpecOptions = specs.map((spec) => `<option value="${escAttr(spec.id)}">${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
   res.send(layout("Add Item", `
     <h1>Add Item</h1>
     <div class="card">
@@ -8568,87 +8659,272 @@ app.post("/items", requireAuth, requireJobContext, requirePermission("inventory"
 
 app.get("/items/specs", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
-  const specs = await getMaterialSpecOptions(jobId);
-  const currentSpecRows = specs.map((spec) => `<tr>
-    <td>${esc(spec.name)}</td>
-    <td>${esc(spec.vendor_rev || "")}</td>
-  </tr>`).join("");
+  const q = String(req.query.q || "").trim();
+  const params = [jobId];
+  const where = ["job_id = $1"];
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(
+      coalesce(service_code, '') ilike $${params.length}
+      or coalesce(service_description, '') ilike $${params.length}
+      or coalesce(material_specification, name, '') ilike $${params.length}
+      or coalesce(material, '') ilike $${params.length}
+      or coalesce(rating, '') ilike $${params.length}
+    )`);
+  }
+  const specs = (await query(`
+    select id,
+           name,
+           coalesce(service_code, '') as service_code,
+           coalesce(service_description, '') as service_description,
+           coalesce(material_specification, name, '') as material_specification,
+           coalesce(material, '') as material,
+           coalesce(rating, '') as rating,
+           coalesce(specific_usage_requirements, '') as specific_usage_requirements,
+           coalesce(comments, '') as comments
+    from material_specs
+    where ${where.join(" and ")}
+    order by service_code, service_description, material_specification, material, id
+    limit 500
+  `, params)).rows;
   const specRows = specs.map((spec) => `<tr>
+    <td><input form="item-spec-form-${spec.id}" name="service_code" value="${escAttr(spec.service_code)}" /></td>
+    <td><input form="item-spec-form-${spec.id}" name="service_description" value="${escAttr(spec.service_description)}" /></td>
     <td>
       <form id="item-spec-form-${spec.id}" method="post" action="/items/specs/${spec.id}" class="inline-form">
-        <input name="name" value="${esc(spec.name)}" required />
+        <input name="material_specification" value="${escAttr(spec.material_specification)}" required />
       </form>
     </td>
-    <td><input form="item-spec-form-${spec.id}" name="vendor_rev" value="${esc(spec.vendor_rev || "")}" /></td>
-    <td><button form="item-spec-form-${spec.id}" type="submit">Save Spec</button></td>
+    <td><input form="item-spec-form-${spec.id}" name="material" value="${escAttr(spec.material)}" /></td>
+    <td><input form="item-spec-form-${spec.id}" name="rating" value="${escAttr(spec.rating)}" /></td>
+    <td><input form="item-spec-form-${spec.id}" name="specific_usage_requirements" value="${escAttr(spec.specific_usage_requirements)}" /></td>
+    <td><input form="item-spec-form-${spec.id}" name="comments" value="${escAttr(spec.comments)}" /></td>
+    <td><button form="item-spec-form-${spec.id}" type="submit">Save</button></td>
   </tr>`).join("");
-  res.send(layout("Specs", `
-    <h1>Specs</h1>
+  res.send(layout("Line Class Index", `
+    <h1>Line Class Index</h1>
     <div class="card">
-      <div class="actions"><a class="btn btn-secondary" href="/items">Back To Item Master</a></div>
-    </div>
-    <div class="card scroll">
-      <h3>Current Specs</h3>
-      <table><tr><th>Spec Name</th><th>Vendor</th></tr>${currentSpecRows || `<tr><td colspan="2" class="muted">No specs added yet.</td></tr>`}</table>
-    </div>
-    <div class="card scroll">
-      <h3>Add / Edit Specs</h3>
-      <form method="post" action="/items/specs" class="stack" style="margin-bottom:12px;">
-        <div class="grid" style="grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;">
-          <div><label>Spec Name</label><input name="name" required /></div>
-          <div><label>Vendor</label><input name="vendor_rev" /></div>
-          <div style="align-self:end;"><button type="submit">Add Spec</button></div>
+      <form method="get" action="/items/specs" class="stack">
+        <div><label>Search</label><input name="q" value="${escAttr(q)}" placeholder="Service code, service description, material specification, material, rating" /></div>
+        <div class="actions">
+          <button type="submit">Filter Specs</button>
+          <a class="btn btn-secondary" href="/items/specs">Clear</a>
+          <a class="btn btn-secondary" href="/items">Back To Item Master</a>
+          <a class="btn btn-secondary" href="/items/specs/export.xlsx">Export XLSX</a>
+          <a class="btn btn-secondary" href="/items/specs/import/template">Download Import Template</a>
+          <span class="muted">${specs.length} line class row(s), max 500 shown</span>
         </div>
       </form>
-      <table><tr><th>Spec Name</th><th>Vendor</th><th>Action</th></tr>${specRows || `<tr><td colspan="3" class="muted">No specs added yet.</td></tr>`}</table>
+    </div>
+    <div class="card">
+      <h3>Add Line Class Row</h3>
+      <form method="post" action="/items/specs" class="stack">
+        <div class="grid-4">
+          <div><label>Service Code</label><input name="service_code" /></div>
+          <div><label>Service Description</label><input name="service_description" /></div>
+          <div><label>Material Specification</label><input name="material_specification" required /></div>
+          <div><label>Material</label><input name="material" /></div>
+        </div>
+        <div class="grid">
+          <div><label>Rating #</label><input name="rating" /></div>
+          <div><label>Specific Usage Requirements</label><input name="specific_usage_requirements" /></div>
+        </div>
+        <div><label>Comments</label><textarea name="comments"></textarea></div>
+        <div class="actions"><button type="submit">Add Line Class Row</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Import Line Class Index</h3>
+      <p class="muted">CSV/XLSX columns: ${esc(lineClassIndexImportHeaders.join(", "))}</p>
+      <form method="post" enctype="multipart/form-data" action="/items/specs/import" class="stack">
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
+        <div class="actions"><button type="submit">Import Line Class Index</button></div>
+      </form>
+    </div>
+    <div class="card scroll">
+      <h3>Line Class Rows</h3>
+      <table>
+        <tr><th>Service Code</th><th>Service Description</th><th>Material Specification</th><th>Material</th><th>Rating #</th><th>Specific Usage Requirements</th><th>Comments</th><th>Action</th></tr>
+        ${specRows || `<tr><td colspan="8" class="muted">No line class rows added yet.</td></tr>`}
+      </table>
     </div>
   `, req.user));
 }));
 
+async function upsertLineClassIndexRow(client, jobId, row) {
+  const normalized = normalizeLineClassIndexRow(row);
+  if (!normalized.material_specification) {
+    return { status: "skipped", errorCode: "missing_material_specification", message: "Material specification is required.", row: normalized };
+  }
+  const existing = (await client.query(`
+    select id
+    from material_specs
+    where job_id = $1
+      and lower(coalesce(service_code, '')) = lower($2)
+      and lower(coalesce(material_specification, name, '')) = lower($3)
+    limit 1
+  `, [jobId, normalized.service_code, normalized.material_specification])).rows[0];
+  if (existing) {
+    await client.query(`
+      update material_specs
+      set name = $3,
+          service_code = $4,
+          service_description = $5,
+          material_specification = $3,
+          material = $6,
+          rating = $7,
+          specific_usage_requirements = $8,
+          comments = $9
+      where id = $1 and job_id = $2
+    `, [
+      existing.id,
+      jobId,
+      normalized.material_specification,
+      normalized.service_code,
+      normalized.service_description,
+      normalized.material,
+      normalized.rating,
+      normalized.specific_usage_requirements,
+      normalized.comments
+    ]);
+    return { status: "updated", id: existing.id, row: normalized };
+  }
+  const inserted = (await client.query(`
+    insert into material_specs (
+      job_id, name, service_code, service_description, material_specification,
+      material, rating, specific_usage_requirements, comments
+    )
+    values ($1, $4, $2, $3, $4, $5, $6, $7, $8)
+    returning id
+  `, [
+    jobId,
+    normalized.service_code,
+    normalized.service_description,
+    normalized.material_specification,
+    normalized.material,
+    normalized.rating,
+    normalized.specific_usage_requirements,
+    normalized.comments
+  ])).rows[0];
+  return { status: "inserted", id: inserted.id, row: normalized };
+}
+
 app.post("/items/specs", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
-  const name = normalizeSpecName(req.body.name);
-  const vendorRev = String(req.body.vendor_rev || "").trim();
-  if (!name) throw new Error("Spec name is required.");
   await withTransaction(async (client) => {
-    const existing = (await client.query(
-      "select id from material_specs where job_id = $1 and lower(name) = lower($2) limit 1",
-      [jobId, name]
-    )).rows[0];
-    if (existing) {
-      await client.query("update material_specs set vendor_rev = $3 where id = $1 and job_id = $2", [existing.id, jobId, vendorRev]);
-      await auditLog(client, req.user.id, "update", "material_spec", existing.id, `${name}|${vendorRev}`);
-      return;
-    }
-    const inserted = (await client.query(
-      "insert into material_specs (job_id, name, vendor_rev) values ($1, $2, $3) returning id",
-      [jobId, name, vendorRev]
-    )).rows[0];
-    await auditLog(client, req.user.id, "create", "material_spec", inserted.id, `${name}|${vendorRev}`);
+    const result = await upsertLineClassIndexRow(client, jobId, req.body);
+    if (result.status === "skipped") throw new Error(result.message);
+    await auditLog(client, req.user.id, result.status === "inserted" ? "create" : "update", "material_spec", result.id, formatMaterialSpecLabel(result.row));
   });
   res.redirect("/items/specs");
 }));
 
-app.post("/items/specs/:id", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.post("/items/specs/:id(\\d+)", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const specId = Number(req.params.id);
-  const name = normalizeSpecName(req.body.name);
-  const vendorRev = String(req.body.vendor_rev || "").trim();
-  if (!name) throw new Error("Spec name is required.");
+  const normalized = normalizeLineClassIndexRow(req.body);
+  if (!normalized.material_specification) throw new Error("Material specification is required.");
   await withTransaction(async (client) => {
-    const duplicate = (await client.query(
-      "select id from material_specs where job_id = $1 and lower(name) = lower($2) and id <> $3 limit 1",
-      [jobId, name, specId]
-    )).rows[0];
-    if (duplicate) throw new Error(`Spec ${name} already exists.`);
-    const updated = await client.query(
-      "update material_specs set name = $3, vendor_rev = $4 where id = $1 and job_id = $2",
-      [specId, jobId, name, vendorRev]
-    );
-    if (updated.rowCount === 0) throw new Error("Spec not found.");
-    await auditLog(client, req.user.id, "update", "material_spec", specId, `${name}|${vendorRev}`);
+    const duplicate = (await client.query(`
+      select id
+      from material_specs
+      where job_id = $1
+        and lower(coalesce(service_code, '')) = lower($2)
+        and lower(coalesce(material_specification, name, '')) = lower($3)
+        and id <> $4
+      limit 1
+    `, [jobId, normalized.service_code, normalized.material_specification, specId])).rows[0];
+    if (duplicate) throw new Error(`Line class row ${formatMaterialSpecLabel(normalized)} already exists.`);
+    const updated = await client.query(`
+      update material_specs
+      set name = $3,
+          service_code = $4,
+          service_description = $5,
+          material_specification = $3,
+          material = $6,
+          rating = $7,
+          specific_usage_requirements = $8,
+          comments = $9
+      where id = $1 and job_id = $2
+    `, [
+      specId,
+      jobId,
+      normalized.material_specification,
+      normalized.service_code,
+      normalized.service_description,
+      normalized.material,
+      normalized.rating,
+      normalized.specific_usage_requirements,
+      normalized.comments
+    ]);
+    if (updated.rowCount === 0) throw new Error("Line class row not found.");
+    await auditLog(client, req.user.id, "update", "material_spec", specId, formatMaterialSpecLabel(normalized));
   });
   res.redirect("/items/specs");
+}));
+
+app.get("/items/specs/import/template", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (_req, res) => {
+  const worksheet = XLSX.utils.aoa_to_sheet([lineClassIndexImportHeaders]);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Line Class Index");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="line-class-index-import-template.xlsx"');
+  res.send(buffer);
+}));
+
+app.get("/items/specs/export.xlsx", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const rows = (await query(`
+    select coalesce(service_code, '') as service_code,
+           coalesce(service_description, '') as service_description,
+           coalesce(material_specification, name, '') as material_specification,
+           coalesce(material, '') as material,
+           coalesce(rating, '') as rating,
+           coalesce(specific_usage_requirements, '') as specific_usage_requirements,
+           coalesce(comments, '') as comments
+    from material_specs
+    where job_id = $1
+    order by service_code, service_description, material_specification, material, id
+  `, [jobId])).rows;
+  const worksheet = XLSX.utils.json_to_sheet(rows, { header: lineClassIndexImportHeaders });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Line Class Index");
+  const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="line-class-index.xlsx"');
+  res.send(buffer);
+}));
+
+app.post("/items/specs/import", requireAuth, requireJobContext, requirePermission("inventory", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+  const rows = parseUploadedRows(req.file, req.body.csv_text);
+  if (!rows.length) throw new Error("No rows found.");
+  const jobId = currentJobId(req);
+  const batchId = await withTransaction(async (client) => {
+    const batchId = await createImportBatch(client, {
+      entityType: "material_specs",
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || "Line Class Index Import",
+      jobId
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const result = await upsertLineClassIndexRow(client, jobId, rows[index]);
+      if (result.status === "inserted") insertedCount += 1;
+      else if (result.status === "updated") updatedCount += 1;
+      else {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, index + 2, result.errorCode, result.message, rows[index]);
+      }
+    }
+    await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "material_specs", batchId, `rows=${rows.length}`);
+    return batchId;
+  });
+  res.redirect(`/imports/${batchId}`);
 }));
 
 app.get("/items/import-page", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
@@ -8721,7 +8997,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
   const item = itemResult.rows[0];
   if (!item) throw new Error("Item not found.");
   const selectedSpecIds = new Set(selectedSpecResult.rows.map((row) => Number(row.spec_id)));
-  const itemSpecOptions = specs.map((spec) => `<option value="${esc(spec.name)}" ${selectedSpecIds.has(Number(spec.id)) ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
+  const itemSpecOptions = specs.map((spec) => `<option value="${escAttr(spec.id)}" ${selectedSpecIds.has(Number(spec.id)) ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
   res.send(layout("Edit Item", `
     <h1>Edit Item</h1>
     <div class="card">
@@ -9998,7 +10274,7 @@ async function getBomLineEntryAutocomplete(bomId, jobId) {
         coalesce(mi.size_2, '') as size_2,
         coalesce(mi.thk_1, '') as thk_1,
         coalesce(mi.thk_2, '') as thk_2,
-        coalesce(string_agg(ms.name, ' | ' order by ms.name) filter (where ms.id is not null), '') as specs
+        coalesce(string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ' | ' order by ms.service_code, ms.material_specification, ms.name) filter (where ms.id is not null), '') as specs
       from material_items mi
       left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
       left join material_specs ms on ms.id = mis.spec_id
@@ -12841,7 +13117,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       left join (
-        select mis.material_item_id, string_agg(ms.name, ', ' order by ms.name) as specs
+        select mis.material_item_id, string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ', ' order by ms.service_code, ms.material_specification, ms.name) as specs
         from material_item_specs mis
         join material_specs ms on ms.id = mis.spec_id
         where mis.job_id = $2
@@ -13688,7 +13964,7 @@ app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission(
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       left join (
-        select mis.material_item_id, string_agg(ms.name, ', ' order by ms.name) as specs
+        select mis.material_item_id, string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ', ' order by ms.service_code, ms.material_specification, ms.name) as specs
         from material_item_specs mis
         join material_specs ms on ms.id = mis.spec_id
         where mis.job_id = $2
@@ -13858,7 +14134,10 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         where search_mis.material_item_id = mi.id
           and search_mis.job_id = mi.job_id
           and (
-            search_ms.name ilike $${itemParams.length}
+            coalesce(nullif(search_ms.material_specification, ''), search_ms.name) ilike $${itemParams.length}
+            or coalesce(search_ms.service_code, '') ilike $${itemParams.length}
+            or coalesce(search_ms.service_description, '') ilike $${itemParams.length}
+            or coalesce(search_ms.material, '') ilike $${itemParams.length}
             or coalesce(search_ms.vendor_rev, '') ilike $${itemParams.length}
           )
       )
@@ -13889,7 +14168,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         coalesce(mi.thk_1, '') as thk_1,
         coalesce(mi.thk_2, '') as thk_2,
         coalesce(mi.notes, '') as notes,
-        coalesce(string_agg(${materialSpecDisplaySql("ms")}, ', ' order by ms.name, ms.vendor_rev) filter (where ms.id is not null), '') as specs
+        coalesce(string_agg(${materialSpecDisplaySql("ms")}, ', ' order by ms.service_code, ms.service_description, ms.material_specification, ms.material, ms.name) filter (where ms.id is not null), '') as specs
       from material_items mi
       left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
       left join material_specs ms on ms.id = mis.spec_id
@@ -15020,7 +15299,7 @@ app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission(
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
     left join (
-      select mis.material_item_id, string_agg(ms.name, ', ' order by ms.name) as specs
+      select mis.material_item_id, string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ', ' order by ms.service_code, ms.material_specification, ms.name) as specs
       from material_item_specs mis
       join material_specs ms on ms.id = mis.spec_id
       where mis.job_id = $2
