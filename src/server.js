@@ -1531,6 +1531,7 @@ function layout(title, body, user) {
       button, .btn { display: inline-flex; align-items: center; justify-content: center; min-width: 92px; height: 32px; padding: 0 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,.15); font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
       button, .btn-primary { background: linear-gradient(180deg, #4278a9 0%, var(--brand) 100%); color: white; }
       .btn-secondary { background: linear-gradient(180deg, #6a7681 0%, var(--brand-2) 100%); color: white; }
+      .btn-warning { background: linear-gradient(180deg, #ffd866 0%, #d9a928 100%); color: #2d2300; }
       .btn-danger { background: linear-gradient(180deg, #bf5b49 0%, var(--warn) 100%); color: white; }
       .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
       .check-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 14px; }
@@ -11130,7 +11131,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
         : requisitionStatusKey(row.status) === "ISSUED" && hasLoggedRequisitionSignature(row)
         ? `<a class="btn btn-secondary" href="/requisitions/${row.id}#warehouse-sign-off">Issued</a>`
         : requisitionStatusKey(row.status) === "ISSUED" && canSignRequisition(req.user, row)
-          ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
+          ? `<a class="btn btn-warning" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
         : requisitionStatusKey(row.status) === "WAITING_ON_MATERIAL"
         ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/edit">Review</a>`
         : isVerifiedStageRequisitionStatus(row.status)
