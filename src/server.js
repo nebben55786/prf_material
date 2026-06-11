@@ -19777,9 +19777,15 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
       : `/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit`;
     const receiveRemainingLabel = row.app_po_id ? "Receive Remaining on New MRR" : "Receive Missed Line";
     const isReversed = String(row.status || "").toUpperCase() === "REVERSED";
-    const reverseAction = isReversed
-      ? `<span class="chip">Reversed</span>`
-      : `<button type="submit" class="btn btn-danger" formaction="/material-logs/mrr/${row.id}/reverse" formmethod="post" onclick="return confirm('Reverse MRR ${escAttr(row.mrr_number)}? This will subtract its received quantities from inventory and PO received totals.');">Reverse MRR</button>`;
+    const reverseCard = isReversed
+      ? `<div class="card"><h3>Reverse MRR</h3><span class="chip">Reversed</span></div>`
+      : `<div class="card">
+          <h3>Reverse MRR</h3>
+          <p class="muted">Use this only when the received quantities from this MRR need to be backed out.</p>
+          <form method="post" action="/material-logs/mrr/${row.id}/reverse" onsubmit="return confirm('Reverse MRR ${escAttr(row.mrr_number)}? This will subtract its received quantities from inventory and PO received totals.');">
+            <button type="submit" class="btn btn-danger">Reverse MRR</button>
+          </form>
+        </div>`;
     res.send(layout("Edit MRR Log", `
       <h1>Edit MRR Header</h1>
       <div class="card">
@@ -19798,9 +19804,10 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
         <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
-          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="${escAttr(receiveRemainingHref)}">${esc(receiveRemainingLabel)}</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/export-flow.xlsx">Export to FLOW</a>${reverseAction}<a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="${escAttr(receiveRemainingHref)}">${esc(receiveRemainingLabel)}</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/export-flow.xlsx">Export to FLOW</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
         </form>
       </div>
+      ${reverseCard}
       <div class="card scroll">
         <h3>MRR Lines</h3>
         <table><tr><th>Source</th><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>Status</th><th>Date</th><th>Notes</th></tr>${mrrLineRows || `<tr><td colspan="10" class="muted">No MRR lines found for this header yet.</td></tr>`}</table>
