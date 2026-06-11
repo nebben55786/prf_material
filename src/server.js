@@ -18330,8 +18330,8 @@ app.post("/material-logs/mrr/:id/reverse", requireAuth, requireJobContext, requi
       update mrr_logs
       set status = 'REVERSED',
           reversed_at = now(),
-          reversed_by = $3,
-          notes = trim(both from concat_ws(E'\n', nullif(notes, ''), 'Reversed in app on ' || now()::text || ' by user id ' || $3::text || '.')),
+          reversed_by = $3::bigint,
+          notes = trim(both from concat_ws(E'\n', nullif(notes, ''), 'Reversed in app on ' || now()::text || '.')),
           updated_at = now()
       where id = $1 and job_id = $2
     `, [mrrId, jobId, req.user.id]);
