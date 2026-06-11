@@ -18210,7 +18210,7 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
     left join purchase_orders po on po.id = m.app_po_id
     where m.job_id = $1
       ${q ? "and (coalesce(m.mrr_number, '') ilike $2 or coalesce(m.vendor_name, '') ilike $2 or coalesce(po.po_no, m.po_number, '') ilike $2 or coalesce(m.material_description, '') ilike $2 or coalesce(m.received_by, '') ilike $2)" : ""}
-    order by m.id desc
+    order by nullif(substring(coalesce(m.mrr_number, '') from '([0-9]+)$'), '')::bigint desc nulls last, m.id desc
     limit 200
   `, q ? [jobId, `%${q}%`] : [jobId])).rows;
   const tableRows = rows.map((row) => {
@@ -18226,7 +18226,7 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
     <td>${esc(row.received_by)}</td>
     <td>${esc(row.load_number)}</td>
     <td>${esc(row.opi_number)}</td>
-    <td style="min-width:275px;"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a>${isReversed ? "" : `<form method="post" action="/material-logs/mrr/${row.id}/reverse" style="display:inline;" onsubmit="return confirm('Reverse MRR ${escAttr(row.mrr_number)}? This will subtract its received quantities from inventory and PO received totals.');"><button type="submit" class="btn btn-danger">Reverse</button></form>`}</div></td>
+    <td style="min-width:190px;"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
   </tr>`;
   }).join("");
   res.send(layout("MRR Log", `
@@ -19777,6 +19777,10 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
       ? `/po/${row.app_po_id}/receive`
       : `/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit`;
     const receiveRemainingLabel = row.app_po_id ? "Receive Remaining on New MRR" : "Receive Missed Line";
+    const isReversed = String(row.status || "").toUpperCase() === "REVERSED";
+    const reverseAction = isReversed
+      ? `<span class="chip">Reversed</span>`
+      : `<button type="submit" class="btn btn-danger" formaction="/material-logs/mrr/${row.id}/reverse" formmethod="post" onclick="return confirm('Reverse MRR ${escAttr(row.mrr_number)}? This will subtract its received quantities from inventory and PO received totals.');">Reverse MRR</button>`;
     res.send(layout("Edit MRR Log", `
       <h1>Edit MRR Header</h1>
       <div class="card">
@@ -19796,7 +19800,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
         <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
-          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="${escAttr(receiveRemainingHref)}">${esc(receiveRemainingLabel)}</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/export-flow.xlsx">Export to FLOW</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
+          <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="${escAttr(receiveRemainingHref)}">${esc(receiveRemainingLabel)}</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/export-flow.xlsx">Export to FLOW</a>${reverseAction}<a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
         </form>
       </div>
       <div class="card scroll">
