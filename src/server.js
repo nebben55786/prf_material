@@ -8369,7 +8369,20 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
   const size1Q = String(req.query.size_1 || "").trim();
   const size2Q = String(req.query.size_2 || "").trim();
   const specId = Number(req.query.spec_id || 0);
-  const specs = await getMaterialSpecOptions(jobId);
+  const [specs, typeOptionResult] = await Promise.all([
+    getMaterialSpecOptions(jobId),
+    query(`
+      select distinct trim(coalesce(material_type, '')) as material_type
+      from material_items
+      where job_id = $1
+        and trim(coalesce(material_type, '')) <> ''
+      order by material_type
+    `, [jobId])
+  ]);
+  const typeValues = typeOptionResult.rows.map((row) => String(row.material_type || "").trim()).filter(Boolean);
+  if (typeQ && !typeValues.some((value) => value.toLowerCase() === typeQ.toLowerCase())) {
+    typeValues.unshift(typeQ);
+  }
   const params = [jobId];
   const where = ["mi.job_id = $1"];
   if (q) {
@@ -8385,8 +8398,8 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
     where.push(`mi.description ilike $${params.length}`);
   }
   if (typeQ) {
-    params.push(`%${typeQ}%`);
-    where.push(`coalesce(mi.material_type, '') ilike $${params.length}`);
+    params.push(typeQ);
+    where.push(`lower(coalesce(mi.material_type, '')) = lower($${params.length})`);
   }
   if (size1Q) {
     params.push(`%${size1Q}%`);
@@ -8431,6 +8444,9 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
   const specOptions = [`<option value="">All Specs</option>`]
     .concat(specs.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === specId ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`))
     .join("");
+  const typeOptions = [`<option value="">All Types</option>`]
+    .concat(typeValues.map((value) => `<option value="${escAttr(value)}" ${value.toLowerCase() === typeQ.toLowerCase() ? "selected" : ""}>${esc(value)}</option>`))
+    .join("");
   const bulkEditParams = new URLSearchParams();
   if (q) bulkEditParams.set("q", q);
   if (descriptionQ) bulkEditParams.set("description", descriptionQ);
@@ -8462,7 +8478,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
           <div><label>Description</label><input name="description" value="${escAttr(descriptionQ)}" placeholder="Description only" /></div>
         </div>
         <div class="grid-4">
-          <div><label>Type</label><input name="type" value="${escAttr(typeQ)}" placeholder="Type" /></div>
+          <div><label>Type</label><select name="type">${typeOptions}</select></div>
           <div><label>Size 1</label><input name="size_1" value="${escAttr(size1Q)}" placeholder="Size 1" /></div>
           <div><label>Size 2</label><input name="size_2" value="${escAttr(size2Q)}" placeholder="Size 2" /></div>
           <div><label>Spec</label><select name="spec_id">${specOptions}</select></div>
@@ -8512,8 +8528,8 @@ app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("i
     where.push(`mi.description ilike $${params.length}`);
   }
   if (typeQ) {
-    params.push(`%${typeQ}%`);
-    where.push(`coalesce(mi.material_type, '') ilike $${params.length}`);
+    params.push(typeQ);
+    where.push(`lower(coalesce(mi.material_type, '')) = lower($${params.length})`);
   }
   if (size1Q) {
     params.push(`%${size1Q}%`);
