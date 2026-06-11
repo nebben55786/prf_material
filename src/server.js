@@ -2295,12 +2295,32 @@ async function mergeVendors(client, sourceVendorId, targetVendorId, userId) {
         and exists (
           select 1
           from material_log_lookup_values target_lookup
-          where target_lookup.job_id = source_lookup.job_id
+          where target_lookup.job_id is not distinct from source_lookup.job_id
             and target_lookup.kind = source_lookup.kind
             and lower(trim(coalesce(target_lookup.value, ''))) = lower(trim($2))
         )
     `, [sourceName, targetName]);
-    await client.query("update material_log_lookup_values set value = $2 where kind = 'vendor_name' and lower(trim(coalesce(value, ''))) = lower(trim($1))", [sourceName, targetName]);
+    await client.query(`
+      delete from material_log_lookup_values duplicate_lookup
+      using (
+        select id,
+               row_number() over (
+                 partition by job_id, kind
+                 order by id
+               ) as rn
+        from material_log_lookup_values
+        where kind = 'vendor_name'
+          and lower(trim(coalesce(value, ''))) = lower(trim($1))
+      ) ranked_lookup
+      where duplicate_lookup.id = ranked_lookup.id
+        and ranked_lookup.rn > 1
+    `, [sourceName]);
+    await client.query(`
+      update material_log_lookup_values
+      set value = $2
+      where kind = 'vendor_name'
+        and lower(trim(coalesce(value, ''))) = lower(trim($1))
+    `, [sourceName, targetName]);
   }
 
   await client.query("delete from vendors where id = $1", [sourceId]);
