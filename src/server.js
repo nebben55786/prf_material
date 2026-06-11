@@ -16628,6 +16628,7 @@ app.post("/po/add", requireAuth, requireJobContext, requirePermission("pos", "ed
 app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
   const poId = Number(req.params.id);
   const jobId = currentJobId(req);
+  const hideFullyReceived = String(req.query.hide_received || "") === "1";
   const [po, warehouseOptions, locationMap, nextMrrNumber, receivedByOptions] = await Promise.all([
     query(`
       select po.id, po.po_no, po.status, coalesce(po.description, '') as description, v.name as vendor_name
@@ -16737,12 +16738,15 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
   const receivedByListId = `received-by-options-${record.id}`;
   const today = new Date().toISOString().slice(0, 10);
   const openPoLineCount = poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0) > 0).length;
+  const visiblePoLines = hideFullyReceived
+    ? poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0) > 0)
+    : poLines;
   const receiveStatusKey = String(record.status || "").toUpperCase();
   const canPostReceipt = openPoLineCount > 0 && !["FULLY_RECEIVED", "CLOSED", "CANCELLED"].includes(receiveStatusKey);
   const receiveBlockedMessage = ["CLOSED", "CANCELLED"].includes(receiveStatusKey)
     ? `This PO is ${record.status || "closed"}. No additional receipts can be posted against it.`
     : "This PO is fully received. No additional receipts can be posted against it.";
-  const lineRows = poLines.map((line) => {
+  const lineRows = visiblePoLines.map((line) => {
     const lineId = Number(line.id);
     const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0);
     const locked = remainingQty <= 0;
@@ -16809,6 +16813,12 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           <div><label>Default Warehouse</label><select id="po-receive-warehouse-${record.id}" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
           <div><label>Default Location</label><select id="po-receive-location-${record.id}" data-placeholder="Select location" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'><option value="">Select location</option></select></div>
           <div><label>Short Qty Default</label><select name="short_action_default" onchange='document.querySelectorAll("select[name^=short_action_]").forEach(function(select){ select.value = this.value; }, this);'><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
+        </div>
+        <div class="actions">
+          ${hideFullyReceived
+            ? `<a class="btn btn-secondary" href="/po/${record.id}/receive">Show Fully Received Items</a>`
+            : `<a class="btn btn-secondary" href="/po/${record.id}/receive?hide_received=1">Hide Fully Received Items</a>`}
+          <span class="muted">${esc(String(visiblePoLines.length))} line(s) shown</span>
         </div>
         <div class="scroll">
           <table>
