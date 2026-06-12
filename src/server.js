@@ -19642,10 +19642,12 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, req
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
     .concat(warehouseOptions.map((warehouse) => `<option value="${esc(warehouse.name)}" ${warehouse.name === normalizedRowWarehouse ? "selected" : ""}>${esc(warehouse.name)}</option>`))
     .join("");
+  const returnTo = getSafeReturnPath(req, "/material-logs");
   res.send(layout("Edit Receiving Log", `
     <h1>Edit Material Receiving Line</h1>
     <div class="card">
       <form method="post" action="/material-logs/receiving/${row.id}/edit" class="stack">
+        <input type="hidden" name="return_to" value="${esc(returnTo)}" />
         <div class="grid">
           <div><label>Legacy ID</label><input name="legacy_row_id" value="${esc(row.legacy_row_id || "")}" /></div>
           <div><label>Discipline</label><input name="discipline" value="${esc(row.discipline)}" /></div>
@@ -19662,7 +19664,7 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, req
         </div>
         <div><label>Received Date</label><input name="recv_date" value="${esc(formatShortDateTime(row.recv_date))}" /></div>
         <div><label>Comments</label><textarea name="comments">${esc(row.comments)}</textarea></div>
-        <div class="actions"><button type="submit">Save Receiving Line</button><a class="btn btn-secondary" href="/material-logs">Back</a></div>
+        <div class="actions"><button type="submit">Save Receiving Line</button><a class="btn btn-secondary" href="${esc(returnTo)}">Back</a></div>
       </form>
       <script>syncLocationOptions("receiving-log-warehouse-${row.id}", "receiving-log-location-${row.id}", ${JSON.stringify(locationMap)}, ${JSON.stringify(normalizedRowLocation)});</script>
     </div>
@@ -19671,6 +19673,7 @@ app.get("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, req
 
 app.post("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
+  const returnTo = getSafeReturnPath(req, "/material-logs");
   await withTransaction(async (client) => {
     await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
     await client.query(`
@@ -19698,8 +19701,134 @@ app.post("/material-logs/receiving/:id/edit", requireAuth, requireJobContext, re
     ]);
     await auditLog(client, req.user.id, "update", "material_receiving_log", req.params.id, req.body.item_code?.trim() || "");
   });
-  res.redirect("/material-logs");
+  res.redirect(returnTo);
 });
+
+app.get("/material-logs/mrr/:mrrId/receipts/:receiptId/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const mrrId = Number(req.params.mrrId);
+  const receiptId = Number(req.params.receiptId);
+  const row = (await query(`
+    select
+      r.id,
+      r.mrr_log_id,
+      r.qty_received,
+      r.warehouse,
+      r.location,
+      r.osd_status,
+      coalesce(r.osd_notes, '') as osd_notes,
+      r.received_at,
+      m.mrr_number,
+      coalesce(pl.po_line, '') as po_line,
+      coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+      coalesce(nullif(pl.description_snapshot, ''), mi.description) as description
+    from receipts r
+    join mrr_logs m on m.id = r.mrr_log_id and m.job_id = r.job_id
+    join po_lines pl on pl.id = r.po_line_id
+    join material_items mi on mi.id = pl.material_item_id
+    where r.id = $1
+      and r.mrr_log_id = $2
+      and r.job_id = $3
+  `, [receiptId, mrrId, jobId])).rows[0];
+  if (!row) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>MRR receipt line not found.</h3></div>`, req.user));
+    return;
+  }
+  const normalizedRowWarehouse = normalizeWarehouseName(row.warehouse);
+  const normalizedRowLocation = normalizeLocationName(row.location);
+  const warehouseOptions = await getWarehouseOptions(jobId);
+  const locationMap = await getWarehouseLocationMap(jobId);
+  const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
+    .concat(warehouseOptions.map((warehouse) => `<option value="${esc(warehouse.name)}" ${warehouse.name === normalizedRowWarehouse ? "selected" : ""}>${esc(warehouse.name)}</option>`))
+    .join("");
+  const statusOptions = ["OK", "BACKORDER", "SHORTAGE", "OVERAGE"].map((status) => `<option value="${status}" ${String(row.osd_status || "").toUpperCase() === status ? "selected" : ""}>${status}</option>`).join("");
+  const returnTo = `/material-logs/mrr/${mrrId}/edit`;
+  res.send(layout("Edit MRR Line", `
+    <h1>Edit MRR Line</h1>
+    <div class="card">
+      <p><strong>${esc(row.mrr_number)}</strong>${row.po_line ? ` | PO Line ${esc(row.po_line)}` : ""} | ${esc(row.item_code || "")}</p>
+      <p class="muted">${esc(row.description || "")}</p>
+      <form method="post" action="/material-logs/mrr/${mrrId}/receipts/${receiptId}/edit" class="stack">
+        <input type="hidden" name="return_to" value="${esc(returnTo)}" />
+        <div class="grid">
+          <div><label>Received Qty</label><input name="qty_received" value="${esc(formatQtyDisplay(row.qty_received))}" required inputmode="decimal" /></div>
+          <div><label>Status</label><select name="osd_status">${statusOptions}</select></div>
+          <div><label>Warehouse</label><select id="receipt-line-warehouse-${receiptId}" name="warehouse" required onchange='syncLocationOptions("receipt-line-warehouse-${receiptId}", "receipt-line-location-${receiptId}", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(normalizedRowLocation)}")'>${warehouseOptionsHtml}</select></div>
+          <div><label>Location</label><select id="receipt-line-location-${receiptId}" name="location" data-placeholder="Select location" required><option value="">Select location</option></select></div>
+        </div>
+        <div><label>Notes</label><textarea name="osd_notes">${esc(row.osd_notes || "")}</textarea></div>
+        <div class="actions"><button type="submit">Save MRR Line</button><a class="btn btn-secondary" href="${esc(returnTo)}">Back</a></div>
+      </form>
+      <script>syncLocationOptions("receipt-line-warehouse-${receiptId}", "receipt-line-location-${receiptId}", ${JSON.stringify(locationMap)}, ${JSON.stringify(normalizedRowLocation)});</script>
+    </div>
+  `, req.user));
+}));
+
+app.post("/material-logs/mrr/:mrrId/receipts/:receiptId/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const mrrId = Number(req.params.mrrId);
+  const receiptId = Number(req.params.receiptId);
+  const returnTo = getSafeReturnPath(req, `/material-logs/mrr/${mrrId}/edit`);
+  const qtyReceived = parseQtyValue(req.body.qty_received || 0);
+  if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
+  await withTransaction(async (client) => {
+    await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
+    const normalizedNames = normalizeWarehouseLocationValues(req.body.warehouse, req.body.location);
+    const receipt = (await client.query(`
+      select r.id, r.po_line_id, po.id as po_id, po.rfq_id
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      join purchase_orders po on po.id = pl.po_id
+      where r.id = $1
+        and r.mrr_log_id = $2
+        and r.job_id = $3
+      for update
+    `, [receiptId, mrrId, jobId])).rows[0];
+    if (!receipt) throw new Error("MRR receipt line not found.");
+    await client.query(`
+      update receipts
+      set qty_received = $4,
+          warehouse = $5,
+          location = $6,
+          osd_status = $7,
+          osd_notes = $8
+      where id = $1
+        and mrr_log_id = $2
+        and job_id = $3
+    `, [
+      receiptId,
+      mrrId,
+      jobId,
+      qtyReceived,
+      normalizedNames.warehouse,
+      normalizedNames.location,
+      String(req.body.osd_status || "OK").trim().toUpperCase() || "OK",
+      String(req.body.osd_notes || "").trim()
+    ]);
+    await client.query(`
+      update osd_logs
+      set received_qty = $2,
+          warehouse = $3,
+          location = $4,
+          osd_status = $5,
+          notes = $6
+      where receipt_id = $1
+        and job_id = $7
+    `, [
+      receiptId,
+      qtyReceived,
+      normalizedNames.warehouse,
+      normalizedNames.location,
+      String(req.body.osd_status || "OK").trim().toUpperCase() || "OK",
+      String(req.body.osd_notes || "").trim(),
+      jobId
+    ]);
+    await recalcPoStatus(client, receipt.po_id);
+    if (receipt.rfq_id) await recalcRfqStatus(client, receipt.rfq_id);
+    await auditLog(client, req.user.id, "update", "receipt", receiptId, `mrr=${mrrId}`);
+  });
+  res.redirect(returnTo);
+}));
 
 app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
@@ -19758,9 +19887,14 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
     const appPoOptions = [`<option value="">Select app PO</option>`]
       .concat(appPos.map((po) => `<option value="${po.id}" ${Number(po.id) === Number(row.app_po_id || 0) ? "selected" : ""}>${esc(po.po_no)}${po.vendor_name ? ` | ${esc(po.vendor_name)}` : ""}${po.description ? ` | ${esc(po.description)}` : ""}</option>`))
       .join("");
+    const mrrEditReturnTo = `/material-logs/mrr/${row.id}/edit`;
     const mrrLineRows = [...poReceiptLines.rows, ...manualLines.rows]
       .sort((a, b) => String(b.line_date || "").localeCompare(String(a.line_date || "")) || Number(b.id || 0) - Number(a.id || 0))
-      .map((line) => `<tr>
+      .map((line) => {
+        const editHref = line.source_type === "PO Receipt"
+          ? `/material-logs/mrr/${row.id}/receipts/${line.id}/edit`
+          : `/material-logs/receiving/${line.id}/edit?return_to=${encodeURIComponent(mrrEditReturnTo)}`;
+        return `<tr>
         <td>${esc(line.source_type)}</td>
         <td>${esc(line.po_line || "")}</td>
         <td>${esc(line.item_code || "")}</td>
@@ -19771,7 +19905,9 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         <td>${esc(line.osd_status || "")}</td>
         <td>${esc(formatShortDateTime(line.line_date || ""))}</td>
         <td>${esc(line.notes || "")}</td>
-      </tr>`).join("");
+        <td><a class="btn btn-secondary" href="${esc(editHref)}">Edit</a></td>
+      </tr>`;
+      }).join("");
     const receiveRemainingHref = row.app_po_id
       ? `/po/${row.app_po_id}/receive`
       : `/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit`;
@@ -19810,7 +19946,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
       ${reverseCard}
       <div class="card scroll">
         <h3>MRR Lines</h3>
-        <table><tr><th>Source</th><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>Status</th><th>Date</th><th>Notes</th></tr>${mrrLineRows || `<tr><td colspan="10" class="muted">No MRR lines found for this header yet.</td></tr>`}</table>
+        <table><tr><th>Source</th><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>Status</th><th>Date</th><th>Notes</th><th>Action</th></tr>${mrrLineRows || `<tr><td colspan="11" class="muted">No MRR lines found for this header yet.</td></tr>`}</table>
       </div>
     `, req.user));
   });
