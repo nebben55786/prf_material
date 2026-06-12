@@ -13906,10 +13906,10 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     itemRows.push(`<tr data-rfq-item-id="${item.id}">
       <td style="width:1%; white-space:nowrap;">${esc(item.po_line || "")}</td>
       <td style="width:1%; white-space:nowrap;"><input type="hidden" name="rfq_item_id_${item.id}" value="${item.id}" />${esc(item.item_code)}</td>
-      <td style="width:auto; min-width:260px;">${esc(item.description)}</td>
+      <td style="width:36%; min-width:420px;">${esc(item.description)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(item.qty))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(item.uom)}</td>
-      <td style="width:1%; white-space:nowrap;">${esc(item.spec || "")}</td>
+      <td style="width:80px; max-width:80px; white-space:normal; overflow-wrap:anywhere;">${esc(item.spec || "")}</td>
       <td style="width:1%; white-space:nowrap;">${esc([formatPlainNumberDisplay(item.size_1), formatPlainNumberDisplay(item.size_2)].filter(Boolean).join(" x "))}</td>
       <td style="width:1%; white-space:nowrap;">${esc([formatPlainNumberDisplay(item.thk_1), formatPlainNumberDisplay(item.thk_2)].filter(Boolean).join(" x "))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(item.notes || "")}</td>
@@ -14197,7 +14197,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <button type="submit" data-rfq-quote-save="1" ${activeQuoteVendorId ? "" : "disabled"}>Save ${esc(activeVendor?.name || "Vendor")} Quotes</button>
         </div>
         <table id="rfq-quote-table-${rfqId}">
-          <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:260px;">Description</th><th style="width:1%; white-space:nowrap;">Qty</th><th style="width:1%; white-space:nowrap;">UOM</th><th style="width:1%; white-space:nowrap;">Spec</th><th style="width:1%; white-space:nowrap;">Size</th><th style="width:1%; white-space:nowrap;">Thk</th><th style="width:1%; white-space:nowrap;">Notes</th><th style="width:96px; white-space:nowrap;">Unit Price</th><th style="width:88px; white-space:nowrap;">Lead Days</th><th style="width:1%; white-space:nowrap;">Award Status</th><th style="width:1%; white-space:nowrap;">Award Summary</th><th style="width:1%; white-space:nowrap;">Issued PO</th><th>Actions</th></tr>
+          <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:36%; min-width:420px;">Description</th><th style="width:1%; white-space:nowrap;">Qty</th><th style="width:1%; white-space:nowrap;">UOM</th><th style="width:80px; max-width:80px; white-space:normal;">Spec</th><th style="width:1%; white-space:nowrap;">Size</th><th style="width:1%; white-space:nowrap;">Thk</th><th style="width:1%; white-space:nowrap;">Notes</th><th style="width:96px; white-space:nowrap;">Unit Price</th><th style="width:88px; white-space:nowrap;">Lead Days</th><th style="width:1%; white-space:nowrap;">Award Status</th><th style="width:1%; white-space:nowrap;">Award Summary</th><th style="width:1%; white-space:nowrap;">Issued PO</th><th>Actions</th></tr>
           ${itemRows.join("") || `<tr><td colspan="15" class="muted">No RFQ items loaded yet.</td></tr>`}
         </table>
       </form>
