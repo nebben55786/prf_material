@@ -3596,6 +3596,40 @@ async function updateMaterialMasterItemById(client, materialItemId, row, jobId) 
   return { status: "updated", id: materialItemId, item: normalized };
 }
 
+async function getMaterialItemUsageSummary(client, materialItemId, itemCode, jobId) {
+  const code = String(itemCode || "").trim();
+  const checks = [
+    ["BOM lines", `
+      select count(*)::int as count
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bh.job_id = $1 and lower(bl.item_code) = lower($2)
+    `, [jobId, code]],
+    ["RFQ lines", "select count(*)::int as count from rfq_items where job_id = $1 and material_item_id = $2", [jobId, materialItemId]],
+    ["PO lines", "select count(*)::int as count from po_lines where job_id = $1 and material_item_id = $2", [jobId, materialItemId]],
+    ["Receipts", `
+      select count(*)::int as count
+      from receipts r
+      join po_lines pl on pl.id = r.po_line_id
+      where pl.job_id = $1 and pl.material_item_id = $2
+    `, [jobId, materialItemId]],
+    ["Receiving log rows", `
+      select count(*)::int as count
+      from material_receiving_logs
+      where lower(item_code) = lower($1)
+         or lower(ident_code) = lower($1)
+         or lower(fluor_item_code) = lower($1)
+    `, [code]],
+    ["OS&D rows", "select count(*)::int as count from osd_logs where lower(item_code) = lower($1)", [code]]
+  ];
+  const results = await Promise.all(checks.map(async ([label, sql, params]) => {
+    const row = (await client.query(sql, params)).rows[0];
+    return { label, count: Number(row?.count || 0) };
+  }));
+  const total = results.reduce((sum, entry) => sum + entry.count, 0);
+  return { total, entries: results.filter((entry) => entry.count > 0) };
+}
+
 async function getMaterialItemForUse(client, itemCode, jobId, specName = "") {
   const code = String(itemCode || "").trim();
   if (!code) return { errorCode: "missing_item_code", message: "Item code is required." };
@@ -9487,6 +9521,24 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
   ]);
   const item = itemResult.rows[0];
   if (!item) throw new Error("Item not found.");
+  const itemUsage = await getMaterialItemUsageSummary(pool, item.id, item.item_code, jobId);
+  const usageSummary = itemUsage.entries.map((entry) => `${entry.count} ${entry.label}`).join(", ");
+  const deleteSection = itemUsage.total === 0
+    ? `
+      <div class="card" style="margin-top: 12px;">
+        <h2>Delete Item</h2>
+        <p class="muted">This item is not currently used by BOMs, RFQs, POs, receipts, receiving logs, or OS&amp;D records.</p>
+        <form method="post" action="/items/${item.id}/delete" onsubmit="return confirm('Delete this unused item? This cannot be undone.');">
+          <button class="btn btn-danger" type="submit">Delete Item</button>
+        </form>
+      </div>
+    `
+    : `
+      <div class="card" style="margin-top: 12px;">
+        <h2>Delete Item</h2>
+        <p class="muted">Delete is disabled because this item is already used in: ${esc(usageSummary)}.</p>
+      </div>
+    `;
   const selectedSpecIds = new Set(selectedSpecResult.rows.map((row) => Number(row.spec_id)));
   const itemSpecOptions = specs.map((spec) => `<option value="${escAttr(spec.id)}" ${selectedSpecIds.has(Number(spec.id)) ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
   res.send(layout("Edit Item", `
@@ -9514,6 +9566,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
         <div class="actions"><button type="submit">Save Item</button><a class="btn btn-secondary" href="/items">Back</a></div>
       </form>
     </div>
+    ${deleteSection}
   `, req.user));
 }));
 
@@ -9528,6 +9581,23 @@ app.post("/items/:id/edit", requireAuth, requireJobContext, requirePermission("i
     await auditLog(client, req.user.id, "update", "material_item", result.id, result.item.item_code);
   });
   res.redirect(`/items?q=${encodeURIComponent(String(req.body.item_code || "").trim())}`);
+}));
+
+app.post("/items/:id/delete", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const item = (await client.query("select id, item_code from material_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
+    if (!item) throw new Error("Item not found.");
+    const itemUsage = await getMaterialItemUsageSummary(client, item.id, item.item_code, jobId);
+    if (itemUsage.total > 0) {
+      const usageSummary = itemUsage.entries.map((entry) => `${entry.count} ${entry.label}`).join(", ");
+      throw new Error(`This item cannot be deleted because it is already used in: ${usageSummary}.`);
+    }
+    await client.query("delete from material_items where id = $1 and job_id = $2", [itemId, jobId]);
+    await auditLog(client, req.user.id, "delete", "material_item", itemId, item.item_code);
+  });
+  res.redirect("/items");
 }));
 
 app.post("/settings/permissions", requireAuth, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
