@@ -2521,9 +2521,9 @@ function parseRfqPasteRows(pastedText) {
 function getRfqPasteRowIssues(row, { matched = false } = {}) {
   const issues = [];
   const itemCode = String(row.item_code || "").trim();
+  const description = String(row.description || "").trim();
   const qty = parseQtyValue(row.qty, NaN);
-  if (!itemCode) issues.push("Ident is required");
-  if (itemCode && !matched) issues.push("Item is not in Item Master");
+  if ((!itemCode || !matched) && !description) issues.push("Description is required");
   if (!Number.isFinite(qty) || qty <= 0) issues.push("Qty is required");
   return issues;
 }
@@ -15205,10 +15205,11 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
   const rowsPayload = Buffer.from(JSON.stringify(rows), "utf8").toString("base64");
   const previewRows = previewMeta.map(({ row, matched, issues }) => {
     const thk = [formatPlainNumberDisplay(row.thk_1), formatPlainNumberDisplay(row.thk_2)].filter(Boolean).join(" x ");
-    const statusLabel = matched ? "Item Master" : "Not In Item Master";
+    const hasItemCode = String(row.item_code || "").trim();
+    const statusLabel = matched ? "Item Master" : hasItemCode ? "Will Add to Item Master" : "Will Generate Item Code";
     const statusChip = matched
       ? `<span class="chip">Item Master</span>`
-      : `<span class="chip" style="background:#fdecec;border-color:#f2a69b;color:#8a1f11;">Not In Master</span>`;
+      : `<span class="chip" style="background:#fff4cc;border-color:#f2ce65;color:#6b4e00;">${hasItemCode ? "New Master Item" : "Generate Code"}</span>`;
     return `<tr>
       <td>${esc(row.item_code || "")}</td>
       <td>${esc(row.description || "")}</td>
@@ -15230,7 +15231,7 @@ app.post("/rfq/:id/items/paste", requireAuth, requireJobContext, requirePermissi
         <div class="stat"><div>Matched Idents</div><strong>${matchedRows.length}</strong></div>
         <div class="stat"><div>Missing Idents</div><strong>${unmatchedRows.length}</strong></div>
       </div>
-      ${unmatchedRows.length > 0 ? `<p class="muted" style="margin-top:10px;">${unmatchedRows.length} ident(s) are not in Item Master for this job. Add them on the Items page first, then paste again.</p>` : `<p class="muted" style="margin-top:10px;">All pasted idents exist in Item Master.</p>`}
+      ${unmatchedRows.length > 0 ? `<p class="muted" style="margin-top:10px;">${unmatchedRows.length} row(s) are not in Item Master or have a blank ident. Import Rows will add them to Item Master using the pasted values.</p>` : `<p class="muted" style="margin-top:10px;">All pasted idents exist in Item Master.</p>`}
       ${invalidPreviewRows.length > 0 ? `<p class="muted" style="margin-top:10px;color:#b42318;">${invalidPreviewRows.length} row(s) are missing required values. Fix them and paste again before importing.</p>` : ""}
     </div>
     <div class="card scroll">
