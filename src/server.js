@@ -14991,26 +14991,33 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
   if (!rfq) throw new Error("RFQ not found.");
   const newItemRows = Array.from({ length: 8 }, (_, index) => `
     <tr>
-      <td><input name="item_code_${index}" /></td>
-      <td><input name="description_${index}" /></td>
-      <td><input name="material_type_${index}" /></td>
-      <td><input name="uom_${index}" /></td>
+      <td><input name="item_code_${index}" /><input type="hidden" name="material_type_${index}" value="misc" /></td>
+      <td class="rfq-entry-description"><input name="description_${index}" /></td>
       <td><input name="spec_${index}" /></td>
       <td><input name="commodity_code_${index}" /></td>
       <td><input name="tag_number_${index}" /></td>
-      <td><input name="size_1_${index}" /></td>
-      <td><input name="size_2_${index}" /></td>
-      <td><input name="thk_1_${index}" /></td>
-      <td><input name="thk_2_${index}" /></td>
-      <td><input name="qty_${index}" /></td>
+      <td class="rfq-entry-small"><input name="size_1_${index}" /></td>
+      <td class="rfq-entry-small"><input name="size_2_${index}" /></td>
+      <td class="rfq-entry-small"><input name="thk_1_${index}" /></td>
+      <td class="rfq-entry-small"><input name="thk_2_${index}" /></td>
+      <td class="rfq-entry-small"><input name="qty_${index}" /></td>
+      <td class="rfq-entry-uom"><input name="uom_${index}" /></td>
       <td><input name="notes_${index}" /></td>
     </tr>
   `).join("");
   res.send(layout(`Add New RFQ Items`, `
     <h1>Add New RFQ Items</h1>
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
-    <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Leave item code blank to generate a unique 5-digit code; new item codes are added to Item Master with the entered description, UOM, type, specs, and dimensions.</p>
+    <p class="muted" style="margin: 12px 0;">Use this like an Excel grid. Leave item code blank to generate a unique 5-digit code; new item codes are added to Item Master with the entered description, UOM, specs, and dimensions.</p>
     <style>
+      #rfq-grid-form-${rfqId} .rfq-entry-grid {
+        table-layout: fixed;
+        width: 100%;
+      }
+      #rfq-grid-form-${rfqId} .rfq-entry-grid th,
+      #rfq-grid-form-${rfqId} .rfq-entry-grid td {
+        white-space: normal;
+      }
       #rfq-grid-form-${rfqId} table td { padding: 0; }
       #rfq-grid-form-${rfqId} table td input {
         width: 100%;
@@ -15027,11 +15034,33 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
         outline-offset: -2px;
         background: #f7fbff;
       }
+      #rfq-grid-form-${rfqId} .rfq-entry-description {
+        min-width: 420px;
+      }
+      #rfq-grid-form-${rfqId} .rfq-entry-small input,
+      #rfq-grid-form-${rfqId} .rfq-entry-uom input {
+        padding-left: 6px;
+        padding-right: 6px;
+      }
     </style>
     <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', 8)">
       <div class="scroll">
         <table class="data-grid rfq-entry-grid">
-          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Notes</th></tr></thead>
+          <colgroup>
+            <col style="width: 120px;">
+            <col style="width: 34%;">
+            <col style="width: 110px;">
+            <col style="width: 110px;">
+            <col style="width: 110px;">
+            <col style="width: 6ch;">
+            <col style="width: 6ch;">
+            <col style="width: 6ch;">
+            <col style="width: 6ch;">
+            <col style="width: 6ch;">
+            <col style="width: 4ch;">
+            <col style="width: 120px;">
+          </colgroup>
+          <thead><tr><th>Item Code</th><th>Description</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>UOM</th><th>Notes</th></tr></thead>
           <tbody>${newItemRows}</tbody>
         </table>
       </div>
