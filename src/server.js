@@ -15057,7 +15057,7 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
             <col style="width: 6ch;">
             <col style="width: 6ch;">
             <col style="width: 6ch;">
-            <col style="width: 4ch;">
+            <col style="width: 6ch;">
             <col style="width: 120px;">
           </colgroup>
           <thead><tr><th>Item Code</th><th>Description</th><th>Spec</th><th>Commodity Code</th><th>Tag Number</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>UOM</th><th>Notes</th></tr></thead>
