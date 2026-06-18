@@ -166,6 +166,8 @@ create table if not exists rfqs (
   comments text,
   requestor_name text,
   due_date date,
+  eta_date date,
+  eta_date_override boolean not null default false,
   status text not null default 'SEND_FOR_QUOTES',
   created_at timestamptz not null default now()
 );
@@ -175,6 +177,8 @@ alter table rfqs add column if not exists po_number text;
 alter table rfqs add column if not exists vendor_quote_number text;
 alter table rfqs add column if not exists comments text;
 alter table rfqs add column if not exists requestor_name text;
+alter table rfqs add column if not exists eta_date date;
+alter table rfqs add column if not exists eta_date_override boolean not null default false;
 
 update rfqs
 set status = case

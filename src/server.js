@@ -6343,7 +6343,7 @@ async function syncRfqVendors(client, rfqId, vendorIds) {
 }
 
 async function recalcPoStatus(client, poId) {
-  const po = (await client.query("select status from purchase_orders where id = $1", [poId])).rows[0];
+  const po = (await client.query("select status, rfq_id, job_id from purchase_orders where id = $1", [poId])).rows[0];
   if (!po || po.status === "CANCELLED" || po.status === "DRAFT") return;
   const totals = (await client.query(`
     select
@@ -6371,6 +6371,22 @@ async function recalcPoStatus(client, poId) {
         updated_at = now()
     where id = $1
   `, [poId, nextStatus]);
+  if (po.rfq_id) await refreshRfqEtaFromPos(client, po.rfq_id, po.job_id);
+}
+
+async function refreshRfqEtaFromPos(client, rfqId, jobId) {
+  if (!Number(rfqId) || !Number(jobId)) return;
+  const rfq = (await client.query("select eta_date_override from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+  if (!rfq || rfq.eta_date_override) return;
+  const eta = (await client.query(`
+    select max((coalesce(po.issued_at, po.created_at)::date + greatest(coalesce(pl.lead_days, 0), 0)::int)) as eta_date
+    from purchase_orders po
+    join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+    where po.rfq_id = $1
+      and po.job_id = $2
+      and po.status <> 'CANCELLED'
+  `, [rfqId, jobId])).rows[0]?.eta_date || null;
+  await client.query("update rfqs set eta_date = $3 where id = $1 and job_id = $2", [rfqId, jobId, eta]);
 }
 
 async function getJobNumber(client = null) {
@@ -13613,6 +13629,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td>${renderIssuedPoLinks(rfq.issued_po_links, rfq.issued_po_refs)}</td>
     <td style="width:1%; white-space:nowrap;">${esc(rfq.client_request_no || "")}</td>
     <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
+    <td>${esc(formatShortDate(rfq.eta_date || ""))}</td>
     <td>${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}</td>
   </tr>`).join("");
   res.send(layout("Purchasing", `
@@ -13638,7 +13655,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table><tr><th>RFQ</th><th>Description</th><th>Requestor</th><th>Awarded Vendor(s)</th><th>Issued PO(s)</th><th style="width:1%; white-space:nowrap;">Client Request #</th><th>Due</th><th>Status</th></tr>${rows || `<tr><td colspan="8" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+        <table><tr><th>RFQ</th><th>Description</th><th>Requestor</th><th>Awarded Vendor(s)</th><th>Issued PO(s)</th><th style="width:1%; white-space:nowrap;">Client Request #</th><th>Due</th><th>ETA</th><th>Status</th></tr>${rows || `<tr><td colspan="9" class="muted">No RFQs match the current filter.</td></tr>`}</table>
       </div>
     </div>
   `, req.user));
@@ -13737,16 +13754,17 @@ app.post("/rfq/:id/header", requireAuth, requireJobContext, requirePermission("r
   const comments = String(req.body.comments || "").trim();
   const requestorName = String(req.body.requestor_name || "").trim();
   const dueDate = String(req.body.due_date || "").trim();
+  const etaDate = String(req.body.eta_date || "").trim();
   const requestedStatus = String(req.body.status || "").trim();
   const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "";
   if (!projectName) throw new Error("Description is required.");
   if (!dueDate) throw new Error("Due date is required.");
   if (!status) throw new Error("Choose a valid RFQ status.");
   await withTransaction(async (client) => {
-    const rfq = (await client.query("select rfq_no, project_name, client_request_no, po_number, vendor_quote_number, comments, requestor_name, due_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    const rfq = (await client.query("select rfq_no, project_name, client_request_no, po_number, vendor_quote_number, comments, requestor_name, due_date, eta_date, status from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
-    await client.query("update rfqs set project_name = $2, client_request_no = $3, po_number = $4, vendor_quote_number = $5, comments = $6, requestor_name = $7, due_date = $8, status = $9 where id = $1 and job_id = $10", [rfqId, projectName, clientRequestNo, poNumber, vendorQuoteNumber, comments, requestorName, dueDate, status, jobId]);
-    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${clientRequestNo}:${poNumber}:${vendorQuoteNumber}:${requestorName}:${dueDate}:${status}`);
+    await client.query("update rfqs set project_name = $2, client_request_no = $3, po_number = $4, vendor_quote_number = $5, comments = $6, requestor_name = $7, due_date = $8, eta_date = $9, eta_date_override = $10, status = $11 where id = $1 and job_id = $12", [rfqId, projectName, clientRequestNo, poNumber, vendorQuoteNumber, comments, requestorName, dueDate, etaDate || null, Boolean(etaDate), status, jobId]);
+    await auditLog(client, req.user.id, "update", "rfq", rfqId, `${rfq.rfq_no}:${projectName}:${clientRequestNo}:${poNumber}:${vendorQuoteNumber}:${requestorName}:${dueDate}:${etaDate}:${status}`);
   });
   res.redirect(`/rfq/${rfqId}`);
 });
@@ -14217,10 +14235,11 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     <h1>${esc(rfq.rfq_no)}${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</h1>
     <div class="card">
       <form id="rfq-${rfqId}-header-form" method="post" action="/rfq/${rfqId}/header" class="stack">
-        <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+        <div class="grid" style="grid-template-columns: repeat(5, minmax(0, 1fr));">
           <div><label>RFQ Number</label><input value="${esc(rfq.rfq_no)}" readonly /></div>
           <div><label>Description</label><input name="project_name" value="${esc(rfq.project_name || "")}" required /></div>
           <div><label>Due Date</label><input type="date" name="due_date" value="${esc(textValue(rfq.due_date))}" required /></div>
+          <div><label>ETA Date</label><input type="date" name="eta_date" value="${esc(textValue(rfq.eta_date))}" /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
         </div>
         <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
@@ -15838,6 +15857,7 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
         ), po_number)
         where id = $1 and job_id = $2
       `, [rfqId, jobId]);
+      await refreshRfqEtaFromPos(client, rfqId, jobId);
     }
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
@@ -17275,7 +17295,10 @@ app.post("/po/:id/delete", requireAuth, requireJobContext, requirePermission("po
   await withTransaction(async (client) => {
     const po = (await client.query("select rfq_id from purchase_orders where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     await client.query("delete from purchase_orders where id = $1 and job_id = $2", [req.params.id, jobId]);
-    if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
+    if (po?.rfq_id) {
+      await refreshRfqEtaFromPos(client, po.rfq_id, jobId);
+      await recalcRfqStatus(client, po.rfq_id);
+    }
     await auditLog(client, req.user.id, "delete", "purchase_order", req.params.id, "");
   });
   res.redirect("/po");
