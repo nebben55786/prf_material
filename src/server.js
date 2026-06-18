@@ -3739,7 +3739,8 @@ async function findOrCreateVendorByName(client, vendorName, jobId) {
   return insert.rows[0].id;
 }
 
-async function upsertRfqItemRow(client, rfqId, row, jobId, reservedCodes = new Set()) {
+async function upsertRfqItemRow(client, rfqId, row, jobId, reservedCodes = new Set(), options = {}) {
+  const preserveDuplicateRows = Boolean(options.preserveDuplicateRows);
   const initialItemCode = String(row.item_code || "").trim();
   const qty = parseQtyValue(row.qty);
   if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
@@ -3764,32 +3765,34 @@ async function upsertRfqItemRow(client, rfqId, row, jobId, reservedCodes = new S
   const item = materialLookup.item;
   const materialItemId = item.id;
   const resolvedSpec = requestedSpec || await getMaterialItemSpecsText(client, materialItemId, jobId);
-  const existingItem = await client.query(`
-    select id, coalesce(po_line, '') as po_line
-    from rfq_items
-    where rfq_id = $1 and material_item_id = $2
-      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
-      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
-      and (coalesce(spec, '') = $7 or ($8 = '' and coalesce(spec, '') = ''))
-  `, [rfqId, materialItemId, item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", resolvedSpec, requestedSpec]);
-  if (existingItem.rows[0]) {
-    const poLine = requestedLine || existingItem.rows[0].po_line || await getNextRfqLineNumber(client, rfqId);
-    await client.query(`
-      update rfq_items
-      set po_line = $2,
-          item_code_snapshot = $3,
-          description_snapshot = $4,
-          material_type_snapshot = $5,
-          uom_snapshot = $6,
-          spec = $7,
-          commodity_code = $8,
-          tag_number = $9,
-          qty = $10,
-          notes = $11,
-          updated_at = now()
-      where id = $1
-    `, [existingItem.rows[0].id, poLine, ...materialItemSnapshotParams(item), resolvedSpec, item.commodity_code || "", preparedRow.tag_number || "", qty, preparedRow.notes || ""]);
-    return { status: "updated", itemId: Number(existingItem.rows[0].id) };
+  if (!preserveDuplicateRows) {
+    const existingItem = await client.query(`
+      select id, coalesce(po_line, '') as po_line
+      from rfq_items
+      where rfq_id = $1 and material_item_id = $2
+        and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
+        and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
+        and (coalesce(spec, '') = $7 or ($8 = '' and coalesce(spec, '') = ''))
+    `, [rfqId, materialItemId, item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || "", resolvedSpec, requestedSpec]);
+    if (existingItem.rows[0]) {
+      const poLine = requestedLine || existingItem.rows[0].po_line || await getNextRfqLineNumber(client, rfqId);
+      await client.query(`
+        update rfq_items
+        set po_line = $2,
+            item_code_snapshot = $3,
+            description_snapshot = $4,
+            material_type_snapshot = $5,
+            uom_snapshot = $6,
+            spec = $7,
+            commodity_code = $8,
+            tag_number = $9,
+            qty = $10,
+            notes = $11,
+            updated_at = now()
+        where id = $1
+      `, [existingItem.rows[0].id, poLine, ...materialItemSnapshotParams(item), resolvedSpec, item.commodity_code || "", preparedRow.tag_number || "", qty, preparedRow.notes || ""]);
+      return { status: "updated", itemId: Number(existingItem.rows[0].id) };
+    }
   }
   const poLine = requestedLine || await getNextRfqLineNumber(client, rfqId);
   const insert = await client.query(`
@@ -15408,7 +15411,7 @@ app.post("/rfq/:id/items/import", requireAuth, requireJobContext, requirePermiss
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const rowNumber = index + 2;
-      const result = await upsertRfqItemRow(client, rfqId, row, jobId, reservedItemCodes);
+      const result = await upsertRfqItemRow(client, rfqId, row, jobId, reservedItemCodes, { preserveDuplicateRows: true });
       if (result.status === "inserted") insertedCount += 1;
       else if (result.status === "updated") updatedCount += 1;
       else {
