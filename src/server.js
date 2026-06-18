@@ -9059,6 +9059,7 @@ app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("i
     <td><input name="thk_2_${item.id}" value="${escAttr(formatPlainNumberDisplay(item.thk_2))}" /></td>
     <td><input name="specs_${item.id}" value="${escAttr(item.specs || "")}" /></td>
     <td><input name="notes_${item.id}" value="${escAttr(item.notes || "")}" /></td>
+    <td><button class="btn btn-danger" type="submit" formaction="/items/bulk-edit/${item.id}/delete" formmethod="post" onclick="return confirm('Delete this unused item? This cannot be undone.');">Delete</button></td>
   </tr>`).join("");
   const returnParams = new URLSearchParams();
   if (q) returnParams.set("q", q);
@@ -9070,12 +9071,6 @@ app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("i
   const returnHref = `/items${returnParams.toString() ? `?${returnParams.toString()}` : ""}`;
   res.send(layout("Bulk Edit Items", `
     <h1>Bulk Edit Items</h1>
-    <div class="card">
-      <p class="muted">Editing ${rows.length} filtered item(s). Item Code is locked so RFQs, BOMs, POs, and inventory stay linked correctly.</p>
-      <div class="actions">
-        <a class="btn btn-secondary" href="${escAttr(returnHref)}">Back To Item Master</a>
-      </div>
-    </div>
     <form method="post" action="/items/bulk-edit" class="stack">
       <input type="hidden" name="return_q" value="${escAttr(q)}" />
       <input type="hidden" name="return_description" value="${escAttr(descriptionQ)}" />
@@ -9083,13 +9078,17 @@ app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("i
       <input type="hidden" name="return_size_1" value="${escAttr(size1Q)}" />
       <input type="hidden" name="return_size_2" value="${escAttr(size2Q)}" />
       <input type="hidden" name="return_spec_id" value="${escAttr(specId > 0 ? String(specId) : "")}" />
-      <div class="card scroll">
-        <table class="data-grid">
-          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Commodity</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Specs</th><th>Notes</th></tr></thead>
-          <tbody>${itemRows || `<tr><td colspan="11" class="muted">No items match the current filter.</td></tr>`}</tbody>
-        </table>
-      </div>
       <div class="card">
+        <p class="muted">Editing ${rows.length} filtered item(s). Item Code is locked so RFQs, BOMs, POs, and inventory stay linked correctly.</p>
+        <div class="actions" style="margin-bottom: 12px;">
+          <a class="btn btn-secondary" href="${escAttr(returnHref)}">Back To Item Master</a>
+        </div>
+        <div class="scroll">
+        <table class="data-grid">
+          <thead><tr><th>Item Code</th><th>Description</th><th>Type</th><th>UOM</th><th>Commodity</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Specs</th><th>Notes</th><th>Action</th></tr></thead>
+          <tbody>${itemRows || `<tr><td colspan="12" class="muted">No items match the current filter.</td></tr>`}</tbody>
+        </table>
+        </div>
         <div class="actions">
           <button type="submit" ${rows.length ? "" : "disabled"}>Save Changes</button>
           <a class="btn btn-secondary" href="${escAttr(returnHref)}">Cancel</a>
@@ -9153,6 +9152,36 @@ app.post("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("
   if (returnSize2) returnParams.set("size_2", returnSize2);
   if (returnSpecId > 0) returnParams.set("spec_id", String(returnSpecId));
   res.redirect(`/items${returnParams.toString() ? `?${returnParams.toString()}` : ""}`);
+}));
+
+app.post("/items/bulk-edit/:id/delete", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+  const itemId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const item = (await client.query("select id, item_code from material_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
+    if (!item) throw new Error("Item not found.");
+    const itemUsage = await getMaterialItemUsageSummary(client, item.id, item.item_code, jobId);
+    if (itemUsage.total > 0) {
+      const usageSummary = itemUsage.entries.map((entry) => `${entry.count} ${entry.label}`).join(", ");
+      throw new Error(`This item cannot be deleted because it is already used in: ${usageSummary}.`);
+    }
+    await client.query("delete from material_items where id = $1 and job_id = $2", [itemId, jobId]);
+    await auditLog(client, req.user.id, "delete", "material_item", itemId, item.item_code);
+  });
+  const returnParams = new URLSearchParams();
+  const returnQ = String(req.body.return_q || "").trim();
+  const returnDescription = String(req.body.return_description || "").trim();
+  const returnType = String(req.body.return_type || "").trim();
+  const returnSize1 = String(req.body.return_size_1 || "").trim();
+  const returnSize2 = String(req.body.return_size_2 || "").trim();
+  const returnSpecId = Number(req.body.return_spec_id || 0);
+  if (returnQ) returnParams.set("q", returnQ);
+  if (returnDescription) returnParams.set("description", returnDescription);
+  if (returnType) returnParams.set("type", returnType);
+  if (returnSize1) returnParams.set("size_1", returnSize1);
+  if (returnSize2) returnParams.set("size_2", returnSize2);
+  if (returnSpecId > 0) returnParams.set("spec_id", String(returnSpecId));
+  res.redirect(`/items/bulk-edit${returnParams.toString() ? `?${returnParams.toString()}` : ""}`);
 }));
 
 app.get("/items/new", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
