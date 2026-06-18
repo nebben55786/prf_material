@@ -13464,7 +13464,7 @@ app.post("/vendors/:id/contacts/:contactId/delete", requireAuth, requireJobConte
 
 app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"), async (req, res) => {
   const jobId = currentJobId(req);
-  const rfqNo = String(req.query.rfq_no || "").trim();
+  const poReqNo = String(req.query.po_req || "").trim();
   const project = String(req.query.project || "").trim();
   const status = String(req.query.status || "").trim();
   const itemCode = String(req.query.item_code || "").trim();
@@ -13483,9 +13483,18 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const requestors = requestorsRes.rows;
   const where = ["r.job_id = $1"];
   const params = [jobId];
-  if (rfqNo) {
-    params.push(`%${rfqNo}%`);
-    where.push(`r.rfq_no ilike $${params.length}`);
+  if (poReqNo) {
+    params.push(`%${poReqNo}%`);
+    where.push(`(
+      coalesce(r.client_request_no, '') ilike $${params.length}
+      or exists (
+        select 1
+        from purchase_orders po_filter
+        where po_filter.job_id = r.job_id
+          and po_filter.rfq_id = r.id
+          and coalesce(po_filter.po_no, '') ilike $${params.length}
+      )
+    )`);
   }
   if (project) {
     params.push(`%${project}%`);
@@ -13668,7 +13677,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <div class="card">
       <form method="get" action="/rfq" class="stack">
         <div class="grid-4">
-          <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
+          <div><label>PO / Req #</label><input name="po_req" value="${esc(poReqNo)}" /></div>
           <div><label>Description</label><input name="project" value="${esc(project)}" /></div>
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
           <div><label>Item Code</label><input name="item_code" value="${esc(itemCode)}" /></div>
