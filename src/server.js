@@ -1953,14 +1953,13 @@ function layout(title, body, user) {
           const itemCodeInput = form.querySelector('[name="item_code_' + index + '"]');
           const descriptionInput = form.querySelector('[name="description_' + index + '"]');
           const qtyInput = form.querySelector('[name="qty_' + index + '"]');
-          const materialTypeInput = form.querySelector('[name="material_type_' + index + '"]');
           const uomInput = form.querySelector('[name="uom_' + index + '"]');
           const size1Input = form.querySelector('[name="size_1_' + index + '"]');
           const size2Input = form.querySelector('[name="size_2_' + index + '"]');
           const thk1Input = form.querySelector('[name="thk_1_' + index + '"]');
           const thk2Input = form.querySelector('[name="thk_2_' + index + '"]');
           const notesInput = form.querySelector('[name="notes_' + index + '"]');
-          const hasRowData = [descriptionInput, qtyInput, materialTypeInput, uomInput]
+          const hasRowData = [descriptionInput, qtyInput, uomInput]
             .concat([size1Input, size2Input, thk1Input, thk2Input, notesInput])
             .some((input) => input && String(input.value || "").trim());
           if (itemCodeInput && !String(itemCodeInput.value || "").trim() && hasRowData) {
