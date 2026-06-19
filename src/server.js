@@ -24,7 +24,7 @@ const vercelBlobClientModuleUrl = process.env.VERCEL_BLOB_CLIENT_MODULE_URL || "
 const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
 const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
 const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
-const bomLineImportHeaders = ["line_no", "item_code", "spec", "tag_number", "iwp_no", "iso_no", "qty_required", "notes"];
+const bomLineImportHeaders = ["line_no", "item_code", "description", "size_1", "qty", "uom", "spec", "tag_number", "iwp_no", "iso_no", "material_type", "commodity_code", "size_2", "thk_1", "thk_2", "notes"];
 const materialItemImportHeaders = ["item_code", "description", "material_type", "uom", "commodity_code", "size_1", "size_2", "thk_1", "thk_2", "notes", "specs"];
 const requisitionStatuses = ["REQUESTED", "WAITING_ON_MATERIAL", "ACCEPTED", "FLAGGED", "LOADED", "ISSUED", "CANCELLED", "CLOSED"];
 const unallocatedBomSystemKey = "UNALLOCATED";
@@ -2603,7 +2603,7 @@ function normalizeBomImportRow(row) {
     item_code: text(row.item_code, row.ident, row.ident_code, row.item),
     description: text(row.description, row.item_description, row.material_description, row.abbrev_description, row.abbrev_desc, row.product_description),
     material_type: text(row.material_type, row.category, row.type, "misc"),
-    uom: text(row.uom, row.unit, row.unit_of_measure, "EA"),
+    uom: text(row.uom, row.unit, row.unit_of_measure),
     spec: text(row.spec),
     commodity_code: text(row.commodity_code, row.commodity),
     tag_number: text(row.tag_number, row.tag),
@@ -3547,6 +3547,34 @@ async function ensureRfqMaterialItem(client, row, jobId, reservedCodes = new Set
     return { ...preparedRow, __rfqMaterialError: masterResult };
   }
   return preparedRow;
+}
+
+async function ensureBomImportMaterialItem(client, row, jobId, spec = "") {
+  const itemCode = String(row.item_code || "").trim();
+  let materialLookup = await getMaterialItemForUse(client, itemCode, jobId, spec);
+  if (materialLookup.errorCode !== "item_not_in_master") {
+    return materialLookup;
+  }
+
+  const masterResult = await upsertMaterialMasterItem(client, {
+    item_code: itemCode,
+    description: row.description,
+    material_type: row.material_type,
+    uom: row.uom,
+    specs: spec,
+    commodity_code: row.commodity_code,
+    size_1: row.size_1,
+    size_2: row.size_2,
+    thk_1: row.thk_1,
+    thk_2: row.thk_2,
+    notes: row.notes
+  }, jobId);
+  if (masterResult.status === "skipped") {
+    return { errorCode: masterResult.errorCode, message: masterResult.message };
+  }
+
+  materialLookup = await getMaterialItemForUse(client, itemCode, jobId, spec);
+  return materialLookup;
 }
 
 async function updateMaterialMasterItemById(client, materialItemId, row, jobId) {
@@ -10317,7 +10345,7 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       </div>
       <div class="card">
         <h3>Upload BOM Lines</h3>
-        <p class="muted">CSV/XLSX columns: line_no, item_code, spec, tag_number, iwp_no, iso_no, qty_required, notes. Item code must exist in Item Master; master description, UOM, type, commodity, and dimensions are used.</p>
+        <p class="muted">CSV/XLSX columns include line_no, item_code, description, size_1, qty, uom, spec, tag_number, iwp_no, iso_no, material_type, commodity_code, size_2, thk_1, thk_2, notes. Required fields are line_no, item_code, description, size_1, qty, and uom. The older qty_required column is still accepted. If an item code is not in Item Master, it will be added using the imported row values.</p>
           <form id="bom-lines-import-form" method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
             <div><label>CSV/XLSX File</label><input id="bom-lines-import-file" type="file" name="sheet" /></div>
             <div><label>Or Paste CSV</label><textarea id="bom-lines-import-text" name="csv_text"></textarea></div>
@@ -10698,14 +10726,17 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
       const rowNumber = index + 2;
       const lineNo = String(row.line_no || "").trim();
       const itemCode = String(row.item_code || "").trim();
+      const description = String(row.description || "").trim();
+      const size1 = String(row.size_1 || "").trim();
+      const uom = String(row.uom || "").trim();
       const qtyRequired = parseQtyValue(row.qty_required);
-      if (!lineNo || !itemCode || qtyRequired <= 0) {
+      if (!lineNo || !itemCode || !description || !size1 || !uom || qtyRequired <= 0) {
         skippedCount += 1;
-        await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, and qty_required are required.", row);
+        await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, description, size_1, qty, and uom are required.", row);
         continue;
       }
       const spec = normalizeSpecName(row.spec || "");
-      const materialLookup = await getMaterialItemForUse(client, itemCode, jobId, spec);
+      const materialLookup = await ensureBomImportMaterialItem(client, row, jobId, spec);
       if (materialLookup.errorCode) {
         skippedCount += 1;
         await addImportBatchError(client, batchId, rowNumber, materialLookup.errorCode, materialLookup.message, row);
