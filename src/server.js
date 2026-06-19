@@ -2105,7 +2105,6 @@ function normalizePhone(value) {
 function rfqRowHasAnyEnteredValues(row) {
   return [
     row.description,
-    row.material_type,
     row.uom,
     row.spec,
     row.commodity_code,
