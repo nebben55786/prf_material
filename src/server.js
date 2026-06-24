@@ -13983,6 +13983,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ? "RECEIVED"
       : (receivedItemCount > 0 ? "PARTIALLY_RECEIVED" : rfq.status));
   const awardedItems = items.filter((item) => item.award_status === "AWARDED" && item.awarded_vendor_id);
+  const fullyAwarded = items.length > 0 && awardedItems.length === items.length;
   const awardedVendorSet = new Set(awardedItems.map((item) => Number(item.awarded_vendor_id)));
   const awardedVendorId = items.length > 0 && awardedItems.length === items.length && awardedVendorSet.size === 1
     ? Number(awardedItems[0].awarded_vendor_id)
@@ -14058,7 +14059,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     const awardSummary = item.award_status === "AWARDED"
       ? `${awardedVendor} | $${Number(item.awarded_unit_price || 0).toFixed(2)} | ${num(item.awarded_lead_days)}d`
       : "Open";
-    const awardLineButton = selectedQuote && activeQuoteVendorId && !itemIssuedToPo
+    const awardLineButton = !fullyAwarded && selectedQuote && activeQuoteVendorId && !itemIssuedToPo
       ? `<button class="btn btn-primary" type="submit" formaction="/rfq-item/${item.id}/award" formmethod="post">Award Line</button>`
       : "";
     itemRows.push(`<tr data-rfq-item-id="${item.id}">
@@ -14291,7 +14292,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <div><label>Award Notes</label><input name="award_notes" value="${esc(items.find((item) => item.award_notes)?.award_notes || "")}" /></div>
         </div>
         <div class="actions">
-          <button type="submit" ${selectedVendors.length === 0 ? "disabled" : ""}>Award Whole RFQ</button>
+          ${fullyAwarded ? "" : `<button type="submit" ${selectedVendors.length === 0 ? "disabled" : ""}>Award Whole RFQ</button>`}
           ${awardedItems.length > 0 ? `<button class="btn btn-secondary" type="submit" formaction="/rfq/${rfqId}/award/clear">Clear Whole RFQ Award</button>` : ""}
           ${poAwardAction}
           <a class="btn btn-secondary" href="/rfq/${rfqId}/export-flow.xlsx">Export to FLOW</a>
