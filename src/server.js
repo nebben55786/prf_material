@@ -14158,6 +14158,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}">Import Quotes</a>`
         : `<button class="btn btn-secondary" type="button" disabled title="Select a vendor tab before importing quotes">Import Quotes</button>`) : ""}
       <a class="btn btn-primary" target="_blank" href="/rfq/${rfqId}/sheet.pdf" onclick="return openRfqPdfWithOrder(this, 'rfq-quote-table-${rfqId}');">Open RFQ PDF</a>
+      ${poCount === 0 && items.length > 0 ? `<form method="post" action="/rfq/${rfqId}/items/delete-all" onsubmit="return confirm('Delete all RFQ items from ${escAttr(rfq.rfq_no || "this RFQ")}? This will also remove line quotes and quote history.');"><button class="btn btn-danger" type="submit">Delete All Items</button></form>` : ""}
     </div>`;
   const quoteFileRows = quoteFiles.length > 0
     ? quoteFiles.map((file) => {
@@ -14741,6 +14742,41 @@ app.post("/rfq/:id/delete", requireAuth, requireJobContext, requirePermission("r
     await auditLog(client, req.user.id, "delete", "rfq", rfqId, rfq.rfq_no || "");
   });
   res.redirect("/rfq");
+}));
+
+app.post("/rfq/:id/items/delete-all", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const rfq = (await client.query("select id, rfq_no from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    if (!rfq) throw new Error("RFQ not found.");
+    const linkedPoLines = Number((await client.query(`
+      select count(*) as count
+      from po_lines
+      where job_id = $2
+        and rfq_item_id in (select id from rfq_items where rfq_id = $1 and job_id = $2)
+    `, [rfqId, jobId])).rows[0]?.count || 0);
+    const linkedPoHeaders = Number((await client.query(
+      "select count(*) as count from purchase_orders where rfq_id = $1 and job_id = $2",
+      [rfqId, jobId]
+    )).rows[0]?.count || 0);
+    if (linkedPoLines > 0 || linkedPoHeaders > 0) {
+      throw new Error("Cannot delete all RFQ items after a PO has been created for this RFQ.");
+    }
+    await client.query(`
+      delete from quote_revisions
+      where job_id = $2
+        and rfq_item_id in (select id from rfq_items where rfq_id = $1 and job_id = $2)
+    `, [rfqId, jobId]);
+    await client.query(`
+      delete from quotes
+      where job_id = $2
+        and rfq_item_id in (select id from rfq_items where rfq_id = $1 and job_id = $2)
+    `, [rfqId, jobId]);
+    const deleted = await client.query("delete from rfq_items where rfq_id = $1 and job_id = $2", [rfqId, jobId]);
+    await auditLog(client, req.user.id, "delete_all_items", "rfq", rfqId, `${rfq.rfq_no || ""}|items=${deleted.rowCount}`);
+  });
+  res.redirect(`/rfq/${rfqId}`);
 }));
 
 app.get("/rfq/:id/sheet.pdf", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
