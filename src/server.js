@@ -332,6 +332,49 @@ function formatPlainNumberDisplay(value, maxDecimals = 4) {
   return rounded === "-0" ? "0" : rounded;
 }
 
+function parseDimensionNumber(value) {
+  if (value === null || value === undefined) return null;
+  let text = String(value).trim().toLowerCase();
+  if (!text) return null;
+  const unicodeFractions = {
+    "¼": " 1/4",
+    "½": " 1/2",
+    "¾": " 3/4",
+    "⅛": " 1/8",
+    "⅜": " 3/8",
+    "⅝": " 5/8",
+    "⅞": " 7/8"
+  };
+  text = text
+    .replace(/[¼½¾⅛⅜⅝⅞]/g, (match) => unicodeFractions[match] || match)
+    .replace(/,/g, "")
+    .replace(/[″"]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  const mixed = text.match(/^(-?\d+)[\s-]+(\d+)\/(\d+)$/);
+  if (mixed) {
+    const whole = Number(mixed[1]);
+    const numerator = Number(mixed[2]);
+    const denominator = Number(mixed[3]);
+    if (Number.isFinite(whole) && Number.isFinite(numerator) && Number.isFinite(denominator) && denominator !== 0) {
+      return whole < 0 ? whole - numerator / denominator : whole + numerator / denominator;
+    }
+  }
+  const fraction = text.match(/^(-?\d+)\/(\d+)$/);
+  if (fraction) {
+    const numerator = Number(fraction[1]);
+    const denominator = Number(fraction[2]);
+    if (Number.isFinite(numerator) && Number.isFinite(denominator) && denominator !== 0) {
+      return numerator / denominator;
+    }
+  }
+  return null;
+}
+
 function formatCombinedSize(size1, size2) {
   const primary = formatPlainNumberDisplay(size1);
   const secondary = formatPlainNumberDisplay(size2);
@@ -3515,6 +3558,15 @@ function normalizeRfqMasterDimension(value) {
   return formatPlainNumberDisplay(value).trim().toLowerCase();
 }
 
+function rfqMasterDimensionsMatch(current, incoming) {
+  const currentNumber = parseDimensionNumber(current);
+  const incomingNumber = parseDimensionNumber(incoming);
+  if (currentNumber !== null && incomingNumber !== null) {
+    return Math.abs(currentNumber - incomingNumber) < 0.0001;
+  }
+  return normalizeRfqMasterDimension(current) === normalizeRfqMasterDimension(incoming);
+}
+
 async function applyRfqMasterSizeDefaults(client, existingItem, row, jobId) {
   const updates = [];
   const values = [];
@@ -3531,7 +3583,7 @@ async function applyRfqMasterSizeDefaults(client, existingItem, row, jobId) {
       updates.push(`${field} = $${values.length}`);
       continue;
     }
-    if (normalizeRfqMasterDimension(current) !== normalizeRfqMasterDimension(incoming)) {
+    if (!rfqMasterDimensionsMatch(current, incoming)) {
       return {
         status: "skipped",
         errorCode: "master_size_mismatch",
