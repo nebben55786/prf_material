@@ -3511,6 +3511,45 @@ async function generateRfqItemCode(client, jobId, reservedCodes = new Set()) {
   throw new Error("Could not generate a unique item code.");
 }
 
+function normalizeRfqMasterDimension(value) {
+  return formatPlainNumberDisplay(value).trim().toLowerCase();
+}
+
+async function applyRfqMasterSizeDefaults(client, existingItem, row, jobId) {
+  const updates = [];
+  const values = [];
+  const fields = [
+    ["size_1", "Size 1"],
+    ["size_2", "Size 2"]
+  ];
+  for (const [field, label] of fields) {
+    const incoming = String(row[field] || "").trim();
+    if (!incoming) continue;
+    const current = String(existingItem[field] || "").trim();
+    if (!current) {
+      values.push(incoming);
+      updates.push(`${field} = $${values.length}`);
+      continue;
+    }
+    if (normalizeRfqMasterDimension(current) !== normalizeRfqMasterDimension(incoming)) {
+      return {
+        status: "skipped",
+        errorCode: "master_size_mismatch",
+        message: `Item code ${row.item_code} has ${label} "${current}" in Item Master, but the RFQ import row has "${incoming}". Fix the import row or update Item Master first.`
+      };
+    }
+  }
+  if (!updates.length) return { status: "ok" };
+  values.push(existingItem.id, jobId);
+  await client.query(`
+    update material_items
+    set ${updates.join(", ")},
+        updated_at = now()
+    where id = $${values.length - 1} and job_id = $${values.length}
+  `, values);
+  return { status: "updated" };
+}
+
 async function ensureRfqMaterialItem(client, row, jobId, reservedCodes = new Set()) {
   const preparedRow = { ...row };
   let itemCode = String(preparedRow.item_code || "").trim();
@@ -3522,10 +3561,14 @@ async function ensureRfqMaterialItem(client, row, jobId, reservedCodes = new Set
   }
 
   const existing = (await client.query(
-    "select id from material_items where job_id = $1 and lower(item_code) = lower($2) limit 1",
+    "select id, item_code, size_1, size_2 from material_items where job_id = $1 and lower(item_code) = lower($2) limit 1",
     [jobId, itemCode]
   )).rows[0];
   if (existing) {
+    const sizeResult = await applyRfqMasterSizeDefaults(client, existing, preparedRow, jobId);
+    if (sizeResult.status === "skipped") {
+      return { ...preparedRow, __rfqMaterialError: sizeResult };
+    }
     await addMaterialItemSpecs(client, existing.id, jobId, preparedRow.spec || preparedRow.specs);
     return preparedRow;
   }
