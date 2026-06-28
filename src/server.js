@@ -11460,7 +11460,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   let lineRows = "";
   let lineNumberOptionsHtml = "";
   const selectedBomUsesPackageLabel = selectedBom ? String(selectedBom.bom_type || "").trim().toLowerCase() === "equipment" : false;
-  const selectedBomPrefillsRequestQty = selectedBom ? String(selectedBom.bom_type || "").trim().toLowerCase() === "pipe" : false;
   const selectedBomIsUnallocated = selectedBom ? isUnallocatedBom(selectedBom) : false;
   const lineLabel = selectedBomUsesPackageLabel ? "Package" : "Line";
   const tagNumberLabel = selectedBom && String(selectedBom.bom_no || "").trim().toUpperCase() === "KEQ3-BOM-00006"
@@ -11519,7 +11518,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       const stagedQty = stagedSelection[String(line.id)];
       const requestQtyValue = stagedQty !== undefined
         ? formatQtyDisplay(stagedQty)
-        : (selectedBomPrefillsRequestQty ? formatQtyDisplay(num(line.qty_remaining)) : "");
+        : "";
       return `<tr>
       <td><input type="checkbox" name="selected_line_ids" value="${line.id}" tabindex="-1" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
       <td>${esc(line.line_no)}</td>
@@ -11537,7 +11536,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(formatPlainNumberDisplay(line.thk_1))}</td>
       <td>${esc(formatPlainNumberDisplay(line.thk_2))}</td>
       <td>${esc(line.notes || "")}</td>
-      <td><span class="chip">${esc(line.planning_status)}</span></td>
       <td><div class="actions">${selectedBomAllowsManualLineEdits ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit" tabindex="-1">Edit</a>` : `<span class="muted">System BOM</span>`}</div></td>
     </tr>`;
     }).join("");
@@ -11617,7 +11615,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:80px" />
                 <col style="width:80px" />
                 <col style="width:150px" />
-                <col style="width:100px" />
                 <col style="width:120px" />
               </colgroup>
               <thead>
@@ -11638,12 +11635,11 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="nowrap" data-resizable="true">Thk 1</th>
                 <th class="nowrap" data-resizable="true">Thk 2</th>
                 <th class="wrap" data-resizable="true">Notes</th>
-                <th class="nowrap" data-resizable="true">Status</th>
                 <th class="nowrap" data-resizable="true">Actions</th>
               </tr>
               </thead>
               <tbody>
-              ${lineRows || `<tr><td colspan="18" class="muted">No BOM lines match the current filter.</td></tr>`}
+              ${lineRows || `<tr><td colspan="17" class="muted">No BOM lines match the current filter.</td></tr>`}
               </tbody>
             </table>
           </div>
