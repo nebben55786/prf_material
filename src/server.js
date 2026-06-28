@@ -11510,7 +11510,10 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       `, [selectedBom.id])
     ]);
     filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
-    lineNumberOptionsHtml = lineNumberOptionsRes.rows.map((row) => `<option value="${esc(row.line_no)}"></option>`).join("");
+    lineNumberOptionsHtml = `<option value="">All ${esc(lineLabel)}s</option>${lineNumberOptionsRes.rows.map((row) => {
+      const lineNo = String(row.line_no || "");
+      return `<option value="${escAttr(lineNo)}" ${lineNo === lineFilter.lineNo ? "selected" : ""}>${esc(lineNo)}</option>`;
+    }).join("")}`;
     const selectedBomAllowsManualLineEdits = !isSystemGeneratedBom(selectedBom);
     lineRows = linesRes.rows.map((line) => {
       const stagedQty = stagedSelection[String(line.id)];
@@ -11556,9 +11559,8 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
             <div><label>Max Rows</label><input value="${esc(lineFilter.limit)}" readonly /></div>
             <div><label>Description</label><input name="description" value="${esc(lineFilter.description)}" /></div>
             <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
-            <div><label>${esc(lineLabel)}</label><input name="line_no" value="${esc(lineFilter.lineNo)}" list="requisition-line-no-options" /></div>
+            <div><label>${esc(lineLabel)}</label><select name="line_no">${lineNumberOptionsHtml}</select></div>
           </div>
-          <datalist id="requisition-line-no-options">${lineNumberOptionsHtml}</datalist>
           <div class="actions">
             <button type="submit">Load Lines</button>
             <button class="btn btn-secondary" type="submit" name="clear_filters" value="1">Clear Filter</button>
