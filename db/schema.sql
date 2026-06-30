@@ -349,7 +349,7 @@ create table if not exists quotes (
   rfq_item_id bigint not null references rfq_items(id) on delete cascade,
   vendor_id bigint not null references vendors(id),
   unit_price numeric(18,4) not null,
-  lead_days integer not null default 0,
+  lead_days integer,
   quoted_at timestamptz not null default now(),
   unique (rfq_item_id, vendor_id)
 );
@@ -378,7 +378,7 @@ create table if not exists quote_revisions (
   rfq_item_id bigint not null references rfq_items(id) on delete cascade,
   vendor_id bigint not null references vendors(id),
   unit_price numeric(18,4) not null,
-  lead_days integer not null default 0,
+  lead_days integer,
   source_type text not null,
   source_batch_id bigint,
   created_by bigint references users(id) on delete set null,
@@ -478,7 +478,7 @@ create table if not exists po_lines (
   thk_1 text,
   thk_2 text,
   qty_ordered numeric(18,4) not null,
-  unit_price numeric(18,4) not null,
+  unit_price numeric(18,4),
   updated_at timestamptz not null default now()
 );
 
@@ -521,6 +521,14 @@ alter table po_lines add column if not exists description_snapshot text;
 alter table po_lines add column if not exists material_type_snapshot text;
 alter table po_lines add column if not exists uom_snapshot text;
 alter table po_lines add column if not exists po_line text;
+alter table po_lines add column if not exists lead_days integer;
+alter table quotes alter column lead_days drop not null;
+alter table quotes alter column lead_days drop default;
+alter table quote_revisions alter column lead_days drop not null;
+alter table quote_revisions alter column lead_days drop default;
+alter table po_lines alter column unit_price drop not null;
+alter table po_lines alter column lead_days drop not null;
+alter table po_lines alter column lead_days drop default;
 alter table material_requisition_lines add column if not exists source_po_line_id bigint references po_lines(id) on delete set null;
 create index if not exists idx_material_requisition_lines_source_po_line
   on material_requisition_lines(source_po_line_id)
