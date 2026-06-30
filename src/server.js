@@ -166,7 +166,7 @@ const defaultPermissionMatrix = {
     receiving: { view: true, edit: false },
     yard: { view: true },
     inventory: { view: true, edit: false },
-    requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
+    requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: false, delete: false },
     settings: { view: false, edit: false }
   }
 };
@@ -197,6 +197,11 @@ function canAccess(user, section, action = "view") {
     ...(rolePermissions[section] || {})
   };
   return Boolean(sectionPermissions[action]);
+}
+
+function isCheckedFormValue(value) {
+  if (Array.isArray(value)) return value.some((entry) => String(entry || "") === "on");
+  return String(value || "") === "on";
 }
 
 function canEditInventoryAudit(user) {
@@ -9791,15 +9796,15 @@ app.post("/settings/permissions", requireAuth, requireRole(adminEquivalentRoles)
       const currentDefaults = defaultPermissionMatrix[role]?.[section.key] || {};
       nextMatrix[role][section.key] = {
         ...currentDefaults,
-        view: String(req.body[`perm__${role}__${section.key}__view`] || "") === "on",
-        edit: String(req.body[`perm__${role}__${section.key}__edit`] || "") === "on"
+        view: isCheckedFormValue(req.body[`perm__${role}__${section.key}__view`]),
+        edit: isCheckedFormValue(req.body[`perm__${role}__${section.key}__edit`])
       };
       if (section.key === "requisitions") {
-        nextMatrix[role][section.key].create = String(req.body[`perm__${role}__${section.key}__create`] || "") === "on";
-        nextMatrix[role][section.key].verify = String(req.body[`perm__${role}__${section.key}__verify`] || "") === "on";
-        nextMatrix[role][section.key].issue = String(req.body[`perm__${role}__${section.key}__issue`] || "") === "on";
-        nextMatrix[role][section.key].unverify = String(req.body[`perm__${role}__${section.key}__unverify`] || "") === "on";
-        nextMatrix[role][section.key].delete = String(req.body[`perm__${role}__${section.key}__delete`] || "") === "on";
+        nextMatrix[role][section.key].create = isCheckedFormValue(req.body[`perm__${role}__${section.key}__create`]);
+        nextMatrix[role][section.key].verify = isCheckedFormValue(req.body[`perm__${role}__${section.key}__verify`]);
+        nextMatrix[role][section.key].issue = isCheckedFormValue(req.body[`perm__${role}__${section.key}__issue`]);
+        nextMatrix[role][section.key].unverify = isCheckedFormValue(req.body[`perm__${role}__${section.key}__unverify`]);
+        nextMatrix[role][section.key].delete = isCheckedFormValue(req.body[`perm__${role}__${section.key}__delete`]);
       }
     }
   }
