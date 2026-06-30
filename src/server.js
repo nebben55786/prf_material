@@ -472,6 +472,22 @@ function renderRequisitionStatusChip(status) {
   return `<span class="${classes}">${esc(requisitionStatusLabel(status))}</span>`;
 }
 
+function renderRequisitionActionButtons(row, user) {
+  return `<div class="actions">${
+    requisitionStatusKey(row.status) === "CANCELLED" && isAdminRole(user)
+      ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
+      : requisitionStatusKey(row.status) === "ISSUED" && hasLoggedRequisitionSignature(row)
+      ? `<a class="btn btn-secondary" href="/requisitions/${row.id}#warehouse-sign-off">Issued</a>`
+      : requisitionStatusKey(row.status) === "ISSUED" && canSignRequisition(user, row)
+        ? `<a class="btn btn-warning" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
+      : requisitionStatusKey(row.status) === "WAITING_ON_MATERIAL"
+      ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/edit">Review</a>`
+      : isVerifiedStageRequisitionStatus(row.status)
+      ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>${canAccess(user, "requisitions", "issue") ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">Sign</a>` : ""}`
+        : ""
+  }${canDeleteRequisition(user, row) ? `<form method="post" action="/requisitions/${row.id}/delete" onsubmit="return confirm('Permanently delete this requisition? This cannot be undone.');"><button class="btn btn-danger" type="submit">Delete</button></form>` : ""}</div>`;
+}
+
 function formatShortDateTime(value) {
   if (value === null || value === undefined || value === "") return "";
   const text = String(value).trim();
@@ -11450,6 +11466,26 @@ app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermissi
 app.get("/min-max", requireAuth, requireJobContext, requirePermission("min_max", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const minMaxBom = await getMinMaxBom(jobId);
+  const minMaxReqRows = minMaxBom ? (await query(`
+    select mr.*, count(mrl.id) as line_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
+    from material_requisitions mr
+    left join material_requisition_lines mrl on mrl.requisition_id = mr.id
+    where mr.job_id = $1 and mr.bom_id = $2
+    group by mr.id
+    order by mr.id desc
+    limit 300
+  `, [jobId, minMaxBom.id])).rows : [];
+  const minMaxReqTableRows = minMaxReqRows.map((row) => `<tr>
+    <td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
+    <td>${esc(row.requested_by_name)}</td>
+    <td>${esc(row.issued_to || "")}</td>
+    <td>${esc(row.iwp_no || "")}</td>
+    <td>${row.line_count}</td>
+    <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
+    <td>${renderRequisitionStatusChip(row.status)}</td>
+    <td>${esc(formatShortDateTime(row.created_at))}</td>
+    <td>${renderRequisitionActionButtons(row, req.user)}</td>
+  </tr>`).join("");
   res.send(layout("Min-Max", `
     <h1>Min-Max</h1>
     <div class="card">
@@ -11460,6 +11496,13 @@ app.get("/min-max", requireAuth, requireJobContext, requirePermission("min_max",
         <div class="actions">
           <a class="btn btn-primary" href="/min-max/request">New Request</a>
           <a class="btn btn-secondary" href="/min-max/inventory">Inventory</a>
+        </div>
+        <h3>Min-Max Requests</h3>
+        <div class="scroll">
+          <table>
+            <tr><th>Req #</th><th>Requested By</th><th>Issued To</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>
+            ${minMaxReqTableRows || `<tr><td colspan="9" class="muted">No Min-Max requests yet.</td></tr>`}
+          </table>
         </div>
       ` : `
         <div class="error">
@@ -11939,19 +11982,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
     <td>${renderRequisitionStatusChip(row.status)}</td>
     <td>${esc(formatShortDateTime(row.created_at))}</td>
-    <td><div class="actions">${
-      requisitionStatusKey(row.status) === "CANCELLED" && isAdminRole(req.user)
-        ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
-        : requisitionStatusKey(row.status) === "ISSUED" && hasLoggedRequisitionSignature(row)
-        ? `<a class="btn btn-secondary" href="/requisitions/${row.id}#warehouse-sign-off">Issued</a>`
-        : requisitionStatusKey(row.status) === "ISSUED" && canSignRequisition(req.user, row)
-          ? `<a class="btn btn-warning" href="/requisitions/${row.id}/sign">${row.signed_at || row.signed_copy_filename ? "Update Sign-Off" : "Sign-Off"}</a>`
-        : requisitionStatusKey(row.status) === "WAITING_ON_MATERIAL"
-        ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/edit">Review</a>`
-        : isVerifiedStageRequisitionStatus(row.status)
-        ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${row.id}/pick-ticket.pdf">Pick Ticket</a>${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-secondary" href="/requisitions/${row.id}/sign">Sign</a>` : ""}`
-          : ""
-    }${canDeleteRequisition(req.user, row) ? `<form method="post" action="/requisitions/${row.id}/delete" onsubmit="return confirm('Permanently delete this requisition? This cannot be undone.');"><button class="btn btn-danger" type="submit">Delete</button></form>` : ""}</div></td>
+    <td>${renderRequisitionActionButtons(row, req.user)}</td>
   </tr>`).join("");
   res.send(layout("Requisitions", `
     <h1>Material Requisitions</h1>
