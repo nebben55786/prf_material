@@ -58,7 +58,7 @@ const permissionSections = [
   { key: "receiving", label: "Receiving", href: "/receive" },
   { key: "yard", label: "Yard", href: "/yard" },
   { key: "requisitions", label: "REQs", href: "/requisitions" },
-  { key: "requisitions", label: "Min-Max", href: "/min-max" },
+  { key: "min_max", label: "Min-Max", href: "/min-max" },
   { key: "settings", label: "Settings", href: "/settings" }
 ];
 const roleAdmin = "admin";
@@ -111,6 +111,7 @@ const defaultPermissionMatrix = {
     yard: { view: true },
     inventory: { view: true, edit: true },
     requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: true },
+    min_max: { view: true, create: true },
     settings: { view: true, edit: true }
   },
   buyer: {
@@ -125,6 +126,7 @@ const defaultPermissionMatrix = {
     yard: { view: true },
     inventory: { view: true, edit: true },
     requisitions: { view: true, create: false, edit: false, verify: false, issue: false, unverify: false, delete: false },
+    min_max: { view: false, create: false },
     settings: { view: true, edit: true }
   },
   warehouse: {
@@ -139,6 +141,7 @@ const defaultPermissionMatrix = {
     yard: { view: true },
     inventory: { view: true, edit: false },
     requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: false },
+    min_max: { view: true, create: true },
     settings: { view: false, edit: false }
   },
   field: {
@@ -153,6 +156,7 @@ const defaultPermissionMatrix = {
     yard: { view: true },
     inventory: { view: true, edit: false },
     requisitions: { view: true, create: true, edit: true, verify: false, issue: false, unverify: false, delete: false },
+    min_max: { view: true, create: true },
     settings: { view: false, edit: false }
   },
   supervisor: {
@@ -167,6 +171,7 @@ const defaultPermissionMatrix = {
     yard: { view: true },
     inventory: { view: true, edit: false },
     requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: false, delete: false },
+    min_max: { view: true, create: true },
     settings: { view: false, edit: false }
   }
 };
@@ -7937,6 +7942,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
   const jobs = jobsRes.rows;
   const currentJob = req.user.activeJob || jobs[0] || null;
   const vendorCategoryText = vendorCategories.join("\n");
+  const permissionRoleHeaders = permissionRoles.map((role) => `<th>${esc(displayRole(role))}</th>`).join("");
   const permissionRows = permissionSections.map((section) => {
     const cells = permissionRoles.map((role) => {
       const perms = {
@@ -7954,8 +7960,10 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
         <div class="stack">
           <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__view" ${viewChecked} /><span>View</span></label>
           <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__edit" ${editChecked} /><span>Edit</span></label>
-          ${section.key === "requisitions" ? `
+          ${["requisitions", "min_max"].includes(section.key) ? `
             <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__create" ${createChecked} /><span>Create</span></label>
+          ` : ""}
+          ${section.key === "requisitions" ? `
             <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__verify" ${verifyChecked} /><span>Accept</span></label>
             <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__issue" ${issueChecked} /><span>Issue</span></label>
             <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__unverify" ${unverifyChecked} /><span>Unaccept</span></label>
@@ -8040,7 +8048,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
         <form method="post" action="/settings/permissions" class="stack">
           <input type="hidden" name="return_to" value="/settings/job-setup" />
           <table>
-            <tr><th>Sheet</th><th>Admin</th><th>Buyer</th><th>Warehouse</th><th>Field</th><th>Supervisor</th></tr>
+            <tr><th>Sheet</th>${permissionRoleHeaders}</tr>
             ${permissionRows}
           </table>
           <div class="actions"><button type="submit">Save Permissions</button></div>
@@ -9799,6 +9807,9 @@ app.post("/settings/permissions", requireAuth, requireRole(adminEquivalentRoles)
         view: isCheckedFormValue(req.body[`perm__${role}__${section.key}__view`]),
         edit: isCheckedFormValue(req.body[`perm__${role}__${section.key}__edit`])
       };
+      if (section.key === "min_max") {
+        nextMatrix[role][section.key].create = isCheckedFormValue(req.body[`perm__${role}__${section.key}__create`]);
+      }
       if (section.key === "requisitions") {
         nextMatrix[role][section.key].create = isCheckedFormValue(req.body[`perm__${role}__${section.key}__create`]);
         nextMatrix[role][section.key].verify = isCheckedFormValue(req.body[`perm__${role}__${section.key}__verify`]);
@@ -11436,7 +11447,7 @@ app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermissi
   res.redirect(`/bom/${bomId}`);
 });
 
-app.get("/min-max", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+app.get("/min-max", requireAuth, requireJobContext, requirePermission("min_max", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const minMaxBom = await getMinMaxBom(jobId);
   res.send(layout("Min-Max", `
@@ -11460,7 +11471,7 @@ app.get("/min-max", requireAuth, requireJobContext, requirePermission("requisiti
   `, req.user));
 }));
 
-app.get("/min-max/request", requireAuth, requireJobContext, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
+app.get("/min-max/request", requireAuth, requireJobContext, requirePermission("min_max", "create"), asyncHandler(async (req, res) => {
   const minMaxBom = await getMinMaxBom(currentJobId(req));
   if (!minMaxBom) {
     return res.send(layout("Min-Max Request", `
@@ -11475,7 +11486,7 @@ app.get("/min-max/request", requireAuth, requireJobContext, requirePermission("r
   res.redirect(`/requisitions/new?bom_id=${encodeURIComponent(minMaxBom.id)}&min_max=1`);
 }));
 
-app.get("/min-max/inventory", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+app.get("/min-max/inventory", requireAuth, requireJobContext, requirePermission("min_max", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const minMaxBom = await getMinMaxBom(jobId);
   if (!minMaxBom) {
