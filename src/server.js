@@ -11672,8 +11672,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td><input class="requisition-request-qty-input" name="request_qty_${line.id}" value="${esc(requestQtyValue)}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.tag_number || "")}</td>
-      <td>${esc(formatPlainNumberDisplay(line.size_1))}</td>
-      <td>${esc(formatPlainNumberDisplay(line.size_2))}</td>
+      <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
       <td>${esc(formatPlainNumberDisplay(line.thk_1))}</td>
       <td>${esc(formatPlainNumberDisplay(line.thk_2))}</td>
       <td>${esc(line.notes || "")}</td>
@@ -11754,8 +11753,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:90px" />
                 <col style="width:56px" />
                 <col style="width:110px" />
-                <col style="width:80px" />
-                <col style="width:80px" />
+                <col style="width:110px" />
                 <col style="width:80px" />
                 <col style="width:80px" />
                 <col style="width:150px" />
@@ -11774,8 +11772,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="wrap" data-resizable="true">Request Qty</th>
                 <th class="nowrap" data-resizable="true">UOM</th>
                 <th class="wrap" data-resizable="true">${esc(tagNumberLabel)}</th>
-                <th class="nowrap" data-resizable="true">Size 1</th>
-                <th class="nowrap" data-resizable="true">Size 2</th>
+                <th class="nowrap" data-resizable="true">Size</th>
                 <th class="nowrap" data-resizable="true">Thk 1</th>
                 <th class="nowrap" data-resizable="true">Thk 2</th>
                 <th class="wrap" data-resizable="true">Notes</th>
@@ -11783,7 +11780,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               </tr>
               </thead>
               <tbody>
-              ${lineRows || `<tr><td colspan="17" class="muted">No BOM lines match the current filter.</td></tr>`}
+              ${lineRows || `<tr><td colspan="16" class="muted">No BOM lines match the current filter.</td></tr>`}
               </tbody>
             </table>
           </div>
@@ -11833,7 +11830,10 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
             checkbox.addEventListener("change", syncStagedSelection);
             const lineId = String(checkbox.value || "");
             const qtyInput = document.querySelector('input[name="request_qty_' + lineId + '"]');
-            if (qtyInput) qtyInput.addEventListener("input", syncStagedSelection);
+            if (qtyInput) qtyInput.addEventListener("input", () => {
+              checkbox.checked = String(qtyInput.value || "").trim() !== "";
+              syncStagedSelection();
+            });
           });
           const requestQtyInputs = Array.from(document.querySelectorAll(".requisition-request-qty-input"));
           requestQtyInputs.forEach((input, index) => {
