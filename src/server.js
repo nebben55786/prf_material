@@ -17081,7 +17081,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     const locked = remainingQty <= 0;
     const qtyCell = locked
       ? `<span class="chip">Received</span><input type="hidden" name="po_line_ids" value="${lineId}" />`
-      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" inputmode="decimal" min="0" step="any" data-remaining="${escAttr(String(remainingQty))}" placeholder="${escAttr(formatQtyDisplay(remainingQty))}" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
+      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" value="${escAttr(formatQtyDisplay(remainingQty))}" inputmode="decimal" min="0" step="any" data-remaining="${escAttr(String(remainingQty))}" placeholder="${escAttr(formatQtyDisplay(remainingQty))}" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
     const shortCell = locked
       ? ""
       : `<select name="short_action_${lineId}" tabindex="-1" style="min-width:120px;"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select>`;
