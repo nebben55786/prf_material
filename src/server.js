@@ -58,6 +58,7 @@ const permissionSections = [
   { key: "receiving", label: "Receiving", href: "/receive" },
   { key: "yard", label: "Yard", href: "/yard" },
   { key: "requisitions", label: "REQs", href: "/requisitions" },
+  { key: "requisitions", label: "Min-Max", href: "/min-max" },
   { key: "settings", label: "Settings", href: "/settings" }
 ];
 const roleAdmin = "admin";
@@ -4965,6 +4966,33 @@ function isSystemGeneratedBom(bom) {
 
 function isUnallocatedBom(bom) {
   return String(bom?.system_key || "").trim().toUpperCase() === unallocatedBomSystemKey;
+}
+
+async function getMinMaxBom(jobId) {
+  return (await query(`
+    select id, bom_no, bom_name, description, bom_type, status, is_system_generated, system_key
+    from bom_headers
+    where job_id = $1
+      and (
+        lower(trim(coalesce(bom_name, ''))) = 'min-max'
+        or lower(trim(coalesce(description, ''))) = 'min-max'
+        or lower(trim(coalesce(bom_no, ''))) = 'min-max'
+        or lower(trim(coalesce(system_key, ''))) = 'min-max'
+      )
+    order by
+      case
+        when lower(trim(coalesce(bom_name, ''))) = 'min-max' then 0
+        when lower(trim(coalesce(description, ''))) = 'min-max' then 1
+        when lower(trim(coalesce(bom_no, ''))) = 'min-max' then 2
+        else 3
+      end,
+      id
+    limit 1
+  `, [jobId])).rows[0] || null;
+}
+
+function isMinMaxRequestLocked(req) {
+  return String(req.query.min_max || "") === "1";
 }
 
 function assertBomAllowsManualChanges(bom, actionLabel = "modify") {
@@ -11403,6 +11431,114 @@ app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermissi
   res.redirect(`/bom/${bomId}`);
 });
 
+app.get("/min-max", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const minMaxBom = await getMinMaxBom(jobId);
+  res.send(layout("Min-Max", `
+    <h1>Min-Max</h1>
+    <div class="card">
+      <h3>Min-Max BOM</h3>
+      ${minMaxBom ? `
+        <p><strong>${esc(minMaxBom.bom_name || minMaxBom.description || "Min-Max")}</strong> | ${esc(minMaxBom.bom_no)}</p>
+        <p class="muted">Use this page for Min-Max material requests and inventory only.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="/min-max/request">New Request</a>
+          <a class="btn btn-secondary" href="/min-max/inventory">Inventory</a>
+        </div>
+      ` : `
+        <div class="error">
+          <h3>Min-Max BOM Not Found</h3>
+          <p>Create or rename a BOM to <strong>Min-Max</strong> for this job before using this page.</p>
+        </div>
+      `}
+    </div>
+  `, req.user));
+}));
+
+app.get("/min-max/request", requireAuth, requireJobContext, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
+  const minMaxBom = await getMinMaxBom(currentJobId(req));
+  if (!minMaxBom) {
+    return res.send(layout("Min-Max Request", `
+      <h1>Min-Max Request</h1>
+      <div class="card error">
+        <h3>Min-Max BOM Not Found</h3>
+        <p>Create or rename a BOM to <strong>Min-Max</strong> for this job before creating a Min-Max request.</p>
+      </div>
+      <div class="actions"><a class="btn btn-secondary" href="/min-max">Back To Min-Max</a></div>
+    `, req.user));
+  }
+  res.redirect(`/requisitions/new?bom_id=${encodeURIComponent(minMaxBom.id)}&min_max=1`);
+}));
+
+app.get("/min-max/inventory", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const minMaxBom = await getMinMaxBom(jobId);
+  if (!minMaxBom) {
+    return res.send(layout("Min-Max Inventory", `
+      <h1>Min-Max Inventory</h1>
+      <div class="card error">
+        <h3>Min-Max BOM Not Found</h3>
+        <p>Create or rename a BOM to <strong>Min-Max</strong> for this job before viewing Min-Max inventory.</p>
+      </div>
+      <div class="actions"><a class="btn btn-secondary" href="/min-max">Back To Min-Max</a></div>
+    `, req.user));
+  }
+  const rows = (await query(`
+    select
+      bl.line_no,
+      bl.item_code,
+      bl.description,
+      bl.uom,
+      bl.size_1,
+      bl.size_2,
+      bl.thk_1,
+      bl.thk_2,
+      coalesce(inv.qty_on_hand, 0) as qty_received,
+      coalesce(issued.qty_issued_total, 0) as qty_issued,
+      greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0), 0) as qty_remaining
+    from bom_lines bl
+    left join (
+      ${getInventoryTotalsByItemSubquery(jobId)}
+    ) inv
+      on inv.item_code = bl.item_code
+    left join (
+      ${getIssuedInventoryTotalsByItemSubquery(jobId)}
+    ) issued
+      on issued.item_code = bl.item_code
+    where bl.bom_id = $1
+    order by coalesce(bl.line_no, ''), bl.item_code, bl.id
+  `, [minMaxBom.id])).rows;
+  const tableRows = rows.map((row) => `<tr>
+    <td>${esc(row.line_no || "")}</td>
+    <td>${esc(row.item_code || "")}</td>
+    <td>${esc(row.description || "")}</td>
+    <td>${esc(row.uom || "")}</td>
+    <td>${esc(formatPlainNumberDisplay(row.size_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.size_2))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.thk_1))}</td>
+    <td>${esc(formatPlainNumberDisplay(row.thk_2))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_received))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_issued))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_remaining))}</td>
+  </tr>`).join("");
+  res.send(layout("Min-Max Inventory", `
+    <h1>Min-Max Inventory</h1>
+    <div class="card">
+      <p><strong>${esc(minMaxBom.bom_name || minMaxBom.description || "Min-Max")}</strong> | ${esc(minMaxBom.bom_no)}</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="/min-max/request">New Request</a>
+        <a class="btn btn-secondary" href="/min-max">Back To Min-Max</a>
+      </div>
+    </div>
+    <div class="card scroll">
+      <table>
+        <thead><tr><th>Line</th><th>Item</th><th>Description</th><th>UOM</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Received Qty</th><th>Issued Qty</th><th>Remaining Qty</th></tr></thead>
+        <tbody>${tableRows || `<tr><td colspan="11" class="muted">No Min-Max BOM items found.</td></tr>`}</tbody>
+      </table>
+    </div>
+  `, req.user));
+}));
+
 app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("requisitions", "create"), async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
@@ -11417,8 +11553,22 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       lower(coalesce(bom_no, '')),
       id
   `, [jobId])).rows;
-  const selectedBomId = Number(req.query.bom_id || 0);
-  const selectedBom = availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
+  const minMaxLocked = isMinMaxRequestLocked(req);
+  const minMaxBom = minMaxLocked ? await getMinMaxBom(jobId) : null;
+  if (minMaxLocked && !minMaxBom) {
+    return res.send(layout("New Min-Max Request", `
+      <h1>New Min-Max Request</h1>
+      <div class="card error">
+        <h3>Min-Max BOM Not Found</h3>
+        <p>Create or rename a BOM to <strong>Min-Max</strong> for this job before creating a Min-Max request.</p>
+      </div>
+      <div class="actions"><a class="btn btn-secondary" href="/min-max">Back To Min-Max</a></div>
+    `, req.user));
+  }
+  const selectedBomId = minMaxLocked && minMaxBom ? Number(minMaxBom.id) : Number(req.query.bom_id || 0);
+  const selectedBom = minMaxLocked && minMaxBom
+    ? minMaxBom
+    : availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
   const clearFilters = String(req.query.clear_filters || "") === "1";
   const lineFilter = {
     description: clearFilters ? "" : String(req.query.description || "").trim(),
@@ -11528,12 +11678,15 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   }
   const bomOptions = availableBoms.map((row) => `<option value="${row.id}" ${Number(row.id) === selectedBomId ? "selected" : ""}>${esc(row.bom_name || row.description || row.bom_no)} | ${esc(row.bom_no)}</option>`).join("");
   const stagedSelectionJson = escAttr(JSON.stringify(stagedSelection));
-  res.send(layout("New Request", `
-    <h1>New Material Request</h1>
+  const requestPageTitle = minMaxLocked ? "New Min-Max Request" : "New Request";
+  const requestHeading = minMaxLocked ? "New Min-Max Request" : "New Material Request";
+  res.send(layout(requestPageTitle, `
+    <h1>${requestHeading}</h1>
     ${selectedBom ? `
       <div class="card">
         <form method="get" action="/requisitions/new" class="stack" id="requisition-filter-form">
           <input type="hidden" name="bom_id" value="${selectedBom.id}" />
+          ${minMaxLocked ? `<input type="hidden" name="min_max" value="1" />` : ""}
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
           <input type="hidden" name="draft_issued_to" value="${escAttr(draftIssuedTo)}" id="requisition-filter-draft-issued-to" />
           <input type="hidden" name="draft_iwp_no" value="${escAttr(draftIwpNo)}" id="requisition-filter-draft-iwp-no" />
@@ -11548,8 +11701,8 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           <div class="actions">
             <button type="submit">Load Lines</button>
             <button class="btn btn-secondary" type="submit" name="clear_filters" value="1">Clear Filter</button>
-            <a class="btn btn-secondary" href="/requisitions/new">Change BOM</a>
-            <a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a>
+            ${minMaxLocked ? "" : `<a class="btn btn-secondary" href="/requisitions/new">Change BOM</a>`}
+            <a class="btn btn-secondary" href="${minMaxLocked ? "/min-max" : "/requisitions"}">${minMaxLocked ? "Back to Min-Max" : "Back to Requisitions"}</a>
           </div>
         </form>
       </div>
