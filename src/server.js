@@ -5027,6 +5027,53 @@ function assertBomAllowsManualChanges(bom, actionLabel = "modify") {
   }
 }
 
+async function getBomLineUsageCounts(client, lineIds, jobId) {
+  const ids = (Array.isArray(lineIds) ? lineIds : [lineIds])
+    .map((id) => Number(id))
+    .filter(Number.isFinite);
+  if (!ids.length) {
+    return { requisitionCount: 0, issueCount: 0, rfqCount: 0 };
+  }
+  const row = (await client.query(`
+    select
+      (
+        select count(*)::int
+        from material_requisition_lines mrl
+        join material_requisitions mr on mr.id = mrl.requisition_id
+        where mrl.bom_line_id = any($1::bigint[])
+          and mr.job_id = $2::bigint
+      ) as requisition_count,
+      (
+        select count(*)::int
+        from material_issue_transactions mit
+        where mit.source_bom_line_id = any($1::bigint[])
+          and mit.job_id = $2::bigint
+      ) as issue_count,
+      (
+        select count(*)::int
+        from rfq_items ri
+        join rfqs r on r.id = ri.rfq_id
+        where ri.bom_line_id = any($1::bigint[])
+          and r.job_id = $2::bigint
+      ) as rfq_count
+  `, [ids, jobId])).rows[0] || {};
+  return {
+    requisitionCount: Number(row.requisition_count || 0),
+    issueCount: Number(row.issue_count || 0),
+    rfqCount: Number(row.rfq_count || 0)
+  };
+}
+
+function assertBomLineUnusedForDelete(counts, targetLabel = "BOM line") {
+  const blockers = [];
+  if (counts.requisitionCount) blockers.push(`${counts.requisitionCount} requisition line(s)`);
+  if (counts.issueCount) blockers.push(`${counts.issueCount} issue transaction(s)`);
+  if (counts.rfqCount) blockers.push(`${counts.rfqCount} RFQ item(s)`);
+  if (blockers.length) {
+    throw new Error(`${targetLabel} cannot be deleted because it is already used by ${blockers.join(", ")}.`);
+  }
+}
+
 async function ensureUnallocatedBom(client, jobId) {
   let bom = (await client.query(`
     select *
@@ -6402,9 +6449,10 @@ function canSignRequisition(user, header) {
   if (!user || !header) return false;
   if (!canAccess(user, "requisitions", "issue")) return false;
   const statusKey = requisitionStatusKey(header.status);
-  if (isAdminRole(user)) return isVerifiedStageRequisitionStatus(statusKey) || statusKey === "ISSUED";
+  const canSignStatus = isVerifiedStageRequisitionStatus(statusKey) || statusKey === "ISSUED";
+  if (isAdminRole(user)) return canSignStatus;
   if (hasLoggedRequisitionSignature(header)) return false;
-  return isVerifiedStageRequisitionStatus(statusKey);
+  return canSignStatus;
 }
 
 async function recalcRfqStatus(client, rfqId) {
@@ -11448,20 +11496,54 @@ app.post("/bom-line/:id/edit", requireAuth, requireJobContext, requirePermission
   res.redirect(`/bom/${bomId}`);
 });
 
-app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermission("bom", "edit"), async (req, res) => {
+app.post("/bom-line/:id/delete", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
   const lineId = Number(req.params.id);
   const jobId = currentJobId(req);
-  const bomId = await withTransaction(async (client) => {
-    const current = (await client.query("select bl.bom_id, bh.is_system_generated, bh.system_key from bom_lines bl join bom_headers bh on bh.id = bl.bom_id where bl.id = $1 and bh.job_id = $2", [lineId, jobId])).rows[0];
+  const result = await withTransaction(async (client) => {
+    const current = (await client.query(`
+      select bl.id, bl.bom_id, bl.item_code, bh.is_system_generated, bh.system_key
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bl.id = $1
+        and bh.job_id = $2
+    `, [lineId, jobId])).rows[0];
     if (!current) throw new Error("BOM line not found.");
     assertBomAllowsManualChanges(current, "delete");
-    await client.query("delete from bom_lines where id = $1", [lineId]);
+    const usageCounts = await getBomLineUsageCounts(client, [lineId], jobId);
+    assertBomLineUnusedForDelete(usageCounts, "BOM line");
+    await client.query("delete from bom_lines where id = $1 and bom_id = $2", [lineId, current.bom_id]);
     await rebuildUnallocatedBom(client, jobId);
-    await auditLog(client, req.user.id, "delete", "bom_line", lineId, "");
-    return current.bom_id;
+    await auditLog(client, req.user.id, "delete", "bom_line", lineId, current.item_code || "");
+    return { bomId: current.bom_id };
   });
-  res.redirect(`/bom/${bomId}`);
-});
+  const fallback = `/bom/${result.bomId}/lines`;
+  const returnTo = String(req.body.return_to || "").trim();
+  res.redirect(returnTo.startsWith(fallback) ? returnTo : fallback);
+}));
+
+app.post("/bom/:id/lines/delete-all", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  await withTransaction(async (client) => {
+    const bom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+    if (!bom) throw new Error("BOM not found.");
+    assertBomAllowsManualChanges(bom, "delete");
+    const lineRows = (await client.query(`
+      select bl.id
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bl.bom_id = $1
+        and bh.job_id = $2
+    `, [bomId, jobId])).rows;
+    const lineIds = lineRows.map((row) => Number(row.id));
+    const usageCounts = await getBomLineUsageCounts(client, lineIds, jobId);
+    assertBomLineUnusedForDelete(usageCounts, "BOM lines");
+    const deleted = await client.query("delete from bom_lines where bom_id = $1 returning id", [bomId]);
+    await rebuildUnallocatedBom(client, jobId);
+    await auditLog(client, req.user.id, "delete", "bom_lines", bomId, `deleted ${deleted.rowCount} line(s)`);
+  });
+  res.redirect(`/bom/${bomId}/lines`);
+}));
 
 app.get("/min-max", requireAuth, requireJobContext, requirePermission("min_max", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
@@ -12049,6 +12131,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
     where ${where.join(" and ")}
     order by coalesce(bl.iwp_no, ''), coalesce(bl.line_no, ''), bl.id
   `, params)).rows;
+  const canEditBomLines = canAccess(req.user, "bom", "edit") && manualBom;
   const lineRows = lines.map((line) => `<tr>
     <td>${esc(line.line_no)}</td>
     <td>${esc(line.iwp_no || "")}</td>
@@ -12062,13 +12145,27 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
     <td>${esc(line.uom || "")}</td>
     <td>${esc(line.spec || "")}</td>
     <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
-    <td><div class="actions">${manualBom ? `<a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a>` : ""}</div></td>
+    <td><div class="actions">${canEditBomLines ? `
+      <a class="btn btn-secondary" href="/bom-line/${line.id}/edit">Edit</a>
+      <form method="post" action="/bom-line/${line.id}/delete" onsubmit="return confirm(${escAttr(JSON.stringify(`Delete BOM line ${line.item_code || line.id}? This is only allowed if the line has not been used.`))});">
+        <input type="hidden" name="return_to" value="${escAttr(req.originalUrl || `/bom/${bom.id}/lines`)}" />
+        <button class="btn btn-danger" type="submit">Delete</button>
+      </form>
+    ` : ""}</div></td>
   </tr>`).join("");
   res.send(layout(`BOM Lines ${bom.bom_name || bom.description || bom.bom_no}`, `
     <h1>BOM Lines</h1>
     <div class="card">
       <p class="muted">BOM: <a href="/bom/${bom.id}">${esc(bom.bom_name || bom.description || bom.bom_no)}</a> | BOM #: ${esc(bom.bom_no)} | Type: ${esc(bom.bom_type)} | Status: ${esc(bom.status)}</p>
-      <div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}">Back to BOM</a>${canAccess(req.user, "bom", "edit") && manualBom ? `<a class="btn btn-primary" href="/bom/${bom.id}/lines/new">Add BOM Line</a>` : ""}</div>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/bom/${bom.id}">Back to BOM</a>
+        ${canEditBomLines ? `
+          <a class="btn btn-primary" href="/bom/${bom.id}/lines/new">Add BOM Line</a>
+          <form method="post" action="/bom/${bom.id}/lines/delete-all" onsubmit="return confirm(${escAttr(JSON.stringify(`Delete all BOM lines from ${bom.bom_name || bom.description || bom.bom_no}? This is only allowed if none of the lines have been used.`))});">
+            <button class="btn btn-danger" type="submit">Delete All BOM Lines</button>
+          </form>
+        ` : ""}
+      </div>
     </div>
     ${addedLines ? `<div class="card success"><strong>Added ${addedLines} BOM line${addedLines === 1 ? "" : "s"}.</strong>${skippedLines ? ` ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.` : ""}</div>` : ""}
     ${!addedLines && skippedLines ? `<div class="card error"><strong>No BOM lines were added.</strong> ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.</div>` : ""}
