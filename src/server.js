@@ -6431,7 +6431,10 @@ function canEditRequisition(user, header) {
 
 function canDeleteRequisition(user, header) {
   if (!user || !header) return false;
-  return isAdminRole(user) && requisitionStatusKey(header.status) !== "ISSUED" && !header.issued_at;
+  if (!isAdminRole(user)) return false;
+  const statusKey = requisitionStatusKey(header.status);
+  if (statusKey === "ISSUED") return false;
+  return !header.issued_at || statusKey === "CANCELLED";
 }
 
 function getUserDisplayName(user) {
@@ -13422,8 +13425,10 @@ app.post("/requisitions/:id/delete", requireAuth, requireJobContext, requirePerm
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     const issueCount = Number((await client.query("select count(*) as issue_count from material_issue_transactions where requisition_id = $1 and job_id = $2", [req.params.id, jobId])).rows[0]?.issue_count || 0);
-    if (requisitionStatusKey(header.status) === "ISSUED" || header.issued_at || issueCount > 0) {
-      throw new Error("Issued requisitions cannot be deleted.");
+    const statusKey = requisitionStatusKey(header.status);
+    const isCancelled = statusKey === "CANCELLED";
+    if (statusKey === "ISSUED" || issueCount > 0 || (header.issued_at && !isCancelled)) {
+      throw new Error("Issued requisitions must be cancelled before they can be deleted.");
     }
     await auditLog(client, req.user.id, "delete", "material_requisition", req.params.id, header.requisition_no);
     await client.query("delete from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId]);
