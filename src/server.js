@@ -9525,7 +9525,7 @@ app.get("/items/specs", requireAuth, requireJobContext, requirePermission("inven
       <h3>Import Line Class Index</h3>
       <p class="muted">CSV/XLSX columns: ${esc(lineClassIndexImportHeaders.join(", "))}</p>
       <form method="post" enctype="multipart/form-data" action="/items/specs/import" class="stack">
-        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" accept=".csv,.xlsx,.xlsm,.xlsb,.xls" /></div>
         <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
         <div class="actions"><button type="submit">Import Line Class Index</button></div>
       </form>
@@ -9727,7 +9727,7 @@ app.get("/items/import-page", requireAuth, requireJobContext, requirePermission(
     <div class="card">
       <p class="muted">Supported columns: ${esc(materialItemImportHeaders.join(", "))}. Use the specs column for one or more specs separated by | or commas.</p>
       <form method="post" enctype="multipart/form-data" action="/items/import" class="stack">
-        <div><label>CSV/XLSX File</label><input type="file" name="sheet" /></div>
+        <div><label>CSV/XLSX File</label><input type="file" name="sheet" accept=".csv,.xlsx,.xlsm,.xlsb,.xls" /></div>
         <div><label>Or Paste CSV</label><textarea name="csv_text"></textarea></div>
         <div class="actions">
           <button type="submit">Import Items</button>
