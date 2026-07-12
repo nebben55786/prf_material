@@ -1604,6 +1604,8 @@ function layout(title, body, user) {
       .btn-warning { background: linear-gradient(180deg, #ffd866 0%, #d9a928 100%); color: #2d2300; }
       .btn-danger { background: linear-gradient(180deg, #bf5b49 0%, var(--warn) 100%); color: white; }
       .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+      .rfq-line-actions { display: grid; grid-template-columns: repeat(2, minmax(88px, 1fr)); gap: 6px; min-width: 182px; }
+      .rfq-line-actions .btn, .rfq-line-actions button { width: 100%; min-width: 0; }
       .check-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 14px; }
       .check-option { display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 6px; padding: 4px 0; font-size: 12px; text-transform: uppercase; }
       .check-option input { width: 14px; height: 14px; margin: 0; justify-self: center; }
@@ -14447,7 +14449,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ? `${awardedVendor} | ${awardedUnitPriceText} | ${awardedLeadText}`
       : "Open";
     const awardLineButton = !fullyAwarded && activeQuoteVendorId && !itemIssuedToPo
-      ? `<button class="btn btn-primary" type="submit" formaction="/rfq-item/${item.id}/award" formmethod="post" onclick="return confirm('Award this line even if unit price, lead time, or ETA are blank?');">Award Line</button>`
+      ? `<button class="btn btn-primary" type="submit" formaction="/rfq-item/${item.id}/award" formmethod="post" onclick="return confirm('Award this line even if unit price, lead time, or ETA are blank?');">Award</button>`
       : "";
     itemRows.push(`<tr data-rfq-item-id="${item.id}">
       <td style="width:1%; white-space:nowrap;">${esc(item.po_line || "")}</td>
@@ -14464,8 +14466,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <td style="width:1%; white-space:nowrap;">${esc(item.award_status)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(awardSummary)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(poRefs)}</td>
-      <td><div class="actions">
-        <a class="btn btn-secondary" href="/rfq-item/${item.id}/quotes">Quotes / History</a>
+      <td style="width:194px;"><div class="rfq-line-actions">
+        <a class="btn btn-secondary" href="/rfq-item/${item.id}/quotes">Quotes</a>
         ${awardLineButton}
         <a class="btn btn-secondary" href="/rfq-item/${item.id}/edit">Edit</a>
         ${item.award_status === "AWARDED" ? `<button class="btn btn-secondary" type="submit" formaction="/rfq-item/${item.id}/award/clear" formmethod="post">Clear Award</button>` : ""}
