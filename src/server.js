@@ -15294,36 +15294,35 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
   const jobId = currentJobId(req);
   const selectedSpecId = Number(req.query.spec_id || 0);
   const q = String(req.query.q || "").trim();
+  const descriptionQ = String(req.query.description || "").trim();
+  const typeQ = String(req.query.type || "").trim();
+  const size1Q = String(req.query.size_1 || "").trim();
+  const size2Q = String(req.query.size_2 || "").trim();
   const itemWhere = ["mi.job_id = $1"];
   const itemParams = [jobId];
   if (q) {
     itemParams.push(`%${q}%`);
     itemWhere.push(`(
       mi.item_code ilike $${itemParams.length}
-      or mi.description ilike $${itemParams.length}
-      or coalesce(mi.material_type, '') ilike $${itemParams.length}
       or coalesce(mi.uom, '') ilike $${itemParams.length}
       or coalesce(mi.commodity_code, '') ilike $${itemParams.length}
-      or coalesce(mi.size_1, '') ilike $${itemParams.length}
-      or coalesce(mi.size_2, '') ilike $${itemParams.length}
-      or coalesce(mi.thk_1, '') ilike $${itemParams.length}
-      or coalesce(mi.thk_2, '') ilike $${itemParams.length}
-      or coalesce(mi.notes, '') ilike $${itemParams.length}
-      or exists (
-        select 1
-        from material_item_specs search_mis
-        join material_specs search_ms on search_ms.id = search_mis.spec_id
-        where search_mis.material_item_id = mi.id
-          and search_mis.job_id = mi.job_id
-          and (
-            coalesce(nullif(search_ms.material_specification, ''), search_ms.name) ilike $${itemParams.length}
-            or coalesce(search_ms.service_code, '') ilike $${itemParams.length}
-            or coalesce(search_ms.service_description, '') ilike $${itemParams.length}
-            or coalesce(search_ms.material, '') ilike $${itemParams.length}
-            or coalesce(search_ms.vendor_rev, '') ilike $${itemParams.length}
-          )
-      )
     )`);
+  }
+  if (descriptionQ) {
+    itemParams.push(`%${descriptionQ}%`);
+    itemWhere.push(`mi.description ilike $${itemParams.length}`);
+  }
+  if (typeQ) {
+    itemParams.push(typeQ);
+    itemWhere.push(`lower(coalesce(mi.material_type, '')) = lower($${itemParams.length})`);
+  }
+  if (size1Q) {
+    itemParams.push(`%${size1Q}%`);
+    itemWhere.push(`coalesce(mi.size_1, '') ilike $${itemParams.length}`);
+  }
+  if (size2Q) {
+    itemParams.push(`%${size2Q}%`);
+    itemWhere.push(`coalesce(mi.size_2, '') ilike $${itemParams.length}`);
   }
   if (selectedSpecId > 0) {
     itemParams.push(selectedSpecId);
@@ -15335,7 +15334,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         and mis_filter.spec_id = $${itemParams.length}
     )`);
   }
-  const [rfqRes, specOptions, materialItemsRes, nextPoLine] = await Promise.all([
+  const [rfqRes, specOptions, materialItemsRes, nextPoLine, typeOptionResult] = await Promise.all([
     query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
     getMaterialSpecOptions(jobId),
     query(`
@@ -15359,13 +15358,25 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       order by mi.item_code
       limit 500
     `, itemParams),
-    getNextRfqLineNumber(pool, rfqId)
+    getNextRfqLineNumber(pool, rfqId),
+    query(`
+      select distinct trim(coalesce(material_type, '')) as material_type
+      from material_items
+      where job_id = $1
+        and trim(coalesce(material_type, '')) <> ''
+      order by material_type
+    `, [jobId])
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
   const selectedSpec = specOptions.find((spec) => Number(spec.id) === selectedSpecId) || null;
   const specSelectOptions = [`<option value="">All Specs</option>`]
     .concat(specOptions.map((spec) => `<option value="${spec.id}" ${Number(spec.id) === selectedSpecId ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`))
+    .join("");
+  const typeValues = typeOptionResult.rows.map((row) => String(row.material_type || "").trim()).filter(Boolean);
+  if (typeQ && !typeValues.some((value) => value.toLowerCase() === typeQ.toLowerCase())) typeValues.unshift(typeQ);
+  const typeSelectOptions = [`<option value="">All Types</option>`]
+    .concat(typeValues.map((value) => `<option value="${escAttr(value)}" ${value.toLowerCase() === typeQ.toLowerCase() ? "selected" : ""}>${esc(value)}</option>`))
     .join("");
   const materialItemRows = materialItemsRes.rows
     .map((item) => `<tr>
@@ -15409,13 +15420,19 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
       </div>
       <form method="get" action="/rfq/${rfqId}/items/existing" class="stack" style="margin-bottom:12px;">
-        <div class="grid" style="grid-template-columns: 1fr auto;">
-          <div><label>Spec</label><select name="spec_id">${specSelectOptions}</select></div>
-          <div style="align-self:end;"><button type="submit">Apply Spec</button></div>
+        <div class="grid">
+          <div><label>Search</label><input name="q" value="${esc(q)}" placeholder="Item code, UOM, commodity" /></div>
+          <div><label>Description</label><input name="description" value="${esc(descriptionQ)}" placeholder="Description only" /></div>
         </div>
-        <div class="grid" style="grid-template-columns: 1fr auto;">
-          <div><label>Filter Existing Items</label><input name="q" value="${esc(q)}" placeholder="Search item code, description, commodity, spec, size, thickness, type, or UOM" /></div>
-          <div style="align-self:end;"><button type="submit">Apply Filter</button></div>
+        <div class="grid-4">
+          <div><label>Type</label><select name="type">${typeSelectOptions}</select></div>
+          <div><label>Size 1</label><input name="size_1" value="${esc(size1Q)}" placeholder="Size 1" /></div>
+          <div><label>Size 2</label><input name="size_2" value="${esc(size2Q)}" placeholder="Size 2" /></div>
+          <div><label>Spec</label><select name="spec_id">${specSelectOptions}</select></div>
+        </div>
+        <div class="actions">
+          <button type="submit">Filter Items</button>
+          <a class="btn btn-secondary" href="/rfq/${rfqId}/items/existing">Clear</a>
         </div>
       </form>
       <div class="scroll">
