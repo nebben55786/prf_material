@@ -15460,7 +15460,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         </div>
         <div class="grid" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
           <div><label>PO Line</label><input name="po_line" id="rfq-existing-item-po-line-${rfqId}" inputmode="numeric" /></div>
-          <div><label>Qty</label><input name="qty" id="rfq-existing-item-qty-${rfqId}" value="1" inputmode="decimal" required /></div>
+          <div><label>Qty</label><input name="qty" id="rfq-existing-item-qty-${rfqId}" inputmode="decimal" required /></div>
           <div><label>UOM</label><input name="uom" id="rfq-existing-item-uom-${rfqId}" required /></div>
         </div>
         <p id="rfq-existing-item-message-${rfqId}" class="muted" style="display:none;margin:0;"></p>
@@ -15525,7 +15525,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         setValue('rfq-existing-item-spec-' + rfqId, spec);
         const nextLineInput = document.getElementById('rfq-existing-item-next-line-' + rfqId);
         setValue('rfq-existing-item-po-line-' + rfqId, nextLineInput ? nextLineInput.value : '');
-        setValue('rfq-existing-item-qty-' + rfqId, '1');
+        setValue('rfq-existing-item-qty-' + rfqId, '');
         setValue('rfq-existing-item-uom-' + rfqId, uom);
         const title = document.getElementById('rfq-existing-item-title-' + rfqId);
         const summary = document.getElementById('rfq-existing-item-summary-' + rfqId);
