@@ -14496,6 +14496,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     <div class="actions">
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/existing">Add Existing</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/new">Add New</a>` : ""}
+      ${poCount === 0 ? `<a class="btn btn-secondary" href="/items" target="_blank" rel="noopener noreferrer">Item Master</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/paste">Paste Values</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/import-page">Import Items</a>` : ""}
       ${poCount === 0 ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/items/import-template.xlsx">Download Item Template</a>` : ""}
