@@ -348,18 +348,18 @@ function parseDimensionNumber(value) {
   let text = String(value).trim().toLowerCase();
   if (!text) return null;
   const unicodeFractions = {
-    "¼": " 1/4",
-    "½": " 1/2",
-    "¾": " 3/4",
-    "⅛": " 1/8",
-    "⅜": " 3/8",
-    "⅝": " 5/8",
-    "⅞": " 7/8"
+    "Â¼": " 1/4",
+    "Â½": " 1/2",
+    "Â¾": " 3/4",
+    "â…›": " 1/8",
+    "â…œ": " 3/8",
+    "â…": " 5/8",
+    "â…ž": " 7/8"
   };
   text = text
-    .replace(/[¼½¾⅛⅜⅝⅞]/g, (match) => unicodeFractions[match] || match)
+    .replace(/[Â¼Â½Â¾â…›â…œâ…â…ž]/g, (match) => unicodeFractions[match] || match)
     .replace(/,/g, "")
-    .replace(/[″"]/g, "")
+    .replace(/[â€³"]/g, "")
     .replace(/\s+/g, " ")
     .trim();
   if (/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
@@ -799,47 +799,64 @@ function buildRfqSheetPdf(rfq, items, options = {}) {
   const right = pageWidth - 28;
   const top = pageHeight - 24;
   const usableWidth = right - left;
-  const cols = [
-    { key: "line", label: "LINE", width: 36 },
-    { key: "item", label: "ITEM", width: 95 },
-    { key: "description", label: "DESCRIPTION", width: 310 },
+  const optionalColumns = [
     { key: "size_1", label: "SIZE 1", width: 55 },
     { key: "size_2", label: "SIZE 2", width: 55 },
     { key: "thk_1", label: "THK 1", width: 55 },
-    { key: "thk_2", label: "THK 2", width: 55 },
+    { key: "thk_2", label: "THK 2", width: 55 }
+  ].filter((column) => items.some((item) => String(formatPlainNumberDisplay(item[column.key]) || "").trim()));
+  const optionalWidth = optionalColumns.reduce((sum, column) => sum + column.width, 0);
+  const removedOptionalWidth = (4 - optionalColumns.length) * 55;
+  const itemWidth = 95 + Math.min(72, Math.round(removedOptionalWidth * 0.35));
+  const descriptionWidth = usableWidth - 36 - itemWidth - optionalWidth - 40 - 35;
+  const cols = [
+    { key: "line", label: "LINE", width: 36 },
+    { key: "item", label: "ITEM", width: itemWidth },
+    { key: "description", label: "DESCRIPTION", width: descriptionWidth },
+    ...optionalColumns,
     { key: "qty", label: "QTY", width: 40 },
     { key: "uom", label: "UOM", width: 35 }
   ];
-  const descriptionWrapWidth = Math.max(12, Math.floor((cols[2].width - 12) / 5));
+  const wrapCharsForWidth = (width, minimum = 4) => Math.max(minimum, Math.floor((width - 12) / 5));
+  const wrapPdfCellText = (value, maxChars) => {
+    const wrapped = wrapPdfText(String(value ?? ""), maxChars);
+    const lines = [];
+    for (const sourceLine of wrapped) {
+      if (sourceLine.length <= maxChars) {
+        lines.push(sourceLine);
+        continue;
+      }
+      for (let offset = 0; offset < sourceLine.length; offset += maxChars) {
+        lines.push(sourceLine.slice(offset, offset + maxChars));
+      }
+    }
+    return lines.length ? lines : [""];
+  };
+  const itemWrapWidth = wrapCharsForWidth(itemWidth, 8);
+  const descriptionWrapWidth = wrapCharsForWidth(descriptionWidth, 12);
   const makeText = (x, y, text, font = "F1", size = 9) => `BT /${font} ${size} Tf 1 0 0 1 ${x} ${y} Tm (${pdfEscape(text)}) Tj ET`;
   const rect = (x, y, w, h) => `${x} ${y} ${w} ${h} re S`;
   const line = (x1, y1, x2, y2) => `${x1} ${y1} m ${x2} ${y2} l S`;
 
   const rows = items.map((item) => {
-    const lineLines = wrapPdfText(showPoLines ? (item.po_line || "") : "", 6);
-    const itemLines = wrapPdfText(item.item_code || "", 14);
     const descriptionLines = wrapPdfText(item.description || "", descriptionWrapWidth);
     const extraDescription = [];
     if (item.spec) extraDescription.push(...wrapPdfText(`Spec: ${item.spec}`, descriptionWrapWidth));
     if (item.notes) extraDescription.push(...wrapPdfText(`Notes: ${item.notes}`, descriptionWrapWidth));
     const combinedDescription = descriptionLines.concat(extraDescription);
-    const size1Lines = wrapPdfText(formatPlainNumberDisplay(item.size_1), 8);
-    const size2Lines = wrapPdfText(formatPlainNumberDisplay(item.size_2), 8);
-    const thk1Lines = wrapPdfText(formatPlainNumberDisplay(item.thk_1), 8);
-    const thk2Lines = wrapPdfText(formatPlainNumberDisplay(item.thk_2), 8);
-    const lineCount = Math.max(lineLines.length, itemLines.length, combinedDescription.length, size1Lines.length, size2Lines.length, thk1Lines.length, thk2Lines.length, 1);
-    return {
-      lineLines,
-      itemLines,
-      descriptionLines: combinedDescription.length ? combinedDescription : [""],
-      size1Lines: size1Lines.length ? size1Lines : [""],
-      size2Lines: size2Lines.length ? size2Lines : [""],
-      thk1Lines: thk1Lines.length ? thk1Lines : [""],
-      thk2Lines: thk2Lines.length ? thk2Lines : [""],
-      qty: formatQtyDisplay(item.qty),
-      uom: String(item.uom || ""),
-      height: 10 + (lineCount * 11)
+    const cells = {
+      line: wrapPdfCellText(showPoLines ? (item.po_line || "") : "", 6),
+      item: wrapPdfCellText(item.item_code || "", itemWrapWidth),
+      description: combinedDescription.length ? combinedDescription : [""],
+      size_1: wrapPdfCellText(formatPlainNumberDisplay(item.size_1), 8),
+      size_2: wrapPdfCellText(formatPlainNumberDisplay(item.size_2), 8),
+      thk_1: wrapPdfCellText(formatPlainNumberDisplay(item.thk_1), 8),
+      thk_2: wrapPdfCellText(formatPlainNumberDisplay(item.thk_2), 8),
+      qty: [formatQtyDisplay(item.qty)],
+      uom: [String(item.uom || "")]
     };
+    const lineCount = Math.max(...cols.map((column) => (cells[column.key] || [""]).length), 1);
+    return { cells, height: 10 + (lineCount * 11) };
   });
 
   const pages = [];
@@ -900,20 +917,15 @@ function buildRfqSheetPdf(rfq, items, options = {}) {
         if (x < right) content.push(line(x, rowTop, x, rowBottom));
       });
 
-      const rowLineCount = Math.max(row.lineLines.length, row.itemLines.length, row.descriptionLines.length, row.size1Lines.length, row.size2Lines.length, row.thk1Lines.length, row.thk2Lines.length, 1);
-      for (let index = 0; index < rowLineCount; index += 1) {
-        const baseline = rowTop - 14 - (index * 11);
-        if (row.lineLines[index]) content.push(makeText(left + 6, baseline, row.lineLines[index], "F1", 8.5));
-        if (row.itemLines[index]) content.push(makeText(left + cols[0].width + 6, baseline, row.itemLines[index], "F1", 8.5));
-        if (row.descriptionLines[index]) content.push(makeText(left + cols[0].width + cols[1].width + 6, baseline, row.descriptionLines[index], "F1", 8.5));
-        if (row.size1Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + 6, baseline, row.size1Lines[index], "F1", 8.5));
-        if (row.size2Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + 6, baseline, row.size2Lines[index], "F1", 8.5));
-        if (row.thk1Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + cols[4].width + 6, baseline, row.thk1Lines[index], "F1", 8.5));
-        if (row.thk2Lines[index]) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + cols[4].width + cols[5].width + 6, baseline, row.thk2Lines[index], "F1", 8.5));
-        if (index === 0 && row.qty) content.push(makeText(left + cols[0].width + cols[1].width + cols[2].width + cols[3].width + cols[4].width + cols[5].width + cols[6].width + 8, baseline, row.qty, "F1", 8.5));
-        if (index === 0 && row.uom) content.push(makeText(right - cols[8].width + 4, baseline, row.uom, "F1", 8.5));
+      let cellX = left;
+      for (const column of cols) {
+        const cellLines = row.cells[column.key] || [""];
+        cellLines.forEach((cellLine, index) => {
+          const baseline = rowTop - 14 - (index * 11);
+          if (cellLine) content.push(makeText(cellX + 6, baseline, cellLine, "F1", 8.5));
+        });
+        cellX += column.width;
       }
-
       y = rowBottom;
     }
 
@@ -1995,7 +2007,7 @@ function layout(title, body, user) {
             headers.forEach((header, headerIndex) => {
               const headerIndicator = header.querySelector(".sort-indicator");
               if (!headerIndicator) return;
-              headerIndicator.textContent = headerIndex === index ? (nextDir === "asc" ? "↑" : "↓") : "";
+              headerIndicator.textContent = headerIndex === index ? (nextDir === "asc" ? "â†‘" : "â†“") : "";
             });
           });
         });
@@ -2193,7 +2205,7 @@ function nextSortDir(currentSort, currentDir, column) {
 
 function sortLabel(label, currentSort, currentDir, column) {
   if (currentSort !== column) return label;
-  return `${label} ${currentDir === "asc" ? "↑" : "↓"}`;
+  return `${label} ${currentDir === "asc" ? "â†‘" : "â†“"}`;
 }
 
 async function syncLegacyVendorContact(client, vendorId) {
@@ -2440,7 +2452,7 @@ function splitCombinedDimensionValue(value) {
   const text = String(value || "").trim();
   if (!text) return { primary: "", secondary: "" };
   const parts = text
-    .replace(/×/g, "x")
+    .replace(/Ã—/g, "x")
     .split(/\s*x\s*/i)
     .map((part) => part.trim())
     .filter(Boolean);
