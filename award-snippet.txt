@@ -1,0 +1,118 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { Readable } from "node:stream";
+import zlib from "node:zlib";
+import { del, get, put } from "@vercel/blob";
+import { handleUpload } from "@vercel/blob/client";
+import express from "express";
+import cookieParser from "cookie-parser";
+import multer from "multer";
+import bcrypt from "bcryptjs";
+import XLSX from "xlsx";
+import { initDb, query, withTransaction, auditLog, vendorCategories, setVendorCategories, permissionMatrix, setPermissionMatrix, pool } from "./db.js";
+
+const app = express();
+const upload = multer();
+const PORT = Number(process.env.PORT || 3000);
+const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
+const authContextCacheMs = Math.max(0, Number(process.env.AUTH_CONTEXT_CACHE_MS || 15000));
+const slowRequestMs = Math.max(0, Number(process.env.SLOW_REQUEST_MS || 1000));
+const configuredQuoteFileUploadMaxBytes = Number(process.env.QUOTE_FILE_UPLOAD_MAX_BYTES || 100 * 1024 * 1024);
+const quoteFileUploadMaxBytes = Math.max(5 * 1024 * 1024, Number.isFinite(configuredQuoteFileUploadMaxBytes) ? configuredQuoteFileUploadMaxBytes : 100 * 1024 * 1024);
+const vercelBlobClientModuleUrl = process.env.VERCEL_BLOB_CLIENT_MODULE_URL || "https://esm.sh/@vercel/blob@2.3.3/client?bundle";
+const bomTypes = ["pipe", "pipe fab", "support fab", "steel", "civil", "tubing", "grout", "misc", "equipment"];
+const bomStatuses = ["DRAFT", "ACTIVE", "ISSUED_FOR_RFQ", "PARTIALLY_PROCURED", "FULLY_PROCURED", "CLOSED"];
+const bomLineStatuses = ["PLANNED", "ON_RFQ", "AWARDED", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "ISSUED_TO_FIELD", "CLOSED"];
+const bomLineImportHeaders = ["line_no", "item_code", "description", "size_1", "qty", "uom", "spec", "tag_number", "iwp_no", "iso_no", "material_type", "commodity_code", "size_2", "thk_1", "thk_2", "notes"];
+const materialItemImportHeaders = ["item_code", "description", "material_type", "uom", "commodity_code", "size_1", "size_2", "thk_1", "thk_2", "notes", "specs"];
+const requisitionStatuses = ["REQUESTED", "WAITING_ON_MATERIAL", "ACCEPTED", "FLAGGED", "LOADED", "ISSUED", "CANCELLED", "CLOSED"];
+const unallocatedBomSystemKey = "UNALLOCATED";
+const unallocatedBomName = "Un-Allocated Inventory";
+const issueSourceTypes = {
+  bom: "BOM",
+  unallocated: "UNALLOCATED",
+  manual: "MANUAL"
+};
+const rfqStatuses = [
+  { value: "SEND_FOR_QUOTES", label: "Send for Quotes" },
+  { value: "WAITING_ON_QUOTES", label: "Waiting on Quotes" },
+  { value: "AWARDED", label: "Awarded" },
+  { value: "WAITING_ON_CLIENT", label: "Waiting on Client" },
+  { value: "NEED_RFI", label: "Need RFI" },
+  { value: "RFI_SUBMITTED", label: "RFI submitted" },
+  { value: "ON_HOLD", label: "On-hold" },
+  { value: "CANCELLED", label: "Cancelled" },
+  { value: "PURCHASED", label: "Purchased" },
+  { value: "PARTIALLY_RECEIVED", label: "Partially Received" },
+  { value: "RECEIVED", label: "Received" }
+];
+const permissionSections = [
+  { key: "dashboard", label: "Dashboard", href: "/" },
+  { key: "material_logs", label: "Material Logs", href: "/material-logs" },
+  { key: "vendors", label: "Vendors", href: "/vendors" },
+  { key: "rfqs", label: "Purchasing", href: "/rfq" },
+  { key: "pos", label: "POs", href: "/po" },
+  { key: "bom", label: "BOM", href: "/bom" },
+  { key: "inventory", label: "Items", href: "/items" },
+  { key: "receiving", label: "Receiving", href: "/receive" },
+  { key: "yard", label: "Yard", href: "/yard" },
+  { key: "requisitions", label: "REQs", href: "/requisitions" },
+  { key: "min_max", label: "Min-Max", href: "/min-max" },
+  { key: "settings", label: "Settings", href: "/settings" }
+];
+const roleAdmin = "admin";
+const roleMaterialController = "material_controller";
+const adminEquivalentRoles = [roleAdmin, roleMaterialController];
+const validUserRoles = [roleAdmin, roleMaterialController, "buyer", "warehouse", "field", "supervisor"];
+const permissionRoles = validUserRoles;
+function normalizeRole(role) {
+  return String(role || "").trim().toLowerCase();
+}
+function isAdminRole(userOrRole) {
+  const role = typeof userOrRole === "string" ? userOrRole : userOrRole?.role;
+  return adminEquivalentRoles.includes(normalizeRole(role));
+}
+function displayRole(role) {
+  const normalized = normalizeRole(role);
+  if (normalized === roleMaterialController) return "Material Controller";
+  return String(role || "");
+}
+function renderRoleOptions(selectedRole = "field") {
+  const selected = normalizeRole(selectedRole);
+  return validUserRoles.map((role) => {
+    const isSelected = selected === role ? "selected" : "";
+    return `<option value="${esc(role)}" ${isSelected}>${esc(displayRole(role))}</option>`;
+  }).join("");
+}
+const defaultJobNumberValue = String(process.env.DEFAULT_JOB_NUMBER || "0000").trim() || "0000";
+let headerJobNumber = defaultJobNumberValue;
+let headerPlantName = "";
+let headerPerformanceJobNumber = "";
+const pickTicketLogoPath = path.join(process.cwd(), "public", "prf-logo.png");
+const axImportTemplatePath = path.join(process.cwd(), "assets", "templates", "ax-import-template.xlsx");
+let pickTicketLogoBuffer = null;
+try {
+  pickTicketLogoBuffer = fs.readFileSync(pickTicketLogoPath);
+} catch {
+  pickTicketLogoBuffer = null;
+}
+
+const defaultPermissionMatrix = {
+  admin: {
+    dashboard: { view: true },
+    material_logs: { view: true, edit: true },
+    vendors: { view: true, edit: true },
+    rfqs: { view: true, edit: true },
+    pos: { view: true, edit: true },
+    bom: { view: true, edit: true },
+    items: { view: true, edit: true },
+    receiving: { view: true, edit: true },
+    yard: { view: true },
+    inventory: { view: true, edit: true },
+    requisitions: { view: true, create: true, edit: true, verify: true, issue: true, unverify: true, delete: true },
+    min_max: { view: true, create: true },
+    settings: { view: true, edit: true }
+  },
+  buyer: {
+   

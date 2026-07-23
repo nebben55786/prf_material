@@ -1733,7 +1733,7 @@ function layout(title, body, user) {
       }
       function validateBulkAward(form) {
         if (!form) return true;
-        return window.confirm("Award these RFQ lines even if unit price, lead time, or ETA are blank?");
+        return window.confirm("Award these RFQ lines even if unit price is blank?");
       }
       function captureRfqQuoteOrder(form) {
         if (!form) return true;
