@@ -16610,20 +16610,13 @@ app.post("/rfq-item/:id/award/clear", requireAuth, requireJobContext, requirePer
 
 app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const item = (await query(`
-    select ri.id, ri.rfq_id, ri.po_line, ri.qty, ri.notes, coalesce(nullif(ri.spec, ''), item_specs.specs, '') as spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
+    select ri.id, ri.rfq_id, ri.po_line, ri.qty, ri.notes, coalesce(ri.spec, '') as spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
            coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
            coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
            coalesce(nullif(ri.material_type_snapshot, ''), mi.material_type) as material_type,
            coalesce(nullif(ri.uom_snapshot, ''), mi.uom) as uom
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
-    left join (
-      select mis.material_item_id, string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ', ' order by ms.service_code, ms.material_specification, ms.name) as specs
-      from material_item_specs mis
-      join material_specs ms on ms.id = mis.spec_id
-      where mis.job_id = $2
-      group by mis.material_item_id
-    ) item_specs on item_specs.material_item_id = ri.material_item_id
     where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
   `, [req.params.id, currentJobId(req)])).rows[0];
   if (!item) {
@@ -16660,7 +16653,7 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
   const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
     const current = (await client.query(`
-      select ri.rfq_id, ri.po_line, ri.material_item_id, mi.item_code, mi.description
+      select ri.rfq_id, ri.po_line, ri.material_item_id, coalesce(ri.spec, '') as spec, mi.item_code, mi.description
       from rfq_items ri
       join material_items mi on mi.id = ri.material_item_id
       where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
@@ -16668,7 +16661,8 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
     if (!current) throw new Error("RFQ item not found.");
     const qty = parseQtyValue(req.body.qty || 0);
     if (qty <= 0) throw new Error("Qty must be greater than zero.");
-    const requestedSpec = normalizeSpecName(req.body.spec || "");
+    const requestedSpecRaw = normalizeSpecName(req.body.spec || "");
+    const requestedSpec = !normalizeSpecName(current.spec) && parseSpecList(requestedSpecRaw).length > 1 ? "" : requestedSpecRaw;
     const materialLookup = await getMaterialItemForUse(client, req.body.item_code, jobId, requestedSpec);
     if (materialLookup.errorCode) throw new Error(materialLookup.message);
     const item = materialLookup.item;
