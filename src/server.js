@@ -16610,13 +16610,20 @@ app.post("/rfq-item/:id/award/clear", requireAuth, requireJobContext, requirePer
 
 app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const item = (await query(`
-    select ri.id, ri.rfq_id, ri.po_line, ri.qty, ri.notes, coalesce(ri.spec, '') as spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
+    select ri.id, ri.rfq_id, ri.po_line, ri.qty, ri.notes, coalesce(nullif(ri.spec, ''), item_specs.specs, '') as spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, extract(epoch from ri.updated_at)::text as updated_token,
            coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
            coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
            coalesce(nullif(ri.material_type_snapshot, ''), mi.material_type) as material_type,
            coalesce(nullif(ri.uom_snapshot, ''), mi.uom) as uom
     from rfq_items ri
     join material_items mi on mi.id = ri.material_item_id
+    left join (
+      select mis.material_item_id, string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ', ' order by ms.service_code, ms.material_specification, ms.name) as specs
+      from material_item_specs mis
+      join material_specs ms on ms.id = mis.spec_id
+      where mis.job_id = $2
+      group by mis.material_item_id
+    ) item_specs on item_specs.material_item_id = ri.material_item_id
     where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
   `, [req.params.id, currentJobId(req)])).rows[0];
   if (!item) {
@@ -16628,20 +16635,20 @@ app.get("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission(
     <div class="card">
       <form method="post" action="/rfq-item/${item.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(item.updated_token)}" />
-        <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" required /></div>
+        <div><label>Item Code</label><input value="${esc(item.item_code)}" readonly /></div>
         <div><label>Description</label><input value="${esc(item.description)}" readonly /></div>
         <div><label>Type</label><input value="${esc(item.material_type)}" readonly /></div>
         <div><label>UOM</label><input value="${esc(item.uom)}" readonly /></div>
         <div><label>PO Line</label><input name="po_line" value="${esc(item.po_line || "")}" inputmode="numeric" /></div>
         <div><label>Qty</label><input name="qty" value="${esc(item.qty)}" required /></div>
-        <div><label>Spec</label><input name="spec" value="${esc(item.spec || "")}" /></div>
+        <div><label>Spec</label><input value="${esc(item.spec || "")}" readonly /></div>
         <div><label>Commodity Code</label><input value="${esc(item.commodity_code || "")}" readonly /></div>
-        <div><label>Tag Number</label><input name="tag_number" value="${esc(item.tag_number || "")}" /></div>
+        <div><label>Tag Number</label><input value="${esc(item.tag_number || "")}" readonly /></div>
         <div><label>Size 1</label><input value="${esc(formatPlainNumberDisplay(item.size_1))}" readonly /></div>
         <div><label>Size 2</label><input value="${esc(formatPlainNumberDisplay(item.size_2))}" readonly /></div>
         <div><label>Thk 1</label><input value="${esc(formatPlainNumberDisplay(item.thk_1))}" readonly /></div>
         <div><label>Thk 2</label><input value="${esc(formatPlainNumberDisplay(item.thk_2))}" readonly /></div>
-        <div><label>Notes</label><textarea name="notes">${esc(item.notes || "")}</textarea></div>
+        <div><label>Notes</label><textarea readonly>${esc(item.notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save Item</button><a class="btn btn-secondary" href="/rfq/${item.rfq_id}">Back</a></div>
       </form>
     </div>
@@ -16652,59 +16659,28 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
   const itemId = Number(req.params.id);
   const jobId = currentJobId(req);
   const rfqId = await withTransaction(async (client) => {
-    const current = (await client.query(`
-      select ri.rfq_id, ri.po_line, ri.material_item_id, coalesce(ri.spec, '') as spec, mi.item_code, mi.description
-      from rfq_items ri
-      join material_items mi on mi.id = ri.material_item_id
-      where ri.id = $1 and ri.job_id = $2 and mi.job_id = $2
-    `, [itemId, jobId])).rows[0];
+    const current = (await client.query("select rfq_id, po_line from rfq_items where id = $1 and job_id = $2", [itemId, jobId])).rows[0];
     if (!current) throw new Error("RFQ item not found.");
     const qty = parseQtyValue(req.body.qty || 0);
     if (qty <= 0) throw new Error("Qty must be greater than zero.");
-    const requestedSpecRaw = normalizeSpecName(req.body.spec || "");
-    const requestedSpec = !normalizeSpecName(current.spec) && parseSpecList(requestedSpecRaw).length > 1 ? "" : requestedSpecRaw;
-    const materialLookup = await getMaterialItemForUse(client, req.body.item_code, jobId, requestedSpec);
-    if (materialLookup.errorCode) throw new Error(materialLookup.message);
-    const item = materialLookup.item;
     const requestedPoLine = String(req.body.po_line || "").trim();
     const update = await client.query(`
       update rfq_items
-      set material_item_id = $2,
-          item_code_snapshot = $3,
-          description_snapshot = $4,
-          material_type_snapshot = $5,
-          uom_snapshot = $6,
-          spec = $7,
-          commodity_code = $8,
-          tag_number = $9,
-          size_1 = $10,
-          size_2 = $11,
-          thk_1 = $12,
-          thk_2 = $13,
-          po_line = $14,
-          qty = $15,
-          notes = $16,
+      set po_line = $2,
+          qty = $3,
           updated_at = now()
-      where id = $1 and job_id = $17 and extract(epoch from updated_at)::text = $18
+      where id = $1 and job_id = $4 and extract(epoch from updated_at)::text = $5
     `, [
       itemId,
-      item.id,
-      ...materialItemSnapshotParams(item),
-      requestedSpec,
-      item.commodity_code || "",
-      req.body.tag_number || "",
-      item.size_1 || "",
-      item.size_2 || "",
-      item.thk_1 || "",
-      item.thk_2 || "",
       requestedPoLine,
       qty,
-      req.body.notes || "",
       jobId,
       req.body.updated_token || ""
     ]);
     if (update.rowCount === 0) throw new Error("This RFQ item was modified by another user. Refresh and try again.");
-    if (parsePositiveLineNumber(requestedPoLine)) {
+    const requestedLineNumber = parsePositiveLineNumber(requestedPoLine);
+    const currentLineNumber = parsePositiveLineNumber(current.po_line);
+    if (requestedLineNumber && requestedLineNumber !== currentLineNumber) {
       await resequenceRfqItemLine(client, {
         rfqId: current.rfq_id,
         itemId,
@@ -16712,7 +16688,7 @@ app.post("/rfq-item/:id/edit", requireAuth, requireJobContext, requirePermission
         jobId
       });
     }
-    await auditLog(client, req.user.id, "update", "rfq_item", itemId, `${item.item_code || ""}|line=${requestedPoLine}`);
+    await auditLog(client, req.user.id, "update", "rfq_item", itemId, `line=${requestedPoLine};qty=${qty}`);
     return current.rfq_id;
   });
   res.redirect(`/rfq/${rfqId}`);
