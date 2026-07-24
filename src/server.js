@@ -6624,9 +6624,28 @@ async function refreshRfqEtaFromPos(client, rfqId, jobId) {
   const rfq = (await client.query("select eta_date_override from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
   if (!rfq || rfq.eta_date_override) return;
   const eta = (await client.query(`
-    select max((coalesce(po.issued_at, po.created_at)::date + greatest(pl.lead_days, 0)::int)) as eta_date
+    select max(eta.eta_date) as eta_date
     from purchase_orders po
     join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+    cross join lateral (
+      select
+        coalesce(po.issued_at, po.created_at)::date as base_date,
+        greatest(pl.lead_days, 0)::int as lead_days
+    ) calc
+    cross join lateral (
+      select min(candidate.day)::date as eta_date
+      from generate_series(
+        calc.base_date,
+        calc.base_date + (calc.lead_days + (((calc.lead_days / 5) + 2) * 2) + 7),
+        interval '1 day'
+      ) candidate(day)
+      where calc.lead_days = 0
+        or (
+          select count(*)
+          from generate_series(calc.base_date + interval '1 day', candidate.day, interval '1 day') counted(day)
+          where extract(isodow from counted.day) < 6
+        ) >= calc.lead_days
+    ) eta
     where po.rfq_id = $1
       and po.job_id = $2
       and po.status <> 'CANCELLED'
