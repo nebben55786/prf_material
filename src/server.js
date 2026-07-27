@@ -1784,7 +1784,6 @@ function layout(title, body, user) {
         poInput.value = cleanPoNumber;
         if (defaultPoInput) defaultPoInput.value = cleanPoNumber;
         vendorInput.value = vendorSelect.value;
-        if (!window.confirm("Create this PO even if awarded lines have blank unit price, lead time, or ETA?")) return false;
         targetForm.submit();
         return false;
       }
