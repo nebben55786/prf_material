@@ -47,6 +47,7 @@ const rfqStatuses = [
   { value: "PARTIALLY_RECEIVED", label: "Partially Received" },
   { value: "RECEIVED", label: "Received" }
 ];
+const rfqNewItemGridRowCount = 18;
 const permissionSections = [
   { key: "dashboard", label: "Dashboard", href: "/" },
   { key: "material_logs", label: "Material Logs", href: "/material-logs" },
@@ -15635,8 +15636,7 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
   const rfqId = Number(req.params.id);
   const rfq = (await query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, currentJobId(req)])).rows[0];
   if (!rfq) throw new Error("RFQ not found.");
-  const newRfqItemRowCount = 18;
-  const newItemRows = Array.from({ length: newRfqItemRowCount }, (_, index) => `
+  const newItemRows = Array.from({ length: rfqNewItemGridRowCount }, (_, index) => `
     <tr>
       <td><input name="item_code_${index}" /><input type="hidden" name="material_type_${index}" value="misc" /></td>
       <td class="rfq-entry-description"><input name="description_${index}" /></td>
@@ -15690,7 +15690,7 @@ app.get("/rfq/:id/items/new", requireAuth, requireJobContext, requirePermission(
         padding-right: 6px;
       }
     </style>
-    <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', ${newRfqItemRowCount})">
+    <form id="rfq-grid-form-${rfqId}" method="post" action="/rfq/${rfqId}/items/grid" class="stack" onsubmit="return prepareRfqGrid('rfq-grid-form-${rfqId}', ${rfqNewItemGridRowCount})">
       <div class="scroll">
         <table class="data-grid rfq-entry-grid">
           <colgroup>
@@ -16020,7 +16020,7 @@ app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission
 
 app.post("/rfq/:id/items/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const rfqId = Number(req.params.id);
-  const rows = Array.from({ length: 8 }, (_, index) => ({
+  const rows = Array.from({ length: rfqNewItemGridRowCount }, (_, index) => ({
     item_code: req.body[`item_code_${index}`],
     description: req.body[`description_${index}`],
     material_type: req.body[`material_type_${index}`],
