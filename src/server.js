@@ -6541,14 +6541,6 @@ async function backfillRfqVendors(client, rfqId) {
   if (!rfq) return;
   await client.query(`
     insert into rfq_vendors (job_id, rfq_id, vendor_id)
-    select distinct $2::bigint, ri.rfq_id, q.vendor_id
-    from rfq_items ri
-    join quotes q on q.rfq_item_id = ri.id
-    where ri.rfq_id = $1 and ri.job_id = $2::bigint and q.job_id = $2::bigint
-    on conflict (rfq_id, vendor_id) do nothing
-  `, [rfqId, rfq.job_id]);
-  await client.query(`
-    insert into rfq_vendors (job_id, rfq_id, vendor_id)
     select distinct $2::bigint, rfq_id, awarded_vendor_id
     from rfq_items
     where rfq_id = $1 and job_id = $2::bigint and awarded_vendor_id is not null
@@ -14510,7 +14502,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <td style="width:80px; max-width:80px; white-space:normal; overflow-wrap:anywhere;">${esc(item.spec || "")}</td>
       <td style="width:1%; white-space:nowrap;">${esc(item.notes || "")}</td>
       <td style="width:96px; white-space:nowrap;"><input data-rfq-quote-input="1" name="unit_price_${item.id}" value="${esc(formatCurrencyInput(selectedQuote?.unit_price))}" inputmode="decimal"${quoteInputsDisabledAttr} /></td>
-      <td style="width:88px; white-space:nowrap;"><input data-rfq-quote-input="1" name="lead_days_${item.id}" value="${esc(selectedQuote?.lead_days || "")}" inputmode="numeric"${quoteInputsDisabledAttr} /></td>
+      <td style="width:88px; white-space:nowrap;"><input data-rfq-quote-input="1" name="lead_days_${item.id}" value="${esc(selectedQuote?.lead_days === null || selectedQuote?.lead_days === undefined ? "" : String(num(selectedQuote.lead_days)))}" inputmode="numeric"${quoteInputsDisabledAttr} /></td>
       <td style="width:170px; max-width:170px; white-space:normal; overflow-wrap:anywhere;">${esc(awardSummary)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(poRefs)}</td>
       <td style="width:194px;"><div class="rfq-line-actions">
@@ -16092,9 +16084,9 @@ app.post("/rfq/:id/quotes/import", requireAuth, requireJobContext, requirePermis
       const itemCode = String(row.item_code || "").trim();
       const unitPrice = num(row.unit_price, NaN);
       const leadDays = num(row.lead_days);
-      if ((!scopedVendorId && !vendorName) || !itemCode || !Number.isFinite(unitPrice) || unitPrice <= 0) {
+      if ((!scopedVendorId && !vendorName) || !itemCode || !Number.isFinite(unitPrice) || unitPrice < 0) {
         skippedCount += 1;
-        await addImportBatchError(client, batchId, rowNumber, "invalid_quote", "Vendor, item code, and unit price are required.", row);
+        await addImportBatchError(client, batchId, rowNumber, "invalid_quote", "Vendor, item code, and unit price are required. Unit price cannot be negative.", row);
         continue;
       }
       let vendorId = scopedVendorId;
@@ -16280,10 +16272,10 @@ app.post("/rfq/:id/award", requireAuth, requireJobContext, requirePermission("rf
       const missingList = missingItems.slice(0, 8).map((item) => item.item_code || `Line ${item.id}`).join(", ");
       throw new Error(`Cannot award this RFQ yet. The selected vendor is missing quotes for: ${missingList}${missingItems.length > 8 ? ", ..." : ""}`);
     }
-    const invalidItems = submittedItems.filter((item) => !Number.isFinite(item.awarded_unit_price) || item.awarded_unit_price <= 0);
+    const invalidItems = submittedItems.filter((item) => !Number.isFinite(item.awarded_unit_price) || item.awarded_unit_price < 0);
     if (invalidItems.length > 0) {
       const invalidList = invalidItems.slice(0, 8).map((item) => item.item_code || `Line ${item.id}`).join(", ");
-      throw new Error(`Unit price must be greater than zero for: ${invalidList}${invalidItems.length > 8 ? ", ..." : ""}`);
+      throw new Error(`Unit price cannot be negative for: ${invalidList}${invalidItems.length > 8 ? ", ..." : ""}`);
     }
     for (const item of submittedItems) {
       await client.query(`
@@ -16535,7 +16527,7 @@ app.post("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermissio
     if (issued.rows[0]) throw new Error("Cannot change an award after a PO line has been issued.");
     const submitted = parseSubmittedUnitPrice(req.body, itemId);
     if (submitted.blank) throw new Error(`Cannot award this RFQ yet. The selected vendor is missing quotes for: ${item.item_code || `Line ${itemId}`}`);
-    if (!Number.isFinite(submitted.unitPrice) || submitted.unitPrice <= 0) throw new Error(`Unit price for RFQ item ${itemId} must be greater than zero.`);
+    if (!Number.isFinite(submitted.unitPrice) || submitted.unitPrice < 0) throw new Error(`Unit price for RFQ item ${itemId} cannot be negative.`);
     const submittedLeadDaysRaw = String(req.body[`lead_days_${itemId}`] ?? "").trim();
     const leadDays = submittedLeadDaysRaw ? num(submittedLeadDaysRaw) : null;
     await client.query(`
@@ -16828,7 +16820,7 @@ app.post("/quotes", requireAuth, requireJobContext, requirePermission("rfqs", "e
     const vendorId = Number(req.body.vendor_id);
     const unitPrice = num(req.body.unit_price, NaN);
     const leadDays = num(req.body.lead_days);
-    if (!Number.isFinite(unitPrice) || unitPrice <= 0) throw new Error("Unit price must be greater than zero.");
+    if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error("Unit price cannot be negative.");
     const item = (await client.query("select rfq_id from rfq_items where id = $1 and job_id = $2", [rfqItemId, jobId])).rows[0];
     if (!item) throw new Error("RFQ item not found.");
     const vendorRow = (await client.query("select 1 from rfq_vendors where rfq_id = $1 and vendor_id = $2 and job_id = $3", [item.rfq_id, vendorId, jobId])).rows[0];
@@ -16913,8 +16905,8 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermissi
       const leadDays = leadDaysRaw ? num(leadDaysRaw) : null;
       if (unitPriceRaw) {
         const unitPrice = num(unitPriceRaw, NaN);
-        if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
-          throw new Error(`Unit price for RFQ item ${item.id} must be greater than zero.`);
+        if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+          throw new Error(`Unit price for RFQ item ${item.id} cannot be negative.`);
         }
         await client.query(`
           insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
