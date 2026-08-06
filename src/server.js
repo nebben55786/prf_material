@@ -4285,11 +4285,12 @@ function parseStoPackageImportRows(file, pastedText = "") {
   const normalizeHeader = (value) => String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   const packageHeaders = new Set(["sto_package_number", "sto_package", "package_number", "package", "sto_packages"]);
   const dueDateHeaders = new Set(["sto_package_due_date", "package_due_date", "due_date", "need_date"]);
+  const orderedFields = ["person_assigned", "spec", "area", "package_status", "test_type", "test_psig"];
   const fieldHeaders = {
     person_assigned: new Set(["person_assigned", "assigned_to", "assignee", "person"]),
     spec: new Set(["spec", "specification"]),
     area: new Set(["area"]),
-    package_status: new Set(["package_status", "status"]),
+    package_status: new Set(["package_status", "sto_package_status", "package_state", "pkg_status", "status"]),
     test_type: new Set(["test_type", "test", "type", "package_type"]),
     test_psig: new Set(["test_psig", "psig", "test_pressure", "test_pressure_psig"])
   };
@@ -4302,7 +4303,10 @@ function parseStoPackageImportRows(file, pastedText = "") {
     const hasHeader = firstHeaders.some((header) => packageHeaders.has(header) || dueDateHeaders.has(header));
     const packageIndex = hasHeader ? firstHeaders.findIndex((header) => packageHeaders.has(header)) : 0;
     const dueDateIndex = hasHeader ? firstHeaders.findIndex((header) => dueDateHeaders.has(header)) : 1;
-    const fieldIndexes = Object.fromEntries(Object.entries(fieldHeaders).map(([field, aliases]) => [field, hasHeader ? firstHeaders.findIndex((header) => aliases.has(header)) : -1]));
+    const fieldIndexes = Object.fromEntries(Object.entries(fieldHeaders).map(([field, aliases], fallbackIndex) => [
+      field,
+      hasHeader ? firstHeaders.findIndex((header) => aliases.has(header)) : fallbackIndex + 2
+    ]));
     if (packageIndex < 0) return [];
     return (hasHeader ? cleanRows.slice(1) : cleanRows)
       .map((row, index) => {
@@ -4310,9 +4314,12 @@ function parseStoPackageImportRows(file, pastedText = "") {
           rowNumber: index + (hasHeader ? 2 : 1),
           sto_package_number: normalizeStoPackageNumber(row[packageIndex]),
           sto_package_due_date: dueDateIndex >= 0 ? parseImportDateValue(row[dueDateIndex]) : "",
+          presentFields: {},
           raw: row
         };
-        for (const [field, fieldIndex] of Object.entries(fieldIndexes)) {
+        for (const field of orderedFields) {
+          const fieldIndex = fieldIndexes[field];
+          parsed.presentFields[field] = fieldIndex >= 0 && fieldIndex < row.length;
           parsed[field] = fieldIndex >= 0 ? textValue(row[fieldIndex]) : "";
         }
         return parsed;
@@ -4324,7 +4331,7 @@ function parseStoPackageImportRows(file, pastedText = "") {
     if (/\.(xlsx|xlsm|xlsb|xls)$/.test(lowerName)) {
       const workbook = XLSX.read(file.buffer, { type: "buffer", cellDates: true });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-      return rowsFromArrays(XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: "", blankrows: false }));
+      return rowsFromArrays(XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: "", blankrows: false, raw: false }));
     }
     pastedText = file.buffer.toString("utf8");
   }
@@ -14508,16 +14515,33 @@ app.post("/sto-packages/import", requireAuth, requireJobContext, requirePermissi
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
         on conflict (job_id, (lower(sto_package_number)))
         do update set sto_package_due_date = coalesce(excluded.sto_package_due_date, sto_packages.sto_package_due_date),
-                      person_assigned = coalesce(nullif(excluded.person_assigned, ''), sto_packages.person_assigned),
-                      spec = coalesce(nullif(excluded.spec, ''), sto_packages.spec),
-                      area = coalesce(nullif(excluded.area, ''), sto_packages.area),
-                      package_status = coalesce(nullif(excluded.package_status, ''), sto_packages.package_status),
-                      test_type = coalesce(nullif(excluded.test_type, ''), sto_packages.test_type),
-                      test_psig = coalesce(nullif(excluded.test_psig, ''), sto_packages.test_psig),
+                      person_assigned = case when $11 then excluded.person_assigned else sto_packages.person_assigned end,
+                      spec = case when $12 then excluded.spec else sto_packages.spec end,
+                      area = case when $13 then excluded.area else sto_packages.area end,
+                      package_status = case when $14 then excluded.package_status else sto_packages.package_status end,
+                      test_type = case when $15 then excluded.test_type else sto_packages.test_type end,
+                      test_psig = case when $16 then excluded.test_psig else sto_packages.test_psig end,
                       updated_by = excluded.updated_by,
                       updated_at = now()
         returning (xmax = 0) as inserted
-      `, [jobId, row.sto_package_number, row.sto_package_due_date || null, row.person_assigned || "", row.spec || "", row.area || "", row.package_status || "", row.test_type || "", row.test_psig || "", req.user.id || null]);
+      `, [
+        jobId,
+        row.sto_package_number,
+        row.sto_package_due_date || null,
+        row.person_assigned || "",
+        row.spec || "",
+        row.area || "",
+        row.package_status || "",
+        row.test_type || "",
+        row.test_psig || "",
+        req.user.id || null,
+        Boolean(row.presentFields?.person_assigned),
+        Boolean(row.presentFields?.spec),
+        Boolean(row.presentFields?.area),
+        Boolean(row.presentFields?.package_status),
+        Boolean(row.presentFields?.test_type),
+        Boolean(row.presentFields?.test_psig)
+      ]);
       if (result.rows[0]?.inserted) insertedCount += 1;
       else updatedCount += 1;
     }
@@ -14954,12 +14978,12 @@ app.post("/rfq/:id/sto-packages/import", requireAuth, requireJobContext, require
           values ($1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
           on conflict (job_id, (lower(sto_package_number)))
           do update set sto_package_due_date = coalesce(excluded.sto_package_due_date, sto_packages.sto_package_due_date),
-                        person_assigned = coalesce(nullif(excluded.person_assigned, ''), sto_packages.person_assigned),
-                        spec = coalesce(nullif(excluded.spec, ''), sto_packages.spec),
-                        area = coalesce(nullif(excluded.area, ''), sto_packages.area),
-                        package_status = coalesce(nullif(excluded.package_status, ''), sto_packages.package_status),
-                        test_type = coalesce(nullif(excluded.test_type, ''), sto_packages.test_type),
-                        test_psig = coalesce(nullif(excluded.test_psig, ''), sto_packages.test_psig),
+                        person_assigned = case when $12 then excluded.person_assigned else sto_packages.person_assigned end,
+                        spec = case when $13 then excluded.spec else sto_packages.spec end,
+                        area = case when $14 then excluded.area else sto_packages.area end,
+                        package_status = case when $15 then excluded.package_status else sto_packages.package_status end,
+                        test_type = case when $16 then excluded.test_type else sto_packages.test_type end,
+                        test_psig = case when $17 then excluded.test_psig else sto_packages.test_psig end,
                         updated_by = excluded.updated_by,
                         updated_at = now()
           returning id, sto_package_number, sto_package_due_date
@@ -14971,7 +14995,25 @@ app.post("/rfq/:id/sto-packages/import", requireAuth, requireJobContext, require
         where sto_package_id is not null
         do update set sto_package_number = excluded.sto_package_number, sto_package_due_date = excluded.sto_package_due_date, updated_by = excluded.updated_by, updated_at = now()
         returning (xmax = 0) as inserted
-      `, [jobId, rfqId, row.sto_package_number, row.sto_package_due_date || null, row.person_assigned || "", row.spec || "", row.area || "", row.package_status || "", row.test_type || "", row.test_psig || "", req.user.id || null]);
+      `, [
+        jobId,
+        rfqId,
+        row.sto_package_number,
+        row.sto_package_due_date || null,
+        row.person_assigned || "",
+        row.spec || "",
+        row.area || "",
+        row.package_status || "",
+        row.test_type || "",
+        row.test_psig || "",
+        req.user.id || null,
+        Boolean(row.presentFields?.person_assigned),
+        Boolean(row.presentFields?.spec),
+        Boolean(row.presentFields?.area),
+        Boolean(row.presentFields?.package_status),
+        Boolean(row.presentFields?.test_type),
+        Boolean(row.presentFields?.test_psig)
+      ]);
       if (result.rows[0]?.inserted) insertedCount += 1;
       else updatedCount += 1;
     }
