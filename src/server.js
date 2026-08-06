@@ -14710,16 +14710,14 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     .join("");
   const reportTitle = `${[job.plant_name, job.job_number].filter(Boolean).join(" - ") || "Job"} STO Package Report`;
   const tableRows = rows.map((row) => `<tr>
-    <td>${esc(row.sto_package_number)}</td>
+    <td class="sto-package-cell">${esc(row.sto_package_number)}</td>
+    <td>${esc(row.project_name || "")}</td>
     <td>${esc(formatShortDate(row.sto_package_due_date || ""))}</td>
     <td>${esc(row.person_assigned || "")}</td>
-    <td>${esc(row.spec || "")}</td>
     <td>${esc(row.area || "")}</td>
     <td>${esc(row.package_status || "")}</td>
     <td>${esc(row.test_type || "")}</td>
     <td>${esc(row.test_psig || "")}</td>
-    <td>${esc(row.rfq_no || "")}</td>
-    <td>${esc(row.project_name || "")}</td>
     <td>${renderRfqStatusChip(row.display_status || row.status, row.due_date)}</td>
     <td>${esc(row.vendor_refs || "")}</td>
     <td>${esc(row.issued_po_refs || "")}</td>
@@ -14734,6 +14732,11 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
         .card { border: 0; padding: 0; }
         table { font-size: 10px; }
         th, td { padding: 4px; }
+      }
+      .public-sto-report .sto-package-cell,
+      .public-sto-report .sto-package-heading {
+        min-width: 118px;
+        white-space: nowrap;
       }
     </style>
     <h1>${esc(reportTitle)}</h1>
@@ -14752,7 +14755,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     </div>
     <div class="card">
       <div class="scroll">
-        <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQ</th><th>Description</th><th>Status</th><th>Vendor(s)</th><th>PO(s)</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="14" class="muted">No STO packages match the current filter.</td></tr>`}</table>
+        <table class="public-sto-report"><tr><th class="sto-package-heading">STO Package</th><th>Description</th><th>Package Due</th><th>Person Assigned</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>Status</th><th>Vendor</th><th>PO</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No STO packages match the current filter.</td></tr>`}</table>
       </div>
       <p class="muted">${rows.length} result(s), max 500 shown.</p>
     </div>
