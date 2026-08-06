@@ -198,11 +198,26 @@ create table if not exists sto_packages (
   job_id bigint not null,
   sto_package_number text not null,
   sto_package_due_date date,
+  person_assigned text not null default '',
+  spec text not null default '',
+  area text not null default '',
+  package_status text not null default '',
+  test text not null default '',
+  type text not null default '',
+  test_psig text not null default '',
   created_by bigint references users(id) on delete set null,
   updated_by bigint references users(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table sto_packages add column if not exists person_assigned text not null default '';
+alter table sto_packages add column if not exists spec text not null default '';
+alter table sto_packages add column if not exists area text not null default '';
+alter table sto_packages add column if not exists package_status text not null default '';
+alter table sto_packages add column if not exists test text not null default '';
+alter table sto_packages add column if not exists type text not null default '';
+alter table sto_packages add column if not exists test_psig text not null default '';
 
 alter table rfq_sto_packages add column if not exists sto_package_id bigint references sto_packages(id) on delete cascade;
 
