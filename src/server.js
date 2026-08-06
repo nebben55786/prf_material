@@ -14677,12 +14677,6 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
              when coalesce(rs.received_item_count, 0) > 0 then 'PARTIALLY_RECEIVED'
              else b.status
            end as display_status,
-           case
-             when coalesce(ic.item_count, 0) = 0 then 'No Items'
-             when coalesce(ic.awarded_item_count, 0) = 0 then 'Open'
-             when coalesce(ic.awarded_item_count, 0) < coalesce(ic.item_count, 0) then 'Partially Awarded'
-             else 'Awarded'
-           end as award_summary,
            coalesce(av.awarded_vendor_refs, pv.participating_vendor_refs, '') as vendor_refs,
            coalesce(ip.issued_po_refs, '') as issued_po_refs
     from base b
@@ -14710,7 +14704,6 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     <td>${esc(row.project_name || "")}</td>
     <td>${renderRfqStatusChip(row.display_status || row.status, row.due_date)}</td>
     <td>${esc(row.vendor_refs || "")}</td>
-    <td>${esc(row.award_summary || "")}</td>
     <td>${esc(row.issued_po_refs || "")}</td>
     <td>${esc(formatShortDate(row.eta_date || ""))}</td>
   </tr>`).join("");
@@ -14734,14 +14727,14 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
         <div class="grid-4">
           <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
           <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
-          <div><label>RFQ Status</label><select name="status">${statusOptions}</select></div>
+          <div><label>Status</label><select name="status">${statusOptions}</select></div>
           <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/public/sto-package-rfq-report/${jobId}">Clear</a></div></div>
         </div>
       </form>
     </div>
     <div class="card">
       <div class="scroll">
-        <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQ</th><th>Description</th><th>RFQ Status</th><th>Vendor(s)</th><th>Award</th><th>PO(s)</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="15" class="muted">No STO packages match the current filter.</td></tr>`}</table>
+        <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQ</th><th>Description</th><th>Status</th><th>Vendor(s)</th><th>PO(s)</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="14" class="muted">No STO packages match the current filter.</td></tr>`}</table>
       </div>
       <p class="muted">${rows.length} result(s), max 500 shown.</p>
     </div>
@@ -14839,12 +14832,6 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
              when coalesce(rs.received_item_count, 0) > 0 then 'PARTIALLY_RECEIVED'
              else b.status
            end as display_status,
-           case
-             when coalesce(ic.item_count, 0) = 0 then 'No Items'
-             when coalesce(ic.awarded_item_count, 0) = 0 then 'Open'
-             when coalesce(ic.awarded_item_count, 0) < coalesce(ic.item_count, 0) then 'Partially Awarded'
-             else 'Awarded'
-           end as award_summary,
            coalesce(av.awarded_vendor_refs, pv.participating_vendor_refs, '') as vendor_refs,
            coalesce(ip.issued_po_refs, '') as issued_po_refs,
            coalesce(ip.issued_po_links, '[]'::jsonb) as issued_po_links
@@ -14891,7 +14878,6 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
     <td>${esc(row.project_name || "")}</td>
     <td>${renderRfqStatusChip(row.display_status || row.status, row.due_date)}</td>
     <td>${esc(row.vendor_refs || "")}</td>
-    <td>${esc(row.award_summary || "")}</td>
     <td>${renderPoLinks(row.issued_po_links, row.issued_po_refs)}</td>
     <td>${esc(formatShortDate(row.eta_date || ""))}</td>
   </tr>`).join("");
@@ -14907,7 +14893,7 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQ</th><th>Description</th><th>RFQ Status</th><th>Vendor(s)</th><th>Award</th><th>PO(s)</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="15" class="muted">No STO packages match the current filter.</td></tr>`}</table>
+        <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQ</th><th>Description</th><th>RFQ Status</th><th>Vendor(s)</th><th>PO(s)</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="14" class="muted">No STO packages match the current filter.</td></tr>`}</table>
       </div>
       <p class="muted">${rows.length} result(s), max 500 shown.</p>
     </div>
