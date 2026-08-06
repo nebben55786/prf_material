@@ -14578,6 +14578,176 @@ app.post("/sto-packages/:id/delete", requireAuth, requireJobContext, requirePerm
   res.redirect("/sto-packages");
 }));
 
+app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) => {
+  const jobId = Number(req.params.jobId || 0);
+  if (!Number.isFinite(jobId) || jobId <= 0) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Report not found.</h3></div>`, null));
+    return;
+  }
+  const job = (await query("select id, job_number, plant_name, performance_job_number from jobs where id = $1 and is_active = true", [jobId])).rows[0];
+  if (!job) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Report not found.</h3></div>`, null));
+    return;
+  }
+  const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
+  const rfqNo = String(req.query.rfq_no || "").trim();
+  const status = String(req.query.status || "").trim();
+  const where = ["sp.job_id = $1"];
+  const params = [jobId];
+  if (packageNo) {
+    params.push(`%${packageNo}%`);
+    where.push(`sp.sto_package_number ilike $${params.length}`);
+  }
+  if (rfqNo) {
+    params.push(`%${rfqNo}%`);
+    where.push(`r.rfq_no ilike $${params.length}`);
+  }
+  if (status) {
+    params.push(status);
+    where.push(`r.status = $${params.length}`);
+  }
+  const rows = (await query(`
+    with base as (
+      select coalesce(master.id, sp.sto_package_id) as sto_package_id,
+             coalesce(master.sto_package_number, sp.sto_package_number) as sto_package_number,
+             coalesce(master.sto_package_due_date, sp.sto_package_due_date) as sto_package_due_date,
+             coalesce(master.person_assigned, '') as person_assigned,
+             coalesce(master.spec, '') as spec,
+             coalesce(master.area, '') as area,
+             coalesce(master.package_status, '') as package_status,
+             coalesce(master.test_type, '') as test_type,
+             coalesce(master.test_psig, '') as test_psig,
+             r.id as rfq_id, r.rfq_no, r.project_name, r.due_date, r.eta_date, r.status, r.job_id
+      from rfq_sto_packages sp
+      join rfqs r on r.id = sp.rfq_id and r.job_id = sp.job_id
+      left join sto_packages master on master.id = sp.sto_package_id and master.job_id = sp.job_id
+      where ${where.join(" and ")}
+      order by sp.sto_package_number, sp.sto_package_due_date nulls last, r.rfq_no
+      limit 500
+    ),
+    awarded_vendors as (
+      select b.rfq_id, string_agg(distinct v.name, ', ' order by v.name) as awarded_vendor_refs
+      from base b
+      join rfq_items ri on ri.rfq_id = b.rfq_id and ri.job_id = b.job_id
+      join vendors v on v.id = ri.awarded_vendor_id
+      where ri.award_status = 'AWARDED' and ri.awarded_vendor_id is not null
+      group by b.rfq_id
+    ),
+    participating_vendors as (
+      select b.rfq_id, string_agg(distinct v.name, ', ' order by v.name) as participating_vendor_refs
+      from base b
+      join rfq_vendors rv on rv.rfq_id = b.rfq_id and rv.job_id = b.job_id
+      join vendors v on v.id = rv.vendor_id
+      group by b.rfq_id
+    ),
+    issued_pos as (
+      select b.rfq_id,
+             string_agg(distinct po.po_no, ', ' order by po.po_no) as issued_po_refs
+      from base b
+      join purchase_orders po on po.rfq_id = b.rfq_id and po.job_id = b.job_id
+      where coalesce(po.po_no, '') <> ''
+      group by b.rfq_id
+    ),
+    item_counts as (
+      select b.rfq_id,
+             count(distinct ri.id) as item_count,
+             count(distinct ri.id) filter (where ri.award_status = 'AWARDED' and ri.awarded_vendor_id is not null) as awarded_item_count
+      from base b
+      left join rfq_items ri on ri.rfq_id = b.rfq_id and ri.job_id = b.job_id
+      group by b.rfq_id
+    ),
+    receiving_status as (
+      select b.rfq_id,
+             count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) > 0) as received_item_count,
+             count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) >= pl.qty_ordered) as fully_received_item_count
+      from base b
+      join purchase_orders po on po.rfq_id = b.rfq_id and po.job_id = b.job_id
+      join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+      left join (
+        select po_line_id, sum(qty_received) as qty_received
+        from receipts
+        group by po_line_id
+      ) rcv on rcv.po_line_id = pl.id
+      group by b.rfq_id
+    )
+    select b.*,
+           case
+             when b.status in ('CANCELLED', 'ON_HOLD') then b.status
+             when coalesce(ic.item_count, 0) > 0 and coalesce(rs.fully_received_item_count, 0) >= coalesce(ic.item_count, 0) then 'RECEIVED'
+             when coalesce(rs.received_item_count, 0) > 0 then 'PARTIALLY_RECEIVED'
+             else b.status
+           end as display_status,
+           case
+             when coalesce(ic.item_count, 0) = 0 then 'No Items'
+             when coalesce(ic.awarded_item_count, 0) = 0 then 'Open'
+             when coalesce(ic.awarded_item_count, 0) < coalesce(ic.item_count, 0) then 'Partially Awarded'
+             else 'Awarded'
+           end as award_summary,
+           coalesce(av.awarded_vendor_refs, pv.participating_vendor_refs, '') as vendor_refs,
+           coalesce(ip.issued_po_refs, '') as issued_po_refs
+    from base b
+    left join awarded_vendors av on av.rfq_id = b.rfq_id
+    left join participating_vendors pv on pv.rfq_id = b.rfq_id
+    left join issued_pos ip on ip.rfq_id = b.rfq_id
+    left join item_counts ic on ic.rfq_id = b.rfq_id
+    left join receiving_status rs on rs.rfq_id = b.rfq_id
+    order by b.sto_package_number, b.sto_package_due_date nulls last, b.rfq_no
+  `, params)).rows;
+  const statusOptions = [`<option value="">All Statuses</option>`]
+    .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
+    .join("");
+  const reportTitle = `${[job.plant_name, job.job_number].filter(Boolean).join(" - ") || "Job"} STO Package RFQ Report`;
+  const tableRows = rows.map((row) => `<tr>
+    <td>${esc(row.sto_package_number)}</td>
+    <td>${esc(formatShortDate(row.sto_package_due_date || ""))}</td>
+    <td>${esc(row.person_assigned || "")}</td>
+    <td>${esc(row.spec || "")}</td>
+    <td>${esc(row.area || "")}</td>
+    <td>${esc(row.package_status || "")}</td>
+    <td>${esc(row.test_type || "")}</td>
+    <td>${esc(row.test_psig || "")}</td>
+    <td>${esc(row.rfq_no || "")}</td>
+    <td>${esc(row.project_name || "")}</td>
+    <td>${renderRfqStatusChip(row.display_status || row.status, row.due_date)}</td>
+    <td>${esc(row.vendor_refs || "")}</td>
+    <td>${esc(row.award_summary || "")}</td>
+    <td>${esc(row.issued_po_refs || "")}</td>
+    <td>${esc(formatShortDate(row.eta_date || ""))}</td>
+  </tr>`).join("");
+  res.send(layout("Public STO Package RFQ Report", `
+    <style>
+      @media print {
+        body { background: #fff; }
+        .topbar, .print-actions, .report-filters { display: none !important; }
+        .shell { max-width: none; padding: 0; }
+        .card { border: 0; padding: 0; }
+        table { font-size: 10px; }
+        th, td { padding: 4px; }
+      }
+    </style>
+    <h1>${esc(reportTitle)}</h1>
+    <div class="actions print-actions" style="margin-bottom:10px;">
+      <button type="button" onclick="window.print()">Print Report</button>
+    </div>
+    <div class="card report-filters">
+      <form method="get" action="/public/sto-package-rfq-report/${jobId}" class="stack">
+        <div class="grid-4">
+          <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
+          <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
+          <div><label>RFQ Status</label><select name="status">${statusOptions}</select></div>
+          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/public/sto-package-rfq-report/${jobId}">Clear</a></div></div>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <div class="scroll">
+        <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQ</th><th>Description</th><th>RFQ Status</th><th>Vendor(s)</th><th>Award</th><th>PO(s)</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="15" class="muted">No STO packages match the current filter.</td></tr>`}</table>
+      </div>
+      <p class="muted">${rows.length} result(s), max 500 shown.</p>
+    </div>
+  `, null));
+}));
+
 app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
@@ -14733,7 +14903,7 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
           <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
           <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
           <div><label>RFQ Status</label><select name="status">${statusOptions}</select></div>
-          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/rfq/sto-packages">Clear</a></div></div>
+          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/rfq/sto-packages">Clear</a><a class="btn btn-secondary" href="/public/sto-package-rfq-report/${jobId}" target="_blank" rel="noopener noreferrer">Public Print Link</a></div></div>
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
