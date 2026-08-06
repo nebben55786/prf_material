@@ -14716,7 +14716,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
   const reportTitle = `${[job.plant_name, job.job_number].filter(Boolean).join(" - ") || "Job"} STO Package Report`;
   const tableRows = rows.map((row) => `<tr>
     <td class="sto-package-cell">${esc(row.sto_package_number)}</td>
-    <td>${esc(row.project_name || "")}</td>
+    <td>${esc(row.project_name || "")}<div class="muted"><a href="/public/sto-package-rfq-report/${jobId}/rfq/${row.rfq_id}/items" target="_blank" rel="noopener noreferrer">Items</a></div></td>
     <td>${esc(formatShortDate(row.sto_package_due_date || ""))}</td>
     <td>${esc(row.person_assigned || "")}</td>
     <td>${esc(row.area || "")}</td>
@@ -14763,6 +14763,76 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
         <table class="public-sto-report"><tr><th class="sto-package-heading">STO Package</th><th>Description</th><th>Package Due</th><th>Person Assigned</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>Status</th><th>Vendor</th><th>PO</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No STO packages match the current filter.</td></tr>`}</table>
       </div>
       <p class="muted">${rows.length} result(s), max 500 shown.</p>
+    </div>
+  `, null));
+}));
+
+app.get("/public/sto-package-rfq-report/:jobId/rfq/:rfqId/items", asyncHandler(async (req, res) => {
+  const jobId = Number(req.params.jobId || 0);
+  const rfqId = Number(req.params.rfqId || 0);
+  if (!Number.isFinite(jobId) || jobId <= 0 || !Number.isFinite(rfqId) || rfqId <= 0) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Report not found.</h3></div>`, null));
+    return;
+  }
+  const rfq = (await query(`
+    select r.id, r.rfq_no, r.project_name, j.job_number, j.plant_name
+    from rfqs r
+    join jobs j on j.id = r.job_id
+    where r.id = $1 and r.job_id = $2 and j.is_active = true
+  `, [rfqId, jobId])).rows[0];
+  if (!rfq) {
+    res.status(404).send(layout("Not Found", `<div class="card error"><h3>Report not found.</h3></div>`, null));
+    return;
+  }
+  const items = (await query(`
+    select coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code, '') as item,
+           coalesce(nullif(ri.description_snapshot, ''), mi.description, '') as description,
+           coalesce(nullif(ri.size_1, ''), mi.size_1, '') as size,
+           ri.qty,
+           coalesce(nullif(ri.uom_snapshot, ''), mi.uom, '') as uom,
+           coalesce(ri.spec, '') as spec,
+           coalesce(ri.po_line, '') as po_line,
+           ri.id
+    from rfq_items ri
+    left join material_items mi on mi.id = ri.material_item_id and mi.job_id = ri.job_id
+    where ri.rfq_id = $1 and ri.job_id = $2
+    order by case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then 0 else 1 end,
+             case when coalesce(ri.po_line, '') ~ '^[0-9]+$' then ri.po_line::numeric end,
+             ri.po_line,
+             ri.id
+  `, [rfqId, jobId])).rows;
+  const reportTitle = `${[rfq.plant_name, rfq.job_number].filter(Boolean).join(" - ") || "Job"} RFQ Items`;
+  const itemRows = items.map((item) => `<tr>
+    <td>${esc(item.item || "")}</td>
+    <td>${esc(item.description || "")}</td>
+    <td>${esc(formatPlainNumberDisplay(item.size || ""))}</td>
+    <td>${esc(formatQtyDisplay(item.qty))}</td>
+    <td>${esc(item.uom || "")}</td>
+    <td>${esc(item.spec || "")}</td>
+  </tr>`).join("");
+  res.send(layout("Public RFQ Items", `
+    <style>
+      @media print {
+        body { background: #fff; }
+        .topbar, .print-actions { display: none !important; }
+        .shell { max-width: none; padding: 0; }
+        .card { border: 0; padding: 0; }
+        table { font-size: 10px; }
+        th, td { padding: 4px; }
+      }
+    </style>
+    <h1>${esc(reportTitle)}</h1>
+    <div class="card">
+      <div><strong>${esc(rfq.rfq_no || "")}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
+      <div class="actions print-actions" style="margin-top:10px;">
+        <button type="button" onclick="window.print()">Print Items</button>
+        <a class="btn btn-secondary" href="/public/sto-package-rfq-report/${jobId}">Back To Report</a>
+      </div>
+    </div>
+    <div class="card">
+      <div class="scroll">
+        <table><tr><th>Items</th><th>Description</th><th>Size</th><th>Qty</th><th>UOM</th><th>Spec</th></tr>${itemRows || `<tr><td colspan="6" class="muted">No Items added</td></tr>`}</table>
+      </div>
     </div>
   `, null));
 }));
