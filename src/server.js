@@ -15111,7 +15111,6 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       </div>
       <div class="muted">Choose the vendors for this RFQ once, then enter quotes vendor-by-vendor in the tabs below.</div>
     </div>
-    ${stoPackageCard}
     <div class="card scroll">
       <h3>Vendor Quote Workspace</h3>
       ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted" style="margin-bottom:10px;">Save at least one selected vendor to unlock quote tabs.</div>`}
@@ -15223,6 +15222,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     </div>
     ${awardSummaryCard}
     ${quoteFileCard}
+    ${stoPackageCard}
     <div class="card scroll">
       <h3>Recent Imports</h3>
       <table>
