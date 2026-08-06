@@ -14690,7 +14690,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
   const statusOptions = [`<option value="">All Statuses</option>`]
     .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
     .join("");
-  const reportTitle = `${[job.plant_name, job.job_number].filter(Boolean).join(" - ") || "Job"} STO Package RFQ Report`;
+  const reportTitle = `${[job.plant_name, job.job_number].filter(Boolean).join(" - ") || "Job"} STO Package Report`;
   const tableRows = rows.map((row) => `<tr>
     <td>${esc(row.sto_package_number)}</td>
     <td>${esc(formatShortDate(row.sto_package_due_date || ""))}</td>
@@ -14707,7 +14707,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     <td>${esc(row.issued_po_refs || "")}</td>
     <td>${esc(formatShortDate(row.eta_date || ""))}</td>
   </tr>`).join("");
-  res.send(layout("Public STO Package RFQ Report", `
+  res.send(layout("Public STO Package Report", `
     <style>
       @media print {
         body { background: #fff; }
