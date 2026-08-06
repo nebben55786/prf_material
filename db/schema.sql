@@ -180,6 +180,18 @@ alter table rfqs add column if not exists requestor_name text;
 alter table rfqs add column if not exists eta_date date;
 alter table rfqs add column if not exists eta_date_override boolean not null default false;
 
+create table if not exists rfq_sto_packages (
+  id bigserial primary key,
+  job_id bigint not null,
+  rfq_id bigint not null references rfqs(id) on delete cascade,
+  sto_package_number text not null,
+  sto_package_due_date date,
+  created_by bigint references users(id) on delete set null,
+  updated_by bigint references users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 update rfqs
 set status = case
   when status = 'OPEN' then 'SEND_FOR_QUOTES'
@@ -814,6 +826,12 @@ create index if not exists idx_rfq_status on rfqs(status);
 create index if not exists idx_rfqs_job_id_desc on rfqs(job_id, id desc);
 create index if not exists idx_rfqs_job_status_id_desc on rfqs(job_id, status, id desc);
 create index if not exists idx_rfqs_job_requestor_name on rfqs(job_id, trim(coalesce(requestor_name, '')));
+create unique index if not exists idx_rfq_sto_packages_job_rfq_package_unique
+  on rfq_sto_packages(job_id, rfq_id, lower(sto_package_number));
+create index if not exists idx_rfq_sto_packages_job_package
+  on rfq_sto_packages(job_id, lower(sto_package_number), sto_package_due_date);
+create index if not exists idx_rfq_sto_packages_job_rfq
+  on rfq_sto_packages(job_id, rfq_id);
 create index if not exists idx_quotes_vendor_id on quotes(vendor_id);
 create index if not exists idx_quotes_rfq_item_id on quotes(rfq_item_id);
 create index if not exists idx_rfq_items_job_rfq_id on rfq_items(job_id, rfq_id);
