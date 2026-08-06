@@ -202,8 +202,7 @@ create table if not exists sto_packages (
   spec text not null default '',
   area text not null default '',
   package_status text not null default '',
-  test text not null default '',
-  type text not null default '',
+  test_type text not null default '',
   test_psig text not null default '',
   created_by bigint references users(id) on delete set null,
   updated_by bigint references users(id) on delete set null,
@@ -215,9 +214,10 @@ alter table sto_packages add column if not exists person_assigned text not null 
 alter table sto_packages add column if not exists spec text not null default '';
 alter table sto_packages add column if not exists area text not null default '';
 alter table sto_packages add column if not exists package_status text not null default '';
-alter table sto_packages add column if not exists test text not null default '';
-alter table sto_packages add column if not exists type text not null default '';
+alter table sto_packages add column if not exists test_type text not null default '';
 alter table sto_packages add column if not exists test_psig text not null default '';
+alter table sto_packages drop column if exists test;
+alter table sto_packages drop column if exists type;
 
 alter table rfq_sto_packages add column if not exists sto_package_id bigint references sto_packages(id) on delete cascade;
 

@@ -4290,8 +4290,7 @@ function parseStoPackageImportRows(file, pastedText = "") {
     spec: new Set(["spec", "specification"]),
     area: new Set(["area"]),
     package_status: new Set(["package_status", "status"]),
-    test: new Set(["test"]),
-    type: new Set(["type", "package_type"]),
+    test_type: new Set(["test_type", "test", "type", "package_type"]),
     test_psig: new Set(["test_psig", "psig", "test_pressure", "test_pressure_psig"])
   };
   const rowsFromArrays = (arrays) => {
@@ -14374,7 +14373,7 @@ app.get("/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs
   }
   const packages = (await query(`
     select sp.id, sp.sto_package_number, sp.sto_package_due_date, sp.person_assigned, sp.spec, sp.area,
-           sp.package_status, sp.test, sp.type, sp.test_psig, sp.updated_at,
+           sp.package_status, sp.test_type, sp.test_psig, sp.updated_at,
            count(distinct rsp.rfq_id) as rfq_count,
            string_agg(distinct r.rfq_no, ', ' order by r.rfq_no) as rfq_refs
     from sto_packages sp
@@ -14395,8 +14394,7 @@ app.get("/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs
     <td><input form="sto-package-${pkg.id}-update" name="spec" value="${esc(pkg.spec || "")}" /></td>
     <td><input form="sto-package-${pkg.id}-update" name="area" value="${esc(pkg.area || "")}" /></td>
     <td><input form="sto-package-${pkg.id}-update" name="package_status" value="${esc(pkg.package_status || "")}" /></td>
-    <td><input form="sto-package-${pkg.id}-update" name="test" value="${esc(pkg.test || "")}" /></td>
-    <td><input form="sto-package-${pkg.id}-update" name="type" value="${esc(pkg.type || "")}" /></td>
+    <td><input form="sto-package-${pkg.id}-update" name="test_type" value="${esc(pkg.test_type || "")}" /></td>
     <td><input form="sto-package-${pkg.id}-update" name="test_psig" value="${esc(pkg.test_psig || "")}" /></td>
     <td>${Number(pkg.rfq_count || 0)}</td>
     <td>${esc(pkg.rfq_refs || "")}</td>
@@ -14430,22 +14428,21 @@ app.get("/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs
             <div><label>Spec</label><input name="spec" /></div>
             <div><label>Area</label><input name="area" /></div>
             <div><label>Package Status</label><input name="package_status" /></div>
-            <div><label>Test</label><input name="test" /></div>
-            <div><label>Type</label><input name="type" /></div>
+            <div><label>Test Type</label><input name="test_type" /></div>
             <div><label>Test PSIG</label><input name="test_psig" /></div>
           </div>
           <div class="actions"><button type="submit">Add Package</button></div>
         </form>
         <form method="post" enctype="multipart/form-data" action="/sto-packages/import" class="stack">
           <div><label>Import STO Packages</label><input type="file" name="sheet" accept=".csv,.txt,.xlsx,.xls,.xlsm,.xlsb" /></div>
-          <div><label>Paste STO Packages</label><textarea name="pasted_packages" rows="5" placeholder="sto_package_number,sto_package_due_date,person_assigned,spec,area,package_status,test,type,test_psig&#10;0022-PIPE-TL,2026-09-15,Jane,SPEC-A,AREA-1,Open,Hydro,Pipe,150"></textarea></div>
+          <div><label>Paste STO Packages</label><textarea name="pasted_packages" rows="5" placeholder="sto_package_number,sto_package_due_date,person_assigned,spec,area,package_status,test_type,test_psig&#10;0022-PIPE-TL,2026-09-15,Jane,SPEC-A,AREA-1,Open,Hydro,150"></textarea></div>
           <div class="actions"><button type="submit">Import Packages</button></div>
         </form>
       </div>
     </div>
     <div class="card scroll">
       <h3>Package List</h3>
-      <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test</th><th>Type</th><th>Test PSIG</th><th>RFQs</th><th>RFQ Numbers</th><th>Actions</th></tr>${packageRows || `<tr><td colspan="12" class="muted">No STO packages found.</td></tr>`}</table>
+      <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQs</th><th>RFQ Numbers</th><th>Actions</th></tr>${packageRows || `<tr><td colspan="11" class="muted">No STO packages found.</td></tr>`}</table>
       <p class="muted">${packages.length} result(s), max 500 shown.</p>
     </div>
   `, req.user));
@@ -14459,29 +14456,27 @@ app.post("/sto-packages", requireAuth, requireJobContext, requirePermission("rfq
   const spec = textValue(req.body.spec);
   const area = textValue(req.body.area);
   const packageStatus = textValue(req.body.package_status);
-  const test = textValue(req.body.test);
-  const type = textValue(req.body.type);
+  const testType = textValue(req.body.test_type);
   const testPsig = textValue(req.body.test_psig);
   if (!stoPackageNumber) throw new Error("STO package number is required.");
   await withTransaction(async (client) => {
     await client.query(`
       insert into sto_packages (
-        job_id, sto_package_number, sto_package_due_date, person_assigned, spec, area, package_status, test, type, test_psig, created_by, updated_by
+        job_id, sto_package_number, sto_package_due_date, person_assigned, spec, area, package_status, test_type, test_psig, created_by, updated_by
       )
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
       on conflict (job_id, (lower(sto_package_number)))
       do update set sto_package_due_date = excluded.sto_package_due_date,
                     person_assigned = excluded.person_assigned,
                     spec = excluded.spec,
                     area = excluded.area,
                     package_status = excluded.package_status,
-                    test = excluded.test,
-                    type = excluded.type,
+                    test_type = excluded.test_type,
                     test_psig = excluded.test_psig,
                     updated_by = excluded.updated_by,
                     updated_at = now()
-    `, [jobId, stoPackageNumber, stoPackageDueDate, personAssigned, spec, area, packageStatus, test, type, testPsig, req.user.id || null]);
-    await auditLog(client, req.user.id, "upsert", "sto_package", stoPackageNumber, `${stoPackageDueDate || ""}|${personAssigned}|${spec}|${area}|${packageStatus}|${test}|${type}|${testPsig}`);
+    `, [jobId, stoPackageNumber, stoPackageDueDate, personAssigned, spec, area, packageStatus, testType, testPsig, req.user.id || null]);
+    await auditLog(client, req.user.id, "upsert", "sto_package", stoPackageNumber, `${stoPackageDueDate || ""}|${personAssigned}|${spec}|${area}|${packageStatus}|${testType}|${testPsig}`);
   });
   res.redirect("/sto-packages");
 }));
@@ -14508,22 +14503,21 @@ app.post("/sto-packages/import", requireAuth, requireJobContext, requirePermissi
       }
       const result = await client.query(`
         insert into sto_packages (
-          job_id, sto_package_number, sto_package_due_date, person_assigned, spec, area, package_status, test, type, test_psig, created_by, updated_by
+          job_id, sto_package_number, sto_package_due_date, person_assigned, spec, area, package_status, test_type, test_psig, created_by, updated_by
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
         on conflict (job_id, (lower(sto_package_number)))
         do update set sto_package_due_date = coalesce(excluded.sto_package_due_date, sto_packages.sto_package_due_date),
                       person_assigned = coalesce(nullif(excluded.person_assigned, ''), sto_packages.person_assigned),
                       spec = coalesce(nullif(excluded.spec, ''), sto_packages.spec),
                       area = coalesce(nullif(excluded.area, ''), sto_packages.area),
                       package_status = coalesce(nullif(excluded.package_status, ''), sto_packages.package_status),
-                      test = coalesce(nullif(excluded.test, ''), sto_packages.test),
-                      type = coalesce(nullif(excluded.type, ''), sto_packages.type),
+                      test_type = coalesce(nullif(excluded.test_type, ''), sto_packages.test_type),
                       test_psig = coalesce(nullif(excluded.test_psig, ''), sto_packages.test_psig),
                       updated_by = excluded.updated_by,
                       updated_at = now()
         returning (xmax = 0) as inserted
-      `, [jobId, row.sto_package_number, row.sto_package_due_date || null, row.person_assigned || "", row.spec || "", row.area || "", row.package_status || "", row.test || "", row.type || "", row.test_psig || "", req.user.id || null]);
+      `, [jobId, row.sto_package_number, row.sto_package_due_date || null, row.person_assigned || "", row.spec || "", row.area || "", row.package_status || "", row.test_type || "", row.test_psig || "", req.user.id || null]);
       if (result.rows[0]?.inserted) insertedCount += 1;
       else updatedCount += 1;
     }
@@ -14543,8 +14537,7 @@ app.post("/sto-packages/:id/update", requireAuth, requireJobContext, requirePerm
   const spec = textValue(req.body.spec);
   const area = textValue(req.body.area);
   const packageStatus = textValue(req.body.package_status);
-  const test = textValue(req.body.test);
-  const type = textValue(req.body.type);
+  const testType = textValue(req.body.test_type);
   const testPsig = textValue(req.body.test_psig);
   if (!stoPackageNumber) throw new Error("STO package number is required.");
   await withTransaction(async (client) => {
@@ -14556,21 +14549,20 @@ app.post("/sto-packages/:id/update", requireAuth, requireJobContext, requirePerm
           spec = $6,
           area = $7,
           package_status = $8,
-          test = $9,
-          type = $10,
-          test_psig = $11,
-          updated_by = $12,
+          test_type = $9,
+          test_psig = $10,
+          updated_by = $11,
           updated_at = now()
       where id = $1 and job_id = $2
       returning id, sto_package_number
-    `, [packageId, jobId, stoPackageNumber, stoPackageDueDate, personAssigned, spec, area, packageStatus, test, type, testPsig, req.user.id || null]);
+    `, [packageId, jobId, stoPackageNumber, stoPackageDueDate, personAssigned, spec, area, packageStatus, testType, testPsig, req.user.id || null]);
     if (!updated.rowCount) throw new Error("STO package not found.");
     await client.query(`
       update rfq_sto_packages
       set sto_package_number = $3, sto_package_due_date = $4, updated_by = $5, updated_at = now()
       where sto_package_id = $1 and job_id = $2
     `, [packageId, jobId, stoPackageNumber, stoPackageDueDate, req.user.id || null]);
-    await auditLog(client, req.user.id, "update", "sto_package", packageId, `${stoPackageNumber}|${stoPackageDueDate || ""}|${personAssigned}|${spec}|${area}|${packageStatus}|${test}|${type}|${testPsig}`);
+    await auditLog(client, req.user.id, "update", "sto_package", packageId, `${stoPackageNumber}|${stoPackageDueDate || ""}|${personAssigned}|${spec}|${area}|${packageStatus}|${testType}|${testPsig}`);
   });
   res.redirect("/sto-packages");
 }));
@@ -14614,8 +14606,7 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
              coalesce(master.spec, '') as spec,
              coalesce(master.area, '') as area,
              coalesce(master.package_status, '') as package_status,
-             coalesce(master.test, '') as test,
-             coalesce(master.type, '') as type,
+             coalesce(master.test_type, '') as test_type,
              coalesce(master.test_psig, '') as test_psig,
              r.id as rfq_id, r.rfq_no, r.project_name, r.due_date, r.eta_date, r.status, r.job_id
       from rfq_sto_packages sp
@@ -14724,8 +14715,7 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
     <td>${esc(row.spec || "")}</td>
     <td>${esc(row.area || "")}</td>
     <td>${esc(row.package_status || "")}</td>
-    <td>${esc(row.test || "")}</td>
-    <td>${esc(row.type || "")}</td>
+    <td>${esc(row.test_type || "")}</td>
     <td>${esc(row.test_psig || "")}</td>
     <td><a href="/rfq/${row.rfq_id}">${esc(row.rfq_no)}</a></td>
     <td>${esc(row.project_name || "")}</td>
@@ -14747,7 +14737,7 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test</th><th>Type</th><th>Test PSIG</th><th>RFQ</th><th>Description</th><th>RFQ Status</th><th>Vendor(s)</th><th>Award</th><th>PO(s)</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="16" class="muted">No STO packages match the current filter.</td></tr>`}</table>
+        <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQ</th><th>Description</th><th>RFQ Status</th><th>Vendor(s)</th><th>Award</th><th>PO(s)</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="15" class="muted">No STO packages match the current filter.</td></tr>`}</table>
       </div>
       <p class="muted">${rows.length} result(s), max 500 shown.</p>
     </div>
@@ -14803,30 +14793,29 @@ app.post("/rfq/:id/sto-packages/import", requireAuth, requireJobContext, require
       const result = await client.query(`
         with upserted_package as (
           insert into sto_packages (
-            job_id, sto_package_number, sto_package_due_date, person_assigned, spec, area, package_status, test, type, test_psig, created_by, updated_by
+            job_id, sto_package_number, sto_package_due_date, person_assigned, spec, area, package_status, test_type, test_psig, created_by, updated_by
           )
-          values ($1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
+          values ($1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
           on conflict (job_id, (lower(sto_package_number)))
           do update set sto_package_due_date = coalesce(excluded.sto_package_due_date, sto_packages.sto_package_due_date),
                         person_assigned = coalesce(nullif(excluded.person_assigned, ''), sto_packages.person_assigned),
                         spec = coalesce(nullif(excluded.spec, ''), sto_packages.spec),
                         area = coalesce(nullif(excluded.area, ''), sto_packages.area),
                         package_status = coalesce(nullif(excluded.package_status, ''), sto_packages.package_status),
-                        test = coalesce(nullif(excluded.test, ''), sto_packages.test),
-                        type = coalesce(nullif(excluded.type, ''), sto_packages.type),
+                        test_type = coalesce(nullif(excluded.test_type, ''), sto_packages.test_type),
                         test_psig = coalesce(nullif(excluded.test_psig, ''), sto_packages.test_psig),
                         updated_by = excluded.updated_by,
                         updated_at = now()
           returning id, sto_package_number, sto_package_due_date
         )
         insert into rfq_sto_packages (job_id, rfq_id, sto_package_id, sto_package_number, sto_package_due_date, created_by, updated_by)
-        select $1, $2, id, sto_package_number, sto_package_due_date, $12, $12
+        select $1, $2, id, sto_package_number, sto_package_due_date, $11, $11
         from upserted_package
         on conflict (job_id, rfq_id, sto_package_id)
         where sto_package_id is not null
         do update set sto_package_number = excluded.sto_package_number, sto_package_due_date = excluded.sto_package_due_date, updated_by = excluded.updated_by, updated_at = now()
         returning (xmax = 0) as inserted
-      `, [jobId, rfqId, row.sto_package_number, row.sto_package_due_date || null, row.person_assigned || "", row.spec || "", row.area || "", row.package_status || "", row.test || "", row.type || "", row.test_psig || "", req.user.id || null]);
+      `, [jobId, rfqId, row.sto_package_number, row.sto_package_due_date || null, row.person_assigned || "", row.spec || "", row.area || "", row.package_status || "", row.test_type || "", row.test_psig || "", req.user.id || null]);
       if (result.rows[0]?.inserted) insertedCount += 1;
       else updatedCount += 1;
     }
