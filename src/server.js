@@ -14515,12 +14515,12 @@ app.post("/sto-packages/import", requireAuth, requireJobContext, requirePermissi
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
         on conflict (job_id, (lower(sto_package_number)))
         do update set sto_package_due_date = coalesce(excluded.sto_package_due_date, sto_packages.sto_package_due_date),
-                      person_assigned = case when $11 then excluded.person_assigned else sto_packages.person_assigned end,
-                      spec = case when $12 then excluded.spec else sto_packages.spec end,
-                      area = case when $13 then excluded.area else sto_packages.area end,
-                      package_status = case when $14 then excluded.package_status else sto_packages.package_status end,
-                      test_type = case when $15 then excluded.test_type else sto_packages.test_type end,
-                      test_psig = case when $16 then excluded.test_psig else sto_packages.test_psig end,
+                      person_assigned = excluded.person_assigned,
+                      spec = excluded.spec,
+                      area = excluded.area,
+                      package_status = excluded.package_status,
+                      test_type = excluded.test_type,
+                      test_psig = excluded.test_psig,
                       updated_by = excluded.updated_by,
                       updated_at = now()
         returning (xmax = 0) as inserted
@@ -14534,13 +14534,7 @@ app.post("/sto-packages/import", requireAuth, requireJobContext, requirePermissi
         row.package_status || "",
         row.test_type || "",
         row.test_psig || "",
-        req.user.id || null,
-        Boolean(row.presentFields?.person_assigned),
-        Boolean(row.presentFields?.spec),
-        Boolean(row.presentFields?.area),
-        Boolean(row.presentFields?.package_status),
-        Boolean(row.presentFields?.test_type),
-        Boolean(row.presentFields?.test_psig)
+        req.user.id || null
       ]);
       if (result.rows[0]?.inserted) insertedCount += 1;
       else updatedCount += 1;
