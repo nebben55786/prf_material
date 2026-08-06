@@ -665,7 +665,7 @@ async function runResetTarget(client, target, user) {
   if (!user?.id) throw new Error("A signed-in admin user is required.");
   switch (target) {
     case "full_reset":
-        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_sto_packages, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_sto_packages, sto_packages, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
       await client.query("delete from users where id <> $1", [user.id]);
       await client.query("update users set is_active = true where id = $1", [user.id]);
       await client.query(`
@@ -677,7 +677,7 @@ async function runResetTarget(client, target, user) {
       await auditLog(client, user.id, "reset", "app_data", target, "Full reset completed.");
       return;
     case "data_only":
-        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_sto_packages, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_sto_packages, sto_packages, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
       await auditLog(client, user.id, "reset", "app_data", target, "Operational data reset completed.");
       return;
     case "vendors":
@@ -14213,6 +14213,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
           <button type="submit">Filter RFQs</button>
           <a class="btn btn-secondary" href="/rfq">Clear</a>
           ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
+          <a class="btn btn-secondary" href="/sto-packages">STO Packages</a>
           <a class="btn btn-secondary" href="/rfq/sto-packages">STO Package Report</a>
           <a class="btn btn-primary" href="/rfq/new">Create RFQ</a>
           <span class="muted">${rfqs.length} result(s), max 300 shown</span>
@@ -14346,6 +14347,168 @@ app.post("/rfq/:id/vendors", requireAuth, requireJobContext, requirePermission("
   res.redirect(`/rfq/${rfqId}`);
 }));
 
+app.get("/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
+  const where = ["sp.job_id = $1"];
+  const params = [jobId];
+  if (packageNo) {
+    params.push(`%${packageNo}%`);
+    where.push(`sp.sto_package_number ilike $${params.length}`);
+  }
+  const packages = (await query(`
+    select sp.id, sp.sto_package_number, sp.sto_package_due_date, sp.updated_at,
+           count(distinct rsp.rfq_id) as rfq_count,
+           string_agg(distinct r.rfq_no, ', ' order by r.rfq_no) as rfq_refs
+    from sto_packages sp
+    left join rfq_sto_packages rsp on rsp.sto_package_id = sp.id and rsp.job_id = sp.job_id
+    left join rfqs r on r.id = rsp.rfq_id and r.job_id = rsp.job_id
+    where ${where.join(" and ")}
+    group by sp.id
+    order by sp.sto_package_number
+    limit 500
+  `, params)).rows;
+  const packageRows = packages.map((pkg) => `<tr>
+    <td>
+      <form id="sto-package-${pkg.id}-update" method="post" action="/sto-packages/${pkg.id}/update"></form>
+      <input form="sto-package-${pkg.id}-update" name="sto_package_number" value="${esc(pkg.sto_package_number)}" required />
+    </td>
+    <td><input form="sto-package-${pkg.id}-update" type="date" name="sto_package_due_date" value="${esc(textValue(pkg.sto_package_due_date))}" /></td>
+    <td>${Number(pkg.rfq_count || 0)}</td>
+    <td>${esc(pkg.rfq_refs || "")}</td>
+    <td>
+      <div class="actions">
+        <button form="sto-package-${pkg.id}-update" type="submit">Save</button>
+        <form method="post" action="/sto-packages/${pkg.id}/delete" onsubmit="return confirm('Delete STO package ${escAttr(pkg.sto_package_number)}? This will remove it from linked RFQs.');">
+          <button class="btn btn-danger" type="submit">Delete</button>
+        </form>
+      </div>
+    </td>
+  </tr>`).join("");
+  res.send(layout("STO Packages", `
+    <h1>STO Packages</h1>
+    <div class="card">
+      <form method="get" action="/sto-packages" class="stack">
+        <div class="grid">
+          <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
+          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/sto-packages">Clear</a><a class="btn btn-secondary" href="/rfq/sto-packages">RFQ Report</a></div></div>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Add / Import STO Packages</h3>
+      <div class="grid" style="grid-template-columns: minmax(280px, 0.55fr) minmax(320px, 1fr); align-items:start;">
+        <form method="post" action="/sto-packages" class="stack">
+          <div class="grid">
+            <div><label>STO Package Number</label><input name="sto_package_number" placeholder="0022-PIPE-TL" required /></div>
+            <div><label>STO Package Due Date</label><input type="date" name="sto_package_due_date" /></div>
+          </div>
+          <div class="actions"><button type="submit">Add Package</button></div>
+        </form>
+        <form method="post" enctype="multipart/form-data" action="/sto-packages/import" class="stack">
+          <div><label>Import STO Packages</label><input type="file" name="sheet" accept=".csv,.txt,.xlsx,.xls,.xlsm,.xlsb" /></div>
+          <div><label>Paste STO Packages</label><textarea name="pasted_packages" rows="5" placeholder="sto_package_number,sto_package_due_date&#10;0022-PIPE-TL,2026-09-15"></textarea></div>
+          <div class="actions"><button type="submit">Import Packages</button></div>
+        </form>
+      </div>
+    </div>
+    <div class="card scroll">
+      <h3>Package List</h3>
+      <table><tr><th>STO Package</th><th>Package Due</th><th>RFQs</th><th>RFQ Numbers</th><th>Actions</th></tr>${packageRows || `<tr><td colspan="5" class="muted">No STO packages found.</td></tr>`}</table>
+      <p class="muted">${packages.length} result(s), max 500 shown.</p>
+    </div>
+  `, req.user));
+}));
+
+app.post("/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const stoPackageNumber = normalizeStoPackageNumber(req.body.sto_package_number);
+  const stoPackageDueDate = parseImportDateValue(req.body.sto_package_due_date) || null;
+  if (!stoPackageNumber) throw new Error("STO package number is required.");
+  await withTransaction(async (client) => {
+    await client.query(`
+      insert into sto_packages (job_id, sto_package_number, sto_package_due_date, created_by, updated_by)
+      values ($1, $2, $3, $4, $4)
+      on conflict (job_id, (lower(sto_package_number)))
+      do update set sto_package_due_date = excluded.sto_package_due_date, updated_by = excluded.updated_by, updated_at = now()
+    `, [jobId, stoPackageNumber, stoPackageDueDate, req.user.id || null]);
+    await auditLog(client, req.user.id, "upsert", "sto_package", stoPackageNumber, stoPackageDueDate || "");
+  });
+  res.redirect("/sto-packages");
+}));
+
+app.post("/sto-packages/import", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const rows = parseStoPackageImportRows(req.file, req.body.pasted_packages);
+  if (!rows.length) throw new Error("No STO package rows were found. Use a package list or columns named sto_package_number and sto_package_due_date.");
+  const batchId = await withTransaction(async (client) => {
+    const batch = await createImportBatch(client, {
+      entityType: "sto_packages",
+      uploadedBy: req.user.id,
+      filename: req.file?.originalname || "pasted-sto-packages",
+      jobId
+    });
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    for (const row of rows) {
+      if (!row.sto_package_number) {
+        skippedCount += 1;
+        await addImportBatchError(client, batch, row.rowNumber, "missing_sto_package_number", "STO package number is required.", row.raw);
+        continue;
+      }
+      const result = await client.query(`
+        insert into sto_packages (job_id, sto_package_number, sto_package_due_date, created_by, updated_by)
+        values ($1, $2, $3, $4, $4)
+        on conflict (job_id, (lower(sto_package_number)))
+        do update set sto_package_due_date = coalesce(excluded.sto_package_due_date, sto_packages.sto_package_due_date), updated_by = excluded.updated_by, updated_at = now()
+        returning (xmax = 0) as inserted
+      `, [jobId, row.sto_package_number, row.sto_package_due_date || null, req.user.id || null]);
+      if (result.rows[0]?.inserted) insertedCount += 1;
+      else updatedCount += 1;
+    }
+    await updateImportBatch(client, batch, { insertedCount, updatedCount, skippedCount });
+    await auditLog(client, req.user.id, "import", "sto_packages", batch, `rows=${rows.length}`);
+    return batch;
+  });
+  res.redirect(`/imports/${batchId}`);
+}));
+
+app.post("/sto-packages/:id/update", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const packageId = Number(req.params.id);
+  const stoPackageNumber = normalizeStoPackageNumber(req.body.sto_package_number);
+  const stoPackageDueDate = parseImportDateValue(req.body.sto_package_due_date) || null;
+  if (!stoPackageNumber) throw new Error("STO package number is required.");
+  await withTransaction(async (client) => {
+    const updated = await client.query(`
+      update sto_packages
+      set sto_package_number = $3, sto_package_due_date = $4, updated_by = $5, updated_at = now()
+      where id = $1 and job_id = $2
+      returning id, sto_package_number
+    `, [packageId, jobId, stoPackageNumber, stoPackageDueDate, req.user.id || null]);
+    if (!updated.rowCount) throw new Error("STO package not found.");
+    await client.query(`
+      update rfq_sto_packages
+      set sto_package_number = $3, sto_package_due_date = $4, updated_by = $5, updated_at = now()
+      where sto_package_id = $1 and job_id = $2
+    `, [packageId, jobId, stoPackageNumber, stoPackageDueDate, req.user.id || null]);
+    await auditLog(client, req.user.id, "update", "sto_package", packageId, `${stoPackageNumber}|${stoPackageDueDate || ""}`);
+  });
+  res.redirect("/sto-packages");
+}));
+
+app.post("/sto-packages/:id/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const packageId = Number(req.params.id);
+  await withTransaction(async (client) => {
+    const deleted = await client.query("delete from sto_packages where id = $1 and job_id = $2 returning sto_package_number", [packageId, jobId]);
+    if (!deleted.rowCount) throw new Error("STO package not found.");
+    await auditLog(client, req.user.id, "delete", "sto_package", packageId, deleted.rows[0].sto_package_number || "");
+  });
+  res.redirect("/sto-packages");
+}));
+
 app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
@@ -14367,10 +14530,13 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
   }
   const rows = (await query(`
     with base as (
-      select sp.id as sto_package_id, sp.sto_package_number, sp.sto_package_due_date,
+      select coalesce(master.id, sp.sto_package_id) as sto_package_id,
+             coalesce(master.sto_package_number, sp.sto_package_number) as sto_package_number,
+             coalesce(master.sto_package_due_date, sp.sto_package_due_date) as sto_package_due_date,
              r.id as rfq_id, r.rfq_no, r.project_name, r.due_date, r.eta_date, r.status, r.job_id
       from rfq_sto_packages sp
       join rfqs r on r.id = sp.rfq_id and r.job_id = sp.job_id
+      left join sto_packages master on master.id = sp.sto_package_id and master.job_id = sp.job_id
       where ${where.join(" and ")}
       order by sp.sto_package_number, sp.sto_package_due_date nulls last, r.rfq_no
       limit 500
@@ -14500,19 +14666,21 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
 app.post("/rfq/:id/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
   const jobId = currentJobId(req);
-  const stoPackageNumber = normalizeStoPackageNumber(req.body.sto_package_number);
-  const stoPackageDueDate = parseImportDateValue(req.body.sto_package_due_date) || null;
-  if (!stoPackageNumber) throw new Error("STO package number is required.");
+  const stoPackageId = Number(req.body.sto_package_id || 0);
+  if (!stoPackageId) throw new Error("Choose an STO package from the package list.");
   await withTransaction(async (client) => {
     const rfq = (await client.query("select id from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     if (!rfq) throw new Error("RFQ not found.");
+    const pkg = (await client.query("select id, sto_package_number, sto_package_due_date from sto_packages where id = $1 and job_id = $2", [stoPackageId, jobId])).rows[0];
+    if (!pkg) throw new Error("STO package not found. Add it on the STO Packages page first.");
     await client.query(`
-      insert into rfq_sto_packages (job_id, rfq_id, sto_package_number, sto_package_due_date, created_by, updated_by)
-      values ($1, $2, $3, $4, $5, $5)
-      on conflict (job_id, rfq_id, (lower(sto_package_number)))
-      do update set sto_package_due_date = excluded.sto_package_due_date, updated_by = excluded.updated_by, updated_at = now()
-    `, [jobId, rfqId, stoPackageNumber, stoPackageDueDate, req.user.id || null]);
-    await auditLog(client, req.user.id, "upsert", "rfq_sto_package", rfqId, `${stoPackageNumber}|${stoPackageDueDate || ""}`);
+      insert into rfq_sto_packages (job_id, rfq_id, sto_package_id, sto_package_number, sto_package_due_date, created_by, updated_by)
+      values ($1, $2, $3, $4, $5, $6, $6)
+      on conflict (job_id, rfq_id, sto_package_id)
+      where sto_package_id is not null
+      do update set sto_package_number = excluded.sto_package_number, sto_package_due_date = excluded.sto_package_due_date, updated_by = excluded.updated_by, updated_at = now()
+    `, [jobId, rfqId, pkg.id, pkg.sto_package_number, pkg.sto_package_due_date || null, req.user.id || null]);
+    await auditLog(client, req.user.id, "upsert", "rfq_sto_package", rfqId, pkg.sto_package_number || "");
   });
   res.redirect(`/rfq/${rfqId}`);
 }));
@@ -14542,10 +14710,19 @@ app.post("/rfq/:id/sto-packages/import", requireAuth, requireJobContext, require
         continue;
       }
       const result = await client.query(`
-        insert into rfq_sto_packages (job_id, rfq_id, sto_package_number, sto_package_due_date, created_by, updated_by)
-        values ($1, $2, $3, $4, $5, $5)
-        on conflict (job_id, rfq_id, (lower(sto_package_number)))
-        do update set sto_package_due_date = coalesce(excluded.sto_package_due_date, rfq_sto_packages.sto_package_due_date), updated_by = excluded.updated_by, updated_at = now()
+        with upserted_package as (
+          insert into sto_packages (job_id, sto_package_number, sto_package_due_date, created_by, updated_by)
+          values ($1, $3, $4, $5, $5)
+          on conflict (job_id, (lower(sto_package_number)))
+          do update set sto_package_due_date = coalesce(excluded.sto_package_due_date, sto_packages.sto_package_due_date), updated_by = excluded.updated_by, updated_at = now()
+          returning id, sto_package_number, sto_package_due_date
+        )
+        insert into rfq_sto_packages (job_id, rfq_id, sto_package_id, sto_package_number, sto_package_due_date, created_by, updated_by)
+        select $1, $2, id, sto_package_number, sto_package_due_date, $5, $5
+        from upserted_package
+        on conflict (job_id, rfq_id, sto_package_id)
+        where sto_package_id is not null
+        do update set sto_package_number = excluded.sto_package_number, sto_package_due_date = excluded.sto_package_due_date, updated_by = excluded.updated_by, updated_at = now()
         returning (xmax = 0) as inserted
       `, [jobId, rfqId, row.sto_package_number, row.sto_package_due_date || null, req.user.id || null]);
       if (result.rows[0]?.inserted) insertedCount += 1;
@@ -14580,7 +14757,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
     return;
   }
-  const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes, quoteFilesRes, stoPackagesRes] = await Promise.all([
+  const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes, quoteFilesRes, stoPackagesRes, availableStoPackagesRes] = await Promise.all([
     query(`
       select ri.id, ri.po_line, ri.qty, ri.notes, coalesce(nullif(ri.spec, ''), item_specs.specs, '') as spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
              ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
@@ -14657,11 +14834,28 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       order by qf.created_at desc, qf.id desc
     `, [rfqId, jobId]),
     query(`
-      select id, sto_package_number, sto_package_due_date, updated_at
-      from rfq_sto_packages
-      where rfq_id = $1 and job_id = $2
-      order by sto_package_number, sto_package_due_date nulls last, id
-    `, [rfqId, jobId])
+      select link.id, coalesce(master.sto_package_number, link.sto_package_number) as sto_package_number,
+             coalesce(master.sto_package_due_date, link.sto_package_due_date) as sto_package_due_date,
+             link.updated_at
+      from rfq_sto_packages link
+      left join sto_packages master on master.id = link.sto_package_id and master.job_id = link.job_id
+      where link.rfq_id = $1 and link.job_id = $2
+      order by coalesce(master.sto_package_number, link.sto_package_number), coalesce(master.sto_package_due_date, link.sto_package_due_date) nulls last, link.id
+    `, [rfqId, jobId]),
+    query(`
+      select sp.id, sp.sto_package_number, sp.sto_package_due_date
+      from sto_packages sp
+      where sp.job_id = $1
+        and not exists (
+          select 1
+          from rfq_sto_packages link
+          where link.job_id = sp.job_id
+            and link.rfq_id = $2
+            and link.sto_package_id = sp.id
+        )
+      order by sp.sto_package_number
+      limit 1000
+    `, [jobId, rfqId])
   ]);
 
   const items = itemsRes.rows;
@@ -14677,6 +14871,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const recentImports = recentImportsRes.rows;
   const quoteFiles = quoteFilesRes.rows;
   const stoPackages = stoPackagesRes.rows;
+  const availableStoPackages = availableStoPackagesRes.rows;
   const materialItems = materialItemsRes.rows;
   const allQuotes = quotesRes.rows;
   const vendorNameMap = new Map(vendors.map((vendor) => [Number(vendor.id), vendor.name]));
@@ -15042,26 +15237,22 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       </td>
     </tr>`).join("")
     : `<tr><td colspan="3" class="muted">No STO packages tagged to this RFQ yet.</td></tr>`;
+  const stoPackageOptions = [`<option value="">Select STO package</option>`]
+    .concat(availableStoPackages.map((pkg) => `<option value="${pkg.id}">${esc(pkg.sto_package_number)}${pkg.sto_package_due_date ? ` | Due ${esc(formatShortDate(pkg.sto_package_due_date))}` : ""}</option>`))
+    .join("");
   const stoPackageCard = `
     <div class="card">
       <h3>STO Packages</h3>
       <div class="actions" style="margin-bottom:12px;">
+        <a class="btn btn-secondary" href="/sto-packages">Manage STO Packages</a>
         <a class="btn btn-secondary" href="/rfq/sto-packages?rfq_no=${encodeURIComponent(rfq.rfq_no || "")}">Open STO Package Report</a>
       </div>
-      <div class="grid" style="grid-template-columns: minmax(280px, 0.55fr) minmax(320px, 1fr); align-items:start;">
+      <div class="grid" style="grid-template-columns: minmax(280px, 0.55fr) minmax(320px, 1fr); align-items:end;">
         <form method="post" action="/rfq/${rfqId}/sto-packages" class="stack">
-          <div class="grid">
-            <div><label>STO Package Number</label><input name="sto_package_number" placeholder="0022-PIPE-TL" required /></div>
-            <div><label>STO Package Due Date</label><input type="date" name="sto_package_due_date" /></div>
-          </div>
-          <div class="actions"><button type="submit">Add STO Package</button></div>
+          <div><label>Add Package To RFQ</label><select name="sto_package_id" required ${availableStoPackages.length ? "" : "disabled"}>${stoPackageOptions}</select></div>
+          <div class="actions"><button type="submit" ${availableStoPackages.length ? "" : "disabled"}>Add Package</button></div>
         </form>
-        <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/sto-packages/import" class="stack">
-          <div><label>Import STO Packages</label><input type="file" name="sheet" accept=".csv,.txt,.xlsx,.xls,.xlsm,.xlsb" /></div>
-          <div><label>Paste STO Packages</label><textarea name="pasted_packages" rows="5" placeholder="sto_package_number,sto_package_due_date&#10;0022-PIPE-TL,2026-09-15"></textarea></div>
-          <div class="actions"><button type="submit">Import STO Packages</button></div>
-          <div class="muted">Use a one-column list or columns named sto_package_number and sto_package_due_date.</div>
-        </form>
+        <div class="muted">${availableStoPackages.length ? "Package dates are managed in the STO Packages section." : "No available package numbers. Add packages in the STO Packages section first."}</div>
       </div>
       <div class="scroll" style="margin-top:12px;">
         <table><tr><th>STO Package</th><th>Package Due</th><th>Actions</th></tr>${stoPackageRows}</table>
@@ -16541,6 +16732,12 @@ app.get("/imports/:id", requireAuth, requireJobContext, async (req, res) => {
     importBackHref = "/items";
     importBackLabel = "Back To Items";
     referenceLabel = "Item Master";
+    referenceValue = "N/A";
+  }
+  if (batch.entity_type === "sto_packages") {
+    importBackHref = "/sto-packages";
+    importBackLabel = "Back To STO Packages";
+    referenceLabel = "STO Packages";
     referenceValue = "N/A";
   }
   res.send(layout("Import Results", `
