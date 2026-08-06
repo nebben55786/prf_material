@@ -37,6 +37,7 @@ const issueSourceTypes = {
 const rfqStatuses = [
   { value: "SEND_FOR_QUOTES", label: "Send for Quotes" },
   { value: "WAITING_ON_QUOTES", label: "Waiting on Quotes" },
+  { value: "WAITING_ON_FIELD", label: "Waiting on field" },
   { value: "AWARDED", label: "Awarded" },
   { value: "WAITING_ON_CLIENT", label: "Waiting on Client" },
   { value: "NEED_RFI", label: "Need RFI" },
