@@ -14742,16 +14742,16 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
   const tableRows = rows.map((row) => `<tr>
     <td class="sto-package-cell"><a href="/public/sto-package-rfq-report/${jobId}/rfq/${row.rfq_id}/items" target="_blank" rel="noopener noreferrer">${esc(row.sto_package_number)}</a></td>
     <td class="public-sto-description-cell">${esc(row.project_name || "")}</td>
-    <td>${esc(formatShortDate(row.sto_package_due_date || ""))}</td>
-    <td>${esc(row.person_assigned || "")}</td>
+    <td class="public-sto-date-cell">${esc(formatShortDate(row.sto_package_due_date || ""))}</td>
+    <td class="public-sto-person-cell">${esc(row.person_assigned || "")}</td>
     <td class="public-sto-area-cell">${esc(row.area || "")}</td>
-    <td>${esc(row.package_status || "")}</td>
-    <td>${esc(row.test_type || "")}</td>
-    <td>${esc(row.test_psig || "")}</td>
-    <td>${renderRfqStatusChip(row.display_status || row.status, row.due_date)}</td>
-    <td>${esc(row.vendor_refs || "")}</td>
-    <td>${esc(row.issued_po_refs || "")}</td>
-    <td>${esc(formatShortDate(row.eta_date || ""))}</td>
+    <td class="public-sto-package-status-cell">${esc(row.package_status || "")}</td>
+    <td class="public-sto-test-type-cell">${esc(row.test_type || "")}</td>
+    <td class="public-sto-test-psig-cell">${esc(row.test_psig || "")}</td>
+    <td class="public-sto-status-cell">${renderRfqStatusChip(row.display_status || row.status, row.due_date)}</td>
+    <td class="public-sto-vendor-cell">${esc(row.vendor_refs || "")}</td>
+    <td class="public-sto-po-cell">${esc(row.issued_po_refs || "")}</td>
+    <td class="public-sto-eta-cell">${esc(formatShortDate(row.eta_date || ""))}</td>
   </tr>`).join("");
   res.send(layout("Public STO Package Report", `
     <style>
@@ -14771,14 +14771,63 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
       }
       .public-sto-report .public-sto-description-heading,
       .public-sto-report .public-sto-description-cell {
-        width: 28%;
+        width: 30%;
+      }
+      .public-sto-report .public-sto-date-heading,
+      .public-sto-report .public-sto-date-cell,
+      .public-sto-report .public-sto-eta-heading,
+      .public-sto-report .public-sto-eta-cell {
+        width: 76px;
+        white-space: nowrap;
+      }
+      .public-sto-report .public-sto-person-heading,
+      .public-sto-report .public-sto-person-cell {
+        width: 102px;
       }
       .public-sto-report .public-sto-area-heading,
       .public-sto-report .public-sto-area-cell {
-        width: 58px;
-        max-width: 58px;
+        width: 48px;
+        max-width: 48px;
         white-space: normal;
         overflow-wrap: anywhere;
+      }
+      .public-sto-report .public-sto-package-status-heading,
+      .public-sto-report .public-sto-package-status-cell {
+        width: 106px;
+        overflow-wrap: anywhere;
+      }
+      .public-sto-report .public-sto-test-type-heading,
+      .public-sto-report .public-sto-test-type-cell {
+        width: 50px;
+        padding-left: 4px;
+        padding-right: 4px;
+      }
+      .public-sto-report .public-sto-test-psig-heading,
+      .public-sto-report .public-sto-test-psig-cell {
+        width: 58px;
+        padding-left: 4px;
+        padding-right: 4px;
+      }
+      .public-sto-report .public-sto-status-heading,
+      .public-sto-report .public-sto-status-cell {
+        width: 138px;
+        white-space: nowrap;
+      }
+      .public-sto-report .public-sto-status-cell .rfq-status-chip {
+        padding-left: 6px;
+        padding-right: 6px;
+      }
+      .public-sto-report .public-sto-vendor-heading,
+      .public-sto-report .public-sto-vendor-cell {
+        width: 112px;
+        overflow-wrap: anywhere;
+      }
+      .public-sto-report .public-sto-po-heading,
+      .public-sto-report .public-sto-po-cell {
+        width: 58px;
+        white-space: nowrap;
+        padding-left: 4px;
+        padding-right: 4px;
       }
     </style>
     <h1>${esc(reportTitle)}</h1>
@@ -14798,7 +14847,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     </div>
     <div class="card">
       <div class="scroll">
-        <table class="public-sto-report"><tr><th class="sto-package-heading">STO Package</th><th class="public-sto-description-heading">Description</th><th>Package Due</th><th>Person Assigned</th><th class="public-sto-area-heading">Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>Status</th><th>Vendor</th><th>PO</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No STO packages match the current filter.</td></tr>`}</table>
+        <table class="public-sto-report"><tr><th class="sto-package-heading">STO Package</th><th class="public-sto-description-heading">Description</th><th class="public-sto-date-heading">Package Due</th><th class="public-sto-person-heading">Person Assigned</th><th class="public-sto-area-heading">Area</th><th class="public-sto-package-status-heading">Package Status</th><th class="public-sto-test-type-heading">Test Type</th><th class="public-sto-test-psig-heading">Test PSIG</th><th class="public-sto-status-heading">Status</th><th class="public-sto-vendor-heading">Vendor</th><th class="public-sto-po-heading">PO</th><th class="public-sto-eta-heading">ETA</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No STO packages match the current filter.</td></tr>`}</table>
       </div>
       <p class="muted">${rows.length} result(s), max 500 shown.</p>
     </div>
