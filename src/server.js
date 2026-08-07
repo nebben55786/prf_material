@@ -14728,7 +14728,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
   const reportTitle = `${[job.plant_name, job.job_number].filter(Boolean).join(" - ") || "Job"} STO Package Report`;
   const tableRows = rows.map((row) => `<tr>
     <td class="sto-package-cell">${esc(row.sto_package_number)}</td>
-    <td>${esc(row.project_name || "")}<div class="muted"><a href="/public/sto-package-rfq-report/${jobId}/rfq/${row.rfq_id}/items" target="_blank" rel="noopener noreferrer">Items</a></div></td>
+    <td>${esc(row.project_name || "")}<div class="muted public-rfq-items-link"><a href="/public/sto-package-rfq-report/${jobId}/rfq/${row.rfq_id}/items" target="_blank" rel="noopener noreferrer">Items</a></div></td>
     <td>${esc(formatShortDate(row.sto_package_due_date || ""))}</td>
     <td>${esc(row.person_assigned || "")}</td>
     <td>${esc(row.area || "")}</td>
@@ -14744,7 +14744,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     <style>
       @media print {
         body { background: #fff; }
-        .topbar, .print-actions, .report-filters { display: none !important; }
+        .topbar, .print-actions, .report-filters, .public-rfq-items-link { display: none !important; }
         .shell { max-width: none; padding: 0; }
         .card { border: 0; padding: 0; }
         table { font-size: 10px; }
