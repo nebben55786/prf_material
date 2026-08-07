@@ -14226,7 +14226,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <style>
       .rfq-list { table-layout: fixed; }
       .rfq-list-number { width: 102px; white-space: nowrap; padding-left: 4px; padding-right: 4px; }
-      .rfq-list-description { width: 28%; }
+      .rfq-list-description { width: 28%; padding-left: 4px; padding-right: 4px; }
       .rfq-list-requestor { width: 110px; }
       .rfq-list-vendor { width: 180px; max-width: 180px; white-space: normal; overflow-wrap: anywhere; }
       .rfq-list-po { width: 96px; }
