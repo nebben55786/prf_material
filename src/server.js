@@ -14627,6 +14627,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
   const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
   const rfqNo = String(req.query.rfq_no || "").trim();
   const status = String(req.query.status || "").trim();
+  const hideReceived = String(req.query.hide_received || "") === "1";
   const where = ["sp.job_id = $1"];
   const params = [jobId];
   if (packageNo) {
@@ -14641,7 +14642,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     params.push(status);
     where.push(`r.status = $${params.length}`);
   }
-  const rows = (await query(`
+  let rows = (await query(`
     with base as (
       select coalesce(master.id, sp.sto_package_id) as sto_package_id,
              coalesce(master.sto_package_number, sp.sto_package_number) as sto_package_number,
@@ -14722,16 +14723,28 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     left join receiving_status rs on rs.rfq_id = b.rfq_id
     order by b.sto_package_number, b.sto_package_due_date nulls last, b.rfq_no
   `, params)).rows;
+  if (hideReceived) {
+    rows = rows.filter((row) => String(row.display_status || row.status || "") !== "RECEIVED");
+  }
   const statusOptions = [`<option value="">All Statuses</option>`]
     .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
     .join("");
+  const reportUrl = `/public/sto-package-rfq-report/${jobId}`;
+  const filterParams = new URLSearchParams();
+  if (packageNo) filterParams.set("package_no", packageNo);
+  if (rfqNo) filterParams.set("rfq_no", rfqNo);
+  if (status) filterParams.set("status", status);
+  const toggleReceivedParams = new URLSearchParams(filterParams);
+  if (!hideReceived) toggleReceivedParams.set("hide_received", "1");
+  const clearHref = reportUrl;
+  const toggleReceivedHref = `${reportUrl}${toggleReceivedParams.toString() ? `?${toggleReceivedParams.toString()}` : ""}`;
   const reportTitle = `${[job.plant_name, job.job_number].filter(Boolean).join(" - ") || "Job"} STO Package Report`;
   const tableRows = rows.map((row) => `<tr>
-    <td class="sto-package-cell">${esc(row.sto_package_number)}</td>
-    <td>${esc(row.project_name || "")}<div class="muted public-rfq-items-link"><a href="/public/sto-package-rfq-report/${jobId}/rfq/${row.rfq_id}/items" target="_blank" rel="noopener noreferrer">Items</a></div></td>
+    <td class="sto-package-cell"><a href="/public/sto-package-rfq-report/${jobId}/rfq/${row.rfq_id}/items" target="_blank" rel="noopener noreferrer">${esc(row.sto_package_number)}</a></td>
+    <td class="public-sto-description-cell">${esc(row.project_name || "")}</td>
     <td>${esc(formatShortDate(row.sto_package_due_date || ""))}</td>
     <td>${esc(row.person_assigned || "")}</td>
-    <td>${esc(row.area || "")}</td>
+    <td class="public-sto-area-cell">${esc(row.area || "")}</td>
     <td>${esc(row.package_status || "")}</td>
     <td>${esc(row.test_type || "")}</td>
     <td>${esc(row.test_psig || "")}</td>
@@ -14750,10 +14763,22 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
         table { font-size: 10px; }
         th, td { padding: 4px; }
       }
+      .public-sto-report { table-layout: fixed; }
       .public-sto-report .sto-package-cell,
       .public-sto-report .sto-package-heading {
-        min-width: 118px;
+        width: 122px;
         white-space: nowrap;
+      }
+      .public-sto-report .public-sto-description-heading,
+      .public-sto-report .public-sto-description-cell {
+        width: 28%;
+      }
+      .public-sto-report .public-sto-area-heading,
+      .public-sto-report .public-sto-area-cell {
+        width: 58px;
+        max-width: 58px;
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
     </style>
     <h1>${esc(reportTitle)}</h1>
@@ -14761,18 +14786,19 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
       <button type="button" onclick="window.print()">Print Report</button>
     </div>
     <div class="card report-filters">
-      <form method="get" action="/public/sto-package-rfq-report/${jobId}" class="stack">
+      <form method="get" action="${reportUrl}" class="stack">
+        ${hideReceived ? `<input type="hidden" name="hide_received" value="1" />` : ""}
         <div class="grid-4">
           <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
           <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
           <div><label>Status</label><select name="status">${statusOptions}</select></div>
-          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/public/sto-package-rfq-report/${jobId}">Clear</a></div></div>
+          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="${escAttr(clearHref)}">Clear</a><a class="btn btn-secondary" href="${escAttr(toggleReceivedHref)}">${hideReceived ? "Show Fully Received" : "Hide Fully Received"}</a></div></div>
         </div>
       </form>
     </div>
     <div class="card">
       <div class="scroll">
-        <table class="public-sto-report"><tr><th class="sto-package-heading">STO Package</th><th>Description</th><th>Package Due</th><th>Person Assigned</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>Status</th><th>Vendor</th><th>PO</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No STO packages match the current filter.</td></tr>`}</table>
+        <table class="public-sto-report"><tr><th class="sto-package-heading">STO Package</th><th class="public-sto-description-heading">Description</th><th>Package Due</th><th>Person Assigned</th><th class="public-sto-area-heading">Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>Status</th><th>Vendor</th><th>PO</th><th>ETA</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No STO packages match the current filter.</td></tr>`}</table>
       </div>
       <p class="muted">${rows.length} result(s), max 500 shown.</p>
     </div>
