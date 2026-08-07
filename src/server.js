@@ -14213,14 +14213,14 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   };
   const rows = rfqs.map((rfq) => `<tr>
     <td class="rfq-list-number"><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
-    <td>${esc(rfq.project_name)}</td>
-    <td>${esc(rfq.requestor_name || "")}</td>
+    <td class="rfq-list-description">${esc(rfq.project_name)}</td>
+    <td class="rfq-list-requestor">${esc(rfq.requestor_name || "")}</td>
     <td class="rfq-list-vendor">${esc(rfq.vendor_display_refs || "")}</td>
-    <td>${renderIssuedPoLinks(rfq.issued_po_links, rfq.issued_po_refs)}</td>
-    <td style="width:1%; white-space:nowrap;">${esc(rfq.client_request_no || "")}</td>
-    <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
-    <td>${esc(formatShortDate(rfq.eta_date || ""))}</td>
-    <td>${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}</td>
+    <td class="rfq-list-po">${renderIssuedPoLinks(rfq.issued_po_links, rfq.issued_po_refs)}</td>
+    <td class="rfq-list-client-request">${esc(rfq.client_request_no || "")}</td>
+    <td class="rfq-list-date">${esc(formatShortDate(rfq.due_date || ""))}</td>
+    <td class="rfq-list-date rfq-list-eta">${esc(formatShortDate(rfq.eta_date || ""))}</td>
+    <td class="rfq-list-status">${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}</td>
   </tr>`).join("");
   res.send(layout("Purchasing", `
     <style>
@@ -14229,8 +14229,10 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       .rfq-list-description { width: 28%; padding-left: 4px; padding-right: 4px; }
       .rfq-list-requestor { width: 110px; }
       .rfq-list-vendor { width: 180px; max-width: 180px; white-space: normal; overflow-wrap: anywhere; }
-      .rfq-list-po { width: 96px; }
+      .rfq-list-po { width: 90px; padding-left: 4px; padding-right: 4px; }
+      .rfq-list-client-request { width: 118px; white-space: nowrap; padding-left: 4px; padding-right: 4px; }
       .rfq-list-date { width: 76px; }
+      .rfq-list-eta { padding-left: 4px; padding-right: 4px; }
       .rfq-list-status { width: 150px; }
     </style>
     <h1>Purchasing</h1>
@@ -14257,7 +14259,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table class="rfq-list"><tr><th class="rfq-list-number">RFQ</th><th class="rfq-list-description">Description</th><th class="rfq-list-requestor">Requestor</th><th class="rfq-list-vendor">Awarded Vendor(s)</th><th class="rfq-list-po">Issued PO(s)</th><th style="width:1%; white-space:nowrap;">Client Request #</th><th class="rfq-list-date">Due</th><th class="rfq-list-date">ETA</th><th class="rfq-list-status">Status</th></tr>${rows || `<tr><td colspan="9" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+        <table class="rfq-list"><tr><th class="rfq-list-number">RFQ</th><th class="rfq-list-description">Description</th><th class="rfq-list-requestor">Requestor</th><th class="rfq-list-vendor">Awarded Vendor(s)</th><th class="rfq-list-po">Issued PO(s)</th><th class="rfq-list-client-request">Client Request #</th><th class="rfq-list-date">Due</th><th class="rfq-list-date rfq-list-eta">ETA</th><th class="rfq-list-status">Status</th></tr>${rows || `<tr><td colspan="9" class="muted">No RFQs match the current filter.</td></tr>`}</table>
       </div>
     </div>
   `, req.user));
