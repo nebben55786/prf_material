@@ -14212,10 +14212,10 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       .join(", ");
   };
   const rows = rfqs.map((rfq) => `<tr>
-    <td><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
+    <td class="rfq-list-number"><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td>${esc(rfq.project_name)}</td>
     <td>${esc(rfq.requestor_name || "")}</td>
-    <td>${esc(rfq.vendor_display_refs || "")}</td>
+    <td class="rfq-list-vendor">${esc(rfq.vendor_display_refs || "")}</td>
     <td>${renderIssuedPoLinks(rfq.issued_po_links, rfq.issued_po_refs)}</td>
     <td style="width:1%; white-space:nowrap;">${esc(rfq.client_request_no || "")}</td>
     <td>${esc(formatShortDate(rfq.due_date || ""))}</td>
@@ -14223,6 +14223,16 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td>${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}</td>
   </tr>`).join("");
   res.send(layout("Purchasing", `
+    <style>
+      .rfq-list { table-layout: fixed; }
+      .rfq-list-number { width: 122px; white-space: nowrap; }
+      .rfq-list-description { width: 28%; }
+      .rfq-list-requestor { width: 110px; }
+      .rfq-list-vendor { width: 180px; max-width: 180px; white-space: normal; overflow-wrap: anywhere; }
+      .rfq-list-po { width: 96px; }
+      .rfq-list-date { width: 76px; }
+      .rfq-list-status { width: 150px; }
+    </style>
     <h1>Purchasing</h1>
     <div class="card">
       <form method="get" action="/rfq" class="stack">
@@ -14247,7 +14257,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
-        <table><tr><th>RFQ</th><th>Description</th><th>Requestor</th><th>Awarded Vendor(s)</th><th>Issued PO(s)</th><th style="width:1%; white-space:nowrap;">Client Request #</th><th>Due</th><th>ETA</th><th>Status</th></tr>${rows || `<tr><td colspan="9" class="muted">No RFQs match the current filter.</td></tr>`}</table>
+        <table class="rfq-list"><tr><th class="rfq-list-number">RFQ</th><th class="rfq-list-description">Description</th><th class="rfq-list-requestor">Requestor</th><th class="rfq-list-vendor">Awarded Vendor(s)</th><th class="rfq-list-po">Issued PO(s)</th><th style="width:1%; white-space:nowrap;">Client Request #</th><th class="rfq-list-date">Due</th><th class="rfq-list-date">ETA</th><th class="rfq-list-status">Status</th></tr>${rows || `<tr><td colspan="9" class="muted">No RFQs match the current filter.</td></tr>`}</table>
       </div>
     </div>
   `, req.user));
