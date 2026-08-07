@@ -14771,7 +14771,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
       }
       .public-sto-report .public-sto-description-heading,
       .public-sto-report .public-sto-description-cell {
-        width: 30%;
+        width: 26%;
       }
       .public-sto-report .public-sto-date-heading,
       .public-sto-report .public-sto-date-cell,
@@ -14786,10 +14786,10 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
       }
       .public-sto-report .public-sto-area-heading,
       .public-sto-report .public-sto-area-cell {
-        width: 48px;
-        max-width: 48px;
+        width: 96px;
+        max-width: 96px;
         white-space: normal;
-        overflow-wrap: anywhere;
+        overflow-wrap: break-word;
       }
       .public-sto-report .public-sto-package-status-heading,
       .public-sto-report .public-sto-package-status-cell {
