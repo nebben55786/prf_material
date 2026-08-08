@@ -14730,10 +14730,12 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
     .join("");
   const assignedPeople = (await query(`
-    select distinct trim(person_assigned) as person_assigned
-    from sto_packages
-    where job_id = $1 and coalesce(trim(person_assigned), '') <> ''
-    order by trim(person_assigned)
+    select distinct trim(coalesce(master.person_assigned, '')) as person_assigned
+    from rfq_sto_packages sp
+    join rfqs r on r.id = sp.rfq_id and r.job_id = sp.job_id
+    left join sto_packages master on master.id = sp.sto_package_id and master.job_id = sp.job_id
+    where sp.job_id = $1 and coalesce(trim(master.person_assigned), '') <> ''
+    order by trim(coalesce(master.person_assigned, ''))
   `, [jobId])).rows;
   const personAssignedOptions = [`<option value="">All People</option>`]
     .concat(assignedPeople.map((person) => `<option value="${escAttr(person.person_assigned)}" ${personAssigned === person.person_assigned ? "selected" : ""}>${esc(person.person_assigned)}</option>`))
@@ -15039,10 +15041,12 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
     .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
     .join("");
   const assignedPeople = (await query(`
-    select distinct trim(person_assigned) as person_assigned
-    from sto_packages
-    where job_id = $1 and coalesce(trim(person_assigned), '') <> ''
-    order by trim(person_assigned)
+    select distinct trim(coalesce(master.person_assigned, '')) as person_assigned
+    from rfq_sto_packages sp
+    join rfqs r on r.id = sp.rfq_id and r.job_id = sp.job_id
+    left join sto_packages master on master.id = sp.sto_package_id and master.job_id = sp.job_id
+    where sp.job_id = $1 and coalesce(trim(master.person_assigned), '') <> ''
+    order by trim(coalesce(master.person_assigned, ''))
   `, [jobId])).rows;
   const personAssignedOptions = [`<option value="">All People</option>`]
     .concat(assignedPeople.map((person) => `<option value="${escAttr(person.person_assigned)}" ${personAssigned === person.person_assigned ? "selected" : ""}>${esc(person.person_assigned)}</option>`))
