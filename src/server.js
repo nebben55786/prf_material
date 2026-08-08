@@ -14032,6 +14032,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const itemCode = String(req.query.item_code || "").trim();
   const vendorId = String(req.query.vendor_id || "").trim();
   const requestorName = String(req.query.requestor_name || "").trim();
+  const hideCancelledReceived = String(req.query.hide_cancelled_received || "") === "1";
   const [vendorsRes, requestorsRes] = await Promise.all([
     query("select id, name from vendors order by name"),
     query(`
@@ -14192,7 +14193,10 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     order by b.id desc
   `, params)
   ]);
-  const rfqs = rfqsRes.rows;
+  let rfqs = rfqsRes.rows;
+  if (hideCancelledReceived) {
+    rfqs = rfqs.filter((rfq) => !["CANCELLED", "RECEIVED"].includes(String(rfq.display_status || rfq.status || "")));
+  }
   const vendorOptions = [`<option value="">All Vendors</option>`]
     .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === vendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
@@ -14202,6 +14206,16 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const requestorOptions = [`<option value="">All Requestors</option>`]
     .concat(requestors.map((requestor) => `<option value="${esc(requestor.requestor_name)}" ${requestor.requestor_name === requestorName ? "selected" : ""}>${esc(requestor.requestor_name)}</option>`))
     .join("");
+  const filterParams = new URLSearchParams();
+  if (poReqNo) filterParams.set("po_req", poReqNo);
+  if (project) filterParams.set("project", project);
+  if (status) filterParams.set("status", status);
+  if (itemCode) filterParams.set("item_code", itemCode);
+  if (vendorId) filterParams.set("vendor_id", vendorId);
+  if (requestorName) filterParams.set("requestor_name", requestorName);
+  const toggleDoneParams = new URLSearchParams(filterParams);
+  if (!hideCancelledReceived) toggleDoneParams.set("hide_cancelled_received", "1");
+  const toggleDoneHref = `/rfq${toggleDoneParams.toString() ? `?${toggleDoneParams.toString()}` : ""}`;
   const renderIssuedPoLinks = (value, fallbackText) => {
     const links = Array.isArray(value)
       ? value
@@ -14268,6 +14282,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
           <a class="btn btn-secondary" href="/rfq/sto-packages">STO Package Report</a>
           <a class="btn btn-primary" href="/rfq/new">Create RFQ</a>
           <span class="muted">${rfqs.length} result(s), max 300 shown</span>
+          <span style="margin-left:auto;"></span>
+          <a class="btn btn-secondary" href="${escAttr(toggleDoneHref)}">${hideCancelledReceived ? "Show Cancelled / Received" : "Hide Cancelled / Received"}</a>
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
