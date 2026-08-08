@@ -436,6 +436,18 @@ function rfqStatusLabel(status) {
   return (rfqStatuses.find((item) => item.value === status) || { label: status }).label;
 }
 
+function buildReportStatusOptions(rows, selectedStatus) {
+  const presentStatuses = Array.from(new Set(
+    rows
+      .map((row) => String(row.display_status || row.status || "").trim())
+      .filter(Boolean)
+  ));
+  presentStatuses.sort((left, right) => rfqStatusLabel(left).localeCompare(rfqStatusLabel(right)));
+  return [`<option value="">All Statuses</option>`]
+    .concat(presentStatuses.map((status) => `<option value="${escAttr(status)}" ${selectedStatus === status ? "selected" : ""}>${esc(rfqStatusLabel(status))}</option>`))
+    .join("");
+}
+
 function renderRfqStatusChip(status, dueDate) {
   let className = "";
   if (status === "SEND_FOR_QUOTES") className = "rfq-status-send";
@@ -14638,10 +14650,6 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     params.push(personAssigned);
     where.push(`coalesce(master.person_assigned, '') = $${params.length}`);
   }
-  if (status) {
-    params.push(status);
-    where.push(`r.status = $${params.length}`);
-  }
   let rows = (await query(`
     with base as (
       select coalesce(master.id, sp.sto_package_id) as sto_package_id,
@@ -14726,9 +14734,10 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
   if (hideReceived) {
     rows = rows.filter((row) => String(row.display_status || row.status || "") !== "RECEIVED");
   }
-  const statusOptions = [`<option value="">All Statuses</option>`]
-    .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
-    .join("");
+  const statusOptions = buildReportStatusOptions(rows, status);
+  if (status) {
+    rows = rows.filter((row) => String(row.display_status || row.status || "") === status);
+  }
   const assignedPeople = (await query(`
     select distinct trim(coalesce(master.person_assigned, '')) as person_assigned
     from rfq_sto_packages sp
@@ -14951,11 +14960,7 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
     params.push(personAssigned);
     where.push(`coalesce(master.person_assigned, '') = $${params.length}`);
   }
-  if (status) {
-    params.push(status);
-    where.push(`r.status = $${params.length}`);
-  }
-  const rows = (await query(`
+  let rows = (await query(`
     with base as (
       select coalesce(master.id, sp.sto_package_id) as sto_package_id,
              coalesce(master.sto_package_number, sp.sto_package_number) as sto_package_number,
@@ -15038,9 +15043,10 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
     left join receiving_status rs on rs.rfq_id = b.rfq_id
     order by b.sto_package_number, b.sto_package_due_date nulls last, b.rfq_no
   `, params)).rows;
-  const statusOptions = [`<option value="">All Statuses</option>`]
-    .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
-    .join("");
+  const statusOptions = buildReportStatusOptions(rows, status);
+  if (status) {
+    rows = rows.filter((row) => String(row.display_status || row.status || "") === status);
+  }
   const assignedPeople = (await query(`
     select distinct trim(coalesce(master.person_assigned, '')) as person_assigned
     from rfq_sto_packages sp
