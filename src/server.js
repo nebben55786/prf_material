@@ -19891,6 +19891,7 @@ app.get("/material-logs", requireAuth, requireJobContext, requirePermission("mat
         <a class="btn btn-primary" href="/material-logs/fmr">Vendor FMR Log</a>
         <a class="btn btn-primary" href="/material-logs/opi">OPI Log</a>
         <a class="btn btn-primary" href="/material-logs/issue-report">Issue Report</a>
+        <a class="btn btn-primary" href="/material-logs/part-history">Part Purchase History</a>
         ${canViewMaterialPurchaseReport(req.user) ? `<a class="btn btn-primary" href="/material-logs/purchase-report">Material Purchase Report</a>` : ""}
       </div>
     </div>
@@ -20796,6 +20797,208 @@ app.get("/material-logs/issue-report", requireAuth, requireJobContext, requirePe
     </div>
   `, req.user));
 });
+
+app.get("/material-logs/part-history", requireAuth, requireJobContext, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const q = String(req.query.q || "").trim();
+  const itemCode = String(req.query.item_code || "").trim();
+  const description = String(req.query.description || "").trim();
+  const requestor = String(req.query.requestor || "").trim();
+  const vendor = String(req.query.vendor || "").trim();
+  const rfqNo = String(req.query.rfq_no || "").trim();
+  const poNo = String(req.query.po_no || "").trim();
+
+  const params = [jobId];
+  const where = ["line_base.job_id = $1"];
+  const addLikeFilter = (value, expression) => {
+    if (!value) return;
+    params.push(`%${value}%`);
+    where.push(`${expression} ilike $${params.length}`);
+  };
+  addLikeFilter(itemCode, "line_base.item_code");
+  addLikeFilter(description, "line_base.description");
+  addLikeFilter(requestor, "line_base.requestor_name");
+  addLikeFilter(vendor, "line_base.vendor_name");
+  addLikeFilter(rfqNo, "line_base.rfq_no");
+  addLikeFilter(poNo, "line_base.po_no");
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(
+      line_base.item_code ilike $${params.length}
+      or line_base.description ilike $${params.length}
+      or line_base.requestor_name ilike $${params.length}
+      or line_base.vendor_name ilike $${params.length}
+      or line_base.rfq_no ilike $${params.length}
+      or line_base.po_no ilike $${params.length}
+      or line_base.po_description ilike $${params.length}
+    )`);
+  }
+  const whereSql = `where ${where.join(" and ")}`;
+  const baseSql = `
+    with receipt_totals as (
+      select
+        r.po_line_id,
+        sum(coalesce(r.qty_received, 0)) as qty_received,
+        max(r.received_at) as last_received_at,
+        string_agg(distinct nullif(coalesce(m.mrr_number, ''), ''), ', ' order by nullif(coalesce(m.mrr_number, ''), '')) as mrr_numbers
+      from receipts r
+      left join mrr_logs m on m.id = r.mrr_log_id and m.job_id = r.job_id
+      where r.job_id = $1
+      group by r.po_line_id
+    ),
+    line_base as (
+      select
+        pl.job_id,
+        pl.id as po_line_id,
+        po.id as po_id,
+        po.po_no,
+        coalesce(po.description, '') as po_description,
+        po.status as po_status,
+        po.created_at as po_created_at,
+        v.name as vendor_name,
+        r.id as rfq_id,
+        coalesce(r.rfq_no, '') as rfq_no,
+        coalesce(r.requestor_name, '') as requestor_name,
+        coalesce(r.status, '') as rfq_status,
+        coalesce(nullif(pl.item_code_snapshot, ''), nullif(ri.item_code_snapshot, ''), mi.item_code, '') as item_code,
+        coalesce(nullif(pl.description_snapshot, ''), nullif(ri.description_snapshot, ''), mi.description, '') as description,
+        coalesce(nullif(pl.uom_snapshot, ''), nullif(ri.uom_snapshot, ''), mi.uom, '') as uom,
+        coalesce(pl.po_line, ri.po_line, '') as po_line,
+        coalesce(pl.qty_ordered, 0) as qty_ordered,
+        pl.unit_price,
+        coalesce(rt.qty_received, 0) as qty_received,
+        rt.last_received_at,
+        coalesce(rt.mrr_numbers, '') as mrr_numbers
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
+      join vendors v on v.id = po.vendor_id
+      join material_items mi on mi.id = pl.material_item_id and mi.job_id = pl.job_id
+      left join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      left join rfqs r on r.id = po.rfq_id and r.job_id = po.job_id
+      left join receipt_totals rt on rt.po_line_id = pl.id
+      where pl.job_id = $1
+    )
+  `;
+
+  const rows = (await query(`
+    ${baseSql}
+    select *
+    from line_base
+    ${whereSql}
+    order by
+      lower(item_code),
+      po_created_at desc nulls last,
+      po_no,
+      case when coalesce(po_line, '') ~ '^[0-9]+$' then lpad(po_line, 20, '0') else lower(coalesce(po_line, '')) end,
+      po_line_id desc
+    limit 500
+  `, params)).rows;
+
+  const summaryRows = (await query(`
+    ${baseSql}
+    select
+      item_code,
+      max(description) as description,
+      count(*) as line_count,
+      count(distinct po_id) as po_count,
+      count(distinct rfq_no) filter (where coalesce(rfq_no, '') <> '') as rfq_count,
+      count(distinct vendor_name) as vendor_count,
+      sum(qty_ordered) as qty_ordered,
+      sum(qty_received) as qty_received,
+      avg(unit_price) filter (where unit_price is not null) as avg_unit_price,
+      min(unit_price) filter (where unit_price is not null) as min_unit_price,
+      max(unit_price) filter (where unit_price is not null) as max_unit_price
+    from line_base
+    ${whereSql}
+    group by item_code
+    order by lower(item_code)
+    limit 200
+  `, params)).rows;
+
+  const totalOrdered = rows.reduce((sum, row) => sum + num(row.qty_ordered), 0);
+  const totalReceived = rows.reduce((sum, row) => sum + num(row.qty_received), 0);
+  const pricedRows = rows.filter((row) => row.unit_price !== null && row.unit_price !== undefined && String(row.unit_price).trim() !== "");
+  const avgPrice = pricedRows.length ? pricedRows.reduce((sum, row) => sum + num(row.unit_price), 0) / pricedRows.length : "";
+
+  const summaryTableRows = summaryRows.map((row) => {
+    const qtyOrdered = num(row.qty_ordered);
+    const qtyReceived = num(row.qty_received);
+    return `<tr>
+      <td>${esc(row.item_code)}</td>
+      <td>${esc(row.description || "")}</td>
+      <td>${esc(row.po_count)}</td>
+      <td>${esc(row.rfq_count)}</td>
+      <td>${esc(row.vendor_count)}</td>
+      <td>${esc(formatQtyDisplay(qtyOrdered))}</td>
+      <td>${esc(formatQtyDisplay(qtyReceived))}</td>
+      <td>${esc(formatQtyDisplay(Math.max(qtyOrdered - qtyReceived, 0)))}</td>
+      <td>${esc(formatCurrencyInput(row.avg_unit_price))}</td>
+      <td>${esc(formatCurrencyInput(row.min_unit_price))}</td>
+      <td>${esc(formatCurrencyInput(row.max_unit_price))}</td>
+    </tr>`;
+  }).join("");
+
+  const detailRows = rows.map((row) => {
+    const qtyOrdered = num(row.qty_ordered);
+    const qtyReceived = num(row.qty_received);
+    return `<tr>
+      <td>${esc(row.item_code)}</td>
+      <td>${esc(row.description || "")}</td>
+      <td>${esc(row.uom || "")}</td>
+      <td>${row.rfq_id ? `<a href="/rfq/${row.rfq_id}">${esc(row.rfq_no || "")}</a>` : esc(row.rfq_no || "")}</td>
+      <td>${esc(row.requestor_name || "")}</td>
+      <td><a href="/po/${row.po_id}/edit">${esc(row.po_no || "")}</a></td>
+      <td>${esc(row.po_line || "")}</td>
+      <td>${esc(row.vendor_name || "")}</td>
+      <td>${esc(formatQtyDisplay(qtyOrdered))}</td>
+      <td>${esc(formatQtyDisplay(qtyReceived))}</td>
+      <td>${esc(formatQtyDisplay(Math.max(qtyOrdered - qtyReceived, 0)))}</td>
+      <td>${esc(formatCurrencyInput(row.unit_price))}</td>
+      <td>${esc(row.po_status || "")}</td>
+      <td>${esc(row.mrr_numbers || "")}</td>
+      <td>${esc(formatShortDateTime(row.last_received_at))}</td>
+    </tr>`;
+  }).join("");
+
+  res.send(layout("Part Purchase History", `
+    <h1>Part Purchase History</h1>
+    <div class="card">
+      <form method="get" action="/material-logs/part-history" class="stack">
+        <div class="grid-4">
+          <div><label>Search All</label><input name="q" value="${esc(q)}" placeholder="item, description, requestor, vendor, RFQ, PO" /></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(itemCode)}" /></div>
+          <div><label>Description</label><input name="description" value="${esc(description)}" /></div>
+          <div><label>Requestor</label><input name="requestor" value="${esc(requestor)}" /></div>
+          <div><label>Vendor</label><input name="vendor" value="${esc(vendor)}" /></div>
+          <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
+          <div><label>PO #</label><input name="po_no" value="${esc(poNo)}" /></div>
+          <div style="align-self:end;"><button type="submit">Filter History</button></div>
+        </div>
+        <div class="actions">
+          <a class="btn btn-secondary" href="/material-logs/part-history">Clear</a>
+          <a class="btn btn-secondary" href="/material-logs">Back To Material Logs</a>
+          <span class="muted">${esc(rows.length)} PO line(s) shown, max 500</span>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <div class="stats" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+        <div class="stat"><div>Matching Lines</div><strong>${esc(rows.length)}</strong></div>
+        <div class="stat"><div>Qty Ordered</div><strong>${esc(formatQtyDisplay(totalOrdered))}</strong></div>
+        <div class="stat"><div>Qty Received</div><strong>${esc(formatQtyDisplay(totalReceived))}</strong></div>
+        <div class="stat"><div>Average Price</div><strong>${esc(formatCurrencyInput(avgPrice))}</strong></div>
+      </div>
+    </div>
+    <div class="card scroll">
+      <h3>Item Summary</h3>
+      <table><tr><th>Item</th><th>Description</th><th>POs</th><th>RFQs</th><th>Vendors</th><th>Ordered</th><th>Received</th><th>Open</th><th>Avg Price</th><th>Min Price</th><th>Max Price</th></tr>${summaryTableRows || `<tr><td colspan="11" class="muted">No purchased parts match the current filters.</td></tr>`}</table>
+    </div>
+    <div class="card scroll">
+      <h3>RFQ, PO, And Receiving Detail</h3>
+      <table><tr><th>Item</th><th>Description</th><th>UOM</th><th>RFQ</th><th>Requestor</th><th>PO</th><th>PO Line</th><th>Vendor</th><th>Ordered</th><th>Received</th><th>Open</th><th>Unit Price</th><th>PO Status</th><th>MRR</th><th>Last Received</th></tr>${detailRows || `<tr><td colspan="15" class="muted">No PO line history found.</td></tr>`}</table>
+    </div>
+  `, req.user));
+}));
 
 app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
   if (!canViewMaterialPurchaseReport(req.user)) {
