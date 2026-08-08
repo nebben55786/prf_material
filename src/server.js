@@ -14773,6 +14773,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
         .card { border: 0; padding: 0; }
         table { font-size: 10px; }
         th, td { padding: 4px; }
+        .sto-package-cell a { color: inherit; text-decoration: none; }
       }
       .public-sto-report { table-layout: fixed; }
       .public-sto-report .sto-package-cell,
