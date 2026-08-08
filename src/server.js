@@ -14625,7 +14625,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     return;
   }
   const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
-  const rfqNo = String(req.query.rfq_no || "").trim();
+  const personAssigned = textValue(req.query.person_assigned);
   const status = String(req.query.status || "").trim();
   const hideReceived = String(req.query.hide_received || "") === "1";
   const where = ["sp.job_id = $1"];
@@ -14634,9 +14634,9 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     params.push(`%${packageNo}%`);
     where.push(`sp.sto_package_number ilike $${params.length}`);
   }
-  if (rfqNo) {
-    params.push(`%${rfqNo}%`);
-    where.push(`r.rfq_no ilike $${params.length}`);
+  if (personAssigned) {
+    params.push(personAssigned);
+    where.push(`coalesce(master.person_assigned, '') = $${params.length}`);
   }
   if (status) {
     params.push(status);
@@ -14729,10 +14729,19 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
   const statusOptions = [`<option value="">All Statuses</option>`]
     .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
     .join("");
+  const assignedPeople = (await query(`
+    select distinct trim(person_assigned) as person_assigned
+    from sto_packages
+    where job_id = $1 and coalesce(trim(person_assigned), '') <> ''
+    order by trim(person_assigned)
+  `, [jobId])).rows;
+  const personAssignedOptions = [`<option value="">All People</option>`]
+    .concat(assignedPeople.map((person) => `<option value="${escAttr(person.person_assigned)}" ${personAssigned === person.person_assigned ? "selected" : ""}>${esc(person.person_assigned)}</option>`))
+    .join("");
   const reportUrl = `/public/sto-package-rfq-report/${jobId}`;
   const filterParams = new URLSearchParams();
   if (packageNo) filterParams.set("package_no", packageNo);
-  if (rfqNo) filterParams.set("rfq_no", rfqNo);
+  if (personAssigned) filterParams.set("person_assigned", personAssigned);
   if (status) filterParams.set("status", status);
   const toggleReceivedParams = new URLSearchParams(filterParams);
   if (!hideReceived) toggleReceivedParams.set("hide_received", "1");
@@ -14839,7 +14848,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
         ${hideReceived ? `<input type="hidden" name="hide_received" value="1" />` : ""}
         <div class="grid-4">
           <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
-          <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
+          <div><label>Person Assigned</label><select name="person_assigned">${personAssignedOptions}</select></div>
           <div><label>Status</label><select name="status">${statusOptions}</select></div>
           <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="${escAttr(clearHref)}">Clear</a><a class="btn btn-secondary" href="${escAttr(toggleReceivedHref)}">${hideReceived ? "Show Fully Received" : "Hide Fully Received"}</a></div></div>
         </div>
@@ -14927,7 +14936,7 @@ app.get("/public/sto-package-rfq-report/:jobId/rfq/:rfqId/items", asyncHandler(a
 app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
-  const rfqNo = String(req.query.rfq_no || "").trim();
+  const personAssigned = textValue(req.query.person_assigned);
   const status = String(req.query.status || "").trim();
   const where = ["sp.job_id = $1"];
   const params = [jobId];
@@ -14935,9 +14944,9 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
     params.push(`%${packageNo}%`);
     where.push(`sp.sto_package_number ilike $${params.length}`);
   }
-  if (rfqNo) {
-    params.push(`%${rfqNo}%`);
-    where.push(`r.rfq_no ilike $${params.length}`);
+  if (personAssigned) {
+    params.push(personAssigned);
+    where.push(`coalesce(master.person_assigned, '') = $${params.length}`);
   }
   if (status) {
     params.push(status);
@@ -15029,6 +15038,15 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
   const statusOptions = [`<option value="">All Statuses</option>`]
     .concat(rfqStatuses.map((rfqStatus) => `<option value="${rfqStatus.value}" ${status === rfqStatus.value ? "selected" : ""}>${esc(rfqStatus.label)}</option>`))
     .join("");
+  const assignedPeople = (await query(`
+    select distinct trim(person_assigned) as person_assigned
+    from sto_packages
+    where job_id = $1 and coalesce(trim(person_assigned), '') <> ''
+    order by trim(person_assigned)
+  `, [jobId])).rows;
+  const personAssignedOptions = [`<option value="">All People</option>`]
+    .concat(assignedPeople.map((person) => `<option value="${escAttr(person.person_assigned)}" ${personAssigned === person.person_assigned ? "selected" : ""}>${esc(person.person_assigned)}</option>`))
+    .join("");
   const renderPoLinks = (value, fallbackText) => {
     const links = Array.isArray(value) ? value : (() => {
       try {
@@ -15070,7 +15088,7 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
       <form method="get" action="/rfq/sto-packages" class="stack">
         <div class="grid-4">
           <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
-          <div><label>RFQ #</label><input name="rfq_no" value="${esc(rfqNo)}" /></div>
+          <div><label>Person Assigned</label><select name="person_assigned">${personAssignedOptions}</select></div>
           <div><label>RFQ Status</label><select name="status">${statusOptions}</select></div>
           <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/rfq/sto-packages">Clear</a><a class="btn btn-secondary" href="/public/sto-package-rfq-report/${jobId}" target="_blank" rel="noopener noreferrer">Public Print Link</a></div></div>
         </div>
@@ -15693,7 +15711,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       <h3>STO Packages</h3>
       <div class="actions" style="margin-bottom:12px;">
         <a class="btn btn-secondary" href="/sto-packages">Manage STO Packages</a>
-        <a class="btn btn-secondary" href="/rfq/sto-packages?rfq_no=${encodeURIComponent(rfq.rfq_no || "")}">Open STO Package Report</a>
+        <a class="btn btn-secondary" href="/rfq/sto-packages">Open STO Package Report</a>
       </div>
       <div class="grid" style="grid-template-columns: minmax(280px, 0.55fr) minmax(320px, 1fr); align-items:end;">
         <form method="post" action="/rfq/${rfqId}/sto-packages" class="stack">
