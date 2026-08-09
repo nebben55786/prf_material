@@ -14489,12 +14489,10 @@ app.get("/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs
           <div><label>Spec</label><input name="spec" value="${esc(specFilter)}" /></div>
           <div><label>Area</label><input name="area" value="${esc(areaFilter)}" /></div>
           <div><label>Status</label><input name="package_status" value="${esc(statusFilter)}" /></div>
-          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/sto-packages">Clear</a><a class="btn btn-secondary" href="/rfq/sto-packages">RFQ Report</a></div></div>
+          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/sto-packages">Clear</a><a class="btn btn-secondary" href="/sto-packages/add">Add / Import STO Packages</a><a class="btn btn-secondary" href="/rfq/sto-packages">RFQ Report</a></div></div>
         </div>
       </form>
     </div>
-    <div class="actions"><a class="btn" href="/sto-packages/add">Add / Import STO Packages</a></div>
-    <br />
     <div class="card scroll">
       <h3>Package List</h3>
       <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQs</th><th>RFQ Numbers</th><th>Actions</th></tr>${packageRows || `<tr><td colspan="11" class="muted">No STO packages found.</td></tr>`}</table>
