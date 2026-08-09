@@ -14417,11 +14417,31 @@ app.post("/rfq/:id/vendors", requireAuth, requireJobContext, requirePermission("
 app.get("/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
+  const personAssignedFilter = textValue(req.query.person_assigned);
+  const specFilter = textValue(req.query.spec);
+  const areaFilter = textValue(req.query.area);
+  const statusFilter = textValue(req.query.package_status);
   const where = ["sp.job_id = $1"];
   const params = [jobId];
   if (packageNo) {
     params.push(`%${packageNo}%`);
     where.push(`sp.sto_package_number ilike $${params.length}`);
+  }
+  if (personAssignedFilter) {
+    params.push(`%${personAssignedFilter}%`);
+    where.push(`sp.person_assigned ilike $${params.length}`);
+  }
+  if (specFilter) {
+    params.push(`%${specFilter}%`);
+    where.push(`sp.spec ilike $${params.length}`);
+  }
+  if (areaFilter) {
+    params.push(`%${areaFilter}%`);
+    where.push(`sp.area ilike $${params.length}`);
+  }
+  if (statusFilter) {
+    params.push(`%${statusFilter}%`);
+    where.push(`sp.package_status ilike $${params.length}`);
   }
   const packages = (await query(`
     select sp.id, sp.sto_package_number, sp.sto_package_due_date, sp.person_assigned, sp.spec, sp.area,
@@ -14465,10 +14485,29 @@ app.get("/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs
       <form method="get" action="/sto-packages" class="stack">
         <div class="grid">
           <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
+          <div><label>Person</label><input name="person_assigned" value="${esc(personAssignedFilter)}" /></div>
+          <div><label>Spec</label><input name="spec" value="${esc(specFilter)}" /></div>
+          <div><label>Area</label><input name="area" value="${esc(areaFilter)}" /></div>
+          <div><label>Status</label><input name="package_status" value="${esc(statusFilter)}" /></div>
           <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/sto-packages">Clear</a><a class="btn btn-secondary" href="/rfq/sto-packages">RFQ Report</a></div></div>
         </div>
       </form>
     </div>
+    <div class="actions"><a class="btn" href="/sto-packages/add">Add / Import STO Packages</a></div>
+    <br />
+    <div class="card scroll">
+      <h3>Package List</h3>
+      <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQs</th><th>RFQ Numbers</th><th>Actions</th></tr>${packageRows || `<tr><td colspan="11" class="muted">No STO packages found.</td></tr>`}</table>
+      <p class="muted">${packages.length} result(s), max 500 shown.</p>
+    </div>
+  `, req.user));
+}));
+
+app.get("/sto-packages/add", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  res.send(layout("Add STO Packages", `
+    <h1>Add / Import STO Packages</h1>
+    <div class="actions"><a class="btn btn-secondary" href="/sto-packages">Back To STO Packages</a></div>
+    <br />
     <div class="card">
       <h3>Add / Import STO Packages</h3>
       <div class="grid" style="grid-template-columns: minmax(280px, 0.55fr) minmax(320px, 1fr); align-items:start;">
@@ -14491,11 +14530,6 @@ app.get("/sto-packages", requireAuth, requireJobContext, requirePermission("rfqs
           <div class="actions"><button type="submit">Import Packages</button></div>
         </form>
       </div>
-    </div>
-    <div class="card scroll">
-      <h3>Package List</h3>
-      <table><tr><th>STO Package</th><th>Package Due</th><th>Person Assigned</th><th>Spec</th><th>Area</th><th>Package Status</th><th>Test Type</th><th>Test PSIG</th><th>RFQs</th><th>RFQ Numbers</th><th>Actions</th></tr>${packageRows || `<tr><td colspan="11" class="muted">No STO packages found.</td></tr>`}</table>
-      <p class="muted">${packages.length} result(s), max 500 shown.</p>
     </div>
   `, req.user));
 }));
