@@ -14687,7 +14687,8 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
   const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
   const personAssigned = textValue(req.query.person_assigned);
   const status = String(req.query.status || "").trim();
-  const hideReceived = String(req.query.hide_received || "") === "1";
+  const showReceived = String(req.query.show_received || "") === "1";
+  const hideReceived = !showReceived;
   const where = ["sp.job_id = $1"];
   const params = [jobId];
   if (packageNo) {
@@ -14803,7 +14804,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
   if (personAssigned) filterParams.set("person_assigned", personAssigned);
   if (status) filterParams.set("status", status);
   const toggleReceivedParams = new URLSearchParams(filterParams);
-  if (!hideReceived) toggleReceivedParams.set("hide_received", "1");
+  if (hideReceived) toggleReceivedParams.set("show_received", "1");
   const clearHref = reportUrl;
   const toggleReceivedHref = `${reportUrl}${toggleReceivedParams.toString() ? `?${toggleReceivedParams.toString()}` : ""}`;
   const reportTitle = `${[job.plant_name, job.job_number].filter(Boolean).join(" - ") || "Job"} STO Package Report`;
@@ -14905,7 +14906,7 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
     </div>
     <div class="card report-filters">
       <form method="get" action="${reportUrl}" class="stack">
-        ${hideReceived ? `<input type="hidden" name="hide_received" value="1" />` : ""}
+        ${showReceived ? `<input type="hidden" name="show_received" value="1" />` : ""}
         <div class="grid-4">
           <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
           <div><label>Person Assigned</label><select name="person_assigned">${personAssignedOptions}</select></div>
@@ -14998,6 +14999,8 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
   const packageNo = normalizeStoPackageNumber(req.query.package_no || "");
   const personAssigned = textValue(req.query.person_assigned);
   const status = String(req.query.status || "").trim();
+  const showReceived = String(req.query.show_received || "") === "1";
+  const hideReceived = !showReceived;
   const where = ["sp.job_id = $1"];
   const params = [jobId];
   if (packageNo) {
@@ -15091,6 +15094,9 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
     left join receiving_status rs on rs.rfq_id = b.rfq_id
     order by b.sto_package_number, b.sto_package_due_date nulls last, b.rfq_no
   `, params)).rows;
+  if (hideReceived) {
+    rows = rows.filter((row) => String(row.display_status || row.status || "") !== "RECEIVED");
+  }
   const statusOptions = buildReportStatusOptions(rows, status);
   if (status) {
     rows = rows.filter((row) => String(row.display_status || row.status || "") === status);
@@ -15106,6 +15112,15 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
   const personAssignedOptions = [`<option value="">All People</option>`]
     .concat(assignedPeople.map((person) => `<option value="${escAttr(person.person_assigned)}" ${personAssigned === person.person_assigned ? "selected" : ""}>${esc(person.person_assigned)}</option>`))
     .join("");
+  const reportUrl = "/rfq/sto-packages";
+  const filterParams = new URLSearchParams();
+  if (packageNo) filterParams.set("package_no", packageNo);
+  if (personAssigned) filterParams.set("person_assigned", personAssigned);
+  if (status) filterParams.set("status", status);
+  const toggleReceivedParams = new URLSearchParams(filterParams);
+  if (hideReceived) toggleReceivedParams.set("show_received", "1");
+  const clearHref = reportUrl;
+  const toggleReceivedHref = `${reportUrl}${toggleReceivedParams.toString() ? `?${toggleReceivedParams.toString()}` : ""}`;
   const renderPoLinks = (value, fallbackText) => {
     const links = Array.isArray(value) ? value : (() => {
       try {
@@ -15145,11 +15160,12 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
     <h1>STO Package RFQ Report</h1>
     <div class="card">
       <form method="get" action="/rfq/sto-packages" class="stack">
+        ${showReceived ? `<input type="hidden" name="show_received" value="1" />` : ""}
         <div class="grid-4">
           <div><label>STO Package</label><input name="package_no" value="${esc(packageNo)}" /></div>
           <div><label>Person Assigned</label><select name="person_assigned">${personAssignedOptions}</select></div>
           <div><label>RFQ Status</label><select name="status">${statusOptions}</select></div>
-          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="/rfq/sto-packages">Clear</a><a class="btn btn-secondary" href="/public/sto-package-rfq-report/${jobId}" target="_blank" rel="noopener noreferrer">Public Print Link</a></div></div>
+          <div><label>&nbsp;</label><div class="actions"><button type="submit">Filter</button><a class="btn btn-secondary" href="${escAttr(clearHref)}">Clear</a><a class="btn btn-secondary" href="${escAttr(toggleReceivedHref)}">${hideReceived ? "Show Fully Received" : "Hide Fully Received"}</a><a class="btn btn-secondary" href="/public/sto-package-rfq-report/${jobId}" target="_blank" rel="noopener noreferrer">Public Print Link</a></div></div>
         </div>
       </form>
       <div class="scroll" style="margin-top:12px;">
