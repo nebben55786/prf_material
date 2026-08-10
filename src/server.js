@@ -14032,7 +14032,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const itemCode = String(req.query.item_code || "").trim();
   const vendorId = String(req.query.vendor_id || "").trim();
   const requestorName = String(req.query.requestor_name || "").trim();
-  const hideCancelledReceived = String(req.query.hide_cancelled_received || "") === "1";
+  const showCancelledReceived = String(req.query.show_cancelled_received || "") === "1";
+  const hideCancelledReceived = !showCancelledReceived;
   const [vendorsRes, requestorsRes] = await Promise.all([
     query("select id, name from vendors order by name"),
     query(`
@@ -14214,7 +14215,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   if (vendorId) filterParams.set("vendor_id", vendorId);
   if (requestorName) filterParams.set("requestor_name", requestorName);
   const toggleDoneParams = new URLSearchParams(filterParams);
-  if (!hideCancelledReceived) toggleDoneParams.set("hide_cancelled_received", "1");
+  if (hideCancelledReceived) toggleDoneParams.set("show_cancelled_received", "1");
   const toggleDoneHref = `/rfq${toggleDoneParams.toString() ? `?${toggleDoneParams.toString()}` : ""}`;
   const renderIssuedPoLinks = (value, fallbackText) => {
     const links = Array.isArray(value)
