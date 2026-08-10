@@ -354,18 +354,18 @@ function parseDimensionNumber(value) {
   let text = String(value).trim().toLowerCase();
   if (!text) return null;
   const unicodeFractions = {
-    "Â¼": " 1/4",
-    "Â½": " 1/2",
-    "Â¾": " 3/4",
-    "â…›": " 1/8",
-    "â…œ": " 3/8",
-    "â…": " 5/8",
-    "â…ž": " 7/8"
+    "\u00bc": " 1/4",
+    "\u00bd": " 1/2",
+    "\u00be": " 3/4",
+    "\u215b": " 1/8",
+    "\u215c": " 3/8",
+    "\u215d": " 5/8",
+    "\u215e": " 7/8"
   };
   text = text
-    .replace(/[Â¼Â½Â¾â…›â…œâ…â…ž]/g, (match) => unicodeFractions[match] || match)
+    .replace(/[\u00bc\u00bd\u00be\u215b\u215c\u215d\u215e]/g, (match) => unicodeFractions[match] || match)
     .replace(/,/g, "")
-    .replace(/[â€³"]/g, "")
+    .replace(/[\u2033"]/g, "")
     .replace(/\s+/g, " ")
     .trim();
   if (/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
@@ -2030,7 +2030,7 @@ function layout(title, body, user) {
             headers.forEach((header, headerIndex) => {
               const headerIndicator = header.querySelector(".sort-indicator");
               if (!headerIndicator) return;
-              headerIndicator.textContent = headerIndex === index ? (nextDir === "asc" ? "â†‘" : "â†“") : "";
+              headerIndicator.textContent = headerIndex === index ? (nextDir === "asc" ? " ^" : " v") : "";
             });
           });
         });
@@ -2228,7 +2228,7 @@ function nextSortDir(currentSort, currentDir, column) {
 
 function sortLabel(label, currentSort, currentDir, column) {
   if (currentSort !== column) return label;
-  return `${label} ${currentDir === "asc" ? "â†‘" : "â†“"}`;
+  return `${label} ${currentDir === "asc" ? "^" : "v"}`;
 }
 
 async function syncLegacyVendorContact(client, vendorId) {
@@ -2475,7 +2475,7 @@ function splitCombinedDimensionValue(value) {
   const text = String(value || "").trim();
   if (!text) return { primary: "", secondary: "" };
   const parts = text
-    .replace(/Ã—/g, "x")
+    .replace(/\u00d7/g, "x")
     .split(/\s*x\s*/i)
     .map((part) => part.trim())
     .filter(Boolean);
