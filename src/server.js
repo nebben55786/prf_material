@@ -18669,7 +18669,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
   `, req.user));
 });
 
-app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
+app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), asyncHandler(async (req, res) => {
   const poId = Number(req.params.id);
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
@@ -18838,7 +18838,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
     await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};mrr=${mrrNumber};lines=${postedCount}`);
   });
   res.redirect("/receive/by-po");
-});
+}));
 
 app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
