@@ -14302,7 +14302,7 @@ app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "e
     query("select id, name from vendors where is_active = true order by name")
   ]);
   const vendors = vendorsRes.rows;
-  const rfqStatusOptions = rfqStatuses.map((status) => `<option value="${status.value}" ${status.value === "SEND_FOR_QUOTES" ? "selected" : ""}>${esc(status.label)}</option>`).join("");
+  const rfqStatusOptions = rfqStatuses.map((status) => `<option value="${status.value}" ${status.value === "WAITING_ON_QUOTES" ? "selected" : ""}>${esc(status.label)}</option>`).join("");
   res.send(layout("Create RFQ", `
     <h1>Create RFQ</h1>
     <div class="card">
@@ -14363,8 +14363,8 @@ app.post("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "edit
   if (!dueDate) throw new Error("Due date is required.");
   const id = await withTransaction(async (client) => {
     const rfqNo = await getNextRfqNumber(client, jobId);
-    const requestedStatus = String(req.body.status || "SEND_FOR_QUOTES").trim();
-    const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "SEND_FOR_QUOTES";
+    const requestedStatus = String(req.body.status || "WAITING_ON_QUOTES").trim();
+    const status = rfqStatuses.some((row) => row.value === requestedStatus) ? requestedStatus : "WAITING_ON_QUOTES";
     const selectedVendorIds = parseSelectedIdList(req.body.vendor_ids);
     const insert = await client.query(
       "insert into rfqs (job_id, rfq_no, project_name, client_request_no, requestor_name, due_date, status) values ($1, $2, $3, $4, $5, $6, $7) returning id",
