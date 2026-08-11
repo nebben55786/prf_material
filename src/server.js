@@ -3920,6 +3920,67 @@ async function findOrCreateVendorByName(client, vendorName, jobId) {
   return insert.rows[0].id;
 }
 
+async function findCanonicalPurchaseOrderByNumber(client, jobId, poNo) {
+  const normalizedPoNo = String(poNo || "").trim();
+  if (!normalizedPoNo) return null;
+  return (await client.query(`
+    select
+      po.id,
+      po.job_id,
+      po.vendor_id,
+      po.rfq_id,
+      po.status,
+      coalesce(sum(r.qty_received), 0) as qty_received,
+      count(r.id) as receipt_count,
+      count(distinct pl.id) as line_count
+    from purchase_orders po
+    left join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+    left join receipts r on r.po_line_id = pl.id
+    where po.job_id = $1
+      and po.po_no = $2
+    group by po.id, po.job_id, po.vendor_id, po.rfq_id, po.status
+    order by
+      case when coalesce(sum(r.qty_received), 0) > 0 then 0 else 1 end,
+      count(r.id) desc,
+      count(distinct pl.id) desc,
+      po.id
+    limit 1
+  `, [jobId, normalizedPoNo])).rows[0] || null;
+}
+
+async function findExistingPoLine(client, poId, item, poLine) {
+  const normalizedPoLine = String(poLine || "").trim();
+  if (normalizedPoLine) {
+    const byLineNumber = (await client.query(`
+      select id
+      from po_lines
+      where po_id = $1
+        and coalesce(po_line, '') = $2
+      limit 1
+    `, [poId, normalizedPoLine])).rows[0];
+    if (byLineNumber) return byLineNumber;
+  }
+  return (await client.query(`
+    select id
+    from po_lines
+    where po_id = $1 and material_item_id = $2
+      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
+      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
+    limit 1
+  `, [poId, item.id, item.size_1 || "", item.size_2 || "", item.thk_1 || "", item.thk_2 || ""])).rows[0];
+}
+
+async function getRfqIdsForPo(client, poId) {
+  const rows = (await client.query(`
+    select distinct ri.rfq_id
+    from po_lines pl
+    join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+    where pl.po_id = $1
+      and ri.rfq_id is not null
+  `, [poId])).rows;
+  return rows.map((row) => Number(row.rfq_id)).filter((id) => Number.isFinite(id) && id > 0);
+}
+
 async function upsertRfqItemRow(client, rfqId, row, jobId, reservedCodes = new Set(), options = {}) {
   const preserveDuplicateRows = Boolean(options.preserveDuplicateRows);
   const initialItemCode = String(row.item_code || "").trim();
@@ -4006,7 +4067,7 @@ async function upsertPurchaseOrderRow(client, row, jobId) {
   const item = materialLookup.item;
   const materialItemId = item.id;
 
-  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
+  const poRow = await findCanonicalPurchaseOrderByNumber(client, jobId, poNo);
   let poId;
   let headerStatus = "updated";
   if (poRow) {
@@ -4062,14 +4123,7 @@ async function upsertPurchaseOrderRow(client, row, jobId) {
   const effectiveSize2 = item.size_2 || "";
   const effectiveThk1 = item.thk_1 || "";
   const effectiveThk2 = item.thk_2 || "";
-  const existingLine = (await client.query(`
-    select id
-    from po_lines
-    where po_id = $1 and material_item_id = $2
-      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
-      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
-    limit 1
-  `, [poId, materialItemId, effectiveSize1, effectiveSize2, effectiveThk1, effectiveThk2])).rows[0];
+  const existingLine = await findExistingPoLine(client, poId, item, poLine);
   if (existingLine) {
     await client.query(`
       update po_lines
@@ -4107,7 +4161,7 @@ async function upsertPurchaseOrderHeaderRow(client, row, jobId) {
   if (!vendorName) return { status: "skipped", errorCode: "missing_vendor", message: "Vendor name is required." };
 
   const vendorId = await findOrCreateVendorByName(client, vendorName, jobId);
-  const poRow = (await client.query("select id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
+  const poRow = await findCanonicalPurchaseOrderByNumber(client, jobId, poNo);
   if (poRow) {
     await client.query(`
       update purchase_orders
@@ -4170,7 +4224,7 @@ async function upsertPurchaseOrderLineRow(client, row, jobId) {
   const poId = Number(row.po_id || 0);
   const poRow = poId
     ? (await client.query("select id, job_id from purchase_orders where id = $1 and job_id = $2", [poId, jobId])).rows[0]
-    : (await client.query("select id, job_id from purchase_orders where job_id = $1 and po_no = $2 order by id desc limit 1", [jobId, poNo])).rows[0];
+    : await findCanonicalPurchaseOrderByNumber(client, jobId, poNo);
   if (!poRow) return { status: "skipped", errorCode: "missing_po_header", message: "PO header not found. Import or create the PO header first." };
 
   const materialLookup = await getMaterialItemForUse(client, itemCode, poRow.job_id);
@@ -4182,14 +4236,7 @@ async function upsertPurchaseOrderLineRow(client, row, jobId) {
   const effectiveSize2 = item.size_2 || "";
   const effectiveThk1 = item.thk_1 || "";
   const effectiveThk2 = item.thk_2 || "";
-  const existingLine = (await client.query(`
-    select id
-    from po_lines
-    where po_id = $1 and material_item_id = $2
-      and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
-      and coalesce(thk_1, '') = $5 and coalesce(thk_2, '') = $6
-    limit 1
-  `, [poRow.id, materialItemId, effectiveSize1, effectiveSize2, effectiveThk1, effectiveThk2])).rows[0];
+  const existingLine = await findExistingPoLine(client, poRow.id, item, poLine);
   if (existingLine) {
     await client.query(`
       update po_lines
@@ -5971,7 +6018,9 @@ async function ensureMrrForVendorCrate(client, { userId = null, fmrId = null, ve
   const description = `${vendor} pkg: ${crate}`;
   const effectivePoNumber = String(poNumber || "").trim() || await getPoNumberForVendorCrate(client, vendor, crate);
   const linkedPo = effectivePoNumber
-    ? (await client.query("select id, po_no from purchase_orders where po_no = $1 and ($2::bigint is null or job_id = $2::bigint) order by id desc limit 1", [effectivePoNumber, normalizedJobId])).rows[0]
+    ? (normalizedJobId
+      ? await findCanonicalPurchaseOrderByNumber(client, normalizedJobId, effectivePoNumber)
+      : (await client.query("select id, po_no from purchase_orders where po_no = $1 order by id desc limit 1", [effectivePoNumber])).rows[0])
     : null;
   const saveLinkedFmr = async (resolvedMrrNumber) => {
     if (!fmrId) return;
@@ -6617,9 +6666,9 @@ async function recalcRfqStatus(client, rfqId) {
         pl.qty_ordered,
         ${poLineReceivedQtySql("pl")} as qty_received,
         ${poLineAccountedQtySql("pl")} as qty_accounted
-      from purchase_orders po
-      join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
-      where po.rfq_id = $1 and po.job_id = $2
+      from po_lines pl
+      join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      where ri.rfq_id = $1 and pl.job_id = $2
     )
     select
       count(distinct rfq_item_id) filter (where rfq_item_id is not null) as issued_count,
@@ -17432,6 +17481,7 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
   const poNo = String(req.body.po_no || "").trim();
   const jobId = currentJobId(req);
   if (!vendorId) throw new Error("Select a vendor with awarded RFQ lines.");
+  if (!poNo) throw new Error("PO number is required.");
   await withTransaction(async (client) => {
     const rfq = (await client.query("select project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
     const awardTotals = (await client.query(`
@@ -17445,11 +17495,28 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
     const vendorAwardedCount = Number(awardTotals?.vendor_awarded_count || 0);
     if (totalCount === 0) throw new Error("Add RFQ items before creating a PO.");
     if (vendorAwardedCount <= 0) throw new Error("Selected vendor has no awarded RFQ lines.");
-    const poInsert = await client.query(
-      "insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, description, status, updated_at) values ($1, $2, $3, $4, $5, 'OPEN', now()) returning id",
-      [jobId, poNo, vendorId, rfqId, rfq?.project_name || ""]
-    );
-    const poId = poInsert.rows[0].id;
+    const existingPo = await findCanonicalPurchaseOrderByNumber(client, jobId, poNo);
+    let poId = 0;
+    if (existingPo) {
+      if (Number(existingPo.vendor_id) !== vendorId) {
+        throw new Error("That PO number already exists for a different vendor. Edit the existing PO instead of creating a duplicate.");
+      }
+      poId = Number(existingPo.id);
+      await client.query(`
+        update purchase_orders
+        set rfq_id = coalesce(rfq_id, $2),
+            description = case when coalesce(description, '') = '' then $3 else description end,
+            status = case when status in ('DRAFT', '') then 'OPEN' else status end,
+            updated_at = now()
+        where id = $1
+      `, [poId, rfqId, rfq?.project_name || ""]);
+    } else {
+      const poInsert = await client.query(
+        "insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, description, status, updated_at) values ($1, $2, $3, $4, $5, 'OPEN', now()) returning id",
+        [jobId, poNo, vendorId, rfqId, rfq?.project_name || ""]
+      );
+      poId = Number(poInsert.rows[0].id);
+    }
     const lines = await client.query(`
       select ri.id as rfq_item_id, ri.material_item_id, ri.po_line,
              coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code) as item_code,
@@ -17464,14 +17531,56 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
         and not exists (
           select 1
           from po_lines pl
-          join purchase_orders po on po.id = pl.po_id
-          where po.rfq_id = ri.rfq_id and po.job_id = $3 and pl.job_id = $3 and pl.rfq_item_id = ri.id
+          where pl.job_id = $3 and pl.rfq_item_id = ri.id
         )
     `, [rfqId, vendorId, jobId]);
     if (lines.rows.length === 0) throw new Error("Selected vendor has no unissued awarded lines on this RFQ.");
     for (const line of lines.rows) {
       const lineUnitPrice = line.unit_price === null || line.unit_price === undefined || String(line.unit_price).trim() === "" ? null : line.unit_price;
       const lineLeadDays = line.lead_days === null || line.lead_days === undefined || String(line.lead_days).trim() === "" ? null : num(line.lead_days);
+      const existingLine = await findExistingPoLine(client, poId, {
+        id: line.material_item_id,
+        size_1: line.size_1 || "",
+        size_2: line.size_2 || "",
+        thk_1: line.thk_1 || "",
+        thk_2: line.thk_2 || ""
+      }, line.po_line || "");
+      if (existingLine) {
+        await client.query(`
+          update po_lines
+          set rfq_item_id = coalesce(rfq_item_id, $2),
+              item_code_snapshot = $3,
+              description_snapshot = $4,
+              material_type_snapshot = $5,
+              uom_snapshot = $6,
+              po_line = $7,
+              size_1 = $8,
+              size_2 = $9,
+              thk_1 = $10,
+              thk_2 = $11,
+              qty_ordered = $12,
+              unit_price = $13,
+              lead_days = $14,
+              updated_at = now()
+          where id = $1
+        `, [
+          existingLine.id,
+          line.rfq_item_id,
+          line.item_code || "",
+          line.description || "",
+          line.material_type || "misc",
+          line.uom || "EA",
+          line.po_line || "",
+          line.size_1 || "",
+          line.size_2 || "",
+          line.thk_1 || "",
+          line.thk_2 || "",
+          line.qty,
+          lineUnitPrice,
+          lineLeadDays
+        ]);
+        continue;
+      }
       await client.query(`
         insert into po_lines (
           job_id, po_id, rfq_item_id, material_item_id, item_code_snapshot, description_snapshot,
@@ -17510,6 +17619,7 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
       `, [rfqId, jobId]);
       await refreshRfqEtaFromPos(client, rfqId, jobId);
     }
+    await recalcPoStatus(client, poId);
     await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
   });
@@ -18380,12 +18490,15 @@ app.get("/po/new/manual", requireAuth, requireJobContext, requirePermission("pos
 app.post("/po/add", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    const poNo = String(req.body.po_no || "").trim();
+    const existingPo = await findCanonicalPurchaseOrderByNumber(client, jobId, poNo);
+    if (existingPo) throw new Error("That PO number already exists. Edit the existing PO instead of creating a duplicate.");
     const result = await client.query(`
       insert into purchase_orders (job_id, po_no, vendor_id, rfq_id, description, status, updated_at)
       values ($1, $2, $3, null, $4, $5, now())
       returning id
-    `, [jobId, String(req.body.po_no || "").trim(), Number(req.body.vendor_id), String(req.body.description || "").trim(), req.body.status || "OPEN"]);
-    await auditLog(client, req.user.id, "create", "purchase_order", result.rows[0].id, String(req.body.po_no || "").trim());
+    `, [jobId, poNo, Number(req.body.vendor_id), String(req.body.description || "").trim(), req.body.status || "OPEN"]);
+    await auditLog(client, req.user.id, "create", "purchase_order", result.rows[0].id, poNo);
   });
   res.redirect("/po");
 });
@@ -18834,7 +18947,11 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
     }
     if (postedCount === 0) throw new Error("Enter a received quantity on at least one editable PO line.");
     await recalcPoStatus(client, poId);
-    if (po?.rfq_id) await recalcRfqStatus(client, po.rfq_id);
+    const rfqIds = await getRfqIdsForPo(client, poId);
+    if (po?.rfq_id) rfqIds.push(Number(po.rfq_id));
+    for (const linkedRfqId of Array.from(new Set(rfqIds)).filter(Boolean)) {
+      await recalcRfqStatus(client, linkedRfqId);
+    }
     await auditLog(client, req.user.id, "create", "receipt", poId, `po=${poId};mrr=${mrrNumber};lines=${postedCount}`);
   });
   res.redirect("/receive/by-po");
@@ -18924,13 +19041,23 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
 app.post("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    const poNo = String(req.body.po_no || "").trim();
+    const duplicate = await client.query(`
+      select id
+      from purchase_orders
+      where job_id = $1
+        and po_no = $2
+        and id <> $3
+      limit 1
+    `, [jobId, poNo, req.params.id]);
+    if (duplicate.rows[0]) throw new Error("That PO number already exists on another PO. Merge or delete the duplicate before renaming.");
     const update = await client.query(`
       update purchase_orders
       set po_no = $2, vendor_id = $3, status = $4, description = $5, updated_at = now()
       where id = $1 and job_id = $6 and extract(epoch from updated_at)::text = $7
-    `, [req.params.id, req.body.po_no?.trim(), Number(req.body.vendor_id), req.body.status || "OPEN", String(req.body.description || "").trim(), jobId, req.body.updated_token || ""]);
+    `, [req.params.id, poNo, Number(req.body.vendor_id), req.body.status || "OPEN", String(req.body.description || "").trim(), jobId, req.body.updated_token || ""]);
     if (update.rowCount === 0) throw new Error("This PO was modified by another user. Refresh and try again.");
-    await auditLog(client, req.user.id, "update", "purchase_order", req.params.id, req.body.po_no?.trim() || "");
+    await auditLog(client, req.user.id, "update", "purchase_order", req.params.id, poNo);
   });
   res.redirect("/po");
 });
@@ -18939,10 +19066,12 @@ app.post("/po/:id/delete", requireAuth, requireJobContext, requirePermission("po
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const po = (await client.query("select rfq_id from purchase_orders where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const rfqIds = await getRfqIdsForPo(client, req.params.id);
+    if (po?.rfq_id) rfqIds.push(Number(po.rfq_id));
     await client.query("delete from purchase_orders where id = $1 and job_id = $2", [req.params.id, jobId]);
-    if (po?.rfq_id) {
-      await refreshRfqEtaFromPos(client, po.rfq_id, jobId);
-      await recalcRfqStatus(client, po.rfq_id);
+    for (const linkedRfqId of Array.from(new Set(rfqIds)).filter(Boolean)) {
+      await refreshRfqEtaFromPos(client, linkedRfqId, jobId);
+      await recalcRfqStatus(client, linkedRfqId);
     }
     await auditLog(client, req.user.id, "delete", "purchase_order", req.params.id, "");
   });
@@ -19007,13 +19136,14 @@ app.post("/po-line/:id/delete", requireAuth, requireJobContext, requirePermissio
   await withTransaction(async (client) => {
     const line = (await client.query(`
       select pl.id, pl.po_id, coalesce(pl.po_line, '') as po_line, coalesce(mi.item_code, '') as item_code,
-             po.rfq_id, coalesce(sum(r.qty_received), 0) as received_qty
+             ri.rfq_id, coalesce(sum(r.qty_received), 0) as received_qty
       from po_lines pl
       join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
       join material_items mi on mi.id = pl.material_item_id
+      left join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
       left join receipts r on r.po_line_id = pl.id
       where pl.id = $1 and pl.job_id = $2
-      group by pl.id, pl.po_id, pl.po_line, mi.item_code, po.rfq_id
+      group by pl.id, pl.po_id, pl.po_line, mi.item_code, ri.rfq_id
     `, [req.params.id, jobId])).rows[0];
     if (!line) throw new Error("PO line not found.");
     poId = Number(line.po_id);
@@ -19180,7 +19310,7 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
   }
   const po = mrr.app_po_id
     ? (await query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [mrr.app_po_id, jobId])).rows[0]
-    : (mrr.po_number ? (await query("select id, po_no from purchase_orders where po_no = $1 and job_id = $2 order by id desc limit 1", [mrr.po_number, jobId])).rows[0] : null);
+    : (mrr.po_number ? await findCanonicalPurchaseOrderByNumber(pool, jobId, mrr.po_number) : null);
   const warehouseOptions = await getWarehouseOptions(jobId);
   const locationMap = await getWarehouseLocationMap(jobId);
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
