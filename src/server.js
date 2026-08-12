@@ -1799,6 +1799,17 @@ function layout(title, body, user) {
         const vendorInput = targetForm.querySelector('input[name="vendor_id"]');
         if (!poInput || !vendorInput) return false;
         const cleanPoNumber = String(poNumber).trim();
+        const existingPoUsage = (() => {
+          try {
+            return JSON.parse(button?.dataset?.existingPoUsage || "{}");
+          } catch {
+            return {};
+          }
+        })();
+        const usage = existingPoUsage[cleanPoNumber.toLowerCase()];
+        if (usage && !window.confirm("PO " + cleanPoNumber + " already exists" + (usage.rfqs ? " on " + usage.rfqs : "") + ". Use this same PO for this RFQ too?")) {
+          return false;
+        }
         poInput.value = cleanPoNumber;
         if (defaultPoInput) defaultPoInput.value = cleanPoNumber;
         vendorInput.value = vendorSelect.value;
@@ -3952,7 +3963,7 @@ async function findExistingPoLine(client, poId, item, poLine) {
   const normalizedPoLine = String(poLine || "").trim();
   if (normalizedPoLine) {
     const byLineNumber = (await client.query(`
-      select id
+      select id, rfq_item_id
       from po_lines
       where po_id = $1
         and coalesce(po_line, '') = $2
@@ -3961,7 +3972,7 @@ async function findExistingPoLine(client, poId, item, poLine) {
     if (byLineNumber) return byLineNumber;
   }
   return (await client.query(`
-    select id
+    select id, rfq_item_id
     from po_lines
     where po_id = $1 and material_item_id = $2
       and coalesce(size_1, '') = $3 and coalesce(size_2, '') = $4
@@ -6766,7 +6777,11 @@ async function recalcPoStatus(client, poId) {
         updated_at = now()
     where id = $1
   `, [poId, nextStatus]);
-  if (po.rfq_id) await refreshRfqEtaFromPos(client, po.rfq_id, po.job_id);
+  const rfqIds = await getRfqIdsForPo(client, poId);
+  if (po.rfq_id) rfqIds.push(Number(po.rfq_id));
+  for (const linkedRfqId of Array.from(new Set(rfqIds)).filter(Boolean)) {
+    await refreshRfqEtaFromPos(client, linkedRfqId, po.job_id);
+  }
 }
 
 async function refreshRfqEtaFromPos(client, rfqId, jobId) {
@@ -6775,8 +6790,9 @@ async function refreshRfqEtaFromPos(client, rfqId, jobId) {
   if (!rfq || rfq.eta_date_override) return;
   const eta = (await client.query(`
     select max(eta.eta_date) as eta_date
-    from purchase_orders po
-    join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+    from po_lines pl
+    join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
+    join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
     cross join lateral (
       select
         coalesce(po.issued_at, po.created_at)::date as base_date,
@@ -6796,8 +6812,8 @@ async function refreshRfqEtaFromPos(client, rfqId, jobId) {
           where extract(isodow from counted.day) < 6
         ) >= calc.lead_days
     ) eta
-    where po.rfq_id = $1
-      and po.job_id = $2
+    where ri.rfq_id = $1
+      and pl.job_id = $2
       and po.status <> 'CANCELLED'
       and pl.lead_days is not null
   `, [rfqId, jobId])).rows[0]?.eta_date || null;
@@ -14103,8 +14119,10 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       or exists (
         select 1
         from purchase_orders po_filter
+        join po_lines pl_filter on pl_filter.po_id = po_filter.id and pl_filter.job_id = po_filter.job_id
+        join rfq_items ri_filter on ri_filter.id = pl_filter.rfq_item_id and ri_filter.job_id = pl_filter.job_id
         where po_filter.job_id = r.job_id
-          and po_filter.rfq_id = r.id
+          and ri_filter.rfq_id = r.id
           and coalesce(po_filter.po_no, '') ilike $${params.length}
       )
     )`);
@@ -14186,12 +14204,14 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     ),
     issued_pos as (
       select
-        po.rfq_id,
+        ri.rfq_id,
         string_agg(distinct po.po_no, ', ' order by po.po_no) as issued_po_refs,
-        jsonb_agg(jsonb_build_object('id', po.id, 'po_no', po.po_no) order by po.po_no) as issued_po_links
-      from purchase_orders po
-      join base_rfqs b on b.id = po.rfq_id and b.job_id = po.job_id
-      group by po.rfq_id
+        jsonb_agg(distinct jsonb_build_object('id', po.id, 'po_no', po.po_no)) as issued_po_links
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
+      join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      join base_rfqs b on b.id = ri.rfq_id and b.job_id = ri.job_id
+      group by ri.rfq_id
     ),
     item_counts as (
       select
@@ -14204,18 +14224,19 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     ),
     receiving_status as (
       select
-        po.rfq_id,
+        ri.rfq_id,
         count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) > 0) as received_item_count,
         count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) >= pl.qty_ordered) as fully_received_item_count
-      from purchase_orders po
-      join base_rfqs b on b.id = po.rfq_id and b.job_id = po.job_id
-      join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
+      join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      join base_rfqs b on b.id = ri.rfq_id and b.job_id = ri.job_id
       left join (
         select po_line_id, sum(qty_received) as qty_received
         from receipts
         group by po_line_id
       ) rcv on rcv.po_line_id = pl.id
-      group by po.rfq_id
+      group by ri.rfq_id
     )
     select
       b.*,
@@ -14787,7 +14808,9 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
       select b.rfq_id,
              string_agg(distinct po.po_no, ', ' order by po.po_no) as issued_po_refs
       from base b
-      join purchase_orders po on po.rfq_id = b.rfq_id and po.job_id = b.job_id
+      join rfq_items ri on ri.rfq_id = b.rfq_id and ri.job_id = b.job_id
+      join po_lines pl on pl.rfq_item_id = ri.id and pl.job_id = ri.job_id
+      join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
       where coalesce(po.po_no, '') <> ''
       group by b.rfq_id
     ),
@@ -14804,8 +14827,8 @@ app.get("/public/sto-package-rfq-report/:jobId", asyncHandler(async (req, res) =
              count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) > 0) as received_item_count,
              count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) >= pl.qty_ordered) as fully_received_item_count
       from base b
-      join purchase_orders po on po.rfq_id = b.rfq_id and po.job_id = b.job_id
-      join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+      join rfq_items ri on ri.rfq_id = b.rfq_id and ri.job_id = b.job_id
+      join po_lines pl on pl.rfq_item_id = ri.id and pl.job_id = ri.job_id
       left join (
         select po_line_id, sum(qty_received) as qty_received
         from receipts
@@ -15100,7 +15123,9 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
              string_agg(distinct po.po_no, ', ' order by po.po_no) as issued_po_refs,
              jsonb_agg(distinct jsonb_build_object('id', po.id, 'po_no', po.po_no)) as issued_po_links
       from base b
-      join purchase_orders po on po.rfq_id = b.rfq_id and po.job_id = b.job_id
+      join rfq_items ri on ri.rfq_id = b.rfq_id and ri.job_id = b.job_id
+      join po_lines pl on pl.rfq_item_id = ri.id and pl.job_id = ri.job_id
+      join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
       where coalesce(po.po_no, '') <> ''
       group by b.rfq_id
     ),
@@ -15117,8 +15142,8 @@ app.get("/rfq/sto-packages", requireAuth, requireJobContext, requirePermission("
              count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) > 0) as received_item_count,
              count(distinct pl.rfq_item_id) filter (where pl.rfq_item_id is not null and coalesce(rcv.qty_received, 0) >= pl.qty_ordered) as fully_received_item_count
       from base b
-      join purchase_orders po on po.rfq_id = b.rfq_id and po.job_id = b.job_id
-      join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+      join rfq_items ri on ri.rfq_id = b.rfq_id and ri.job_id = b.job_id
+      join po_lines pl on pl.rfq_item_id = ri.id and pl.job_id = ri.job_id
       left join (
         select po_line_id, sum(qty_received) as qty_received
         from receipts
@@ -15348,7 +15373,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
     return;
   }
-  const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes, quoteFilesRes, stoPackagesRes, availableStoPackagesRes] = await Promise.all([
+  const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes, quoteFilesRes, stoPackagesRes, availableStoPackagesRes, poUsageRes] = await Promise.all([
     query(`
       select ri.id, ri.po_line, ri.qty, ri.notes, coalesce(nullif(ri.spec, ''), item_specs.specs, '') as spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
              ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
@@ -15382,15 +15407,15 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     query(`
       select
         count(distinct po.id) as po_count,
-        count(distinct issued_ri.id) as issued_item_count,
-        count(distinct issued_ri.id) filter (where ${poLineReceivedQtySql("pl")} > 0) as received_item_count,
-        count(distinct issued_ri.id) filter (where ${poLineAccountedQtySql("pl")} >= pl.qty_ordered) as fully_received_item_count,
+        count(distinct pl.rfq_item_id) as issued_item_count,
+        count(distinct ri.id) filter (where ${poLineReceivedQtySql("pl")} > 0) as received_item_count,
+        count(distinct ri.id) filter (where ${poLineAccountedQtySql("pl")} >= pl.qty_ordered) as fully_received_item_count,
         string_agg(distinct po.po_no, ', ' order by po.po_no) as po_refs,
         min(po.id) as first_po_id
-      from purchase_orders po
-      left join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id and pl.rfq_item_id is not null
-      left join rfq_items issued_ri on issued_ri.id = pl.rfq_item_id and issued_ri.rfq_id = po.rfq_id and issued_ri.job_id = po.job_id
-      where po.rfq_id = $1 and po.job_id = $2
+      from rfq_items ri
+      left join po_lines pl on pl.rfq_item_id = ri.id and pl.job_id = ri.job_id
+      left join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
+      where ri.rfq_id = $1 and ri.job_id = $2
     `, [rfqId, jobId]),
     query(`
       select ib.id, ib.entity_type, ib.status, ib.inserted_count, ib.updated_count, ib.skipped_count, ib.created_at,
@@ -15412,7 +15437,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       select pl.rfq_item_id, string_agg(distinct po.po_no, ', ' order by po.po_no) as po_refs
       from po_lines pl
       join purchase_orders po on po.id = pl.po_id
-      where po.rfq_id = $1 and po.job_id = $2 and pl.job_id = $2 and pl.rfq_item_id is not null
+      join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      where ri.rfq_id = $1 and po.job_id = $2 and pl.job_id = $2 and pl.rfq_item_id is not null
       group by pl.rfq_item_id
     `, [rfqId, jobId]),
     query(`
@@ -15446,6 +15472,20 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         )
       order by sp.sto_package_number
       limit 1000
+    `, [jobId, rfqId]),
+    query(`
+      select
+        lower(po.po_no) as po_key,
+        po.po_no,
+        po.vendor_id,
+        string_agg(distinct r.rfq_no, ', ' order by r.rfq_no) as rfqs
+      from purchase_orders po
+      left join po_lines pl on pl.po_id = po.id and pl.job_id = po.job_id
+      left join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      left join rfqs r on r.id = ri.rfq_id and r.job_id = ri.job_id and r.id <> $2
+      where po.job_id = $1
+        and coalesce(po.po_no, '') <> ''
+      group by lower(po.po_no), po.po_no, po.vendor_id
     `, [jobId, rfqId])
   ]);
 
@@ -15463,6 +15503,14 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   const quoteFiles = quoteFilesRes.rows;
   const stoPackages = stoPackagesRes.rows;
   const availableStoPackages = availableStoPackagesRes.rows;
+  const existingPoUsage = Object.fromEntries(poUsageRes.rows.map((row) => [
+    String(row.po_key || "").trim(),
+    {
+      poNo: row.po_no || "",
+      vendorId: Number(row.vendor_id || 0),
+      rfqs: row.rfqs || ""
+    }
+  ]).filter(([key]) => key));
   const materialItems = materialItemsRes.rows;
   const allQuotes = quotesRes.rows;
   const vendorNameMap = new Map(vendors.map((vendor) => [Number(vendor.id), vendor.name]));
@@ -15514,6 +15562,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     })
     .sort((left, right) => left.vendorName.localeCompare(right.vendorName));
   const activeVendor = selectedVendors.find((vendor) => String(vendor.vendor_id) === activeQuoteVendorId) || null;
+  const existingPoUsageJson = escAttr(JSON.stringify(existingPoUsage));
   const quoteInputsDisabledAttr = activeQuoteVendorId ? "" : " disabled";
   const quoteUploadPathPrefix = activeVendor
     ? [
@@ -15774,7 +15823,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     </div>`;
   const poAwardButtons = awardedVendorGroups
     .filter((group) => group.unissuedCount > 0)
-    .map((group) => `<button type="button" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}-${group.vendorId}', 'rfq-po-create-form-${rfqId}-${group.vendorId}', 'rfq-po-number-${rfqId}')">Create ${esc(group.vendorName)} PO</button>`)
+    .map((group) => `<button type="button" data-existing-po-usage="${existingPoUsageJson}" onclick="return promptPoNumber(this, 'rfq-awarded-vendor-${rfqId}-${group.vendorId}', 'rfq-po-create-form-${rfqId}-${group.vendorId}', 'rfq-po-number-${rfqId}')">Create ${esc(group.vendorName)} PO</button>`)
     .join("");
   const poAwardAction = allItemsIssuedToPo && poCount > 0
     ? `<a class="btn btn-secondary" href="${poCount === 1 && firstIssuedPoId ? `/po/${firstIssuedPoId}/edit` : `/po?rfq_no=${encodeURIComponent(rfq.rfq_no || "")}`}">${poCount > 1 ? "Edit POs" : "Edit PO"}</a>`
@@ -17452,8 +17501,8 @@ app.post("/rfq/:id/award/clear", requireAuth, requireJobContext, requirePermissi
     const issued = await client.query(`
       select 1
       from po_lines pl
-      join purchase_orders po on po.id = pl.po_id
-      where po.rfq_id = $1 and po.job_id = $2 and pl.job_id = $2
+      join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      where ri.rfq_id = $1 and pl.job_id = $2
       limit 1
     `, [rfqId, jobId]);
     if (issued.rows[0]) throw new Error("Cannot clear the RFQ award after a PO has been created.");
@@ -17546,6 +17595,10 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
         thk_2: line.thk_2 || ""
       }, line.po_line || "");
       if (existingLine) {
+        const linkedRfqItemId = Number(existingLine.rfq_item_id || 0);
+        if (linkedRfqItemId && linkedRfqItemId !== Number(line.rfq_item_id)) {
+          throw new Error(`PO ${poNo} line ${line.po_line || line.item_code || existingLine.id} is already linked to another RFQ item. Choose the correct PO number or use a different PO line number.`);
+        }
         await client.query(`
           update po_lines
           set rfq_item_id = coalesce(rfq_item_id, $2),
@@ -17612,8 +17665,10 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
         update rfqs
         set po_number = coalesce((
           select string_agg(distinct po.po_no, ', ' order by po.po_no)
-          from purchase_orders po
-          where po.rfq_id = $1 and po.job_id = $2 and coalesce(po.po_no, '') <> ''
+          from po_lines pl
+          join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
+          join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+          where ri.rfq_id = $1 and pl.job_id = $2 and coalesce(po.po_no, '') <> ''
         ), po_number)
         where id = $1 and job_id = $2
       `, [rfqId, jobId]);
@@ -18139,18 +18194,32 @@ app.get("/po", requireAuth, requireJobContext, requirePermission("pos", "view"),
   const where = ["po.job_id = $1"];
   const params = [jobId];
   if (poNo) { params.push(`%${poNo}%`); where.push(`po.po_no ilike $${params.length}`); }
-  if (rfqNo) { params.push(`%${rfqNo}%`); where.push(`r.rfq_no ilike $${params.length}`); }
+  if (rfqNo) { params.push(`%${rfqNo}%`); where.push(`exists (
+    select 1
+    from po_lines pl_filter
+    join rfq_items ri_filter on ri_filter.id = pl_filter.rfq_item_id and ri_filter.job_id = pl_filter.job_id
+    join rfqs r_filter on r_filter.id = ri_filter.rfq_id and r_filter.job_id = ri_filter.job_id
+    where pl_filter.po_id = po.id
+      and pl_filter.job_id = po.job_id
+      and r_filter.rfq_no ilike $${params.length}
+  )`); }
   if (vendorId) { params.push(Number(vendorId)); where.push(`po.vendor_id = $${params.length}`); }
   if (status) { params.push(status); where.push(`po.status = $${params.length}`); }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const pos = (await query(`
         select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
-               v.name as vendor, coalesce(r.rfq_no, '') as rfq_no, coalesce(po.description, '') as description, coalesce(po.vendor_contact, '') as vendor_contact,
+               v.name as vendor, coalesce(rfq_refs.rfq_refs, '') as rfq_no, coalesce(po.description, '') as description, coalesce(po.vendor_contact, '') as vendor_contact,
                coalesce(po.freight_terms, '') as freight_terms, coalesce(po.ship_to, '') as ship_to, coalesce(po.buyer_name, '') as buyer_name,
                coalesce(open_counts.open_items, 0) as open_items
     from purchase_orders po
     join vendors v on v.id = po.vendor_id
-    left join rfqs r on r.id = po.rfq_id
+    left join (
+      select pl.po_id, string_agg(distinct r.rfq_no, ', ' order by r.rfq_no) as rfq_refs
+      from po_lines pl
+      join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      join rfqs r on r.id = ri.rfq_id and r.job_id = ri.job_id
+      group by pl.po_id
+    ) rfq_refs on rfq_refs.po_id = po.id
     left join (
       select
         pl.po_id,
@@ -18962,9 +19031,15 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
   const [po, vendors, poLines] = await Promise.all([
     query(`
       select po.id, po.po_no, po.vendor_id, po.status, po.created_at, extract(epoch from po.updated_at)::text as updated_token,
-             coalesce(po.description, '') as description, coalesce(r.rfq_no, '') as rfq_no
+             coalesce(po.description, '') as description, coalesce(rfq_refs.rfq_refs, '') as rfq_no
       from purchase_orders po
-      left join rfqs r on r.id = po.rfq_id
+      left join (
+        select pl.po_id, string_agg(distinct r.rfq_no, ', ' order by r.rfq_no) as rfq_refs
+        from po_lines pl
+        join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+        join rfqs r on r.id = ri.rfq_id and r.job_id = ri.job_id
+        group by pl.po_id
+      ) rfq_refs on rfq_refs.po_id = po.id
       where po.id = $1
         and po.job_id = $2
     `, [req.params.id, jobId]),
