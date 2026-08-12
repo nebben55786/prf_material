@@ -15546,7 +15546,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
   }
   const poRefMap = new Map(poRefsRes.rows.map((row) => [Number(row.rfq_item_id), row.po_refs]));
   const allItemsIssuedToPo = items.length > 0 && issuedItemCount >= items.length;
-  const headerPoNumber = issuedPoRefs || rfq.po_number || "";
+  const headerPoNumber = rfq.po_number || "";
   const displayRfqStatus = ["CANCELLED", "ON_HOLD"].includes(rfq.status)
     ? rfq.status
     : (items.length > 0 && fullyReceivedItemCount >= items.length
