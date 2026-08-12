@@ -14099,6 +14099,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   const requestorName = String(req.query.requestor_name || "").trim();
   const showCancelledReceived = String(req.query.show_cancelled_received || "") === "1";
   const hideCancelledReceived = !showCancelledReceived;
+  const hidePurchased = String(req.query.hide_purchased || "") === "1";
   const [vendorsRes, requestorsRes] = await Promise.all([
     query("select id, name from vendors order by name"),
     query(`
@@ -14268,6 +14269,9 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   if (hideCancelledReceived) {
     rfqs = rfqs.filter((rfq) => !["CANCELLED", "RECEIVED"].includes(String(rfq.display_status || rfq.status || "")));
   }
+  if (hidePurchased) {
+    rfqs = rfqs.filter((rfq) => String(rfq.display_status || rfq.status || "") !== "PURCHASED");
+  }
   const vendorOptions = [`<option value="">All Vendors</option>`]
     .concat(vendors.map((vendor) => `<option value="${vendor.id}" ${String(vendor.id) === vendorId ? "selected" : ""}>${esc(vendor.name)}</option>`))
     .join("");
@@ -14284,8 +14288,14 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
   if (itemCode) filterParams.set("item_code", itemCode);
   if (vendorId) filterParams.set("vendor_id", vendorId);
   if (requestorName) filterParams.set("requestor_name", requestorName);
+  if (hidePurchased) filterParams.set("hide_purchased", "1");
+  const togglePurchasedParams = new URLSearchParams(filterParams);
+  if (hidePurchased) togglePurchasedParams.delete("hide_purchased");
+  else togglePurchasedParams.set("hide_purchased", "1");
+  const togglePurchasedHref = `/rfq${togglePurchasedParams.toString() ? `?${togglePurchasedParams.toString()}` : ""}`;
   const toggleDoneParams = new URLSearchParams(filterParams);
   if (hideCancelledReceived) toggleDoneParams.set("show_cancelled_received", "1");
+  else toggleDoneParams.delete("show_cancelled_received");
   const toggleDoneHref = `/rfq${toggleDoneParams.toString() ? `?${toggleDoneParams.toString()}` : ""}`;
   const renderIssuedPoLinks = (value, fallbackText) => {
     const links = Array.isArray(value)
@@ -14354,6 +14364,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
           <a class="btn btn-primary" href="/rfq/new">Create RFQ</a>
           <span class="muted">${rfqs.length} result(s), max 300 shown</span>
           <span style="margin-left:auto;"></span>
+          <a class="btn btn-secondary" href="${escAttr(togglePurchasedHref)}">${hidePurchased ? "Show Purchased" : "Hide Purchased"}</a>
           <a class="btn btn-secondary" href="${escAttr(toggleDoneHref)}">${hideCancelledReceived ? "Show Cancelled / Received" : "Hide Cancelled / Received"}</a>
         </div>
       </form>
