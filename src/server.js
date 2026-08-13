@@ -17330,7 +17330,6 @@ app.post("/rfq/:id/quotes/import", requireAuth, requireJobContext, requirePermis
       else insertedCount += 1;
     }
     await updateImportBatch(client, batchId, { insertedCount, updatedCount, skippedCount });
-    await recalcRfqStatus(client, rfqId);
     await auditLog(client, req.user.id, "import", "quotes", rfqId, `rows=${rows.length};batch=${batchId}`);
     return batchId;
   });
@@ -18100,7 +18099,6 @@ app.post("/quotes", requireAuth, requireJobContext, requirePermission("rfqs", "e
         jobId
       });
     await auditLog(client, req.user.id, "upsert", "quote", req.body.rfq_item_id, `vendor=${req.body.vendor_id}`);
-    await recalcRfqStatus(client, item.rfq_id);
   });
   res.redirect(`/rfq/${req.body.rfq_id}?vendor_tab_id=${encodeURIComponent(String(req.body.vendor_id || ""))}`);
 }));
@@ -18191,7 +18189,6 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermissi
       }
       await auditLog(client, req.user.id, unitPriceRaw ? "upsert" : "update", unitPriceRaw ? "quote" : "rfq_item", item.id, `vendor=${vendorId}`);
     }
-    await recalcRfqStatus(client, rfqId);
   });
   res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(vendorId))}`);
 }));
