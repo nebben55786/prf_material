@@ -7619,14 +7619,14 @@ app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
       <td>${esc(job.job_number)}</td>
       <td>${esc(job.plant_name || "")}</td>
       <td>${esc(job.performance_job_number || "")}</td>
-      <td>${job.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>${job.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Archived</span>`}</td>
       <td>
         ${job.is_active ? `
           <form method="post" action="/jobs/select">
             <input type="hidden" name="job_id" value="${job.id}" />
             <button type="submit">Open Job</button>
           </form>
-        ` : `<span class="muted">Inactive job</span>`}
+        ` : `<span class="muted">Archived job</span>`}
       </td>
     </tr>
   `).join("");
@@ -8262,7 +8262,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
       <td>${esc(job.job_number)}</td>
       <td>${esc(job.plant_name || "")}</td>
       <td>${esc(job.performance_job_number || "")}</td>
-      <td>${job.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
+      <td>${job.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Archived</span>`}</td>
       <td>${esc(formatShortDateTime(job.created_at))}</td>
       <td>
         ${isAdminRole(req.user) ? `
@@ -8275,7 +8275,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
             </div>
             <div class="actions">
               <button type="submit">Save Job</button>
-              <button class="${job.is_active ? "btn btn-danger" : "btn btn-primary"}" type="submit" formaction="/settings/jobs/${job.id}/toggle">${job.is_active ? "Deactivate" : "Activate"}</button>
+              <button class="${job.is_active ? "btn btn-danger" : "btn btn-primary"}" type="submit" formaction="/settings/jobs/${job.id}/toggle">${job.is_active ? "Archive Job" : "Restore Job"}</button>
             </div>
           </form>
         ` : `${currentJob && Number(currentJob.id) === Number(job.id) ? `<span class="chip">Current</span>` : `<span class="muted">Assigned by admin</span>`}`}
@@ -8291,7 +8291,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
     </div>
     <div class="card">
       <h3>Jobs</h3>
-      <div class="muted">Each job now runs as its own working area. Users can be assigned to one or more jobs, and admins can switch between them after login.</div>
+      <div class="muted">Each job runs as its own working area. Archive finished jobs to remove them from normal job selection while keeping their records available here.</div>
       ${isAdminRole(req.user) ? `
         <form method="post" action="/settings/jobs/add" class="stack" style="margin-top:12px;">
           <input type="hidden" name="return_to" value="/settings/job-setup" />
@@ -9024,9 +9024,15 @@ app.post("/settings/jobs/:id/toggle", requireAuth, requireRole(adminEquivalentRo
   await withTransaction(async (client) => {
     const current = (await client.query("select id, job_number, is_active from jobs where id = $1", [jobId])).rows[0];
     if (!current) throw new Error("Job not found.");
-    await client.query("update jobs set is_active = $2, updated_at = now() where id = $1", [jobId, !current.is_active]);
-    await auditLog(client, req.user.id, !current.is_active ? "activate" : "deactivate", "job", jobId, current.job_number);
+    const nextState = !current.is_active;
+    if (!nextState) {
+      const activeJobCount = Number((await client.query("select count(*) from jobs where is_active = true")).rows[0].count);
+      if (activeJobCount <= 1) throw new Error("At least one active job is required. Add or restore another job before archiving this one.");
+    }
+    await client.query("update jobs set is_active = $2, updated_at = now() where id = $1", [jobId, nextState]);
+    await auditLog(client, req.user.id, nextState ? "restore" : "archive", "job", jobId, current.job_number);
   });
+  authContextCache.clear();
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 }));
 
