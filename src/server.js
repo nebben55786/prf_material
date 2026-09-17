@@ -10,6 +10,7 @@ import cookieParser from "cookie-parser";
 import multer from "multer";
 import bcrypt from "bcryptjs";
 import XLSX from "xlsx";
+import { mrrScanMaxBytes, mrrScanFilename, mrrScanPrefix, isMrrScanPath, verifyMrrScan } from "./mrr-scans.js";
 import { initDb, query, withTransaction, auditLog, vendorCategories, setVendorCategories, permissionMatrix, setPermissionMatrix, pool } from "./db.js";
 
 const app = express();
@@ -7507,6 +7508,17 @@ app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalent
     ) ranked
     order by job_number, rfq_no, vendor_name, quote_sequence, id
   `)).rows;
+  const mrrScans = (await query(`
+    select m.id, m.mrr_number, m.vendor_name, coalesce(j.job_number, '') as job_number,
+           m.scanned_pdf_pathname as blob_pathname, m.scanned_pdf_size_bytes as size_bytes,
+           m.scanned_pdf_uploaded_at as created_at, 'application/pdf' as content_type,
+           'mrr_scan' as source
+    from mrr_logs m
+    left join jobs j on j.id = m.job_id
+    where m.scanned_pdf_pathname <> ''
+    order by job_number, m.id
+  `)).rows;
+  files.push(...mrrScans);
   const usedPaths = new Set();
   const entries = [];
   const manifestRows = [[
@@ -7520,10 +7532,11 @@ app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalent
     "byte_size",
     "created_at",
     "backup_status",
-    "error"
+    "error",
+    "mrr_number"
   ]];
   for (const file of files) {
-    const displayFilename = quoteFileDisplayName({
+    const displayFilename = file.source === "mrr_scan" ? mrrScanFilename(file.mrr_number) : quoteFileDisplayName({
       rfqNo: file.rfq_no,
       vendorName: file.vendor_name || "Vendor",
       quoteSequence: file.quote_sequence,
@@ -7545,7 +7558,11 @@ app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalent
       errorMessage = error.message || "Unable to read blob.";
     }
     if (status === "included") {
-      const zipPath = uniqueZipPath([
+      const zipPath = uniqueZipPath(file.source === "mrr_scan" ? [
+        "mrr-scans",
+        sanitizeZipPathSegment(file.job_number || "No Job", "No Job"),
+        displayFilename
+      ].join("/") : [
         "rfq-quotes",
         sanitizeZipPathSegment(file.job_number || "No Job", "No Job"),
         sanitizeZipPathSegment(file.rfq_no || `RFQ-${file.rfq_id}`, `RFQ-${file.rfq_id}`),
@@ -7555,7 +7572,7 @@ app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalent
       entries.push({ name: zipPath, data, date: file.created_at ? new Date(file.created_at) : new Date() });
     }
     manifestRows.push([
-      "rfq_quote_files",
+      file.source || "rfq_quote_files",
       file.job_number || "",
       file.rfq_no || "",
       file.vendor_name || "",
@@ -7565,7 +7582,8 @@ app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalent
       data.length || file.size_bytes || "",
       file.created_at ? new Date(file.created_at).toISOString() : "",
       status,
-      errorMessage
+      errorMessage,
+      file.mrr_number || ""
     ]);
   }
   entries.unshift({
@@ -20190,6 +20208,76 @@ app.get("/material-logs", requireAuth, requireJobContext, requirePermission("mat
   `, req.user));
 });
 
+app.post("/material-logs/mrr/:id/scanned-pdf/client-upload", express.json({ limit: "1mb" }), asyncHandler(async (req, res) => {
+  try {
+    const response = await handleUpload({
+      body: req.body,
+      request: req,
+      onBeforeGenerateToken: async (pathname) => {
+        const user = await getRequestAuthContext(req);
+        if (!user?.activeJob || !canAccess(user, "material_logs", "edit")) {
+          throw new Error("Sign in to the job with permission to edit MRRs before uploading.");
+        }
+        const mrrId = Number(req.params.id);
+        const row = (await query("select mrr_number from mrr_logs where id = $1 and job_id = $2", [mrrId, user.job_id])).rows[0];
+        if (!row || !isMrrScanPath(pathname, user.job_id, mrrId, row.mrr_number)) {
+          throw new Error("Invalid MRR upload target. Refresh the log and try again.");
+        }
+        return {
+          allowedContentTypes: ["application/pdf"],
+          maximumSizeInBytes: mrrScanMaxBytes,
+          addRandomSuffix: false,
+          allowOverwrite: false
+        };
+      }
+    });
+    res.json(response);
+  } catch (error) {
+    res.status(400).json({ error: error.message || "Unable to upload MRR scan." });
+  }
+}));
+
+app.post("/material-logs/mrr/:id/scanned-pdf/complete", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), express.json({ limit: "1mb" }), asyncHandler(async (req, res) => {
+  try {
+    const mrrId = Number(req.params.id);
+    const jobId = currentJobId(req);
+    const pathname = req.body.pathname;
+    const oldPathname = await withTransaction(async (client) => {
+      const row = (await client.query("select mrr_number, scanned_pdf_pathname from mrr_logs where id = $1 and job_id = $2 for update", [mrrId, jobId])).rows[0];
+      if (!row || !isMrrScanPath(pathname, jobId, mrrId, row.mrr_number)) throw new Error("Invalid MRR scan. Refresh the log and try again.");
+      if (pathname === row.scanned_pdf_pathname) return "";
+      const blob = await get(pathname, { access: "private", useCache: false });
+      await verifyMrrScan(blob);
+      await client.query(`
+        update mrr_logs set scanned_pdf_pathname = $1, scanned_pdf_size_bytes = $2,
+          scanned_pdf_uploaded_at = now(), scanned_pdf_uploaded_by = $3
+        where id = $4 and job_id = $5
+      `, [pathname, blob.blob.size, req.user.id, mrrId, jobId]);
+      await auditLog(client, req.user.id, "upload", "mrr_scan", mrrId, mrrScanFilename(row.mrr_number));
+      return row.scanned_pdf_pathname;
+    });
+    if (oldPathname) {
+      try { await del(oldPathname); } catch (error) { console.error("Unable to delete replaced MRR scan", error); }
+    }
+    res.json({ openUrl: `/material-logs/mrr/${mrrId}/scanned-pdf/open` });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "Unable to save MRR scan." });
+  }
+}));
+
+app.get("/material-logs/mrr/:id/scanned-pdf/open", requireAuth, requireJobContext, requirePermission("material_logs", "view"), asyncHandler(async (req, res) => {
+  const row = (await query("select mrr_number, scanned_pdf_pathname from mrr_logs where id = $1 and job_id = $2", [Number(req.params.id), currentJobId(req)])).rows[0];
+  if (!row?.scanned_pdf_pathname) return res.status(404).send("No scanned PDF has been uploaded for this MRR.");
+  const blob = await get(row.scanned_pdf_pathname, { access: "private" });
+  if (!blob?.stream) return res.status(404).send("The scanned PDF is not available.");
+  const filename = mrrScanFilename(row.mrr_number);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${contentDispositionFilename(filename).replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  Readable.fromWeb(blob.stream).on("error", (error) => res.destroy(error)).pipe(res);
+}));
+
 app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
   const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
@@ -20198,7 +20286,8 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
   const rows = (await query(`
     select m.id, m.discipline, m.mrr_number, m.vendor_name, coalesce(po.po_no, m.po_number) as po_number,
            coalesce(m.status, 'ACTIVE') as status,
-           m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number
+           m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number,
+           m.scanned_pdf_pathname
     from mrr_logs m
     left join purchase_orders po on po.id = m.app_po_id
     where m.job_id = $1
@@ -20208,7 +20297,9 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
   `, q ? [jobId, `%${q}%`] : [jobId])).rows;
   const tableRows = rows.map((row) => {
     const isReversed = String(row.status || "").toUpperCase() === "REVERSED";
-    return `<tr>
+    const canUpload = canAccess(req.user, "material_logs", "edit");
+    const hasScan = Boolean(row.scanned_pdf_pathname);
+    return `<tr data-mrr-scan-row data-mrr-id="${row.id}" data-has-scan="${hasScan}" data-upload-prefix="${escAttr(mrrScanPrefix(jobId, row.id))}" data-filename="${escAttr(mrrScanFilename(row.mrr_number))}">
     <td style="min-width:120px;white-space:nowrap;">${esc(row.mrr_number)}${isReversed ? `<div style="margin-top:4px;"><span class="chip">Reversed</span></div>` : ""}</td>
     <td>${esc(row.discipline)}</td>
     <td>${esc(row.vendor_name)}</td>
@@ -20219,6 +20310,13 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
     <td>${esc(row.received_by)}</td>
     <td>${esc(row.load_number)}</td>
     <td>${esc(row.opi_number)}</td>
+    <td style="min-width:180px;">
+      <div class="actions" style="flex-wrap:nowrap;">
+        ${canUpload ? `<button type="button" class="btn btn-secondary" data-scan-upload title="Upload scanned PDF" aria-label="Upload scanned PDF for ${escAttr(row.mrr_number)}">&#8593;</button><input type="file" accept=".pdf,application/pdf" data-scan-input hidden />` : ""}
+        <a class="btn btn-secondary mrr-scan-open" data-scan-open target="_blank" rel="noopener" ${hasScan ? `href="/material-logs/mrr/${row.id}/scanned-pdf/open"` : 'aria-disabled="true" tabindex="-1"'}>Open Scan</a>
+      </div>
+      <div data-scan-status role="status" aria-live="polite" class="muted"></div>
+    </td>
     <td style="min-width:190px;"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
   </tr>`;
   }).join("");
@@ -20239,8 +20337,14 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
       </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Action</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No MRR rows found.</td></tr>`}</table>
+      <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Scan</th><th>Action</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No MRR rows found.</td></tr>`}</table>
     </div>
+    <style>
+      .mrr-scan-open[aria-disabled="true"] { background:#e5e7eb; color:#6b7280; cursor:not-allowed; pointer-events:none; }
+      [data-mrr-scan-row].scan-drag-over > td { background:#e6f4ef; box-shadow:inset 0 2px #22785b,inset 0 -2px #22785b; }
+      [data-scan-status] { max-width:230px; white-space:normal; overflow-wrap:anywhere; }
+    </style>
+    <script type="module" src="/public/mrr-scans.js" data-client-module-url="${escAttr(vercelBlobClientModuleUrl)}"></script>
   `, req.user));
 });
 
