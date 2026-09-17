@@ -454,6 +454,7 @@ function renderRfqStatusChip(status, dueDate) {
   if (status === "WAITING_ON_QUOTES" && isPastDate(dueDate)) className = "rfq-status-waiting-past";
   if (status === "WAITING_ON_CLIENT") className = "rfq-status-client";
   if (status === "ON_HOLD") className = "rfq-status-on-hold";
+  if (status === "AWARDED") className = "rfq-status-awarded";
   if (status === "PURCHASED") className = "rfq-status-purchased";
   if (status === "PARTIALLY_RECEIVED") className = "rfq-status-partial";
   if (status === "RECEIVED") className = "rfq-status-received";
@@ -1662,7 +1663,8 @@ function layout(title, body, user) {
       .rfq-status-waiting-past { background: #f9d7eb; border-color: #d76aa7; color: #86184f; }
       .rfq-status-client { background: #ffe4bd; border-color: #d38a2d; color: #7a4300; }
       .rfq-status-on-hold { background: #e5e7eb; border-color: #9ca3af; color: #374151; }
-      .rfq-status-purchased { background: #fff3b0; border-color: #d4b83d; color: #665200; }
+      .rfq-status-awarded { background: #fff3b0; border-color: #d4b83d; color: #665200; }
+      .rfq-status-purchased { background: #e3ebf2; border-color: #b6c4d1; color: #264b69; }
       .rfq-status-partial { background: #d9ecff; border-color: #6aa5d9; color: #184f86; }
       .rfq-status-received { background: #dff0d8; border-color: #72a864; color: #275f25; }
       .req-status-requested { background: #fbe1dd; border-color: #d66b5f; color: #8e2118; }
