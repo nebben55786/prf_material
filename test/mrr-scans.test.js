@@ -186,8 +186,8 @@ test("log disables missing scans, links saved scans, and hides upload for read-o
   const html = await renderLog();
   assert.match(html, /aria-disabled="true" tabindex="-1"/);
   assert.match(html, /href="\/material-logs\/mrr\/3\/scanned-pdf\/open"/);
-  assert.match(html, /data-scan-upload/);
-  assert.doesNotMatch(await renderLog(false), /data-scan-upload/);
+  assert.match(html, /<button\b[^>]*data-scan-upload/);
+  assert.doesNotMatch(await renderLog(false), /<button\b[^>]*data-scan-upload/);
 });
 
 test("browser: row drop, picker, replacement failure, and responsive scan controls", { skip: !process.env.TEST_PLAYWRIGHT_MODULE }, async () => {

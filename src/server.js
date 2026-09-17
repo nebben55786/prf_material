@@ -20310,14 +20310,14 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
     <td>${esc(row.received_by)}</td>
     <td>${esc(row.load_number)}</td>
     <td>${esc(row.opi_number)}</td>
-    <td style="min-width:180px;">
+    <td style="min-width:190px;"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
+    <td style="min-width:145px;">
       <div class="actions" style="flex-wrap:nowrap;">
         ${canUpload ? `<button type="button" class="btn btn-secondary" data-scan-upload title="Upload scanned PDF" aria-label="Upload scanned PDF for ${escAttr(row.mrr_number)}">&#8593;</button><input type="file" accept=".pdf,application/pdf" data-scan-input hidden />` : ""}
         <a class="btn btn-secondary mrr-scan-open" data-scan-open target="_blank" rel="noopener" ${hasScan ? `href="/material-logs/mrr/${row.id}/scanned-pdf/open"` : 'aria-disabled="true" tabindex="-1"'}>Open Scan</a>
       </div>
       <div data-scan-status role="status" aria-live="polite" class="muted"></div>
     </td>
-    <td style="min-width:190px;"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
   </tr>`;
   }).join("");
   res.send(layout("MRR Log", `
@@ -20337,9 +20337,10 @@ app.get("/material-logs/mrr", requireAuth, requireJobContext, requirePermission(
       </form>
     </div>
     <div class="card scroll">
-      <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Scan</th><th>Action</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No MRR rows found.</td></tr>`}</table>
+      <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Action</th><th>Scan</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No MRR rows found.</td></tr>`}</table>
     </div>
     <style>
+      [data-scan-upload] { width:32px; min-width:32px; flex:0 0 32px; padding:0; }
       .mrr-scan-open[aria-disabled="true"] { background:#e5e7eb; color:#6b7280; cursor:not-allowed; pointer-events:none; }
       [data-mrr-scan-row].scan-drag-over > td { background:#e6f4ef; box-shadow:inset 0 2px #22785b,inset 0 -2px #22785b; }
       [data-scan-status] { max-width:230px; white-space:normal; overflow-wrap:anywhere; }
