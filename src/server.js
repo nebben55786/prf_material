@@ -7701,9 +7701,13 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
       : Promise.resolve({ rows: [] })
   ]);
   const rfqStatusMap = Object.fromEntries(rfqStatusCounts.rows.map((row) => [row.status, Number(row.count || 0)]));
+  const visibleRfqStatuses = rfqStatuses
+    .map((status) => ({ ...status, count: rfqStatusMap[status.value] || 0 }))
+    .filter((status) => status.count > 0);
   const rfqStatusCards = [roleAdmin, roleMaterialController, "buyer"].includes(normalizeRole(req.user.role))
+    && visibleRfqStatuses.length
     ? `<div class="card"><h3>RFQ Status</h3><div class="stats">${
-        rfqStatuses.map((status) => `<div class="stat"><div>${esc(status.label)}</div><strong>${rfqStatusMap[status.value] || 0}</strong></div>`).join("")
+        visibleRfqStatuses.map((status) => `<div class="stat"><div>${esc(status.label)}</div><strong>${status.count}</strong></div>`).join("")
       }</div></div>`
     : "";
   res.send(layout("Dashboard", `
