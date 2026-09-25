@@ -1755,10 +1755,17 @@ function layout(title, body, user) {
       function validateBulkAward(form) {
         if (!form) return true;
         const prices = Array.from(form.querySelectorAll('input[name^="unit_price_"]'));
-        const populatedCount = prices.filter((priceInput) => String(priceInput.value || "").trim()).length;
-        if (!populatedCount) {
-          window.alert("Enter at least one unit price before awarding.");
-          return false;
+        const missingCount = prices.filter((priceInput) => !String(priceInput.value || "").trim()).length;
+        if (missingCount > 0) return window.confirm(
+          "Warning: " + missingCount + " RFQ line(s) do not have a quoted price. Award without quotes anyway?"
+        );
+        return true;
+      }
+      function confirmNoQuoteLineAward(form, itemId, itemLabel) {
+        if (!form) return true;
+        const price = form.querySelector('[name="unit_price_' + itemId + '"]');
+        if (price && !String(price.value || "").trim()) {
+          return window.confirm("Warning: " + (itemLabel || "This RFQ line") + " does not have a quoted price. Award it anyway?");
         }
         return true;
       }
@@ -15667,7 +15674,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       ? `${awardedVendor} | ${awardedUnitPriceText} | ${awardedLeadText}`
       : "Open";
     const awardLineButton = !fullyAwarded && activeQuoteVendorId && !itemIssuedToPo
-      ? `<button class="btn btn-primary" type="submit" formaction="/rfq-item/${item.id}/award" formmethod="post">Award Line</button>`
+      ? `<button class="btn btn-primary" type="submit" formaction="/rfq-item/${item.id}/award" formmethod="post" onclick="return confirmNoQuoteLineAward(this.form, ${item.id}, 'This RFQ line');">Award Line</button>`
       : "";
     itemRows.push(`<tr data-rfq-item-id="${item.id}">
       <td style="width:1%; white-space:nowrap;">${esc(item.po_line || "")}</td>
@@ -15719,6 +15726,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         ? `<a class="btn btn-secondary" href="/rfq/${rfqId}/quotes/import-page?vendor_tab_id=${encodeURIComponent(String(activeQuoteVendorId))}">Import Quotes</a>`
         : `<button class="btn btn-secondary" type="button" disabled title="Select a vendor tab before importing quotes">Import Quotes</button>`) : ""}
       <a class="btn btn-primary" target="_blank" href="/rfq/${rfqId}/sheet.pdf" onclick="return openRfqPdfWithOrder(this, 'rfq-quote-table-${rfqId}');">Open RFQ PDF</a>
+      ${allQuotes.length > 0 ? `<form method="post" action="/rfq/${rfqId}/quotes/clear-all" onsubmit="return confirm('Clear all saved quotes for every vendor on ${escAttr(rfq.rfq_no || "this RFQ")}? Awards will remain, but unissued awards will no longer have a price.');"><input type="hidden" name="vendor_tab_id" value="${esc(activeQuoteVendorId)}" /><button class="btn btn-danger" type="submit">Clear All Quotes</button></form>` : ""}
       ${poCount === 0 && items.length > 0 ? `<form method="post" action="/rfq/${rfqId}/items/delete-all" onsubmit="return confirm('Delete all RFQ items from ${escAttr(rfq.rfq_no || "this RFQ")}? This will also remove line quotes and quote history.');"><button class="btn btn-danger" type="submit">Delete All Items</button></form>` : ""}
     </div>`;
   const quoteFileRows = quoteFiles.length > 0
@@ -17476,30 +17484,30 @@ app.post("/rfq/:id/award", requireAuth, requireJobContext, requirePermission("rf
     if (items.length === 0) throw new Error("Add RFQ items before awarding.");
     const submittedItems = items.map((item) => {
       const submitted = parseSubmittedUnitPrice(req.body, item.id);
+      const submittedLeadDaysRaw = String(req.body[`lead_days_${item.id}`] ?? "").trim();
       return {
         ...item,
-        awarded_unit_price: submitted.unitPrice,
+        awarded_unit_price: submitted.blank ? null : submitted.unitPrice,
         unit_price_blank: submitted.blank,
-        awarded_lead_days: isBlankUnitPrice(req.body[`lead_days_${item.id}`]) ? num(item.lead_days) : num(req.body[`lead_days_${item.id}`])
+        awarded_lead_days: submittedLeadDaysRaw ? num(submittedLeadDaysRaw) : (item.lead_days === null || item.lead_days === undefined ? null : num(item.lead_days))
       };
     });
-    const missingItems = submittedItems.filter((item) => item.unit_price_blank);
-    if (missingItems.length > 0) {
-      const missingList = missingItems.slice(0, 8).map((item) => item.item_code || `Line ${item.id}`).join(", ");
-      throw new Error(`Cannot award this RFQ yet. The selected vendor is missing quotes for: ${missingList}${missingItems.length > 8 ? ", ..." : ""}`);
-    }
-    const invalidItems = submittedItems.filter((item) => !Number.isFinite(item.awarded_unit_price) || item.awarded_unit_price < 0);
+    const invalidItems = submittedItems.filter((item) => !item.unit_price_blank && (!Number.isFinite(item.awarded_unit_price) || item.awarded_unit_price < 0));
     if (invalidItems.length > 0) {
       const invalidList = invalidItems.slice(0, 8).map((item) => item.item_code || `Line ${item.id}`).join(", ");
       throw new Error(`Unit price cannot be negative for: ${invalidList}${invalidItems.length > 8 ? ", ..." : ""}`);
     }
     for (const item of submittedItems) {
-      await client.query(`
-        insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
-        values ($1, $2, $3, $4, $5, now())
-        on conflict (rfq_item_id, vendor_id)
-        do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-      `, [jobId, item.id, vendorId, item.awarded_unit_price, item.awarded_lead_days]);
+      if (item.unit_price_blank) {
+        await client.query("delete from quotes where rfq_item_id = $1 and vendor_id = $2 and job_id = $3", [item.id, vendorId, jobId]);
+      } else {
+        await client.query(`
+          insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+          values ($1, $2, $3, $4, $5, now())
+          on conflict (rfq_item_id, vendor_id)
+          do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
+        `, [jobId, item.id, vendorId, item.awarded_unit_price, item.awarded_lead_days]);
+      }
     }
     await client.query(`
       update rfq_items
@@ -17756,7 +17764,7 @@ app.get("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermission
     <h1>Award RFQ Item</h1>
     <div class="card"><strong>${esc(item.item_code)}</strong> | ${esc(item.description)}</div>
     <div class="card">
-      <form method="post" action="/rfq-item/${item.id}/award" class="stack">
+      <form method="post" action="/rfq-item/${item.id}/award" class="stack" onsubmit="return confirmNoQuoteLineAward(this, ${item.id}, 'This RFQ line');">
         <div class="grid">
           <div><label>Vendor</label><select id="award-vendor-${item.id}" name="vendor_id" ${vendorsRes.rows.length === 0 ? "disabled" : ""}>${quoteOptions}</select></div>
           <div><label>Unit Price</label><input id="award-unit-price-${item.id}" name="unit_price_${item.id}" value="${esc(formatCurrencyInput(selectedAwardQuote?.unit_price))}" inputmode="decimal" ${vendorsRes.rows.length === 0 ? "disabled" : ""} /></div>
@@ -17809,26 +17817,30 @@ app.post("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermissio
     `, [itemId, jobId]);
     if (issued.rows[0]) throw new Error("Cannot change an award after a PO line has been issued.");
     const submitted = parseSubmittedUnitPrice(req.body, itemId);
-    if (submitted.blank) throw new Error(`Cannot award this RFQ yet. The selected vendor is missing quotes for: ${item.item_code || `Line ${itemId}`}`);
-    if (!Number.isFinite(submitted.unitPrice) || submitted.unitPrice < 0) throw new Error(`Unit price for RFQ item ${itemId} cannot be negative.`);
+    if (!submitted.blank && (!Number.isFinite(submitted.unitPrice) || submitted.unitPrice < 0)) throw new Error(`Unit price for RFQ item ${itemId} cannot be negative.`);
     const submittedLeadDaysRaw = String(req.body[`lead_days_${itemId}`] ?? "").trim();
     const leadDays = submittedLeadDaysRaw ? num(submittedLeadDaysRaw) : null;
-    await client.query(`
-      insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
-      values ($1, $2, $3, $4, $5, now())
-      on conflict (rfq_item_id, vendor_id)
-      do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-    `, [jobId, itemId, vendorId, submitted.unitPrice, leadDays]);
-    await writeQuoteRevision(client, {
-      rfqItemId: itemId,
-      vendorId,
-      unitPrice: submitted.unitPrice,
-      leadDays,
-      sourceType: "manual",
-      createdBy: req.user.id,
-      jobId
-    });
-    await auditLog(client, req.user.id, "upsert", "quote", itemId, `vendor=${vendorId}`);
+    if (submitted.blank) {
+      await client.query("delete from quotes where rfq_item_id = $1 and vendor_id = $2 and job_id = $3", [itemId, vendorId, jobId]);
+      await auditLog(client, req.user.id, "delete", "quote", itemId, `vendor=${vendorId};award_without_quote=true`);
+    } else {
+      await client.query(`
+        insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+        values ($1, $2, $3, $4, $5, now())
+        on conflict (rfq_item_id, vendor_id)
+        do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
+      `, [jobId, itemId, vendorId, submitted.unitPrice, leadDays]);
+      await writeQuoteRevision(client, {
+        rfqItemId: itemId,
+        vendorId,
+        unitPrice: submitted.unitPrice,
+        leadDays,
+        sourceType: "manual",
+        createdBy: req.user.id,
+        jobId
+      });
+      await auditLog(client, req.user.id, "upsert", "quote", itemId, `vendor=${vendorId}`);
+    }
     awardedVendorId = vendorId;
     await client.query(`
       update rfq_items
@@ -17841,7 +17853,7 @@ app.post("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermissio
           award_notes = $6,
           updated_at = now()
       where id = $1 and job_id = $7
-    `, [itemId, vendorId, submitted.unitPrice, leadDays, req.user.id, req.body.award_notes || "", jobId]);
+    `, [itemId, vendorId, submitted.blank ? null : submitted.unitPrice, leadDays, req.user.id, req.body.award_notes || "", jobId]);
     await auditLog(client, req.user.id, "award", "rfq_item", itemId, `vendor=${vendorId}`);
     await recalcRfqStatus(client, item.rfq_id);
     return item.rfq_id;
@@ -18133,6 +18145,41 @@ app.post("/quotes", requireAuth, requireJobContext, requirePermission("rfqs", "e
   res.redirect(`/rfq/${req.body.rfq_id}?vendor_tab_id=${encodeURIComponent(String(req.body.vendor_id || ""))}`);
 }));
 
+app.post("/rfq/:id/quotes/clear-all", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+  const rfqId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const vendorTabId = Number(req.body.vendor_tab_id || 0);
+  await withTransaction(async (client) => {
+    const rfq = (await client.query("select id from rfqs where id = $1 and job_id = $2", [rfqId, jobId])).rows[0];
+    if (!rfq) throw new Error("RFQ not found.");
+    const deleted = await client.query(`
+      delete from quotes q
+      using rfq_items ri
+      where q.rfq_item_id = ri.id
+        and ri.rfq_id = $1
+        and ri.job_id = $2
+        and q.job_id = $2
+      returning q.id
+    `, [rfqId, jobId]);
+    await client.query(`
+      update rfq_items ri
+      set awarded_unit_price = null,
+          awarded_lead_days = null,
+          updated_at = now()
+      where ri.rfq_id = $1
+        and ri.job_id = $2
+        and ri.award_status = 'AWARDED'
+        and not exists (
+          select 1
+          from po_lines pl
+          where pl.rfq_item_id = ri.id and pl.job_id = $2
+        )
+    `, [rfqId, jobId]);
+    await auditLog(client, req.user.id, "clear_all", "quotes", rfqId, `deleted=${deleted.rowCount}`);
+  });
+  res.redirect(`/rfq/${rfqId}${vendorTabId ? `?vendor_tab_id=${encodeURIComponent(String(vendorTabId))}` : ""}`);
+}));
+
 app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
   const vendorId = Number(req.body.vendor_id);
@@ -18183,41 +18230,46 @@ app.post("/rfq/:id/quotes/grid", requireAuth, requireJobContext, requirePermissi
     for (const item of items) {
       const unitPriceRaw = String(req.body[`unit_price_${item.id}`] || "").trim();
       const leadDaysRaw = String(req.body[`lead_days_${item.id}`] || "").trim();
-      if (!unitPriceRaw && !leadDaysRaw) continue;
       const leadDays = leadDaysRaw ? num(leadDaysRaw) : null;
-      if (unitPriceRaw) {
-        const unitPrice = num(unitPriceRaw, NaN);
-        if (!Number.isFinite(unitPrice) || unitPrice < 0) {
-          throw new Error(`Unit price for RFQ item ${item.id} cannot be negative.`);
-        }
+      if (!unitPriceRaw) {
+        const deleted = await client.query(
+          "delete from quotes where rfq_item_id = $1 and vendor_id = $2 and job_id = $3 returning id",
+          [item.id, vendorId, jobId]
+        );
         await client.query(`
-          insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
-          values ($1, $2, $3, $4, $5, now())
-          on conflict (rfq_item_id, vendor_id)
-          do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
-        `, [jobId, item.id, vendorId, unitPrice, leadDays]);
-        await client.query(`
-          update rfq_items
-          set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
-          where id = $1 and job_id = $5 and award_status = 'AWARDED' and awarded_vendor_id = $2
-        `, [item.id, vendorId, unitPrice, leadDays, jobId]);
-        await writeQuoteRevision(client, {
-          rfqItemId: item.id,
-          vendorId,
-          unitPrice,
-          leadDays,
-          sourceType: "manual",
-          createdBy: req.user.id,
-          jobId
-        });
-      } else {
-        await client.query(`
-          update rfq_items
-          set awarded_lead_days = $3, updated_at = now()
-          where id = $1 and job_id = $4 and award_status = 'AWARDED' and awarded_vendor_id = $2
+          update rfq_items ri
+          set awarded_unit_price = null, awarded_lead_days = $3, updated_at = now()
+          where ri.id = $1 and ri.job_id = $4 and ri.award_status = 'AWARDED' and ri.awarded_vendor_id = $2
+            and not exists (select 1 from po_lines pl where pl.rfq_item_id = ri.id and pl.job_id = $4)
         `, [item.id, vendorId, leadDays, jobId]);
+        if (deleted.rowCount > 0) await auditLog(client, req.user.id, "delete", "quote", item.id, `vendor=${vendorId}`);
+        continue;
       }
-      await auditLog(client, req.user.id, unitPriceRaw ? "upsert" : "update", unitPriceRaw ? "quote" : "rfq_item", item.id, `vendor=${vendorId}`);
+      const unitPrice = num(unitPriceRaw, NaN);
+      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+        throw new Error(`Unit price for RFQ item ${item.id} cannot be negative.`);
+      }
+      await client.query(`
+        insert into quotes (job_id, rfq_item_id, vendor_id, unit_price, lead_days, quoted_at)
+        values ($1, $2, $3, $4, $5, now())
+        on conflict (rfq_item_id, vendor_id)
+        do update set unit_price = excluded.unit_price, lead_days = excluded.lead_days, quoted_at = now()
+      `, [jobId, item.id, vendorId, unitPrice, leadDays]);
+      await client.query(`
+        update rfq_items
+        set awarded_unit_price = $3, awarded_lead_days = $4, updated_at = now()
+        where id = $1 and job_id = $5 and award_status = 'AWARDED' and awarded_vendor_id = $2
+      `, [item.id, vendorId, unitPrice, leadDays, jobId]);
+      await writeQuoteRevision(client, {
+        rfqItemId: item.id,
+        vendorId,
+        unitPrice,
+        leadDays,
+        sourceType: "manual",
+        createdBy: req.user.id,
+        jobId
+      });
+      await auditLog(client, req.user.id, "upsert", "quote", item.id, `vendor=${vendorId}`);
     }
   });
   res.redirect(`/rfq/${rfqId}?vendor_tab_id=${encodeURIComponent(String(vendorId))}`);
