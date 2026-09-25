@@ -7688,7 +7688,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
     return;
   }
   const jobId = currentJobId(req);
-  const [rfqs, pos, receipts, vendors, osd, jobNumber, pendingAccessRequests, rfqStatusCounts] = await Promise.all([
+  const [rfqs, pos, receipts, vendors, osd, jobNumber, pendingAccessRequests, rfqStatusCounts, requisitionStatusCounts] = await Promise.all([
     query("select count(*) from rfqs where job_id = $1", [jobId]),
     query("select count(*) from purchase_orders where job_id = $1", [jobId]),
     query("select count(*) from receipts where job_id = $1", [jobId]),
@@ -7705,6 +7705,16 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
           where job_id = $1
           group by status
         `, [jobId])
+      : Promise.resolve({ rows: [] }),
+    canAccess(req.user, "requisitions", "view")
+      ? query(`
+          select
+            case when status = 'VERIFIED' then 'ACCEPTED' else status end as status,
+            count(*)::int as count
+          from material_requisitions
+          where job_id = $1
+          group by case when status = 'VERIFIED' then 'ACCEPTED' else status end
+        `, [jobId])
       : Promise.resolve({ rows: [] })
   ]);
   const rfqStatusMap = Object.fromEntries(rfqStatusCounts.rows.map((row) => [row.status, Number(row.count || 0)]));
@@ -7715,6 +7725,21 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
     && visibleRfqStatuses.length
     ? `<div class="card"><h3>RFQ Status</h3><div class="stats">${
         visibleRfqStatuses.map((status) => `<div class="stat"><div>${esc(status.label)}</div><strong>${status.count}</strong></div>`).join("")
+      }</div></div>`
+    : "";
+  const requisitionStatusMap = Object.fromEntries(
+    requisitionStatusCounts.rows.map((row) => [requisitionStatusKey(row.status), Number(row.count || 0)])
+  );
+  const visibleRequisitionStatuses = requisitionStatuses
+    .map((status) => ({ value: status, label: requisitionStatusLabel(status), count: requisitionStatusMap[status] || 0 }))
+    .filter((status) => status.count > 0);
+  const requisitionStatusCards = canAccess(req.user, "requisitions", "view") && visibleRequisitionStatuses.length
+    ? `<div class="card"><h3>REQ Status</h3><div class="stats">${
+        visibleRequisitionStatuses.map((status) => `
+          <a class="stat" href="/requisitions?status=${escAttr(status.value)}" style="text-decoration:none;color:inherit;">
+            <div>${esc(status.label)}</div><strong>${status.count}</strong>
+          </a>
+        `).join("")
       }</div></div>`
     : "";
   res.send(layout("Dashboard", `
@@ -7731,6 +7756,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
         </div>
       </div>
       ${rfqStatusCards}
+      ${requisitionStatusCards}
     </div>
   `, req.user));
 });
