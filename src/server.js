@@ -5938,11 +5938,11 @@ async function getNextOsdNumber(client = null, jobId = null) {
 }
 
 function receiptAffectsInventorySql(alias = "r") {
-  return `upper(coalesce(${alias}.osd_status, 'OK')) in ('OK', 'OVERAGE', 'SHORTAGE', 'BACKORDER')`;
+  return `upper(coalesce(${alias}.osd_status, 'OK')) in ('OK', 'OVERAGE', 'SHORTAGE', 'BACKORDER', 'NOT ON THIS LOAD')`;
 }
 
 function receiptStatusAffectsInventory(status) {
-  return ["OK", "OVERAGE", "SHORTAGE", "BACKORDER"].includes(String(status || "OK").trim().toUpperCase());
+  return ["OK", "OVERAGE", "SHORTAGE", "BACKORDER", "NOT ON THIS LOAD"].includes(String(status || "OK").trim().toUpperCase());
 }
 
 function poLineReceivedQtySql(alias = "pl") {
@@ -18774,6 +18774,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     .join("");
   const receivedByListId = `received-by-options-${record.id}`;
   const today = new Date().toISOString().slice(0, 10);
+  const hasWarehouseLocations = Object.values(locationMap).some((locations) => Array.isArray(locations) && locations.length > 0);
   const openPoLineCount = poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0) > 0).length;
   const visiblePoLines = hideFullyReceived
     ? poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0) > 0)
@@ -18789,16 +18790,16 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     const locked = remainingQty <= 0;
     const qtyCell = locked
       ? `<span class="chip">Received</span><input type="hidden" name="po_line_ids" value="${lineId}" />`
-      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" value="${escAttr(formatQtyDisplay(remainingQty))}" inputmode="decimal" min="0" step="any" data-remaining="${escAttr(String(remainingQty))}" placeholder="${escAttr(formatQtyDisplay(remainingQty))}" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" />`;
+      : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" value="${escAttr(formatQtyDisplay(remainingQty))}" inputmode="decimal" min="0" step="any" data-remaining="${escAttr(String(remainingQty))}" placeholder="${escAttr(formatQtyDisplay(remainingQty))}" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" title="Select a warehouse and location before changing this quantity." disabled />`;
     const shortCell = locked
       ? ""
-      : `<select name="short_action_${lineId}" tabindex="-1" style="min-width:120px;"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select>`;
+      : `<select name="short_action_${lineId}" tabindex="-1" style="min-width:140px;"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option><option value="not_on_load">Not on this load</option></select>`;
     const warehouseCell = locked
       ? `<span>${esc(line.last_warehouse || "")}</span>`
-      : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" tabindex="-1" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select>`;
+      : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" tabindex="-1" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))}); updatePoLineQuantityState("${lineId}")'>${warehouseOptionsHtml}</select>`;
     const locationCell = locked
       ? `<span>${esc(line.last_location || "")}</span>`
-      : `<select id="po-line-location-${lineId}" name="location_${lineId}" tabindex="-1" data-placeholder="Select location"><option value="">Select location</option></select>`;
+      : `<select id="po-line-location-${lineId}" name="location_${lineId}" tabindex="-1" data-placeholder="Select location" onchange='updatePoLineQuantityState("${lineId}")'><option value="">Select location</option></select>`;
     return `<tr>
       <td style="width:1%; white-space:nowrap;">${esc(line.po_line || "")}</td>
       <td style="width:1%; white-space:nowrap;">${esc(line.item_code)}</td>
@@ -18839,6 +18840,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     </div>
     <div class="card">
       ${canPostReceipt ? "" : `<p class="muted">${esc(receiveBlockedMessage)}</p>`}
+      ${canPostReceipt && !hasWarehouseLocations ? `<div class="error"><strong>No warehouse locations are configured for this job.</strong> Add a warehouse location before entering receipt quantities.</div>` : ""}
       <form method="post" action="/po/${record.id}/receive" class="stack" id="po-receive-form-${record.id}">
         <div class="grid">
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" required /></div>
@@ -18849,7 +18851,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         <div class="grid">
           <div><label>Default Warehouse</label><select id="po-receive-warehouse-${record.id}" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
           <div><label>Default Location</label><select id="po-receive-location-${record.id}" data-placeholder="Select location" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'><option value="">Select location</option></select></div>
-          <div><label>Short Qty Default</label><select name="short_action_default" onchange='document.querySelectorAll("select[name^=short_action_]").forEach(function(select){ select.value = this.value; }, this);'><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
+          <div><label>Short Qty Default</label><select name="short_action_default" onchange='document.querySelectorAll("select[name^=short_action_]").forEach(function(select){ select.value = this.value; }, this);'><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option><option value="not_on_load">Not on this load</option></select></div>
         </div>
         <div class="actions">
           ${hideFullyReceived
@@ -18865,9 +18867,20 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         </div>
         <div><label>MRR Notes</label><textarea name="mrr_notes"></textarea></div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
-        <div class="actions">${canPostReceipt ? `<button type="submit">Post Receipt</button>` : `<span class="chip">Fully Received</span>`}<a class="btn btn-secondary" href="/po">Back</a></div>
+        <div class="actions">${canPostReceipt ? `<button type="submit" ${hasWarehouseLocations ? "" : "disabled"}>Post Receipt</button>` : `<span class="chip">Fully Received</span>`}<a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
       <script>
+        function updatePoLineQuantityState(lineId) {
+          const warehouse = document.getElementById("po-line-warehouse-" + lineId);
+          const location = document.getElementById("po-line-location-" + lineId);
+          const quantity = document.querySelector('input[name="qty_received_' + lineId + '"]');
+          if (!quantity) return;
+          const hasStorageLocation = Boolean(warehouse && warehouse.value && location && location.value);
+          quantity.disabled = !hasStorageLocation;
+          quantity.title = hasStorageLocation
+            ? ""
+            : "Select a warehouse and location before changing this quantity.";
+        }
         function applyPoHeaderDefaults(poId, optionsByWarehouse) {
           const headerWarehouse = document.getElementById("po-receive-warehouse-" + poId);
           const headerLocation = document.getElementById("po-receive-location-" + poId);
@@ -18879,10 +18892,11 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
             syncLocationOptions(select.id, locationId, optionsByWarehouse, "");
             const lineLocation = document.getElementById(locationId);
             if (lineLocation) lineLocation.value = headerLocation.value;
+            updatePoLineQuantityState(select.id.replace("po-line-warehouse-", ""));
           });
         }
         syncLocationOptions("po-receive-warehouse-${record.id}", "po-receive-location-${record.id}", ${JSON.stringify(locationMap)});
-        ${poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0) > 0).map((line) => `syncLocationOptions("po-line-warehouse-${line.id}", "po-line-location-${line.id}", ${JSON.stringify(locationMap)});`).join("\n")}
+        ${poLines.filter((line) => Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0) > 0).map((line) => `syncLocationOptions("po-line-warehouse-${line.id}", "po-line-location-${line.id}", ${JSON.stringify(locationMap)}); updatePoLineQuantityState("${line.id}");`).join("\n")}
         document.getElementById("po-receive-form-${record.id}").addEventListener("keydown", function(event) {
           if (event.key !== "Enter") return;
           const tag = (event.target.tagName || "").toUpperCase();
@@ -18913,6 +18927,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
             return;
           }
           document.querySelectorAll('input[name^="qty_received_"]').forEach(function(input) {
+            if (input.disabled) return;
             const lineId = input.name.replace("qty_received_", "");
             const qty = Number(input.value || 0);
             if (!Number.isFinite(qty) || qty <= 0) return;
@@ -19072,6 +19087,8 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
           enteredStatus = "SHORTAGE";
           osdStatus = "SHORTAGE";
           osdQty = remainingQty - qtyReceived;
+        } else if (shortAction === "not_on_load") {
+          enteredStatus = "NOT ON THIS LOAD";
         } else {
           enteredStatus = "BACKORDER";
         }
@@ -19540,15 +19557,27 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
           <div><label>Description</label><input name="description" value="${esc(mrr.material_description || "")}" /></div>
         `}
         <div class="grid">
-          <div><label>Qty Received</label><input name="qty_received" required inputmode="decimal" /></div>
-          <div><label>Warehouse</label><select id="receive-warehouse-${mrr.id}" name="warehouse" required onchange='syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
-          <div><label>Location</label><select id="receive-location-${mrr.id}" name="location" data-placeholder="Select location" required><option value="">Select location</option></select></div>
-          <div><label>Short Handling</label><select name="short_action"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
+          <div><label>Qty Received</label><input id="receive-qty-${mrr.id}" name="qty_received" required inputmode="decimal" title="Select a warehouse and location before entering a quantity." disabled /></div>
+          <div><label>Warehouse</label><select id="receive-warehouse-${mrr.id}" name="warehouse" required onchange='syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${escAttr(JSON.stringify(locationMap))}); updateReceiveQuantityState()'>${warehouseOptionsHtml}</select></div>
+          <div><label>Location</label><select id="receive-location-${mrr.id}" name="location" data-placeholder="Select location" required onchange="updateReceiveQuantityState()"><option value="">Select location</option></select></div>
+          <div><label>Short Handling</label><select name="short_action"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option><option value="not_on_load">Not on this load</option></select></div>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions"><button type="submit" ${canReceiveOnExistingMrr ? "" : "disabled"}>${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="${escAttr(backHref)}">Back</a></div>
       </form>
-      <script>syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${JSON.stringify(locationMap)});</script>
+      <script>
+        function updateReceiveQuantityState() {
+          const warehouse = document.getElementById("receive-warehouse-${mrr.id}");
+          const location = document.getElementById("receive-location-${mrr.id}");
+          const quantity = document.getElementById("receive-qty-${mrr.id}");
+          if (!quantity) return;
+          const hasStorageLocation = Boolean(warehouse && warehouse.value && location && location.value);
+          quantity.disabled = !hasStorageLocation;
+          quantity.title = hasStorageLocation ? "" : "Select a warehouse and location before entering a quantity.";
+        }
+        syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${JSON.stringify(locationMap)});
+        updateReceiveQuantityState();
+      </script>
       ${po ? (canReceiveOnExistingMrr ? "" : `<p class="muted">${esc(existingMrrReceiveMessage)}</p>`) : `<p class="muted">No-PO receipts are logged for traceability, but they do not post into PO-based inventory until a PO line exists.</p>`}
     </div>
   `, req.user));
@@ -19613,6 +19642,8 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
           enteredStatus = "SHORTAGE";
           osdStatus = "SHORTAGE";
           osdQty = remainingQty - qtyReceived;
+        } else if (shortAction === "not_on_load") {
+          enteredStatus = "NOT ON THIS LOAD";
         } else {
           enteredStatus = "BACKORDER";
         }
@@ -22097,7 +22128,7 @@ app.get("/material-logs/mrr/:mrrId/receipts/:receiptId/edit", requireAuth, requi
   const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
     .concat(warehouseOptions.map((warehouse) => `<option value="${esc(warehouse.name)}" ${warehouse.name === normalizedRowWarehouse ? "selected" : ""}>${esc(warehouse.name)}</option>`))
     .join("");
-  const statusOptions = ["OK", "BACKORDER", "SHORTAGE", "OVERAGE"].map((status) => `<option value="${status}" ${String(row.osd_status || "").toUpperCase() === status ? "selected" : ""}>${status}</option>`).join("");
+  const statusOptions = ["OK", "BACKORDER", "NOT ON THIS LOAD", "SHORTAGE", "OVERAGE"].map((status) => `<option value="${status}" ${String(row.osd_status || "").toUpperCase() === status ? "selected" : ""}>${status}</option>`).join("");
   const returnTo = `/material-logs/mrr/${mrrId}/edit`;
   res.send(layout("Edit MRR Line", `
     <h1>Edit MRR Line</h1>
