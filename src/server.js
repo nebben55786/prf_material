@@ -18793,7 +18793,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       : `<input type="hidden" name="po_line_ids" value="${lineId}" /><input name="qty_received_${lineId}" value="${escAttr(formatQtyDisplay(remainingQty))}" inputmode="decimal" min="0" step="any" data-remaining="${escAttr(String(remainingQty))}" placeholder="${escAttr(formatQtyDisplay(remainingQty))}" size="4" style="width:6ch; min-width:6ch; box-sizing:border-box;" title="Select a warehouse and location before changing this quantity." disabled />`;
     const shortCell = locked
       ? ""
-      : `<select name="short_action_${lineId}" tabindex="-1" style="min-width:140px;"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option><option value="not_on_load">Not on this load</option></select>`;
+      : `<select name="short_action_${lineId}" tabindex="-1" style="min-width:140px;"><option value="not_on_load" selected>Not on this load</option><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select>`;
     const warehouseCell = locked
       ? `<span>${esc(line.last_warehouse || "")}</span>`
       : `<select id="po-line-warehouse-${lineId}" name="warehouse_${lineId}" tabindex="-1" onchange='syncLocationOptions("po-line-warehouse-${lineId}", "po-line-location-${lineId}", ${escAttr(JSON.stringify(locationMap))}); updatePoLineQuantityState("${lineId}")'>${warehouseOptionsHtml}</select>`;
@@ -18851,7 +18851,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         <div class="grid">
           <div><label>Default Warehouse</label><select id="po-receive-warehouse-${record.id}" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'>${warehouseOptionsHtml}</select></div>
           <div><label>Default Location</label><select id="po-receive-location-${record.id}" data-placeholder="Select location" onchange='applyPoHeaderDefaults("${record.id}", ${escAttr(JSON.stringify(locationMap))})'><option value="">Select location</option></select></div>
-          <div><label>Short Qty Default</label><select name="short_action_default" onchange='document.querySelectorAll("select[name^=short_action_]").forEach(function(select){ select.value = this.value; }, this);'><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option><option value="not_on_load">Not on this load</option></select></div>
+          <div><label>Short Qty Default</label><select name="short_action_default" onchange='document.querySelectorAll("select[name^=short_action_]").forEach(function(select){ select.value = this.value; }, this);'><option value="not_on_load" selected>Not on this load</option><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
         </div>
         <div class="actions">
           ${hideFullyReceived
@@ -19073,7 +19073,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
       const warehouse = normalizeWarehouseName(req.body[`warehouse_${lineId}`]);
       const location = normalizeLocationName(req.body[`location_${lineId}`]);
       await assertValidWarehouseLocation(client, warehouse, location, jobId);
-      const shortAction = String(req.body[`short_action_${lineId}`] || req.body.short_action_default || "backorder").trim().toLowerCase();
+      const shortAction = String(req.body[`short_action_${lineId}`] || req.body.short_action_default || "not_on_load").trim().toLowerCase();
       const enteredNotes = String(req.body.osd_notes || "").trim();
       let enteredStatus = "OK";
       let osdStatus = "";
@@ -19560,7 +19560,7 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
           <div><label>Qty Received</label><input id="receive-qty-${mrr.id}" name="qty_received" required inputmode="decimal" title="Select a warehouse and location before entering a quantity." disabled /></div>
           <div><label>Warehouse</label><select id="receive-warehouse-${mrr.id}" name="warehouse" required onchange='syncLocationOptions("receive-warehouse-${mrr.id}", "receive-location-${mrr.id}", ${escAttr(JSON.stringify(locationMap))}); updateReceiveQuantityState()'>${warehouseOptionsHtml}</select></div>
           <div><label>Location</label><select id="receive-location-${mrr.id}" name="location" data-placeholder="Select location" required onchange="updateReceiveQuantityState()"><option value="">Select location</option></select></div>
-          <div><label>Short Handling</label><select name="short_action"><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option><option value="not_on_load">Not on this load</option></select></div>
+          <div><label>Short Handling</label><select name="short_action"><option value="not_on_load" selected>Not on this load</option><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
         </div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions"><button type="submit" ${canReceiveOnExistingMrr ? "" : "disabled"}>${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="${escAttr(backHref)}">Back</a></div>
@@ -19628,7 +19628,7 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
       }
       const remainingQty = Math.max(Number(poLine.qty_ordered || 0) - Number(poLine.qty_accounted || 0), 0);
       if (remainingQty <= 0) throw new Error("This PO line is fully received. No additional receipts can be posted against it.");
-      const shortAction = String(req.body.short_action || "backorder").trim().toLowerCase();
+      const shortAction = String(req.body.short_action || "not_on_load").trim().toLowerCase();
       const enteredNotes = String(req.body.osd_notes || "").trim();
       let enteredStatus = "OK";
       let osdStatus = "";
