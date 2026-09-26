@@ -10618,6 +10618,7 @@ app.get("/bom/:id/export.xlsx", requireAuth, requireJobContext, requirePermissio
         bl.qty_awarded,
         bl.qty_ordered,
         coalesce(inv.qty_on_hand, 0) as qty_received,
+        coalesce(reserved.qty_reserved, 0) as qty_reserved,
         bl.planning_status,
         bl.spec,
         bl.commodity_code,
@@ -10634,12 +10635,22 @@ app.get("/bom/:id/export.xlsx", requireAuth, requireJobContext, requirePermissio
         ${getInventoryTotalsByItemSubquery(jobId)}
       ) inv
         on inv.item_code = bl.item_code
+      left join (
+        select
+          mrl.bom_line_id,
+          sum(mrl.qty_requested) as qty_reserved
+        from material_requisition_lines mrl
+        join material_requisitions mr on mr.id = mrl.requisition_id
+        where mr.job_id = $2
+          and mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
+        group by mrl.bom_line_id
+      ) reserved on reserved.bom_line_id = bl.id
       where bl.bom_id = $1
       order by
         case when coalesce(bl.line_no, '') ~ '^[0-9]+$' then lpad(bl.line_no, 20, '0') else lower(coalesce(bl.line_no, '')) end,
         bl.item_code,
         bl.id
-    `, [bomId])
+    `, [bomId, jobId])
   ]);
   const bom = bomRes.rows[0];
   if (!bom) throw new Error("BOM not found.");
@@ -10660,6 +10671,7 @@ app.get("/bom/:id/export.xlsx", requireAuth, requireJobContext, requirePermissio
     qty_awarded: num(line.qty_awarded),
     qty_ordered: num(line.qty_ordered),
     qty_received: num(line.qty_received),
+    qty_reserved: num(line.qty_reserved),
     planning_status: line.planning_status || "",
     spec: line.spec || "",
     commodity_code: line.commodity_code || "",
@@ -10689,6 +10701,7 @@ app.get("/bom/:id/export.xlsx", requireAuth, requireJobContext, requirePermissio
     "qty_awarded",
     "qty_ordered",
     "qty_received",
+    "qty_reserved",
     "planning_status",
     "spec",
     "commodity_code",
@@ -10713,6 +10726,7 @@ app.get("/bom/:id/export.xlsx", requireAuth, requireJobContext, requirePermissio
     { wch: 42 },
     { wch: 14 },
     { wch: 10 },
+    { wch: 12 },
     { wch: 12 },
     { wch: 12 },
     { wch: 12 },
@@ -12386,7 +12400,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
   const iwp = String(req.query.iwp || "").trim();
   const lineNo = String(req.query.line_no || "").trim();
   const where = ["bl.bom_id = $1"];
-  const params = [req.params.id];
+  const params = [req.params.id, jobId];
   if (search) {
     params.push(`%${search}%`);
     where.push(`(bl.item_code ilike $${params.length} or coalesce(bl.description, '') ilike $${params.length})`);
@@ -12403,6 +12417,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
     select
       bl.*,
       coalesce(inv.qty_on_hand, 0) as qty_on_hand,
+      coalesce(reserved.qty_reserved, 0) as qty_reserved,
       coalesce(need.qty_needed, 0) as qty_needed
     from bom_lines bl
     left join (
@@ -12410,6 +12425,16 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
       from (${getInventoryTotalsSubquery(jobId)}) inventory_totals
       group by item_code
     ) inv on inv.item_code = bl.item_code
+    left join (
+      select
+        mrl.bom_line_id,
+        sum(mrl.qty_requested) as qty_reserved
+      from material_requisition_lines mrl
+      join material_requisitions mr on mr.id = mrl.requisition_id
+      where mr.job_id = $2
+        and mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
+      group by mrl.bom_line_id
+    ) reserved on reserved.bom_line_id = bl.id
     left join (
       select bl2.item_code, sum(greatest(bl2.qty_required - bl2.qty_issued, 0)) as qty_needed
       from bom_lines bl2
@@ -12431,6 +12456,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
     <td>${esc(formatQtyDisplay(line.qty_required))}</td>
     <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
     <td>${esc(formatQtyDisplay(line.qty_on_hand))}</td>
+    <td>${esc(formatQtyDisplay(line.qty_reserved))}</td>
     <td>${esc(formatQtyDisplay(line.qty_needed))}</td>
     <td>${esc(line.uom || "")}</td>
     <td>${esc(line.spec || "")}</td>
@@ -12470,7 +12496,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
         <div class="actions"><button type="submit">Filter Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Clear</a><span class="muted">${lines.length} line(s)</span></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Needed Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="13" class="muted">No BOM lines found.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Qty Reserved</th><th>Needed Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="14" class="muted">No BOM lines found.</td></tr>`}</table></div>
   `, req.user));
 }));
 
