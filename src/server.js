@@ -12459,7 +12459,6 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
     <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
     <td>${esc(formatQtyDisplay(line.qty_on_hand))}</td>
     <td>${esc(formatQtyDisplay(line.qty_reserved))}</td>
-    <td>${esc(formatQtyDisplay(line.qty_needed))}</td>
     <td>${esc(line.uom || "")}</td>
     <td>${esc(line.spec || "")}</td>
     <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
@@ -12498,7 +12497,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
         <div class="actions"><button type="submit">Filter Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Clear</a><span class="muted">${lines.length} line(s)</span></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Qty Reserved</th><th>Needed Qty</th><th>UOM</th><th>Spec</th><th>Size</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="14" class="muted">No BOM lines found.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Qty Reserved</th><th>UOM</th><th>Spec</th><th>Size</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="13" class="muted">No BOM lines found.</td></tr>`}</table></div>
   `, req.user));
 }));
 
