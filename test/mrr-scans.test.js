@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import vm from "node:vm";
 import test from "node:test";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { Readable, PassThrough } from "node:stream";
 import { once } from "node:events";
 import { mrrScanFilename, mrrScanPrefix, isMrrScanPath, mrrScanMaxBytes, verifyMrrScan } from "../src/mrr-scans.js";
+import { registerMrrScanRoutes } from "../src/routes/mrr-scans.js";
 
 const uploadId = "b6503b1a-c353-46c2-9080-1141df1467b5";
 const pathname = `${mrrScanPrefix(1, 2)}${uploadId}/MRR-123.pdf`;
@@ -71,7 +71,7 @@ function routeHarness(overrides = {}) {
     mrrScanFilename, mrrScanPrefix, isMrrScanPath, mrrScanMaxBytes, verifyMrrScan,
     console, Readable, contentDispositionFilename: (value) => value, ...overrides
   };
-  vm.runInNewContext(source.slice(source.indexOf('app.post("/material-logs/mrr/:id/scanned-pdf/client-upload"'), source.indexOf('app.post("/material-logs/mrr/:id/reverse"')), context);
+  registerMrrScanRoutes(context.app, context);
   return { routes, row, actions };
 }
 
