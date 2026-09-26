@@ -1142,13 +1142,24 @@ function buildPickTicketPdf(header, lines) {
   const left = 28;
   const right = pageWidth - 28;
   const top = pageHeight - 24;
-  const rowHeight = 30;
-  const maxRowsFirstPage = 9;
-  const maxRowsOtherPages = 12;
+  const rowHeight = 25;
+  const bodyBottom = 24;
+  const footerTop = 86;
+  const footerBoxHeight = 30;
+  const footerGap = 8;
+  const footerReservedTop = footerTop + footerBoxHeight + footerGap;
+  const headerGap = 3;
+  const sectionGap = 4;
+  const metaTop = top - 40 - headerGap;
+  const meta2Top = metaTop - 34 - sectionGap;
+  const tableTop = meta2Top - (header.notes ? 26 + sectionGap : sectionGap);
+  const maxRowsWithoutFooter = Math.max(1, Math.floor((tableTop - bodyBottom) / rowHeight) - 1);
+  const maxRowsWithFooter = Math.max(1, Math.floor((tableTop - footerReservedTop) / rowHeight) - 1);
   const chunks = [];
   let cursor = 0;
   while (cursor < lines.length || !chunks.length) {
-    const maxRows = chunks.length ? maxRowsOtherPages : maxRowsFirstPage;
+    const remaining = lines.length - cursor;
+    const maxRows = remaining <= maxRowsWithFooter ? maxRowsWithFooter : maxRowsWithoutFooter;
     chunks.push(lines.slice(cursor, cursor + maxRows));
     cursor += maxRows;
   }
@@ -1171,7 +1182,6 @@ function buildPickTicketPdf(header, lines) {
     content.push(makeText(right - 170, top - 18, `REQ # ${header.requisition_no || ""}`, "F2", 12));
     content.push(makeText(right - 170, top - 32, `Page ${pageIndex + 1} of ${chunks.length}`, "F1", 8));
 
-    const metaTop = top - 52;
     const metaWidths = [130, 130, 120, 120, 118, 118];
     const metaLabels = ["REQUESTED BY", "ISSUED TO", "CREATED", "PRINTED", "FLAG COLOR", "TRAILER"];
     const metaValues = [
@@ -1190,14 +1200,12 @@ function buildPickTicketPdf(header, lines) {
       metaX += metaWidths[i];
     }
 
-    const meta2Top = metaTop - 42;
     if (header.notes) {
       content.push(rect(left, meta2Top - 26, right - left, 26));
       content.push(makeText(left + 8, meta2Top - 10, "NOTES", "F2", 7));
       content.push(makeText(left + 8, meta2Top - 20, String(header.notes).slice(0, 108), "F1", 8));
     }
 
-    const tableTop = meta2Top - (header.notes ? 40 : 14);
     const widths = [96, 446, 54, 40, 100];
     const headers = ["ITEM", "DESCRIPTION", "ISS QTY", "UOM", "LOCATION"];
     let x = left;
@@ -1241,9 +1249,6 @@ function buildPickTicketPdf(header, lines) {
     }
 
     if (pageIndex === chunks.length - 1) {
-      const footerTop = 86;
-      const footerBoxHeight = 30;
-      const footerGap = 8;
       const printTop = footerTop - footerBoxHeight - footerGap;
       const signTop = printTop - footerBoxHeight - footerGap;
       content.push(rect(left + 8, footerTop, 510, footerBoxHeight));
