@@ -1142,17 +1142,20 @@ function buildPickTicketPdf(header, lines) {
   const left = 28;
   const right = pageWidth - 28;
   const top = pageHeight - 24;
-  const rowHeight = 25;
-  const bodyBottom = 24;
-  const footerTop = 86;
-  const footerBoxHeight = 30;
-  const footerGap = 8;
+  const headerHeight = 34;
+  const metaHeight = 28;
+  const notesHeight = 22;
+  const rowHeight = 20;
+  const bodyBottom = 32;
+  const footerTop = 108;
+  const footerBoxHeight = 26;
+  const footerGap = 6;
   const footerReservedTop = footerTop + footerBoxHeight + footerGap;
-  const headerGap = 3;
-  const sectionGap = 4;
-  const metaTop = top - 40 - headerGap;
-  const meta2Top = metaTop - 34 - sectionGap;
-  const tableTop = meta2Top - (header.notes ? 26 + sectionGap : sectionGap);
+  const headerGap = 2;
+  const sectionGap = 3;
+  const metaTop = top - headerHeight - headerGap;
+  const meta2Top = metaTop - metaHeight - sectionGap;
+  const tableTop = meta2Top - (header.notes ? notesHeight + sectionGap : sectionGap);
   const maxRowsWithoutFooter = Math.max(1, Math.floor((tableTop - bodyBottom) / rowHeight) - 1);
   const maxRowsWithFooter = Math.max(1, Math.floor((tableTop - footerReservedTop) / rowHeight) - 1);
   const chunks = [];
@@ -1172,7 +1175,7 @@ function buildPickTicketPdf(header, lines) {
     const content = [];
     content.push("0.2 w");
     content.push("0 0 0 RG");
-    content.push(rect(left, top - 40, right - left, 40));
+    content.push(rect(left, top - headerHeight, right - left, headerHeight));
     if (pickTicketLogoBuffer) {
       content.push(`q 44 0 0 28 ${left + 12} ${top - 34} cm /Logo Do Q`);
     }
@@ -1194,16 +1197,16 @@ function buildPickTicketPdf(header, lines) {
     ];
     let metaX = left;
     for (let i = 0; i < metaWidths.length; i += 1) {
-      content.push(rect(metaX, metaTop - 34, metaWidths[i], 34));
-      content.push(makeText(metaX + 8, metaTop - 13, metaLabels[i], "F2", 8));
-      content.push(makeText(metaX + 8, metaTop - 26, metaValues[i], "F1", i < 2 ? 10 : 9));
+      content.push(rect(metaX, metaTop - metaHeight, metaWidths[i], metaHeight));
+      content.push(makeText(metaX + 8, metaTop - 10, metaLabels[i], "F2", 8));
+      content.push(makeText(metaX + 8, metaTop - 23, metaValues[i], "F1", i < 2 ? 10 : 9));
       metaX += metaWidths[i];
     }
 
     if (header.notes) {
-      content.push(rect(left, meta2Top - 26, right - left, 26));
-      content.push(makeText(left + 8, meta2Top - 10, "NOTES", "F2", 7));
-      content.push(makeText(left + 8, meta2Top - 20, String(header.notes).slice(0, 108), "F1", 8));
+      content.push(rect(left, meta2Top - notesHeight, right - left, notesHeight));
+      content.push(makeText(left + 8, meta2Top - 8, "NOTES", "F2", 7));
+      content.push(makeText(left + 8, meta2Top - 18, String(header.notes).slice(0, 108), "F1", 8));
     }
 
     const widths = [96, 446, 54, 40, 100];
@@ -1212,7 +1215,7 @@ function buildPickTicketPdf(header, lines) {
     content.push(rect(left, tableTop - rowHeight, right - left, rowHeight));
     for (let i = 0; i < widths.length; i += 1) {
       if (i > 0) content.push(line(x, tableTop, x, tableTop - rowHeight - (pageLines.length * rowHeight)));
-      content.push(makeText(x + 4, tableTop - 15, headers[i], "F2", 8));
+      content.push(makeText(x + 4, tableTop - 13, headers[i], "F2", 8));
       x += widths[i];
     }
     content.push(line(right, tableTop, right, tableTop - rowHeight - (pageLines.length * rowHeight)));
@@ -1235,15 +1238,15 @@ function buildPickTicketPdf(header, lines) {
         const textX = i === 3 ? cellX + widths[i] - 24 : cellX + 4;
         const qtyTextX = i === 2 ? cellX + widths[i] - 24 : textX;
         const wrappedCell = (i === 1 && wrappedDescription[1]) || (i === 4 && wrappedLocation[1]);
-        const textY = wrappedCell ? y - 13 : y - 15;
+        const textY = wrappedCell ? y - 8 : y - 12;
         content.push(makeText(i === 2 ? qtyTextX : textX, textY, value, "F1", 8));
         cellX += widths[i];
       }
       if (wrappedDescription[1]) {
-        content.push(makeText(left + widths[0] + 4, y - 25, wrappedDescription[1], "F1", 8));
+        content.push(makeText(left + widths[0] + 4, y - 17, wrappedDescription[1], "F1", 8));
       }
       if (wrappedLocation[1]) {
-        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + 4, y - 25, wrappedLocation[1], "F1", 8));
+        content.push(makeText(left + widths[0] + widths[1] + widths[2] + widths[3] + 4, y - 17, wrappedLocation[1], "F1", 8));
       }
       y -= rowHeight;
     }
