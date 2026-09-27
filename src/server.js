@@ -82,6 +82,10 @@ function isAdminRole(userOrRole) {
   const role = typeof userOrRole === "string" ? userOrRole : userOrRole?.role;
   return adminEquivalentRoles.includes(normalizeRole(role));
 }
+function hasUnrestrictedJobAccess(userOrRole) {
+  const role = typeof userOrRole === "string" ? userOrRole : userOrRole?.role;
+  return normalizeRole(role) === roleAdmin;
+}
 function displayRole(role) {
   const normalized = normalizeRole(role);
   if (normalized === roleMaterialController) return "Material Controller";
@@ -6388,7 +6392,7 @@ async function getJobRecord(jobId, client = null) {
 
 async function getAccessibleJobsForUser(userId, role, client = null) {
   const runner = client || { query };
-  if (isAdminRole(role)) {
+  if (hasUnrestrictedJobAccess(role)) {
     return (await runner.query(`
       select id, job_number, plant_name, performance_job_number, is_active, created_at, updated_at
       from jobs
@@ -6431,7 +6435,7 @@ async function resolveJobContextForUser(user, client = null, requestedJobId = nu
   if (normalizedRequestedJobId > 0) {
     activeJob = activeJobs.find((job) => Number(job.id) === normalizedRequestedJobId) || null;
   }
-  if (!activeJob && !isAdminRole(user) && activeJobs.length === 1) {
+  if (!activeJob && !hasUnrestrictedJobAccess(user) && activeJobs.length === 1) {
     activeJob = activeJobs[0];
   }
   return {
@@ -6590,7 +6594,7 @@ const requireJobContext = asyncHandler(async (req, res, next) => {
     next();
     return;
   }
-  if (isAdminRole(req.user) || (req.user?.activeJobs || []).length > 1) {
+  if (hasUnrestrictedJobAccess(req.user) || (req.user?.activeJobs || []).length > 1) {
     res.redirect("/jobs/select");
     return;
   }
@@ -7264,7 +7268,7 @@ app.post("/login", asyncHandler(async (req, res) => {
   } catch (error) {
     console.error("Failed to write login audit log", error);
   }
-  if (isAdminRole(user)) {
+  if (hasUnrestrictedJobAccess(user)) {
     setSessionCookie(res, buildSessionPayload(user, null));
     res.redirect(user.must_change_password ? "/change-password" : "/jobs/select");
     return;
@@ -7639,14 +7643,14 @@ app.get("/jobs/no-access", requireAuth, (req, res) => {
 });
 
 app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
-  const jobs = isAdminRole(req.user)
+  const jobs = hasUnrestrictedJobAccess(req.user)
     ? req.user.accessibleJobs
     : req.user.activeJobs;
-  if (!isAdminRole(req.user) && jobs.length === 0) {
+  if (!hasUnrestrictedJobAccess(req.user) && jobs.length === 0) {
     res.redirect("/jobs/no-access");
     return;
   }
-  if (!isAdminRole(req.user) && jobs.length === 1) {
+  if (!hasUnrestrictedJobAccess(req.user) && jobs.length === 1) {
     setSessionCookie(res, buildSessionPayload(req.user, jobs[0].id));
     res.redirect(getUserHomePath(req.user));
     return;
@@ -7670,7 +7674,7 @@ app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
   res.send(layout("Select Job", `
     <h1>Select Job</h1>
     <div class="card">
-      <p>${isAdminRole(req.user) ? "Choose the job you want to work in." : "Choose one of your assigned jobs to continue."}</p>
+      <p>${hasUnrestrictedJobAccess(req.user) ? "Choose the job you want to work in." : "Choose one of your assigned jobs to continue."}</p>
     </div>
     <div class="card scroll">
       <table>
@@ -7683,7 +7687,7 @@ app.get("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
 
 app.post("/jobs/select", requireAuth, asyncHandler(async (req, res) => {
   const requestedJobId = Number(req.body.job_id || 0);
-  const availableJobs = isAdminRole(req.user) ? req.user.accessibleJobs : req.user.activeJobs;
+  const availableJobs = hasUnrestrictedJobAccess(req.user) ? req.user.accessibleJobs : req.user.activeJobs;
   const selectedJob = availableJobs.find((job) => Number(job.id) === requestedJobId && job.is_active);
   if (!selectedJob) {
     throw new Error("Choose a valid active job.");
@@ -10233,7 +10237,7 @@ app.post("/settings/access-requests/:id/approve", requireAuth, requireRole(admin
       "insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active, must_change_password) values ($1, $2, $3, $4, $5, $6, $7, true, true) returning id",
       [username, passwordHash, role, firstName, lastName, email, phone]
     );
-    if (!isAdminRole(role)) {
+    if (!hasUnrestrictedJobAccess(role)) {
       for (const jobId of assignedJobIds) {
         await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [insert.rows[0].id, jobId]);
       }
@@ -10285,7 +10289,7 @@ app.post("/settings/users/add", requireAuth, requireRole(adminEquivalentRoles), 
   const passwordHash = await bcrypt.hash(password, 8);
   await withTransaction(async (client) => {
     const insert = await client.query("insert into users (username, password_hash, role, first_name, last_name, email, phone, is_active, must_change_password) values ($1, $2, $3, $4, $5, $6, $7, true, true) returning id", [username, passwordHash, role, firstName, lastName, email, phone]);
-    if (!isAdminRole(role)) {
+    if (!hasUnrestrictedJobAccess(role)) {
       for (const jobId of assignedJobIds) {
         await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [insert.rows[0].id, jobId]);
       }
@@ -10332,13 +10336,14 @@ app.post("/settings/users/:id/edit", requireAuth, requireRole(adminEquivalentRol
       await client.query("update users set username = $2, role = $3, is_active = $4, first_name = $5, last_name = $6, email = $7, phone = $8 where id = $1", [userId, username, role, isActive, firstName, lastName, email, phone]);
     }
     await client.query("delete from user_jobs where user_id = $1", [userId]);
-    if (!isAdminRole(role)) {
+    if (!hasUnrestrictedJobAccess(role)) {
       for (const jobId of assignedJobIds) {
         await client.query("insert into user_jobs (user_id, job_id) values ($1, $2) on conflict (user_id, job_id) do nothing", [userId, jobId]);
       }
     }
     await auditLog(client, req.user.id, "update", "user", userId, `${username}|${role}|${isActive ? "active" : "inactive"}|${firstName}|${lastName}|${email}|${phone}|jobs=${assignedJobIds.join(",")}`);
   });
+  authContextCache.clear();
   res.redirect(getSafeReturnPath(req, "/settings/user-management"));
 }));
 
