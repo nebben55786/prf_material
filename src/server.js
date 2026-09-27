@@ -8711,7 +8711,7 @@ app.get("/settings/users/:id", requireAuth, requireRole(adminEquivalentRoles), a
         </div>
         <div class="actions">
           <button type="submit">Save User</button>
-          ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="${esc(deleteHref)}">Delete User</a>`}
+          ${req.user.id === record.id ? `<span class="muted">Current user</span>` : `<a class="btn btn-danger" href="${esc(deleteHref)}">Deactivate User</a>`}
         </div>
       </form>
     </div>
