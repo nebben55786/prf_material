@@ -10849,7 +10849,7 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       </div>
       <div class="card">
         <h3>Upload BOM Lines</h3>
-        <p class="muted">CSV/XLSX columns include line_no, item_code, description, size_1, qty, uom, spec, tag_number, iwp_no, iso_no, material_type, commodity_code, size_2, thk_1, thk_2, notes. Required fields are line_no, item_code, description, size_1, qty, and uom. The older qty_required column is still accepted. If an item code is not in Item Master, it will be added using the imported row values.</p>
+        <p class="muted">CSV/XLSX columns include line_no, item_code, description, size_1, qty, uom, spec, tag_number, iwp_no, iso_no, material_type, commodity_code, size_2, thk_1, thk_2, notes. Required fields are line_no, item_code, description, qty, and uom. Size fields are optional. The older qty_required column is still accepted. If an item code is not in Item Master, it will be added using the imported row values.</p>
           <form id="bom-lines-import-form" method="post" enctype="multipart/form-data" action="/bom/${bom.id}/lines/import" class="stack">
             <div><label>CSV/XLSX File</label><input id="bom-lines-import-file" type="file" name="sheet" /></div>
             <div><label>Or Paste CSV</label><textarea id="bom-lines-import-text" name="csv_text"></textarea></div>
@@ -11231,12 +11231,11 @@ app.post("/bom/:id/lines/import", requireAuth, requireJobContext, requirePermiss
       const lineNo = String(row.line_no || "").trim();
       const itemCode = String(row.item_code || "").trim();
       const description = String(row.description || "").trim();
-      const size1 = String(row.size_1 || "").trim();
       const uom = String(row.uom || "").trim();
       const qtyRequired = parseQtyValue(row.qty_required);
-      if (!lineNo || !itemCode || !description || !size1 || !uom || qtyRequired <= 0) {
+      if (!lineNo || !itemCode || !description || !uom || qtyRequired <= 0) {
         skippedCount += 1;
-        await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, description, size_1, qty, and uom are required.", row);
+        await addImportBatchError(client, batchId, rowNumber, "invalid_bom_line", "Line no, item code, description, qty, and uom are required.", row);
         continue;
       }
       const spec = normalizeSpecName(row.spec || "");
