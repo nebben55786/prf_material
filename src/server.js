@@ -11,6 +11,7 @@ import multer from "multer";
 import bcrypt from "bcryptjs";
 import XLSX from "xlsx";
 import { mrrScanFilename } from "./mrr-scans.js";
+import { addOnTheFlyBomItem } from "./on-the-fly-item.js";
 import { registerMrrDocumentRoutes } from "./routes/mrr-documents.js";
 import { registerMrrScanRoutes } from "./routes/mrr-scans.js";
 import { initDb, query, withTransaction, auditLog, vendorCategories, setVendorCategories, permissionMatrix, setPermissionMatrix, pool } from "./db.js";
@@ -6903,7 +6904,7 @@ async function getNextInventoryAuditReportNumber(client = null, jobId = null) {
   return `${jobNumber}-INV-${String(nextNumber).padStart(5, "0")}`;
 }
 
-async function saveInventoryAuditReport(client, { userId, jobId = null, warehouseFilter = "", locationFilter = "", identFilter = "", desiredRows = [] }) {
+async function saveInventoryAuditReport(client, { userId, jobId = null, warehouseFilter = "", locationFilter = "", identFilter = "", desiredRows = [], rebuildUnallocated = true }) {
   if (!desiredRows.length) throw new Error("No inventory rows were provided for this audit.");
   const currentRows = await getCurrentOnHandRows(client, { jobId });
   const currentMap = new Map(currentRows.map((row) => [buildInventoryEntryKey(row), row]));
@@ -6988,7 +6989,7 @@ async function saveInventoryAuditReport(client, { userId, jobId = null, warehous
     ]);
     await auditLog(client, userId, "update", "inventory_audit_counts", `${desiredRow.item_code}|${desiredRow.warehouse}|${desiredRow.location}`, `actual_qty=${actualQty};report=${reportNo};delta=${adjustmentQty}`);
   }
-  if (Number.isFinite(Number(jobId))) {
+  if (rebuildUnallocated && Number.isFinite(Number(jobId))) {
     await rebuildUnallocatedBom(client, Number(jobId));
   }
   return { reportId, reportNo };
@@ -10771,6 +10772,7 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
     return;
   }
   const manualBom = !isSystemGeneratedBom(bom);
+  const canAddOnTheFlyItem = manualBom && canAccess(req.user, "bom", "edit") && canEditInventoryAudit(req.user);
   const inventoryMarked = Number(req.query.inventory_marked || 0);
   const inventoryEligible = Number(req.query.inventory_eligible || 0);
   const inventoryAlready = Number(req.query.inventory_already || 0);
@@ -10823,7 +10825,7 @@ app.get("/bom/:id", requireAuth, requireJobContext, async (req, res) => {
       <p>${esc(bom.description || "")}</p>
       ${bom.notes ? `<p class="muted">${esc(bom.notes)}</p>` : ""}
       ${manualBom
-        ? `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a><a class="btn btn-secondary" href="/bom/${bom.id}/export.xlsx">Export BOM XLSX</a>${isAdminRole(req.user) ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>`
+        ? `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/edit">Edit BOM</a><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a>${canAddOnTheFlyItem ? `<a class="btn btn-primary" href="/bom/${bom.id}/lines/on-the-fly/new">Add On-The-Fly Item</a>` : ""}<a class="btn btn-secondary" href="/bom/${bom.id}/export.xlsx">Export BOM XLSX</a>${isAdminRole(req.user) ? `<a class="btn btn-secondary" href="/bom/${bom.id}/receive-from-inventory">One-Time: Mark In-Stock Lines Received</a>` : ""}</div>`
         : `<div class="actions"><a class="btn btn-secondary" href="/bom/${bom.id}/lines">View BOM Lines</a><a class="btn btn-secondary" href="/bom/${bom.id}/export.xlsx">Export BOM XLSX</a><a class="btn btn-primary" href="/requisitions/new?bom_id=${bom.id}">Create Requisition</a></div><p class="muted">This BOM is generated automatically from item-code inventory balances and cannot be edited manually.</p>`
       }
     </div>
@@ -11414,6 +11416,7 @@ async function getBomLineEntryAutocomplete(bomId, jobId) {
         coalesce(mi.size_2, '') as size_2,
         coalesce(mi.thk_1, '') as thk_1,
         coalesce(mi.thk_2, '') as thk_2,
+        coalesce(mi.notes, '') as notes,
         coalesce(string_agg(coalesce(nullif(ms.material_specification, ''), ms.name), ' | ' order by ms.service_code, ms.material_specification, ms.name) filter (where ms.id is not null), '') as specs
       from material_items mi
       left join material_item_specs mis on mis.material_item_id = mi.id and mis.job_id = mi.job_id
@@ -11441,7 +11444,8 @@ async function getBomLineEntryAutocomplete(bomId, jobId) {
       size_1: String(row.size_1 || "").trim(),
       size_2: String(row.size_2 || "").trim(),
       thk_1: String(row.thk_1 || "").trim(),
-      thk_2: String(row.thk_2 || "").trim()
+      thk_2: String(row.thk_2 || "").trim(),
+      notes: String(row.notes || "").trim()
     };
   }
   return {
@@ -11588,6 +11592,91 @@ function buildBomLineGridPage(req, bom, rowValues = [], errorMessages = [], auto
   `, req.user);
 }
 
+function buildOnTheFlyItemPage(req, bom, values = {}, errorMessage = "", autocomplete = {}, warehouseOptions = [], locationMap = {}) {
+  const field = (name, fallback = "") => String(values[name] ?? fallback).trim();
+  const itemDetailsJson = JSON.stringify(autocomplete.itemDetails || {}).replace(/</g, "\\u003c");
+  const locationMapJson = JSON.stringify(locationMap).replace(/</g, "\\u003c");
+  const warehouseOptionsHtml = [`<option value="">Select warehouse</option>`]
+    .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === field("warehouse") ? "selected" : ""}>${esc(row.name)}</option>`))
+    .join("");
+  return layout(`Add On-The-Fly Item ${bom.bom_name || bom.description || bom.bom_no}`, `
+    <h1>Add On-The-Fly Item</h1>
+    <div class="card"><strong>BOM:</strong> ${esc(bom.bom_name || bom.description || bom.bom_no)} | <strong>BOM #:</strong> ${esc(bom.bom_no)}</div>
+    ${errorMessage ? `<div class="card error"><strong>Could not add item.</strong><pre>${esc(errorMessage)}</pre></div>` : ""}
+    <div class="card">
+      <form id="on-the-fly-item-form" method="post" action="/bom/${bom.id}/lines/on-the-fly" class="stack">
+        <datalist id="on-the-fly-item-codes">${autocomplete.itemCodeOptions || ""}</datalist>
+        <h3>Item Master</h3>
+        <p class="muted">An existing item code reuses its Item Master values. A new item code creates a new Item Master record.</p>
+        <div class="grid-3">
+          <div><label>Item Code</label><input name="item_code" value="${esc(field("item_code"))}" list="on-the-fly-item-codes" required /></div>
+          <div><label>Description</label><input name="description" value="${esc(field("description"))}" required /></div>
+          <div><label>Material Type</label><input name="material_type" value="${esc(field("material_type", "misc"))}" required /></div>
+          <div><label>UOM</label><input name="uom" value="${esc(field("uom", "EA"))}" required /></div>
+          <div><label>Commodity Code</label><input name="commodity_code" value="${esc(field("commodity_code"))}" /></div>
+          <div><label>Specs</label><input name="specs" value="${esc(field("specs"))}" /></div>
+          <div><label>Size 1</label><input name="size_1" value="${esc(field("size_1"))}" /></div>
+          <div><label>Size 2</label><input name="size_2" value="${esc(field("size_2"))}" /></div>
+          <div><label>Thickness 1</label><input name="thk_1" value="${esc(field("thk_1"))}" /></div>
+          <div><label>Thickness 2</label><input name="thk_2" value="${esc(field("thk_2"))}" /></div>
+        </div>
+        <div><label>Item Notes</label><textarea name="item_notes">${esc(field("item_notes"))}</textarea></div>
+
+        <h3>BOM Line</h3>
+        <div class="grid-3">
+          <div><label>Line No</label><input name="line_no" value="${esc(field("line_no"))}" required /></div>
+          <div><label>Qty Required</label><input name="qty_required" value="${esc(field("qty_required"))}" inputmode="decimal" min="0.5" step="0.5" required /></div>
+          <div><label>BOM Spec</label><input name="spec" value="${esc(field("spec"))}" /></div>
+          <div><label>Tag Number</label><input name="tag_number" value="${esc(field("tag_number"))}" /></div>
+          <div><label>IWP</label><input name="iwp_no" value="${esc(field("iwp_no"))}" /></div>
+          <div><label>ISO</label><input name="iso_no" value="${esc(field("iso_no"))}" /></div>
+        </div>
+        <div><label>BOM Notes</label><textarea name="bom_notes">${esc(field("bom_notes"))}</textarea></div>
+
+        <h3>Starting Stock</h3>
+        <p class="muted">Enter the actual on-hand count for this item and location. Enter 0 to add the item without posting stock.</p>
+        <div class="grid-3">
+          <div><label>Actual On-Hand Qty</label><input name="actual_qty" value="${esc(field("actual_qty", "0"))}" inputmode="decimal" min="0" step="0.5" required /></div>
+          <div><label>Warehouse</label><select id="on-the-fly-warehouse" name="warehouse" onchange='syncLocationOptions("on-the-fly-warehouse", "on-the-fly-location", ${escAttr(locationMapJson)}, "${escAttr(field("location"))}")'>${warehouseOptionsHtml}</select></div>
+          <div><label>Location</label><select id="on-the-fly-location" name="location"><option value="">Select location</option></select></div>
+        </div>
+        <div class="actions"><button type="submit">Add Item, BOM Line, and Stock</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Cancel</a></div>
+      </form>
+      <script>
+        (function () {
+          const form = document.getElementById("on-the-fly-item-form");
+          if (!form) return;
+          const itemDetails = ${itemDetailsJson};
+          const itemCode = form.elements.item_code;
+          function fillExistingItem() {
+            const detail = itemDetails[String(itemCode.value || "").trim().toLowerCase()];
+            if (!detail) return;
+            const fields = {
+              description: detail.description || "",
+              material_type: detail.material_type || "misc",
+              uom: detail.uom || "EA",
+              commodity_code: detail.commodity_code || "",
+              specs: detail.specs || "",
+              spec: detail.spec || "",
+              size_1: detail.size_1 || "",
+              size_2: detail.size_2 || "",
+              thk_1: detail.thk_1 || "",
+              thk_2: detail.thk_2 || "",
+              item_notes: detail.notes || ""
+            };
+            Object.entries(fields).forEach(([name, value]) => {
+              if (form.elements[name]) form.elements[name].value = value;
+            });
+          }
+          itemCode.addEventListener("change", fillExistingItem);
+          itemCode.addEventListener("blur", fillExistingItem);
+          syncLocationOptions("on-the-fly-warehouse", "on-the-fly-location", ${locationMapJson}, ${JSON.stringify(field("location"))});
+        }());
+      </script>
+    </div>
+  `, req.user);
+}
+
 app.get("/bom/:id/lines/new", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
@@ -11595,6 +11684,63 @@ app.get("/bom/:id/lines/new", requireAuth, requireJobContext, requirePermission(
   assertBomAllowsManualChanges(bom, "add line");
   const autocomplete = await getBomLineEntryAutocomplete(bom.id, jobId);
   res.send(buildBomLineGridPage(req, bom, [], [], autocomplete));
+}));
+
+app.get("/bom/:id/lines/on-the-fly/new", requireAuth, requireJobContext, requirePermission("bom", "edit"), requireInventoryAuditEdit, asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  assertBomAllowsManualChanges(bom, "add line");
+  const [autocomplete, warehouseOptions, locationMap] = await Promise.all([
+    getBomLineEntryAutocomplete(bom.id, jobId),
+    getWarehouseOptions(jobId),
+    getWarehouseLocationMap(jobId)
+  ]);
+  res.send(buildOnTheFlyItemPage(req, bom, {}, "", autocomplete, warehouseOptions, locationMap));
+}));
+
+app.post("/bom/:id/lines/on-the-fly", requireAuth, requireJobContext, requirePermission("bom", "edit"), requireInventoryAuditEdit, asyncHandler(async (req, res) => {
+  const bomId = Number(req.params.id);
+  const jobId = currentJobId(req);
+  const bom = (await query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+  if (!bom) throw new Error("BOM not found.");
+  assertBomAllowsManualChanges(bom, "add line");
+  try {
+    const result = await withTransaction(async (client) => {
+      const currentBom = (await client.query("select * from bom_headers where id = $1 and job_id = $2", [bomId, jobId])).rows[0];
+      if (!currentBom) throw new Error("BOM not found.");
+      assertBomAllowsManualChanges(currentBom, "add line");
+      return addOnTheFlyBomItem(client, {
+        bomId,
+        jobId,
+        userId: req.user.id,
+        input: req.body
+      }, {
+        parseQtyValue,
+        normalizeWarehouseLocationValues,
+        normalizeSpecName,
+        upsertMaterialMasterItem,
+        getMaterialItemForUse,
+        saveInventoryAuditReport,
+        rebuildUnallocatedBom,
+        auditLog
+      });
+    });
+    const params = new URLSearchParams({
+      on_the_fly_item: result.itemCode,
+      on_the_fly_stock: formatQtyDisplay(result.actualQty),
+      on_the_fly_master: result.itemCreated ? "created" : "reused"
+    });
+    if (result.inventoryReport?.reportNo) params.set("inventory_report", result.inventoryReport.reportNo);
+    res.redirect(`/bom/${bomId}/lines?${params.toString()}`);
+  } catch (error) {
+    const [autocomplete, warehouseOptions, locationMap] = await Promise.all([
+      getBomLineEntryAutocomplete(bom.id, jobId),
+      getWarehouseOptions(jobId),
+      getWarehouseLocationMap(jobId)
+    ]);
+    res.status(400).send(buildOnTheFlyItemPage(req, bom, req.body, error.message, autocomplete, warehouseOptions, locationMap));
+  }
 }));
 
 app.post("/bom/:id/lines/grid", requireAuth, requireJobContext, requirePermission("bom", "edit"), asyncHandler(async (req, res) => {
@@ -12405,6 +12551,10 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
   const addedLines = Number(req.query.added_lines || 0);
   const skippedLines = Number(req.query.skipped_lines || 0);
   const lineSaveErrors = String(req.query.line_save_errors || "").trim();
+  const onTheFlyItem = String(req.query.on_the_fly_item || "").trim();
+  const onTheFlyStock = String(req.query.on_the_fly_stock || "").trim();
+  const onTheFlyMaster = String(req.query.on_the_fly_master || "").trim();
+  const inventoryReport = String(req.query.inventory_report || "").trim();
   const search = String(req.query.search || "").trim();
   const iwp = String(req.query.iwp || "").trim();
   const lineNo = String(req.query.line_no || "").trim();
@@ -12456,6 +12606,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
     order by coalesce(bl.iwp_no, ''), coalesce(bl.line_no, ''), bl.id
   `, params)).rows;
   const canEditBomLines = canAccess(req.user, "bom", "edit") && manualBom;
+  const canAddOnTheFlyItem = canEditBomLines && canEditInventoryAudit(req.user);
   const lineRows = lines.map((line) => `<tr>
     <td>${esc(line.line_no)}</td>
     <td>${esc(line.iwp_no || "")}</td>
@@ -12485,12 +12636,14 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
         <a class="btn btn-secondary" href="/bom/${bom.id}">Back to BOM</a>
         ${canEditBomLines ? `
           <a class="btn btn-primary" href="/bom/${bom.id}/lines/new">Add BOM Line</a>
+          ${canAddOnTheFlyItem ? `<a class="btn btn-primary" href="/bom/${bom.id}/lines/on-the-fly/new">Add On-The-Fly Item</a>` : ""}
           <form method="post" action="/bom/${bom.id}/lines/delete-all" onsubmit="return confirm(${escAttr(JSON.stringify(`Delete all BOM lines from ${bom.bom_name || bom.description || bom.bom_no}? This is only allowed if none of the lines have been used.`))});">
             <button class="btn btn-danger" type="submit">Delete All BOM Lines</button>
           </form>
         ` : ""}
       </div>
     </div>
+    ${onTheFlyItem ? `<div class="card success"><strong>Added ${esc(onTheFlyItem)} to the BOM.</strong> Item Master was ${onTheFlyMaster === "created" ? "created" : "reused"}.${Number(onTheFlyStock) > 0 ? ` Actual on-hand is now ${esc(onTheFlyStock)}${inventoryReport ? ` via audit ${esc(inventoryReport)}` : ""}.` : " No starting stock was posted."}</div>` : ""}
     ${addedLines ? `<div class="card success"><strong>Added ${addedLines} BOM line${addedLines === 1 ? "" : "s"}.</strong>${skippedLines ? ` ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.` : ""}</div>` : ""}
     ${!addedLines && skippedLines ? `<div class="card error"><strong>No BOM lines were added.</strong> ${skippedLines} row${skippedLines === 1 ? "" : "s"} could not be saved.</div>` : ""}
     ${lineSaveErrors ? `<div class="card error"><strong>Manual BOM line issues:</strong><pre>${esc(lineSaveErrors.split(" | ").join("\n"))}</pre></div>` : ""}
