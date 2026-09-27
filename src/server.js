@@ -8510,8 +8510,9 @@ function renderUserJobChecks(jobs = [], selectedJobIds = [], fieldName = "job_id
 }
 
 app.get("/settings/user-management", requireAuth, requireRole(adminEquivalentRoles), async (req, res) => {
+  const showInactive = String(req.query.show_inactive || "").trim() === "1";
   const [usersRes, assignmentsRes] = await Promise.all([
-    query("select id, username, first_name, last_name, email, phone, role, is_active, created_at from users order by username"),
+    query(`select id, username, first_name, last_name, email, phone, role, is_active, created_at from users ${showInactive ? "" : "where is_active = true"} order by username`),
     query(`
       select uj.user_id, uj.job_id, j.job_number, j.plant_name
       from user_jobs uj
@@ -8545,6 +8546,7 @@ app.get("/settings/user-management", requireAuth, requireRole(adminEquivalentRol
       <div class="actions">
         <a class="btn btn-secondary" href="/settings">Back To Settings</a>
         <a class="btn btn-secondary" href="/settings/user-login-history">Login History</a>
+        <a class="btn btn-secondary" href="/settings/user-management${showInactive ? "" : "?show_inactive=1"}">${showInactive ? "Hide Inactive" : "Show Inactive"}</a>
         <a class="btn btn-primary" href="/settings/users/new">Add User</a>
       </div>
     </div>
