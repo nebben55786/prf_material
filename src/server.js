@@ -7748,7 +7748,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
     .map((status) => ({ value: status, label: requisitionStatusLabel(status), count: requisitionStatusMap[status] || 0 }))
     .filter((status) => status.count > 0);
   const requisitionStatusCards = canAccess(req.user, "requisitions", "view") && visibleRequisitionStatuses.length
-    ? `<div class="card"><h3>REQ Status</h3><div class="stats">${
+    ? `<div class="card"><h3>Request status</h3><div class="stats">${
         visibleRequisitionStatuses.map((status) => `
           <a class="stat" href="/requisitions?status=${escAttr(status.value)}" style="text-decoration:none;color:inherit;">
             <div>${esc(status.label)}</div><strong>${status.count}</strong>
@@ -7761,6 +7761,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
     ${isAdminRole(req.user) && Number(pendingAccessRequests.rows[0].count) > 0 ? `<div class="card error"><strong>${pendingAccessRequests.rows[0].count} pending access request(s)</strong><div class="actions" style="margin-top:10px;"><a class="btn btn-primary" href="/settings">Review Requests</a></div></div>` : ""}
     <div class="card"><strong>Job Number:</strong> ${esc(jobNumber)}</div>
     <div class="dashboard-sections">
+      ${requisitionStatusCards}
       <div class="card">
         <div class="stats">
           <div class="stat"><div>RFQs</div><strong>${rfqs.rows[0].count}</strong></div>
@@ -7770,7 +7771,6 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
         </div>
       </div>
       ${rfqStatusCards}
-      ${requisitionStatusCards}
     </div>
   `, req.user));
 });
