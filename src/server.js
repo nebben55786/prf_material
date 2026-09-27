@@ -683,6 +683,250 @@ const resetTargetSections = [
   }
 ];
 
+const cleanupTargets = {
+  material_items: {
+    label: "Item Master",
+    identifierLabel: "Item Code",
+    description: "Deletes unused Item Master records. Items linked to BOMs, RFQs, POs, receiving logs, or OS&D are blocked."
+  },
+  bom_lines: {
+    label: "BOM Lines",
+    identifierLabel: "Item Code",
+    description: "Deletes unused lines from manually managed BOMs. Requisitioned, issued, quoted, and system-generated lines are blocked."
+  },
+  rfq_items: {
+    label: "RFQ Lines",
+    identifierLabel: "Item Code",
+    description: "Deletes RFQ lines and their quotes. Lines already linked to a PO are blocked."
+  },
+  po_lines: {
+    label: "PO Lines",
+    identifierLabel: "Item Code",
+    description: "Deletes PO lines that have no receipts. Received lines are blocked."
+  }
+};
+
+const cleanupMatchModes = {
+  contains: "Contains",
+  starts_with: "Starts With",
+  ends_with: "Ends With",
+  exact: "Exact Match"
+};
+
+function getCleanupTargetConfig(target) {
+  return cleanupTargets[target] || null;
+}
+
+function normalizeCleanupCriteria(source = {}) {
+  const target = String(source.target || "material_items").trim();
+  const matchMode = String(source.match_mode || "contains").trim();
+  const search = String(source.search || "").trim();
+  if (!getCleanupTargetConfig(target)) throw new Error("Cleanup target not found.");
+  if (!cleanupMatchModes[matchMode]) throw new Error("Cleanup match mode not found.");
+  if (!search) throw new Error("Enter text to match before previewing cleanup records.");
+  if (matchMode !== "exact" && search.length < 2) throw new Error("Use at least 2 characters for a partial match.");
+  return { target, matchMode, search };
+}
+
+function cleanupMatchSql(expression, matchMode, parameter = "$2") {
+  if (matchMode === "exact") return `lower(coalesce(${expression}, '')) = lower(${parameter})`;
+  if (matchMode === "starts_with") return `left(lower(coalesce(${expression}, '')), length(${parameter})) = lower(${parameter})`;
+  if (matchMode === "ends_with") return `right(lower(coalesce(${expression}, '')), length(${parameter})) = lower(${parameter})`;
+  return `position(lower(${parameter}) in lower(coalesce(${expression}, ''))) > 0`;
+}
+
+function cleanupBlockers(row, target) {
+  const blockers = [];
+  if (target === "material_items") {
+    if (row.used_bom) blockers.push("BOM");
+    if (row.used_rfq) blockers.push("RFQ");
+    if (row.used_po) blockers.push("PO");
+    if (row.used_receiving) blockers.push("receiving log");
+    if (row.used_osd) blockers.push("OS&D");
+  } else if (target === "bom_lines") {
+    if (row.is_system_generated) blockers.push("system-generated BOM");
+    if (row.used_requisition) blockers.push("requisition");
+    if (row.used_issue) blockers.push("issue transaction");
+    if (row.used_rfq) blockers.push("RFQ");
+  } else if (target === "rfq_items") {
+    if (row.used_po) blockers.push("PO");
+  } else if (target === "po_lines") {
+    if (row.used_receipt) blockers.push("receipt");
+  }
+  return blockers;
+}
+
+async function getCleanupPreview(client, criteria, jobId) {
+  const { target, matchMode, search } = normalizeCleanupCriteria(criteria);
+  let sql = "";
+  if (target === "material_items") {
+    const match = cleanupMatchSql("mi.item_code", matchMode);
+    sql = `
+      select mi.id, mi.item_code as identifier, mi.description,
+        exists (
+          select 1 from bom_lines bl join bom_headers bh on bh.id = bl.bom_id
+          where bh.job_id = $1 and lower(bl.item_code) = lower(mi.item_code)
+        ) as used_bom,
+        exists (select 1 from rfq_items ri where ri.job_id = $1 and ri.material_item_id = mi.id) as used_rfq,
+        exists (select 1 from po_lines pl where pl.job_id = $1 and pl.material_item_id = mi.id) as used_po,
+        exists (
+          select 1 from material_receiving_logs mrl
+          where mrl.job_id = $1 and (
+            lower(mrl.item_code) = lower(mi.item_code)
+            or lower(mrl.ident_code) = lower(mi.item_code)
+            or lower(mrl.fluor_item_code) = lower(mi.item_code)
+          )
+        ) as used_receiving,
+        exists (select 1 from osd_logs ol where ol.job_id = $1 and lower(ol.item_code) = lower(mi.item_code)) as used_osd,
+        ''::text as parent_label
+      from material_items mi
+      where mi.job_id = $1 and ${match}
+      order by lower(mi.item_code), mi.id
+      limit 5001
+    `;
+  } else if (target === "bom_lines") {
+    const match = cleanupMatchSql("bl.item_code", matchMode);
+    sql = `
+      select bl.id, bl.item_code as identifier, bl.description,
+        coalesce(bh.bom_no, bh.bom_name, '') as parent_label,
+        bh.is_system_generated,
+        exists (select 1 from material_requisition_lines mrl where mrl.job_id = $1 and mrl.bom_line_id = bl.id) as used_requisition,
+        exists (select 1 from material_issue_transactions mit where mit.job_id = $1 and mit.source_bom_line_id = bl.id) as used_issue,
+        exists (select 1 from rfq_items ri where ri.job_id = $1 and ri.bom_line_id = bl.id) as used_rfq
+      from bom_lines bl
+      join bom_headers bh on bh.id = bl.bom_id
+      where bh.job_id = $1 and ${match}
+      order by lower(bl.item_code), bl.id
+      limit 5001
+    `;
+  } else if (target === "rfq_items") {
+    const codeExpression = "coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code)";
+    const match = cleanupMatchSql(codeExpression, matchMode);
+    sql = `
+      select ri.id, ${codeExpression} as identifier,
+        coalesce(nullif(ri.description_snapshot, ''), mi.description) as description,
+        r.rfq_no as parent_label,
+        exists (select 1 from po_lines pl where pl.job_id = $1 and pl.rfq_item_id = ri.id) as used_po
+      from rfq_items ri
+      join rfqs r on r.id = ri.rfq_id and r.job_id = ri.job_id
+      join material_items mi on mi.id = ri.material_item_id
+      where ri.job_id = $1 and ${match}
+      order by lower(${codeExpression}), ri.id
+      limit 5001
+    `;
+  } else {
+    const codeExpression = "coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code)";
+    const match = cleanupMatchSql(codeExpression, matchMode);
+    sql = `
+      select pl.id, ${codeExpression} as identifier,
+        coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
+        po.po_no as parent_label,
+        exists (select 1 from receipts r where r.job_id = $1 and r.po_line_id = pl.id) as used_receipt
+      from po_lines pl
+      join purchase_orders po on po.id = pl.po_id and po.job_id = pl.job_id
+      join material_items mi on mi.id = pl.material_item_id
+      where pl.job_id = $1 and ${match}
+      order by lower(${codeExpression}), pl.id
+      limit 5001
+    `;
+  }
+  const rows = (await client.query(sql, [jobId, search])).rows;
+  if (rows.length > 5000) throw new Error("More than 5,000 records match. Narrow the pattern before running cleanup.");
+  const records = rows.map((row) => {
+    const blockers = cleanupBlockers(row, target);
+    return { ...row, blockers, canDelete: blockers.length === 0 };
+  });
+  return {
+    criteria: { target, matchMode, search },
+    records,
+    deletable: records.filter((row) => row.canDelete),
+    blocked: records.filter((row) => !row.canDelete)
+  };
+}
+
+async function runCleanupDelete(client, preview, jobId, userId) {
+  const ids = preview.deletable.map((row) => Number(row.id));
+  if (!ids.length) return 0;
+  const target = preview.criteria.target;
+  let deletedCount = 0;
+  if (target === "material_items") {
+    const deleted = await client.query(`
+      delete from material_items mi
+      where mi.job_id = $1 and mi.id = any($2::bigint[])
+        and not exists (
+          select 1 from bom_lines bl join bom_headers bh on bh.id = bl.bom_id
+          where bh.job_id = $1 and lower(bl.item_code) = lower(mi.item_code)
+        )
+        and not exists (select 1 from rfq_items ri where ri.job_id = $1 and ri.material_item_id = mi.id)
+        and not exists (select 1 from po_lines pl where pl.job_id = $1 and pl.material_item_id = mi.id)
+        and not exists (
+          select 1 from material_receiving_logs mrl
+          where mrl.job_id = $1 and (
+            lower(mrl.item_code) = lower(mi.item_code)
+            or lower(mrl.ident_code) = lower(mi.item_code)
+            or lower(mrl.fluor_item_code) = lower(mi.item_code)
+          )
+        )
+        and not exists (select 1 from osd_logs ol where ol.job_id = $1 and lower(ol.item_code) = lower(mi.item_code))
+      returning mi.id
+    `, [jobId, ids]);
+    deletedCount = deleted.rowCount;
+  } else if (target === "bom_lines") {
+    const deleted = await client.query(`
+      delete from bom_lines bl
+      using bom_headers bh
+      where bl.bom_id = bh.id and bh.job_id = $1 and bl.id = any($2::bigint[])
+        and not bh.is_system_generated
+        and not exists (select 1 from material_requisition_lines mrl where mrl.job_id = $1 and mrl.bom_line_id = bl.id)
+        and not exists (select 1 from material_issue_transactions mit where mit.job_id = $1 and mit.source_bom_line_id = bl.id)
+        and not exists (select 1 from rfq_items ri where ri.job_id = $1 and ri.bom_line_id = bl.id)
+      returning bl.id
+    `, [jobId, ids]);
+    deletedCount = deleted.rowCount;
+    if (deletedCount !== ids.length) throw new Error("One or more BOM lines became linked after preview. No records were deleted; preview again.");
+    await rebuildUnallocatedBom(client, jobId);
+  } else if (target === "rfq_items") {
+    const parents = (await client.query("select distinct rfq_id from rfq_items where job_id = $1 and id = any($2::bigint[])", [jobId, ids])).rows;
+    const deleted = await client.query(`
+      delete from rfq_items ri
+      where ri.job_id = $1 and ri.id = any($2::bigint[])
+        and not exists (select 1 from po_lines pl where pl.job_id = $1 and pl.rfq_item_id = ri.id)
+      returning ri.id
+    `, [jobId, ids]);
+    deletedCount = deleted.rowCount;
+    if (deletedCount !== ids.length) throw new Error("One or more RFQ lines became linked to a PO after preview. No records were deleted; preview again.");
+    for (const row of parents) await recalcRfqStatus(client, row.rfq_id);
+  } else {
+    const parents = (await client.query(`
+      select distinct pl.po_id, ri.rfq_id
+      from po_lines pl
+      left join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
+      where pl.job_id = $1 and pl.id = any($2::bigint[])
+    `, [jobId, ids])).rows;
+    const deleted = await client.query(`
+      delete from po_lines pl
+      where pl.job_id = $1 and pl.id = any($2::bigint[])
+        and not exists (select 1 from receipts r where r.job_id = $1 and r.po_line_id = pl.id)
+      returning pl.id
+    `, [jobId, ids]);
+    deletedCount = deleted.rowCount;
+    if (deletedCount !== ids.length) throw new Error("One or more PO lines received material after preview. No records were deleted; preview again.");
+    for (const poId of new Set(parents.map((row) => Number(row.po_id)).filter(Boolean))) await recalcPoStatus(client, poId);
+    for (const rfqId of new Set(parents.map((row) => Number(row.rfq_id)).filter(Boolean))) await recalcRfqStatus(client, rfqId);
+  }
+  if (deletedCount !== ids.length) throw new Error("One or more records became linked after preview. No records were deleted; preview again.");
+  const config = getCleanupTargetConfig(target);
+  await auditLog(
+    client,
+    userId,
+    "bulk_cleanup",
+    target,
+    preview.criteria.search,
+    `target=${config.label};match=${preview.criteria.matchMode};deleted=${deletedCount};blocked=${preview.blocked.length}`
+  );
+  return deletedCount;
+}
+
 function getResetTargetConfig(target) {
   return resetTargetGroups[target] || null;
 }
@@ -8076,8 +8320,9 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
     ${isAdminRole(req.user) ? `
       <div class="card error">
         <h3 style="margin-top:0;">Danger Zone</h3>
-        <p>This admin-only page lets you delete specific data sections or run a broader reset with verification.</p>
+        <p>Preview and remove accidental imports by pattern, delete specific data sections, or run a broader reset with verification.</p>
         <div class="actions">
+          <a class="btn btn-danger" href="/settings/cleanup">Open Cleanup Tool</a>
           <a class="btn btn-danger" href="/settings/reset-app">Open Reset Controls</a>
         </div>
       </div>
@@ -8091,6 +8336,114 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
     </div>
   `, req.user));
 });
+
+app.get("/settings/cleanup", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const hasCriteria = String(req.query.search || "").trim() !== "";
+  const selectedTarget = String(req.query.target || "material_items").trim();
+  const selectedMode = String(req.query.match_mode || "contains").trim();
+  const completed = Math.max(0, Number(req.query.deleted || 0) || 0);
+  let preview = null;
+  if (hasCriteria) preview = await getCleanupPreview(pool, req.query, currentJobId(req));
+  const targetOptions = Object.entries(cleanupTargets).map(([value, config]) =>
+    `<option value="${escAttr(value)}" ${value === selectedTarget ? "selected" : ""}>${esc(config.label)}</option>`
+  ).join("");
+  const modeOptions = Object.entries(cleanupMatchModes).map(([value, label]) =>
+    `<option value="${escAttr(value)}" ${value === selectedMode ? "selected" : ""}>${esc(label)}</option>`
+  ).join("");
+  let previewMarkup = "";
+  if (preview) {
+    const config = getCleanupTargetConfig(preview.criteria.target);
+    const confirmationText = `DELETE ${preview.deletable.length} RECORDS`;
+    const sampleRows = preview.records.slice(0, 500).map((row) => `
+      <tr>
+        <td>${esc(row.identifier || "")}</td>
+        <td>${esc(row.description || "")}</td>
+        <td>${esc(row.parent_label || "")}</td>
+        <td>${row.canDelete ? `<span class="chip">Will delete</span>` : `<span class="chip">Blocked: ${esc(row.blockers.join(", "))}</span>`}</td>
+      </tr>
+    `).join("");
+    previewMarkup = `
+      <div class="card">
+        <h3>Cleanup Preview</h3>
+        <div class="summary-grid">
+          <div class="stat"><div>Matched</div><strong>${preview.records.length}</strong></div>
+          <div class="stat"><div>Will Delete</div><strong>${preview.deletable.length}</strong></div>
+          <div class="stat"><div>Blocked</div><strong>${preview.blocked.length}</strong></div>
+          <div class="stat"><div>Target</div><strong>${esc(config.label)}</strong></div>
+        </div>
+        <p class="muted" style="margin-top:12px;">Blocked records will remain untouched. The table shows up to 500 matches.</p>
+        <div class="scroll">
+          <table>
+            <tr><th>${esc(config.identifierLabel)}</th><th>Description</th><th>Parent</th><th>Cleanup Status</th></tr>
+            ${sampleRows || `<tr><td colspan="4" class="muted">No records matched this pattern.</td></tr>`}
+          </table>
+        </div>
+      </div>
+      ${preview.deletable.length ? `
+        <div class="card error">
+          <h3>Confirm Cleanup</h3>
+          <p>Type <code>${esc(confirmationText)}</code> and your current username <code>${esc(req.user.username)}</code>. The match is recalculated before deletion; if the count changes, cleanup stops.</p>
+          <form method="post" action="/settings/cleanup" class="stack">
+            <input type="hidden" name="target" value="${escAttr(preview.criteria.target)}" />
+            <input type="hidden" name="match_mode" value="${escAttr(preview.criteria.matchMode)}" />
+            <input type="hidden" name="search" value="${escAttr(preview.criteria.search)}" />
+            <input type="hidden" name="expected_count" value="${preview.deletable.length}" />
+            <div class="grid">
+              <div><label>Confirmation Phrase</label><input name="confirm_text" autocomplete="off" required /></div>
+              <div><label>Current Username</label><input name="confirm_username" autocomplete="off" required /></div>
+            </div>
+            <div class="actions">
+              <button class="btn btn-danger" type="submit">Delete ${preview.deletable.length} Unused Record(s)</button>
+              <a class="btn btn-secondary" href="/settings/cleanup">Cancel</a>
+            </div>
+          </form>
+        </div>
+      ` : ""}
+    `;
+  }
+  res.send(layout("Admin Cleanup", `
+    <h1>Admin Cleanup</h1>
+    ${completed ? `<div class="card success"><strong>${completed} record(s) deleted.</strong> The cleanup was recorded in the audit log.</div>` : ""}
+    <div class="card error">
+      <h3 style="margin-top:0;">Preview required</h3>
+      <p>This tool is scoped to the current job. It uses literal text matching, never wildcard syntax, and will not delete records that fail the target's dependency checks.</p>
+      <div class="actions"><a class="btn btn-secondary" href="/settings">Back To Settings</a></div>
+    </div>
+    <div class="card">
+      <form method="get" action="/settings/cleanup" class="stack">
+        <div class="grid">
+          <div><label>Data Area</label><select name="target">${targetOptions}</select></div>
+          <div><label>Match</label><select name="match_mode">${modeOptions}</select></div>
+          <div><label>Text</label><input name="search" value="${escAttr(String(req.query.search || ""))}" placeholder="-PX" required /></div>
+        </div>
+        <div class="actions">
+          <button type="submit">Preview Matches</button>
+          <a class="btn btn-secondary" href="/settings/cleanup">Clear</a>
+        </div>
+        <p class="muted">${esc(getCleanupTargetConfig(selectedTarget)?.description || "Choose a data area to see its cleanup rules.")}</p>
+      </form>
+    </div>
+    ${previewMarkup}
+  `, req.user));
+}));
+
+app.post("/settings/cleanup", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const expectedCount = Number(req.body.expected_count || 0);
+  const result = await withTransaction(async (client) => {
+    const preview = await getCleanupPreview(client, req.body, jobId);
+    if (preview.deletable.length !== expectedCount) {
+      throw new Error(`Cleanup preview changed from ${expectedCount} to ${preview.deletable.length} deletable record(s). Preview the matches again before continuing.`);
+    }
+    const expectedText = `DELETE ${preview.deletable.length} RECORDS`;
+    if (String(req.body.confirm_text || "").trim() !== expectedText) throw new Error(`Type ${expectedText} to confirm cleanup.`);
+    if (String(req.body.confirm_username || "").trim() !== String(req.user.username || "").trim()) {
+      throw new Error("Enter your current username exactly to confirm cleanup.");
+    }
+    return runCleanupDelete(client, preview, jobId, req.user.id);
+  });
+  res.redirect(`/settings/cleanup?deleted=${result}`);
+}));
 
 app.get("/settings/audit-log", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const userFilter = String(req.query.user || "").trim();
@@ -9472,6 +9825,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
           ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-primary" href="/items/new">Add Item</a>` : ""}
           ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/import-page">Import Items</a>` : ""}
           ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="${escAttr(bulkEditHref)}">Bulk Edit Filtered</a>` : ""}
+          ${isAdminRole(req.user) ? `<a class="btn btn-secondary" href="/settings/cleanup?target=material_items">Cleanup Items</a>` : ""}
           ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/specs">Specs</a>` : ""}
           <a class="btn btn-secondary" href="/items">Clear</a>
           <a class="btn btn-secondary" href="/items/export.xlsx">Export XLSX</a>
