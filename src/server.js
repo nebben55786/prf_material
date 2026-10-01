@@ -12,6 +12,7 @@ import bcrypt from "bcryptjs";
 import XLSX from "xlsx";
 import { mrrScanFilename } from "./mrr-scans.js";
 import { addOnTheFlyBomItem } from "./on-the-fly-item.js";
+import { registerMaterialPhotoRoutes } from "./routes/material-photos.js";
 import { registerMrrDocumentRoutes } from "./routes/mrr-documents.js";
 import { registerMrrScanRoutes } from "./routes/mrr-scans.js";
 import { initDb, query, withTransaction, auditLog, vendorCategories, setVendorCategories, permissionMatrix, setPermissionMatrix, pool } from "./db.js";
@@ -1902,6 +1903,11 @@ function layout(title, body, user) {
       .check-option input { width: 14px; height: 14px; margin: 0; justify-self: center; }
       .inline-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
       .scroll { overflow-x: auto; }
+      .material-photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-top: 10px; }
+      .material-photo-card { border: 1px solid var(--line); background: #fff; }
+      .material-photo-thumb { display: block; aspect-ratio: 4 / 3; background: #eef2f5; overflow: hidden; }
+      .material-photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .material-photo-meta { padding: 8px; display: grid; gap: 6px; }
       table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; }
       th, td { padding: 6px 7px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
       th { color: #223240; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; background: linear-gradient(180deg, #e5eaef 0%, #d3dbe3 100%); }
@@ -7672,7 +7678,12 @@ function signedRequestBackupFilename(row) {
 app.get("/user/backups", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const [signedCountRes, blobCountRes] = await Promise.all([
     query("select count(*) as count from material_requisitions where signed_copy_data is not null"),
-    query("select count(*) as count from rfq_quote_files where coalesce(nullif(blob_pathname, ''), nullif(blob_url, ''), '') <> ''")
+    query(`
+      select
+        (select count(*) from rfq_quote_files where coalesce(nullif(blob_pathname, ''), nullif(blob_url, ''), '') <> '')
+        + (select count(*) from mrr_logs where scanned_pdf_pathname <> '')
+        + (select count(*) from material_photos where coalesce(nullif(blob_pathname, ''), nullif(blob_url, ''), '') <> '') as count
+    `)
   ]);
   const signedCount = Number(signedCountRes.rows[0]?.count || 0);
   const blobCount = Number(blobCountRes.rows[0]?.count || 0);
@@ -7688,7 +7699,7 @@ app.get("/user/backups", requireAuth, requireRole(adminEquivalentRoles), asyncHa
     </div>
     <div class="card">
       <h3>Vercel Blob Files</h3>
-      <p class="muted">Creates a ZIP from file metadata stored in the app, currently RFQ quote files in Vercel Blob.</p>
+      <p class="muted">Creates a ZIP from file metadata stored in the app, including RFQ quote files, MRR scans, and material photos in Vercel Blob.</p>
       <p class="muted">${blobCount} blob file(s) available.</p>
       <div class="actions">
         <a class="btn btn-primary" href="/user/backups/blob-files.zip">Download Blob File Backup</a>
@@ -7785,6 +7796,25 @@ app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalent
     order by job_number, m.id
   `)).rows;
   files.push(...mrrScans);
+  const materialPhotos = (await query(`
+    select mp.id, coalesce(j.job_number, '') as job_number,
+           coalesce(mp.filename, 'photo.jpg') as filename,
+           coalesce(mp.content_type, 'image/jpeg') as content_type,
+           mp.size_bytes, mp.created_at, mp.blob_pathname, mp.blob_url,
+           mp.process_type, mp.caption,
+           m.mrr_number,
+           mr.requisition_no,
+           mi.item_code,
+           'material_photo' as source
+    from material_photos mp
+    left join jobs j on j.id = mp.job_id
+    left join mrr_logs m on m.id = mp.mrr_log_id
+    left join material_requisitions mr on mr.id = mp.requisition_id
+    left join material_items mi on mi.id = mp.material_item_id
+    where coalesce(nullif(mp.blob_pathname, ''), nullif(mp.blob_url, ''), '') <> ''
+    order by job_number, mp.process_type, mp.id
+  `)).rows;
+  files.push(...materialPhotos);
   const usedPaths = new Set();
   const entries = [];
   const manifestRows = [[
@@ -7799,16 +7829,21 @@ app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalent
     "created_at",
     "backup_status",
     "error",
-    "mrr_number"
+    "mrr_number",
+    "requisition_no",
+    "item_code",
+    "caption"
   ]];
   for (const file of files) {
-    const displayFilename = file.source === "mrr_scan" ? mrrScanFilename(file.mrr_number) : quoteFileDisplayName({
+    const displayFilename = file.source === "mrr_scan"
+      ? mrrScanFilename(file.mrr_number)
+      : (file.source === "material_photo" ? (file.filename || "photo.jpg") : quoteFileDisplayName({
       rfqNo: file.rfq_no,
       vendorName: file.vendor_name || "Vendor",
       quoteSequence: file.quote_sequence,
       sourceFilename: file.filename,
       contentType: file.content_type
-    });
+    }));
     let status = "included";
     let errorMessage = "";
     let data = Buffer.alloc(0);
@@ -7828,13 +7863,19 @@ app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalent
         "mrr-scans",
         sanitizeZipPathSegment(file.job_number || "No Job", "No Job"),
         displayFilename
+      ].join("/") : (file.source === "material_photo" ? [
+        "material-photos",
+        sanitizeZipPathSegment(file.job_number || "No Job", "No Job"),
+        sanitizeZipPathSegment(file.process_type || "photo", "photo"),
+        sanitizeZipPathSegment(file.mrr_number || file.requisition_no || file.item_code || `photo-${file.id}`, `photo-${file.id}`),
+        displayFilename
       ].join("/") : [
         "rfq-quotes",
         sanitizeZipPathSegment(file.job_number || "No Job", "No Job"),
         sanitizeZipPathSegment(file.rfq_no || `RFQ-${file.rfq_id}`, `RFQ-${file.rfq_id}`),
         sanitizeZipPathSegment(file.vendor_name || "Vendor", "Vendor"),
         displayFilename
-      ].join("/"), usedPaths);
+      ].join("/")), usedPaths);
       entries.push({ name: zipPath, data, date: file.created_at ? new Date(file.created_at) : new Date() });
     }
     manifestRows.push([
@@ -7849,7 +7890,10 @@ app.get("/user/backups/blob-files.zip", requireAuth, requireRole(adminEquivalent
       file.created_at ? new Date(file.created_at).toISOString() : "",
       status,
       errorMessage,
-      file.mrr_number || ""
+      file.mrr_number || "",
+      file.requisition_no || "",
+      file.item_code || "",
+      file.caption || ""
     ]);
   }
   entries.unshift({
@@ -10454,6 +10498,12 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
     `;
   const selectedSpecIds = new Set(selectedSpecResult.rows.map((row) => Number(row.spec_id)));
   const itemSpecOptions = specs.map((spec) => `<option value="${escAttr(spec.id)}" ${selectedSpecIds.has(Number(spec.id)) ? "selected" : ""}>${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
+  const itemPhotoSection = await req.app.locals.renderPhotoSectionForTarget(req, {
+    scope: "item",
+    targetId: item.id,
+    title: "Item Photos",
+    subtitle: "Photos are saved as JPG files in Vercel Blob and linked to this item."
+  });
   res.send(layout("Edit Item", `
     <h1>Edit Item</h1>
     <div class="card">
@@ -10479,6 +10529,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
         <div class="actions"><button type="submit">Save Item</button><a class="btn btn-secondary" href="/items">Back</a></div>
       </form>
     </div>
+    ${itemPhotoSection}
     ${deleteSection}
   `, req.user));
 }));
@@ -13028,9 +13079,10 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   }
   const [linesResult, flagColorResult, trailerNumberResult] = await Promise.all([
     query(`
-      select mrl.id as requisition_line_id, mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
+      select mrl.id as requisition_line_id, mrl.qty_requested, mrl.qty_issued, mi.id as material_item_id, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
+      left join material_items mi on mi.job_id = mrl.job_id and lower(mi.item_code) = lower(bl.item_code)
       where mrl.requisition_id = $1 and mrl.job_id = $2
       order by bl.line_no, bl.id
     `, [req.params.id, jobId]),
@@ -13145,6 +13197,19 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   if (canDeleteRequisition(req.user, header)) {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/delete" onsubmit="return confirm('Permanently delete this requisition? This cannot be undone.');"><button class="btn btn-danger" type="submit">Delete Requisition</button></form>`);
   }
+  const requisitionItemOptionMap = new Map();
+  for (const line of lines) {
+    if (!line.material_item_id) continue;
+    const label = `${line.item_code || "Item"}${line.description ? ` | ${line.description}` : ""}`;
+    requisitionItemOptionMap.set(Number(line.material_item_id), { id: Number(line.material_item_id), label });
+  }
+  const requisitionPhotoSection = await req.app.locals.renderPhotoSectionForTarget(req, {
+    scope: "requisition",
+    targetId: header.id,
+    title: "Issuing Photos",
+    subtitle: "Photos are saved as JPG files in Vercel Blob and linked to this requisition.",
+    itemOptions: Array.from(requisitionItemOptionMap.values())
+  });
   const handlingParts = [];
   if (header.flag_color) {
     handlingParts.push(`Flag Color: ${esc(header.flag_color)}${header.flagged_at ? ` (${esc(formatShortDateTime(header.flagged_at))})` : ""}`);
@@ -13173,6 +13238,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       ${header.signed_signature_data ? `<div style="margin-top:12px;"><label>Electronic Signature</label><div class="card" style="padding:12px; background:#fff;"><img src="${escAttr(header.signed_signature_data)}" alt="Electronic requisition signature" style="max-width:100%; max-height:180px; display:block;" /></div></div>` : `<p class="muted">No electronic signature saved yet.</p>`}
       ${header.signed_copy_filename ? `<p class="muted">Uploaded signed copy: ${esc(header.signed_copy_filename)}</p>` : `<p class="muted">No signed paper copy uploaded yet.</p>`}
     </div>
+    ${requisitionPhotoSection}
     ${canEditIssuedQty ? `<div class="card"><form id="${issuedQtyFormId}" method="post" action="/requisitions/${header.id}/issued-qty" class="stack"><div class="scroll">${linesTable}</div><div class="actions"><button type="submit">Save Issued Qty</button>${req.query.issued_qty_saved ? `<span class="muted">Issued quantities saved.</span>` : ""}</div></form></div>` : `<div class="card scroll">${linesTable}</div>`}
   `, req.user));
 });
@@ -20730,6 +20796,26 @@ app.get("/material-logs", requireAuth, requireJobContext, requirePermission("mat
   `, req.user));
 });
 
+registerMaterialPhotoRoutes(app, {
+  asyncHandler,
+  auditLog,
+  canAccess,
+  contentDispositionFilename,
+  currentJobId,
+  del,
+  esc,
+  escAttr,
+  formatShortDateTime,
+  get,
+  getRequestAuthContext,
+  handleUpload,
+  query,
+  requireAuth,
+  requireJobContext,
+  vercelBlobClientModuleUrl,
+  withTransaction
+});
+
 registerMrrScanRoutes(app, {
   asyncHandler,
   auditLog,
@@ -22549,6 +22635,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         select
           r.id,
           'PO Receipt' as source_type,
+          mi.id as material_item_id,
           coalesce(pl.po_line, '') as po_line,
           coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
           coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
@@ -22569,6 +22656,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         select
           mrl.id,
           'Manual Entry' as source_type,
+          mi.id as material_item_id,
           coalesce(mrl.po_position, '') as po_line,
           coalesce(mrl.item_code, '') as item_code,
           coalesce(mrl.description, '') as description,
@@ -22579,6 +22667,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
           coalesce(mrl.comments, '') as notes,
           coalesce(mrl.recv_date, '') as line_date
         from material_receiving_logs mrl
+        left join material_items mi on mi.job_id = mrl.job_id and lower(mi.item_code) = lower(mrl.item_code)
         where coalesce(mrl.mrr_number, '') = $1
           and mrl.job_id = $2
         order by coalesce(mrl.legacy_row_id, mrl.id) desc
@@ -22611,6 +22700,19 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         <td><a class="btn btn-secondary" href="${esc(editHref)}">Edit</a></td>
       </tr>`;
       }).join("");
+    const mrrItemOptionMap = new Map();
+    for (const line of [...poReceiptLines.rows, ...manualLines.rows]) {
+      if (!line.material_item_id) continue;
+      const label = `${line.item_code || "Item"}${line.description ? ` | ${line.description}` : ""}`;
+      mrrItemOptionMap.set(Number(line.material_item_id), { id: Number(line.material_item_id), label });
+    }
+    const mrrPhotoSection = await req.app.locals.renderPhotoSectionForTarget(req, {
+      scope: "mrr",
+      targetId: row.id,
+      title: "Receiving Photos",
+      subtitle: "Photos are saved as JPG files in Vercel Blob and linked to this MRR.",
+      itemOptions: Array.from(mrrItemOptionMap.values())
+    });
     const receiveRemainingHref = row.app_po_id
       ? `/po/${row.app_po_id}/receive`
       : `/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit`;
@@ -22647,6 +22749,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         </form>
       </div>
       ${reverseCard}
+      ${mrrPhotoSection}
       <div class="card scroll">
         <h3>MRR Lines</h3>
         <table><tr><th>Source</th><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>Status</th><th>Date</th><th>Notes</th><th>Action</th></tr>${mrrLineRows || `<tr><td colspan="11" class="muted">No MRR lines found for this header yet.</td></tr>`}</table>
