@@ -10501,6 +10501,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
   const itemPhotoSection = await req.app.locals.renderPhotoSectionForTarget(req, {
     scope: "item",
     targetId: item.id,
+    namePrefix: item.item_code,
     title: "Item Photos",
     subtitle: "Photos are saved as JPG files in Vercel Blob and linked to this item."
   });
@@ -13206,6 +13207,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   const requisitionPhotoSection = await req.app.locals.renderPhotoSectionForTarget(req, {
     scope: "requisition",
     targetId: header.id,
+    namePrefix: header.requisition_no,
     title: "Issuing Photos",
     subtitle: "Photos are saved as JPG files in Vercel Blob and linked to this requisition.",
     itemOptions: Array.from(requisitionItemOptionMap.values())
@@ -22709,6 +22711,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
     const mrrPhotoSection = await req.app.locals.renderPhotoSectionForTarget(req, {
       scope: "mrr",
       targetId: row.id,
+      namePrefix: row.mrr_number,
       title: "Receiving Photos",
       subtitle: "Photos are saved as JPG files in Vercel Blob and linked to this MRR.",
       itemOptions: Array.from(mrrItemOptionMap.values())

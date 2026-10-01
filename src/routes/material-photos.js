@@ -22,9 +22,22 @@ function photoSizeLabel(bytes) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function safePhotoNamePart(value, fallback = "PHOTO") {
+  return String(value || fallback)
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 90) || fallback;
+}
+
 async function targetExists(query, config, targetId, jobId) {
   const row = (await query(`select id from ${config.table} where id = $1 and job_id = $2`, [targetId, jobId])).rows[0];
   return Boolean(row);
+}
+
+async function photoTargetLabel(client, config, targetId, jobId) {
+  if (!config?.labelColumn) return "";
+  const row = (await client.query(`select coalesce(${config.labelColumn}, '') as label from ${config.table} where id = $1 and job_id = $2`, [targetId, jobId])).rows[0];
+  return String(row?.label || "").trim();
 }
 
 async function validateTaggedItem(client, jobId, materialItemId) {
@@ -80,10 +93,12 @@ export function registerMaterialPhotoRoutes(app, dependencies) {
     return Boolean(user?.activeJob || user?.job_id) && canAccess(user, config.permission, photoPermission(config, mode));
   }
 
-  function renderMaterialPhotoSection({ scope, targetId, jobId, title, subtitle = "", itemOptions = [], canUpload, photos }) {
+  function renderMaterialPhotoSection({ scope, targetId, jobId, namePrefix = "", title, subtitle = "", itemOptions = [], canUpload, photos }) {
     const config = materialPhotoScopeConfig(scope);
     if (!config) return "";
     const sectionId = `material-photo-${scope}-${Number(targetId)}`;
+    const resolvedNamePrefix = safePhotoNamePart(namePrefix || `${config.targetLabel}-${targetId}`, config.targetLabel);
+    const nextSequence = photos.length + 1;
     const itemSelectOptions = itemOptions
       .map((item) => `<option value="${escAttr(item.id)}">${esc(item.label || item.item_code || item.id)}</option>`)
       .join("");
@@ -92,7 +107,11 @@ export function registerMaterialPhotoRoutes(app, dependencies) {
         <div class="grid">
           <div>
             <label>Photo</label>
-            <input type="file" accept="image/*,.heic,.heif" capture="environment" multiple data-photo-input />
+            <div class="actions">
+              <button type="button" class="btn btn-primary" data-photo-pick>TAKE PHOTO</button>
+              <span class="muted" data-photo-file-label>No photo selected</span>
+            </div>
+            <input type="file" accept="image/*,.heic,.heif" capture="environment" multiple data-photo-input style="position:absolute; opacity:0; width:1px; height:1px; pointer-events:none;" tabindex="-1" />
           </div>
           ${scope === "item" ? "" : `<div><label>Tag Item</label><select data-photo-item><option value="">No item tag</option>${itemSelectOptions}</select></div>`}
         </div>
@@ -127,6 +146,8 @@ export function registerMaterialPhotoRoutes(app, dependencies) {
         data-scope="${escAttr(scope)}"
         data-target-id="${escAttr(targetId)}"
         data-upload-prefix="${escAttr(materialPhotoPrefix(jobId, scope, targetId))}"
+        data-name-prefix="${escAttr(resolvedNamePrefix)}"
+        data-next-sequence="${escAttr(nextSequence)}"
         data-client-module-url="${escAttr(vercelBlobClientModuleUrl)}">
         <h3>${esc(title || `${config.targetLabel} Photos`)}</h3>
         ${subtitle ? `<p class="muted">${esc(subtitle)}</p>` : ""}
@@ -201,7 +222,16 @@ export function registerMaterialPhotoRoutes(app, dependencies) {
       const materialItemId = scope === "item"
         ? targetId
         : await validateTaggedItem(client, jobId, req.body.material_item_id);
-      const filename = safeMaterialPhotoFilename(req.body.source_filename || pathname.split("/").pop(), blob.blob?.contentType || req.body.content_type || "");
+      const existingCount = Number((await client.query(`
+        select count(*) as count
+        from material_photos
+        where job_id = $1
+          and ${config.idColumn} = $2
+          and process_type = $3
+      `, [jobId, targetId, config.processType])).rows[0]?.count || 0);
+      const sequence = String(existingCount + 1).padStart(3, "0");
+      const targetLabel = await photoTargetLabel(client, config, targetId, jobId);
+      const filename = safeMaterialPhotoFilename(`${safePhotoNamePart(targetLabel || `${scope}-${targetId}`)}-PIC-${sequence}.jpg`, "image/jpeg");
       const columns = ["job_id", "process_type", config.idColumn, "material_item_id", "caption", "filename", "content_type", "size_bytes", "blob_url", "blob_download_url", "blob_pathname", "uploaded_by"];
       const values = [
         jobId,

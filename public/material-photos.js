@@ -45,6 +45,8 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
   initializedSections.add(section);
   const form = section.querySelector("[data-photo-upload-form]");
   const input = section.querySelector("[data-photo-input]");
+  const pick = section.querySelector("[data-photo-pick]");
+  const fileLabel = section.querySelector("[data-photo-file-label]");
   const status = section.querySelector("[data-photo-status]");
   const item = section.querySelector("[data-photo-item]");
   const caption = section.querySelector("[data-photo-caption]");
@@ -52,6 +54,11 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
 
   let busy = false;
   const setStatus = (message) => { status.textContent = message || ""; };
+  const updateFileLabel = () => {
+    if (!fileLabel) return;
+    const count = input.files ? input.files.length : 0;
+    fileLabel.textContent = count ? count + " photo" + (count === 1 ? "" : "s") + " selected" : "No photo selected";
+  };
   const uploadFiles = async (files) => {
     if (busy) return;
     const selected = Array.from(files || []);
@@ -71,11 +78,14 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
     try {
       const { upload } = await import(section.dataset.clientModuleUrl);
       const baseUrl = "/photos/" + section.dataset.scope + "/" + section.dataset.targetId;
+      const namePrefix = safeSegment(section.dataset.namePrefix || "PHOTO").toUpperCase();
+      const startingSequence = Math.max(1, Number.parseInt(section.dataset.nextSequence || "1", 10) || 1);
       for (let index = 0; index < selected.length; index += 1) {
         setStatus("Converting " + (index + 1) + " of " + selected.length + " to JPG...");
         const file = await convertToJpeg(selected[index]);
         if (file.size > 25 * 1024 * 1024) throw new Error("Converted JPG is larger than 25 MB.");
-        const filename = safeSegment(file.name || "photo") + ".jpg";
+        const sequence = String(startingSequence + index).padStart(3, "0");
+        const filename = namePrefix + "-PIC-" + sequence + ".jpg";
         const pathname = section.dataset.uploadPrefix + crypto.randomUUID() + "/" + filename;
         setStatus("Uploading " + (index + 1) + " of " + selected.length + "...");
         const blob = await upload(pathname, file, {
@@ -112,9 +122,12 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
       input.disabled = false;
       form.querySelectorAll("button").forEach((button) => { button.disabled = false; });
       input.value = "";
+      updateFileLabel();
     }
   };
 
+  if (pick) pick.addEventListener("click", () => input.click());
+  input.addEventListener("change", updateFileLabel);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     uploadFiles(input.files);
