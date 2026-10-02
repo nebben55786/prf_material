@@ -63,9 +63,9 @@ const permissionSections = [
   { key: "material_logs", label: "Material Logs", href: "/material-logs" },
   { key: "vendors", label: "Vendors", href: "/vendors" },
   { key: "rfqs", label: "Purchasing", href: "/rfq" },
+  { key: "inventory", label: "Items Master", href: "/items" },
   { key: "pos", label: "POs", href: "/po" },
   { key: "bom", label: "BOM", href: "/bom" },
-  { key: "inventory", label: "Items", href: "/items" },
   { key: "receiving", label: "Receiving", href: "/receive" },
   { key: "yard", label: "Yard", href: "/yard" },
   { key: "requisitions", label: "REQs", href: "/requisitions" },
@@ -1830,7 +1830,7 @@ function layout(title, body, user) {
   const navLinks = user
     ? permissionSections
         .filter((section) => canAccess(user, section.key, "view"))
-        .filter((section) => section.key !== "settings")
+        .filter((section) => section.key !== "settings" && section.key !== "min_max")
         .filter((section) => !(isWarehouseUser(user) && section.key === "yard"))
         .map((section) => `<a href="${isWarehouseUser(user) && section.key === "dashboard" ? "/yard" : section.href}">${section.label}</a>`)
         .concat(isAdminRole(user) ? `<a href="/notes">Notes</a>` : "")
