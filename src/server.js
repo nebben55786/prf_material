@@ -12664,6 +12664,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td><input type="checkbox" name="selected_line_ids" value="${line.id}" tabindex="-1" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
       <td>${esc(line.line_no)}</td>
       <td>${esc(line.item_code)}</td>
+      <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(formatQtyDisplay(line.qty_required))}</td>
       <td>${esc(formatQtyDisplay(line.qty_on_hand))}</td>
@@ -12672,7 +12673,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td><input class="requisition-request-qty-input" name="request_qty_${line.id}" value="${esc(requestQtyValue)}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.tag_number || "")}</td>
-      <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
       <td>${esc(formatPlainNumberDisplay(line.thk_1))}</td>
       <td>${esc(formatPlainNumberDisplay(line.thk_2))}</td>
       <td>${esc(line.notes || "")}</td>
@@ -12745,6 +12745,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:80px" />
                 <col style="width:150px" />
                 <col style="width:100px" />
+                <col style="width:110px" />
                 <col style="width:360px" />
                 <col style="width:72px" />
                 <col style="width:72px" />
@@ -12752,7 +12753,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:84px" />
                 <col style="width:90px" />
                 <col style="width:56px" />
-                <col style="width:110px" />
                 <col style="width:110px" />
                 <col style="width:80px" />
                 <col style="width:80px" />
@@ -12764,6 +12764,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="nowrap" data-resizable="true"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="requisition-select-all-visible" tabindex="-1" /> Pick</label></th>
                 <th class="wrap" data-resizable="true">${esc(lineLabel)}</th>
                 <th class="nowrap" data-resizable="true">Item</th>
+                <th class="nowrap" data-resizable="true">Size</th>
                 <th class="wrap" data-resizable="true">Description</th>
                 <th class="wrap" data-resizable="true">Required Qty</th>
                 <th class="wrap" data-resizable="true">Recvd Qty</th>
@@ -12772,7 +12773,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="wrap" data-resizable="true">Request Qty</th>
                 <th class="nowrap" data-resizable="true">UOM</th>
                 <th class="wrap" data-resizable="true">${esc(tagNumberLabel)}</th>
-                <th class="nowrap" data-resizable="true">Size</th>
                 <th class="nowrap" data-resizable="true">Thk 1</th>
                 <th class="nowrap" data-resizable="true">Thk 2</th>
                 <th class="wrap" data-resizable="true">Notes</th>
@@ -13062,7 +13062,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
         <div class="actions"><button type="submit">Filter Lines</button><a class="btn btn-secondary" href="/bom/${bom.id}/lines">Clear</a><span class="muted">${lines.length} line(s)</span></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Qty Req</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Qty Reserved</th><th>UOM</th><th>Spec</th><th>Size</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="13" class="muted">No BOM lines found.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Type</th><th>Required QTY</th><th>Qty Issued</th><th>Qty On-Hand</th><th>Qty Reserved</th><th>UOM</th><th>Spec</th><th>Size</th><th>Actions</th></tr>${lineRows || `<tr><td colspan="13" class="muted">No BOM lines found.</td></tr>`}</table></div>
   `, req.user));
 }));
 
