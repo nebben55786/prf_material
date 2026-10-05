@@ -1,7 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 import XLSX from "xlsx";
 import { registerMrrDocumentRoutes } from "../src/routes/mrr-documents.js";
+
+test("MRR preserves received items while omitting not-on-load discrepancies", () => {
+  const source = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
+  const start = source.indexOf("function buildMrrFormPdf(");
+  const end = source.indexOf("\nfunction renderJobSwitcher", start);
+  const context = vm.createContext({
+    pdfEscape: (value) => String(value),
+    formatShortDate: (value) => value,
+    wrapPdfText: (value) => [value],
+    buildDrawnPdf: (pages) => pages
+  });
+  vm.runInContext(source.slice(start, end), context);
+  const pages = context.buildMrrFormPdf({}, [
+    { item_code: "RECEIVED-PIPE", qty: "4", status: " not on this load ", discrepancy: "NOT ON THIS LOAD" },
+    { item_code: "DAMAGED-PIPE", qty: "2", status: "DAMAGED", discrepancy: "Bent pipe" }
+  ]);
+  const content = pages.join("\n");
+  assert.match(content, /RECEIVED-PIPE/);
+  assert.match(content, /\(4\) Tj/);
+  assert.doesNotMatch(content, /NOT ON THIS LOAD/);
+  assert.match(content, /Bent pipe/);
+});
 
 function routeHarness(overrides = {}) {
   const routes = new Map();
@@ -55,7 +79,9 @@ test("MRR form route assembles receipt lines and linked FMR details", async () =
   await routes.get("/material-logs/mrr/:id/form.pdf")({ params: { id: "10" }, user: { activeJob: { job_number: "JOB-1" } } }, res);
 
   assert.equal(rendered.header.po_number, "PO-3");
-  assert.equal(rendered.lines.length, 2);
+  assert.equal(rendered.lines.length, 4);
+  assert.equal(rendered.lines[1].item_code, "EXCLUDED-PO");
+  assert.equal(rendered.lines[3].item_code, "EXCLUDED-MANUAL");
   assert.equal(rendered.lines[0].location, "MAIN / A1");
   assert.equal(rendered.lines[0].discrepancy, "SHORTAGE | One short");
   assert.deepEqual(rendered.options, { jobNumber: "JOB-1", deliveryLocation: "YARD", fmrNumber: "FMR-YARD-12" });

@@ -1567,8 +1567,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
     return formatShortDate(text);
   };
   const headerDescription = String(header.material_description || "").trim();
-  const reportLines = lines.filter((row) => String(row.status || "").trim().toUpperCase() !== "NOT ON THIS LOAD");
-  const detailLines = reportLines
+  const detailLines = lines
     .map((line) => ({
       ...line,
       item_code: String(line.item_code || "").trim(),
@@ -1600,7 +1599,10 @@ function buildMrrFormPdf(header, lines, options = {}) {
   }
   normalizedLines.push(...detailLines);
   const allLineItems = normalizedLines;
-  const allDiscrepancyItems = reportLines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK");
+  const allDiscrepancyItems = lines.filter((row) => {
+    const status = String(row.status || "").trim().toUpperCase();
+    return status && status !== "OK" && status !== "NOT ON THIS LOAD";
+  });
   const jobNumber = String(options.jobNumber || "").trim();
   const deliveryLocation = String(options.deliveryLocation || "").trim();
   const fmrNumber = String(options.fmrNumber || "").trim();
