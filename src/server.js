@@ -16432,10 +16432,10 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     </div>`;
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>${esc(rfq.rfq_no)}${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</h1>
-    <div class="actions" style="margin-bottom:12px;">
-      ${rfq.po_confirmation_pdf_pathname ? `<a class="btn btn-secondary" target="_blank" rel="noopener" href="/rfq/${rfqId}/po-confirmation/open">View PO Confirmation</a>` : `<span class="muted">No PO confirmation uploaded.</span>`}
-      ${rfq.po_confirmation_pdf_pathname && canAccess(req.user, "rfqs", "edit") ? `<form method="post" action="/rfq/${rfqId}/po-confirmation/delete" onsubmit="return confirm('Delete this PO confirmation PDF?');"><input type="hidden" name="pathname" value="${escAttr(rfq.po_confirmation_pdf_pathname)}" /><button type="submit" class="btn btn-danger">Delete PO Confirmation</button></form>` : ""}
-    </div>
+    ${rfq.po_confirmation_pdf_pathname ? `<div class="actions" style="margin-bottom:12px;">
+      <a class="btn btn-secondary" target="_blank" rel="noopener" href="/rfq/${rfqId}/po-confirmation/open">View PO Confirmation</a>
+      ${canAccess(req.user, "rfqs", "edit") ? `<form method="post" action="/rfq/${rfqId}/po-confirmation/delete" onsubmit="return confirm('Delete this PO confirmation PDF?');"><input type="hidden" name="pathname" value="${escAttr(rfq.po_confirmation_pdf_pathname)}" /><button type="submit" class="btn btn-danger">Delete PO Confirmation</button></form>` : ""}
+    </div>` : ""}
     <div class="card">
       <form id="rfq-${rfqId}-header-form" method="post" action="/rfq/${rfqId}/header" class="stack">
         <div class="grid" style="grid-template-columns: repeat(5, minmax(0, 1fr));">
