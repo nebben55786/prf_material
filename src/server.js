@@ -4231,7 +4231,7 @@ async function findCanonicalPurchaseOrderByNumber(client, jobId, poNo) {
   `, [jobId, normalizedPoNo])).rows[0] || null;
 }
 
-async function findExistingPoLine(client, poId, item, poLine) {
+async function findExistingPoLine(client, poId, item, poLine, options = {}) {
   const normalizedPoLine = String(poLine || "").trim();
   if (normalizedPoLine) {
     const byLineNumber = (await client.query(`
@@ -4243,6 +4243,7 @@ async function findExistingPoLine(client, poId, item, poLine) {
     `, [poId, normalizedPoLine])).rows[0];
     if (byLineNumber) return byLineNumber;
   }
+  if (options.matchPoLineOnly) return null;
   return (await client.query(`
     select id, rfq_item_id
     from po_lines
@@ -18038,7 +18039,7 @@ app.post("/rfq/:id/award/clear", requireAuth, requireJobContext, requirePermissi
   res.redirect(`/rfq/${rfqId}`);
 }));
 
-app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", "edit"), async (req, res) => {
+app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.body.rfq_id);
   const vendorId = Number(req.body.vendor_id);
   const poNo = String(req.body.po_no || "").trim();
@@ -18107,7 +18108,7 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
         size_2: line.size_2 || "",
         thk_1: line.thk_1 || "",
         thk_2: line.thk_2 || ""
-      }, line.po_line || "");
+      }, line.po_line || "", { matchPoLineOnly: true });
       if (existingLine) {
         const linkedRfqItemId = Number(existingLine.rfq_item_id || 0);
         if (linkedRfqItemId && linkedRfqItemId !== Number(line.rfq_item_id)) {
@@ -18193,7 +18194,7 @@ app.post("/po/create", requireAuth, requireJobContext, requirePermission("pos", 
     await auditLog(client, req.user.id, "create", "purchase_order", poId, poNo);
   });
   res.redirect(getSafeReturnPath(req, "/po"));
-});
+}));
 
 app.get("/rfq-item/:id/award", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
