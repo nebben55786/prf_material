@@ -19324,6 +19324,8 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           ${hideFullyReceived
             ? `<a class="btn btn-secondary" href="/po/${record.id}/receive">Show Fully Received Items</a>`
             : `<a class="btn btn-secondary" href="/po/${record.id}/receive?hide_received=1">Hide Fully Received Items</a>`}
+          <button class="btn btn-secondary" type="button" onclick='setPoReceiptQuantities("${record.id}", false)' ${canPostReceipt ? "" : "disabled"}>Clear All Quantities</button>
+          <button class="btn btn-secondary" type="button" onclick='setPoReceiptQuantities("${record.id}", true)' ${canPostReceipt ? "" : "disabled"}>Fill All Quantities</button>
           <span class="muted">${esc(String(visiblePoLines.length))} line(s) shown</span>
         </div>
         <div class="scroll">
@@ -19337,6 +19339,13 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         <div class="actions">${canPostReceipt ? `<button type="submit" ${hasWarehouseLocations ? "" : "disabled"}>Post Receipt</button>` : `<span class="chip">Fully Received</span>`}<a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
       <script>
+        function setPoReceiptQuantities(poId, fill) {
+          const form = document.getElementById("po-receive-form-" + poId);
+          if (!form) return;
+          form.querySelectorAll('input[name^="qty_received_"]').forEach(function(input) {
+            input.value = fill ? input.dataset.remaining : "0";
+          });
+        }
         function updatePoLineQuantityState(lineId) {
           const warehouse = document.getElementById("po-line-warehouse-" + lineId);
           const location = document.getElementById("po-line-location-" + lineId);
