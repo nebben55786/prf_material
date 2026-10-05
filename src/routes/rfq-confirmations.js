@@ -90,6 +90,28 @@ export function registerRfqConfirmationRoutes(app, dependencies) {
     }
   }));
 
+  app.post("/rfq/:id/po-confirmation/delete", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
+    const rfqId = Number(req.params.id);
+    const jobId = currentJobId(req);
+    const result = await withTransaction(async (client) => {
+      const row = (await client.query("select po_confirmation_pdf_pathname from rfqs where id = $1 and job_id = $2 for update", [rfqId, jobId])).rows[0];
+      if (!row) return "missing";
+      if (!row.po_confirmation_pdf_pathname) return "deleted";
+      if (req.body.pathname !== row.po_confirmation_pdf_pathname) return "changed";
+      await del(row.po_confirmation_pdf_pathname);
+      await client.query(`
+        update rfqs set po_confirmation_pdf_pathname = '', po_confirmation_pdf_size_bytes = 0,
+          po_confirmation_pdf_uploaded_at = null, po_confirmation_pdf_uploaded_by = null
+        where id = $1 and job_id = $2
+      `, [rfqId, jobId]);
+      await auditLog(client, req.user.id, "delete", "rfq_confirmation", rfqId, row.po_confirmation_pdf_pathname);
+      return "deleted";
+    });
+    if (result === "missing") return res.status(404).send("RFQ not found.");
+    if (result === "changed") return res.status(409).send("The PO confirmation was replaced. Refresh the RFQ before deleting it.");
+    res.redirect(`/rfq/${rfqId}`);
+  }));
+
   app.get("/rfq/:id/po-confirmation/open", requireAuth, requireJobContext, requirePermission("rfqs", "view"), asyncHandler(async (req, res) => {
     const row = (await query(`select rfq_no, po_confirmation_pdf_pathname, ${confirmationPoNumberSql} from rfqs r where r.id = $1 and r.job_id = $2`, [Number(req.params.id), currentJobId(req)])).rows[0];
     if (!row?.po_confirmation_pdf_pathname) return res.status(404).send("No PO confirmation PDF has been uploaded for this RFQ.");

@@ -114,6 +114,42 @@ const request = () => ({ params: { id: "2" }, body: { pathname }, user: { id: 3 
 const completeRoute = "POST /rfq/:id/po-confirmation/complete";
 const tokenRoute = "POST /rfq/:id/po-confirmation/client-upload";
 
+test("deleting a confirmation removes the saved blob and clears attachment metadata", async () => {
+  const { routes, actions, row } = routeHarness();
+  const req = request();
+  req.body.pathname = row.po_confirmation_pdf_pathname;
+  const res = response();
+  res.redirect = (url) => { res.redirectUrl = url; };
+  await routes.get("POST /rfq/:id/po-confirmation/delete")(req, res);
+  assert.deepEqual(actions.map(([action]) => action), ["delete", "update", "audit", "commit"]);
+  assert.deepEqual(actions[1][1], [2, 1]);
+  assert.equal(res.redirectUrl, "/rfq/2");
+});
+
+test("a stale delete form cannot remove a replacement confirmation", async () => {
+  const { routes, actions } = routeHarness();
+  const res = response();
+  await routes.get("POST /rfq/:id/po-confirmation/delete")(request(), res);
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(actions.map(([action]) => action), ["commit"]);
+});
+
+test("a Blob deletion failure preserves attachment metadata", async () => {
+  const { routes, actions, row } = routeHarness({ del: async () => { throw new Error("Blob unavailable"); } });
+  const req = request();
+  req.body.pathname = row.po_confirmation_pdf_pathname;
+  await assert.rejects(routes.get("POST /rfq/:id/po-confirmation/delete")(req, response()), /Blob unavailable/);
+  assert.deepEqual(actions, []);
+});
+
+test("delete cannot access another job's RFQ", async () => {
+  const { routes, actions } = routeHarness({ withTransaction: async (fn) => fn({ query: async () => ({ rows: [] }) }) });
+  const res = response();
+  await routes.get("POST /rfq/:id/po-confirmation/delete")(request(), res);
+  assert.equal(res.statusCode, 404);
+  assert.deepEqual(actions, []);
+});
+
 test("upload token enforces PDF type, size, and immutable storage paths", async () => {
   const { routes } = routeHarness();
   const res = response();
