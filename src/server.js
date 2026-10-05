@@ -11,6 +11,8 @@ import multer from "multer";
 import bcrypt from "bcryptjs";
 import XLSX from "xlsx";
 import { mrrScanFilename } from "./mrr-scans.js";
+import { rfqConfirmationFilename, rfqConfirmationPrefix } from "./rfq-confirmations.js";
+import { registerRfqConfirmationRoutes } from "./routes/rfq-confirmations.js";
 import { addOnTheFlyBomItem } from "./on-the-fly-item.js";
 import { registerMaterialPhotoRoutes } from "./routes/material-photos.js";
 import { registerMrrDocumentRoutes } from "./routes/mrr-documents.js";
@@ -14825,7 +14827,8 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       })
       .join(", ");
   };
-  const rows = rfqs.map((rfq) => `<tr>
+  const canUploadConfirmation = canAccess(req.user, "rfqs", "edit");
+  const rows = rfqs.map((rfq) => `<tr data-rfq-confirmation-row data-rfq-id="${rfq.id}" data-has-scan="${Boolean(rfq.po_confirmation_pdf_pathname)}" data-upload-prefix="${escAttr(rfqConfirmationPrefix(jobId, rfq.id))}" data-filename="${escAttr(rfqConfirmationFilename(rfq.rfq_no))}">
     <td class="rfq-list-number"><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td class="rfq-list-description">${esc(rfq.project_name)}</td>
     <td class="rfq-list-requestor">${esc(rfq.requestor_name || "")}</td>
@@ -14834,7 +14837,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td class="rfq-list-client-request">${esc(rfq.client_request_no || "")}</td>
     <td class="rfq-list-date">${esc(formatShortDate(rfq.due_date || ""))}</td>
     <td class="rfq-list-date rfq-list-eta">${esc(formatShortDate(rfq.eta_date || ""))}</td>
-    <td class="rfq-list-status">${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}</td>
+    <td class="rfq-list-status">${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}${canUploadConfirmation ? `<div style="margin-top:4px;"><button type="button" class="btn btn-secondary" data-scan-upload title="Upload PO confirmation PDF">&#8593; Confirmation</button><input type="file" accept=".pdf,application/pdf" data-scan-input hidden /></div>` : ""}<div data-scan-status role="status" aria-live="polite" class="muted"></div></td>
   </tr>`).join("");
   res.send(layout("Purchasing", `
     <style>
@@ -14848,8 +14851,11 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       .rfq-list-date { width: 76px; }
       .rfq-list-eta { padding-left: 4px; padding-right: 4px; }
       .rfq-list-status { width: 150px; }
+      [data-rfq-confirmation-row].scan-drag-over > td { background:#e6f4ef; box-shadow:inset 0 2px #22785b,inset 0 -2px #22785b; }
+      [data-scan-status] { white-space:normal; overflow-wrap:anywhere; }
     </style>
     <h1>Purchasing</h1>
+    ${canUploadConfirmation ? `<p class="muted">Drop a PO confirmation PDF onto an RFQ row or use its upload button. View saved confirmations on the RFQ detail page.</p>` : ""}
     <div class="card">
       <form method="get" action="/rfq" class="stack">
         <div class="grid-4">
@@ -14879,7 +14885,14 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         <table class="rfq-list"><tr><th class="rfq-list-number">RFQ</th><th class="rfq-list-description">Description</th><th class="rfq-list-requestor">Requestor</th><th class="rfq-list-vendor">Awarded Vendor(s)</th><th class="rfq-list-po">Issued PO(s)</th><th class="rfq-list-client-request">Client Request #</th><th class="rfq-list-date">Due</th><th class="rfq-list-date rfq-list-eta">ETA</th><th class="rfq-list-status">Status</th></tr>${rows || `<tr><td colspan="9" class="muted">No RFQs match the current filter.</td></tr>`}</table>
       </div>
     </div>
+    <script type="module" src="/public/rfq-confirmations.js" data-client-module-url="${escAttr(vercelBlobClientModuleUrl)}"></script>
   `, req.user));
+});
+
+registerRfqConfirmationRoutes(app, {
+  asyncHandler, auditLog, canAccess, contentDispositionFilename, currentJobId,
+  del, get, getRequestAuthContext, handleUpload, query, requireAuth,
+  requireJobContext, requirePermission, withTransaction
 });
 
 app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
@@ -16419,6 +16432,9 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     </div>`;
   res.send(layout(`RFQ ${rfq.rfq_no}`, `
     <h1>${esc(rfq.rfq_no)}${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</h1>
+    <div class="actions" style="margin-bottom:12px;">
+      ${rfq.po_confirmation_pdf_pathname ? `<a class="btn btn-secondary" target="_blank" rel="noopener" href="/rfq/${rfqId}/po-confirmation/open">View PO Confirmation</a>` : `<span class="muted">No PO confirmation uploaded.</span>`}
+    </div>
     <div class="card">
       <form id="rfq-${rfqId}-header-form" method="post" action="/rfq/${rfqId}/header" class="stack">
         <div class="grid" style="grid-template-columns: repeat(5, minmax(0, 1fr));">
