@@ -1,22 +1,22 @@
 export const rfqConfirmationMaxBytes = 100 * 1024 * 1024;
 
-export function rfqConfirmationFilename(rfqNumber) {
-  const name = String(rfqNumber || "RFQ")
+export function rfqConfirmationFilename(poNumber) {
+  const name = String(poNumber || "XXXXXX").trim().replace(/^PO[- ]*/i, "")
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
     .trim().replace(/[. ]+$/g, "").slice(0, 120);
-  return `${name || "RFQ"}-PO-confirmation.pdf`;
+  return `PO-${name || "XXXXXX"}.pdf`;
 }
 
 export function rfqConfirmationPrefix(jobId, rfqId) {
   return `rfq-confirmations/job-${Number(jobId)}/rfq-${Number(rfqId)}/`;
 }
 
-export function isRfqConfirmationPath(pathname, jobId, rfqId, rfqNumber) {
+export function isRfqConfirmationPath(pathname, jobId, rfqId, poNumber) {
   const prefix = rfqConfirmationPrefix(jobId, rfqId);
   if (typeof pathname !== "string" || !pathname.startsWith(prefix)) return false;
   const [uploadId, filename, ...extra] = pathname.slice(prefix.length).split("/");
   return /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(uploadId)
-    && filename === rfqConfirmationFilename(rfqNumber) && extra.length === 0;
+    && filename === rfqConfirmationFilename(poNumber) && extra.length === 0;
 }
 
 export async function verifyRfqConfirmation(blob) {

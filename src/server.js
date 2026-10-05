@@ -14828,7 +14828,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       .join(", ");
   };
   const canUploadConfirmation = canAccess(req.user, "rfqs", "edit");
-  const rows = rfqs.map((rfq) => `<tr data-rfq-confirmation-row data-rfq-id="${rfq.id}" data-has-scan="${Boolean(rfq.po_confirmation_pdf_pathname)}" data-upload-prefix="${escAttr(rfqConfirmationPrefix(jobId, rfq.id))}" data-filename="${escAttr(rfqConfirmationFilename(rfq.rfq_no))}">
+  const rows = rfqs.map((rfq) => `<tr data-rfq-confirmation-row data-rfq-id="${rfq.id}" data-has-scan="${Boolean(rfq.po_confirmation_pdf_pathname)}" data-upload-prefix="${escAttr(rfqConfirmationPrefix(jobId, rfq.id))}" data-filename="${escAttr(rfqConfirmationFilename(rfq.po_number || String(rfq.issued_po_refs || "").split(",")[0].trim()))}">
     <td class="rfq-list-number"><a href="/rfq/${rfq.id}">${esc(rfq.rfq_no)}</a></td>
     <td class="rfq-list-description">${esc(rfq.project_name)}</td>
     <td class="rfq-list-requestor">${esc(rfq.requestor_name || "")}</td>

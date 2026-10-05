@@ -13,7 +13,7 @@ test("Purchasing row drop saves a confirmation without adding a view link", asyn
   const input = { addEventListener: (name, fn) => { handlers[name] = fn; }, click() {} };
   const button = { addEventListener() {} };
   const row = {
-    dataset: { rfqId: "2", hasScan: "false", uploadPrefix: "rfq-confirmations/job-1/rfq-2/", filename: "RFQ-123-PO-confirmation.pdf" },
+    dataset: { rfqId: "2", hasScan: "false", uploadPrefix: "rfq-confirmations/job-1/rfq-2/", filename: "PO-570767.pdf" },
     querySelector: (selector) => ({ "[data-scan-input]": input, "[data-scan-upload]": button, "[data-scan-status]": status })[selector],
     addEventListener: (name, fn) => { handlers[name] = fn; },
     classList: { add() {}, remove() {} }, contains: () => false
@@ -43,22 +43,22 @@ test("Purchasing row drop saves a confirmation without adding a view link", asyn
 });
 
 const uploadId = "b6503b1a-c353-46c2-9080-1141df1467b5";
-const pathname = `${rfqConfirmationPrefix(1, 2)}${uploadId}/RFQ-123-PO-confirmation.pdf`;
+const pathname = `${rfqConfirmationPrefix(1, 2)}${uploadId}/PO-570767.pdf`;
 const makeBlob = (text = "%PDF-1.7", metadata = {}) => ({
   blob: { contentType: "application/pdf", size: 100, ...metadata },
   stream: new ReadableStream({ start(controller) { controller.enqueue(Buffer.from(text.slice(0, 2))); controller.enqueue(Buffer.from(text.slice(2))); controller.close(); } })
 });
 
 test("RFQ filenames retain the number and replace unsafe filename characters", () => {
-  assert.equal(rfqConfirmationFilename("RFQ-00123"), "RFQ-00123-PO-confirmation.pdf");
-  assert.equal(rfqConfirmationFilename("RFQ/123:4"), "RFQ_123_4-PO-confirmation.pdf");
-  assert.equal(rfqConfirmationFilename(""), "RFQ-PO-confirmation.pdf");
+  assert.equal(rfqConfirmationFilename("570767"), "PO-570767.pdf");
+  assert.equal(rfqConfirmationFilename("PO-123/4"), "PO-123_4.pdf");
+  assert.equal(rfqConfirmationFilename(""), "PO-XXXXXX.pdf");
 });
 
 test("attachment paths are restricted to the job, RFQ, unique upload, and generated filename", () => {
-  assert.equal(isRfqConfirmationPath(pathname, 1, 2, "RFQ-123"), true);
-  for (const candidate of [pathname.replace("job-1", "job-9"), pathname.replace("rfq-2", "rfq-9"), pathname + "/extra", pathname.replace(uploadId, ".."), pathname.replace("RFQ-123-PO-confirmation.pdf", "other.pdf"), "https://example.com/scan.pdf"]) {
-    assert.equal(isRfqConfirmationPath(candidate, 1, 2, "RFQ-123"), false);
+  assert.equal(isRfqConfirmationPath(pathname, 1, 2, "570767"), true);
+  for (const candidate of [pathname.replace("job-1", "job-9"), pathname.replace("rfq-2", "rfq-9"), pathname + "/extra", pathname.replace(uploadId, ".."), pathname.replace("PO-570767.pdf", "other.pdf"), "https://example.com/scan.pdf"]) {
+    assert.equal(isRfqConfirmationPath(candidate, 1, 2, "570767"), false);
   }
 });
 
@@ -74,7 +74,7 @@ test("PDF validation handles split headers and rejects disguised files, empty fi
 // Exercise the actual route handlers without connecting to the production database or Blob store.
 function routeHarness(overrides = {}) {
   const routes = new Map();
-  const row = { id: 2, rfq_no: "RFQ-123", po_confirmation_pdf_pathname: "old-scan.pdf" };
+  const row = { id: 2, rfq_no: "RFQ-123", confirmation_po_number: "570767", po_confirmation_pdf_pathname: "old-scan.pdf" };
   const actions = [];
   const context = {
     app: {
@@ -180,7 +180,7 @@ test("opening an RFQ without a scan returns 404", async () => {
 test("opening a scan streams a private PDF with the RFQ number as its filename", async () => {
   const { routes } = routeHarness({ query: async (sql, params) => {
     assert.deepEqual(Array.from(params), [2, 1]);
-    return { rows: [{ rfq_no: "RFQ-123", po_confirmation_pdf_pathname: pathname }] };
+    return { rows: [{ rfq_no: "RFQ-123", confirmation_po_number: "570767", po_confirmation_pdf_pathname: pathname }] };
   } });
   const res = new PassThrough();
   const headers = {};
@@ -192,7 +192,7 @@ test("opening a scan streams a private PDF with the RFQ number as its filename",
   await finished;
   assert.equal(headers["Content-Type"], "application/pdf");
   assert.equal(headers["Cache-Control"], "private, no-store");
-  assert.match(headers["Content-Disposition"], /inline; filename="RFQ-123-PO-confirmation.pdf"/);
+  assert.match(headers["Content-Disposition"], /inline; filename="PO-570767.pdf"/);
   assert.equal(Buffer.concat(chunks).toString(), "%PDF-1.7");
 });
 
