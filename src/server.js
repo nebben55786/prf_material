@@ -693,7 +693,7 @@ const cleanupTargets = {
   bom_lines: {
     label: "BOM Lines",
     identifierLabel: "Item Code",
-    description: "Deletes unused lines from manually managed BOMs. Requisitioned, issued, quoted, and system-generated lines are blocked."
+    description: "Deletes unused lines from manually managed BOMs. Requisitioned, issued, and system-generated lines are blocked."
   },
   rfq_items: {
     label: "RFQ Lines",
@@ -748,7 +748,6 @@ function cleanupBlockers(row, target) {
     if (row.is_system_generated) blockers.push("system-generated BOM");
     if (row.used_requisition) blockers.push("requisition");
     if (row.used_issue) blockers.push("issue transaction");
-    if (row.used_rfq) blockers.push("RFQ");
   } else if (target === "rfq_items") {
     if (row.used_po) blockers.push("PO");
   } else if (target === "po_lines") {
@@ -792,8 +791,7 @@ async function getCleanupPreview(client, criteria, jobId) {
         coalesce(bh.bom_no, bh.bom_name, '') as parent_label,
         bh.is_system_generated,
         exists (select 1 from material_requisition_lines mrl where mrl.job_id = $1 and mrl.bom_line_id = bl.id) as used_requisition,
-        exists (select 1 from material_issue_transactions mit where mit.job_id = $1 and mit.source_bom_line_id = bl.id) as used_issue,
-        exists (select 1 from rfq_items ri where ri.job_id = $1 and ri.bom_line_id = bl.id) as used_rfq
+        exists (select 1 from material_issue_transactions mit where mit.job_id = $1 and mit.source_bom_line_id = bl.id) as used_issue
       from bom_lines bl
       join bom_headers bh on bh.id = bl.bom_id
       where bh.job_id = $1 and ${match}
@@ -880,7 +878,6 @@ async function runCleanupDelete(client, preview, jobId, userId) {
         and not bh.is_system_generated
         and not exists (select 1 from material_requisition_lines mrl where mrl.job_id = $1 and mrl.bom_line_id = bl.id)
         and not exists (select 1 from material_issue_transactions mit where mit.job_id = $1 and mit.source_bom_line_id = bl.id)
-        and not exists (select 1 from rfq_items ri where ri.job_id = $1 and ri.bom_line_id = bl.id)
       returning bl.id
     `, [jobId, ids]);
     deletedCount = deleted.rowCount;
@@ -5505,7 +5502,7 @@ async function getBomLineUsageCounts(client, lineIds, jobId) {
     .map((id) => Number(id))
     .filter(Number.isFinite);
   if (!ids.length) {
-    return { requisitionCount: 0, issueCount: 0, rfqCount: 0 };
+    return { requisitionCount: 0, issueCount: 0 };
   }
   const row = (await client.query(`
     select
@@ -5521,19 +5518,11 @@ async function getBomLineUsageCounts(client, lineIds, jobId) {
         from material_issue_transactions mit
         where mit.source_bom_line_id = any($1::bigint[])
           and mit.job_id = $2::bigint
-      ) as issue_count,
-      (
-        select count(*)::int
-        from rfq_items ri
-        join rfqs r on r.id = ri.rfq_id
-        where ri.bom_line_id = any($1::bigint[])
-          and r.job_id = $2::bigint
-      ) as rfq_count
+      ) as issue_count
   `, [ids, jobId])).rows[0] || {};
   return {
     requisitionCount: Number(row.requisition_count || 0),
-    issueCount: Number(row.issue_count || 0),
-    rfqCount: Number(row.rfq_count || 0)
+    issueCount: Number(row.issue_count || 0)
   };
 }
 
@@ -5541,7 +5530,6 @@ function assertBomLineUnusedForDelete(counts, targetLabel = "BOM line") {
   const blockers = [];
   if (counts.requisitionCount) blockers.push(`${counts.requisitionCount} requisition line(s)`);
   if (counts.issueCount) blockers.push(`${counts.issueCount} issue transaction(s)`);
-  if (counts.rfqCount) blockers.push(`${counts.rfqCount} RFQ item(s)`);
   if (blockers.length) {
     throw new Error(`${targetLabel} cannot be deleted because it is already used by ${blockers.join(", ")}.`);
   }
@@ -8205,7 +8193,6 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
         coalesce(pl.size_2, mi.size_2, '') as size_2,
         coalesce(pl.thk_1, mi.thk_1, '') as thk_1,
         coalesce(pl.thk_2, mi.thk_2, '') as thk_2,
-        ri.bom_line_id as rfq_bom_line_id,
         ${poLineReceivedQtySql("pl")} as qty_received,
         coalesce((
           select sum(mrl.qty_requested)
@@ -8217,7 +8204,6 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
         ), 0) as qty_already_requested
       from po_lines pl
       join material_items mi on mi.id = pl.material_item_id
-      left join rfq_items ri on ri.id = pl.rfq_item_id and ri.job_id = pl.job_id
       where pl.po_id = $1 and pl.job_id = $2
       order by
         case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then 0 else 1 end,
@@ -8239,16 +8225,6 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
         and coalesce(bh.system_key, '') = $2
     `, [jobId, unallocatedBomSystemKey])).rows;
     const unallocatedByItem = new Map(unallocatedLines.map((line) => [normalizeInventoryKeyPart(line.item_code), Number(line.id)]));
-    const bomLineIds = [...new Set(poLines.map((line) => Number(line.rfq_bom_line_id || 0)).filter((value) => value > 0))];
-    const bomLineRows = bomLineIds.length
-      ? (await client.query(`
-          select bl.id, bl.item_code
-          from bom_lines bl
-          join bom_headers bh on bh.id = bl.bom_id
-          where bl.id = any($1::bigint[]) and bh.job_id = $2
-        `, [bomLineIds, jobId])).rows
-      : [];
-    const validBomLineIds = new Set(bomLineRows.map((line) => Number(line.id)));
     const requisitionNo = await getNextRequisitionNumber(client, jobId);
     const insertReq = await client.query(`
       insert into material_requisitions (
@@ -8269,9 +8245,7 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
     let createdLineCount = 0;
     for (const line of poLines) {
       const itemCodeKey = normalizeInventoryKeyPart(line.item_code);
-      const bomLineId = validBomLineIds.has(Number(line.rfq_bom_line_id || 0))
-        ? Number(line.rfq_bom_line_id)
-        : unallocatedByItem.get(itemCodeKey);
+      const bomLineId = unallocatedByItem.get(itemCodeKey);
       if (!bomLineId) {
         throw new Error(`No BOM allocation was found for received PO item ${line.item_code}. Add it to a BOM or rebuild Un-Allocated Inventory before issuing.`);
       }
@@ -11295,7 +11269,7 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
       where bom_id = $1 and planning_status = 'PLANNED'
       order by line_no, id
     `, [bomId])).rows;
-    if (lines.length === 0) throw new Error("No BOM lines are available to move onto an RFQ.");
+    if (lines.length === 0) throw new Error("No planned BOM lines are available to copy onto an RFQ.");
     const rfqNo = await getNextRfqNumber(client, jobId);
     const rfqInsert = await client.query(`
       insert into rfqs (job_id, rfq_no, project_name, due_date, status)
@@ -11311,15 +11285,14 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
       const item = materialLookup.item;
       await client.query(`
         insert into rfq_items (
-          job_id, rfq_id, bom_line_id, material_item_id, item_code_snapshot, description_snapshot,
+          job_id, rfq_id, material_item_id, item_code_snapshot, description_snapshot,
           material_type_snapshot, uom_snapshot, spec, commodity_code, tag_number,
           size_1, size_2, thk_1, thk_2, qty, notes, updated_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
       `, [
         jobId,
         newRfqId,
-        line.id,
         item.id,
         ...materialItemSnapshotParams(item),
         line.spec || "",
@@ -11332,17 +11305,7 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
         line.qty_required,
         line.notes || ""
       ]);
-      await client.query(`
-        update bom_lines
-        set planning_status = 'ON_RFQ', qty_quoted = qty_required, updated_at = now()
-        where id = $1
-      `, [line.id]);
     }
-    await client.query(`
-      update bom_headers
-      set status = case when status = 'DRAFT' then 'ISSUED_FOR_RFQ' else status end, updated_at = now()
-      where id = $1 and job_id = $2
-    `, [bomId, jobId]);
     await auditLog(client, req.user.id, "create", "rfq", newRfqId, rfqNo);
     await auditLog(client, req.user.id, "generate_rfq", "bom_header", bomId, rfqNo);
     return newRfqId;

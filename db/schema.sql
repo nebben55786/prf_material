@@ -394,7 +394,6 @@ update material_requisitions set status = 'REQUESTED' where status = 'OPEN';
 create table if not exists rfq_items (
   id bigserial primary key,
   rfq_id bigint not null references rfqs(id) on delete cascade,
-  bom_line_id bigint references bom_lines(id) on delete set null,
   material_item_id bigint not null references material_items(id),
   item_code_snapshot text,
   description_snapshot text,
@@ -576,7 +575,7 @@ alter table users add column if not exists last_name text not null default '';
 alter table users add column if not exists email text not null default '';
 alter table users add column if not exists phone text not null default '';
 alter table users add column if not exists must_change_password boolean not null default false;
-alter table rfq_items add column if not exists bom_line_id bigint references bom_lines(id) on delete set null;
+alter table rfq_items drop column if exists bom_line_id;
 alter table rfq_items add column if not exists item_code_snapshot text;
 alter table rfq_items add column if not exists description_snapshot text;
 alter table rfq_items add column if not exists material_type_snapshot text;
