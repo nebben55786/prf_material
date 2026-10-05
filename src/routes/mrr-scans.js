@@ -110,7 +110,7 @@ export function registerMrrScanRoutes(app, dependencies) {
       select m.id, m.discipline, m.mrr_number, m.vendor_name, coalesce(po.po_no, m.po_number) as po_number,
              coalesce(m.status, 'ACTIVE') as status,
              m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number,
-             m.scanned_pdf_pathname
+             m.scanned_pdf_pathname, m.notes
       from mrr_logs m
       left join purchase_orders po on po.id = m.app_po_id
       where m.job_id = $1
@@ -132,8 +132,9 @@ export function registerMrrScanRoutes(app, dependencies) {
       <td>${esc(row.received_by)}</td>
       <td>${esc(row.load_number)}</td>
       <td class="mrr-description">${esc(row.material_description)}</td>
-      <td style="min-width:190px;"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
-      <td style="min-width:145px;">
+      <td class="mrr-notes">${esc(row.notes || "")}</td>
+      <td class="mrr-action"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
+      <td class="mrr-scan">
         <div class="actions" style="flex-wrap:nowrap;">
           ${canUpload ? `<button type="button" class="btn btn-secondary" data-scan-upload title="Upload scanned PDF" aria-label="Upload scanned PDF for ${escAttr(row.mrr_number)}">&#8593;</button><input type="file" accept=".pdf,application/pdf" data-scan-input hidden />` : ""}
           <a class="btn btn-secondary mrr-scan-open" data-scan-open target="_blank" rel="noopener" ${hasScan ? `href="/material-logs/mrr/${row.id}/scanned-pdf/open"` : 'aria-disabled="true" tabindex="-1"'}>Open Scan</a>
@@ -159,11 +160,14 @@ export function registerMrrScanRoutes(app, dependencies) {
         </form>
       </div>
       <div class="card scroll">
-        <table class="mrr-log-table"><tr><th class="mrr-number">MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th class="mrr-description">Description</th><th>Action</th><th>Scan</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No MRR rows found.</td></tr>`}</table>
+        <table class="mrr-log-table"><tr><th class="mrr-number">MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th class="mrr-description">Description</th><th class="mrr-notes">Notes</th><th class="mrr-action">Action</th><th class="mrr-scan">Scan</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No MRR rows found.</td></tr>`}</table>
       </div>
       <style>
         .mrr-log-table .mrr-number { width:1%; white-space:nowrap; padding-left:7px; padding-right:7px; }
-        .mrr-log-table .mrr-description { white-space:normal; overflow-wrap:anywhere; }
+        .mrr-log-table .mrr-description, .mrr-log-table .mrr-notes { white-space:pre-wrap; overflow-wrap:anywhere; }
+        .mrr-log-table .mrr-action, .mrr-log-table .mrr-scan { width:1%; white-space:nowrap; }
+        .mrr-log-table .mrr-action .btn, .mrr-log-table .mrr-scan .btn { min-width:0; padding:0 8px; }
+        .mrr-log-table [data-scan-status] { max-width:140px; }
         [data-scan-upload] { width:32px; min-width:32px; flex:0 0 32px; padding:0; }
         .mrr-scan-open[aria-disabled="true"] { background:#e5e7eb; color:#6b7280; cursor:not-allowed; pointer-events:none; }
         [data-mrr-scan-row].scan-drag-over > td { background:#e6f4ef; box-shadow:inset 0 2px #22785b,inset 0 -2px #22785b; }
