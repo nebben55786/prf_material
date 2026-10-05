@@ -123,16 +123,15 @@ export function registerMrrScanRoutes(app, dependencies) {
       const canUpload = canAccess(req.user, "material_logs", "edit");
       const hasScan = Boolean(row.scanned_pdf_pathname);
       return `<tr data-mrr-scan-row data-mrr-id="${row.id}" data-has-scan="${hasScan}" data-upload-prefix="${escAttr(mrrScanPrefix(jobId, row.id))}" data-filename="${escAttr(mrrScanFilename(row.mrr_number))}">
-      <td style="min-width:120px;white-space:nowrap;">${esc(row.mrr_number)}${isReversed ? `<div style="margin-top:4px;"><span class="chip">Reversed</span></div>` : ""}</td>
+      <td class="mrr-number">${esc(row.mrr_number)}${isReversed ? `<div style="margin-top:4px;"><span class="chip">Reversed</span></div>` : ""}</td>
       <td>${esc(row.discipline)}</td>
       <td>${esc(row.vendor_name)}</td>
       <td>${esc(row.po_number)}</td>
       <td>${esc(row.pick_ticket)}</td>
-      <td>${esc(row.material_description)}</td>
       <td>${esc(formatShortDateTime(row.received_date))}</td>
       <td>${esc(row.received_by)}</td>
       <td>${esc(row.load_number)}</td>
-      <td>${esc(row.opi_number)}</td>
+      <td class="mrr-description">${esc(row.material_description)}</td>
       <td style="min-width:190px;"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/edit">Edit</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">MRR Form</a></div></td>
       <td style="min-width:145px;">
         <div class="actions" style="flex-wrap:nowrap;">
@@ -160,9 +159,11 @@ export function registerMrrScanRoutes(app, dependencies) {
         </form>
       </div>
       <div class="card scroll">
-        <table><tr><th>MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Description</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th>OPI #</th><th>Action</th><th>Scan</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No MRR rows found.</td></tr>`}</table>
+        <table class="mrr-log-table"><tr><th class="mrr-number">MRR #</th><th>Disc.</th><th>Vendor</th><th>PO</th><th>Pick Ticket</th><th>Recv Date</th><th>Recv By</th><th>Load #</th><th class="mrr-description">Description</th><th>Action</th><th>Scan</th></tr>${tableRows || `<tr><td colspan="11" class="muted">No MRR rows found.</td></tr>`}</table>
       </div>
       <style>
+        .mrr-log-table .mrr-number { width:1%; white-space:nowrap; padding-left:7px; padding-right:7px; }
+        .mrr-log-table .mrr-description { white-space:normal; overflow-wrap:anywhere; }
         [data-scan-upload] { width:32px; min-width:32px; flex:0 0 32px; padding:0; }
         .mrr-scan-open[aria-disabled="true"] { background:#e5e7eb; color:#6b7280; cursor:not-allowed; pointer-events:none; }
         [data-mrr-scan-row].scan-drag-over > td { background:#e6f4ef; box-shadow:inset 0 2px #22785b,inset 0 -2px #22785b; }
