@@ -41,8 +41,8 @@ test("MRR form route assembles receipt lines and linked FMR details", async () =
   const routes = routeHarness({
     query: async (sql) => {
       if (sql.includes("m.*")) return { rows: [{ mrr_number: "MRR-10", vendor_name: "Vendor", effective_po_number: "PO-3", received_date: "2026-09-26" }] };
-      if (sql.includes("from receipts")) return { rows: [{ item_code: "PIPE", description: "Pipe", ordered_qty: 5, received_qty: 4, warehouse: "MAIN", location: "A1", osd_status: "SHORTAGE", notes: "One short" }] };
-      if (sql.includes("from material_receiving_logs")) return { rows: [{ item_code: "BOLT", description: "Bolt", received_qty: 2, osd_status: "OK" }] };
+      if (sql.includes("from receipts")) return { rows: [{ item_code: "PIPE", description: "Pipe", ordered_qty: 5, received_qty: 4, warehouse: "MAIN", location: "A1", osd_status: "SHORTAGE", notes: "One short" }, { item_code: "EXCLUDED-PO", osd_status: "NOT ON THIS LOAD" }] };
+      if (sql.includes("from material_receiving_logs")) return { rows: [{ item_code: "BOLT", description: "Bolt", received_qty: 2, osd_status: "OK" }, { item_code: "EXCLUDED-MANUAL", osd_status: " not on this load " }] };
       if (sql.includes("from fmr_logs")) return { rows: [{ fmr_number: "FMR-YARD-12" }] };
       return { rows: [] };
     },

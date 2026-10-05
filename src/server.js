@@ -1559,7 +1559,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
       content.push(line(x + 1.5, y - 6.5, x + 6.5, y - 1.5));
       content.push(line(x + 6.5, y - 6.5, x + 1.5, y - 1.5));
     }
-    if (label) content.push(makeText(x + 12, y - 6, label, "F1", 7));
+    if (label) content.push(makeText(x + 12, y - 7, label, "F1", 7));
   };
   const formatDate = (value) => {
     const text = String(value || "").trim();
@@ -1567,7 +1567,8 @@ function buildMrrFormPdf(header, lines, options = {}) {
     return formatShortDate(text);
   };
   const headerDescription = String(header.material_description || "").trim();
-  const detailLines = lines
+  const reportLines = lines.filter((row) => String(row.status || "").trim().toUpperCase() !== "NOT ON THIS LOAD");
+  const detailLines = reportLines
     .map((line) => ({
       ...line,
       item_code: String(line.item_code || "").trim(),
@@ -1599,7 +1600,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
   }
   normalizedLines.push(...detailLines);
   const allLineItems = normalizedLines;
-  const allDiscrepancyItems = lines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK");
+  const allDiscrepancyItems = reportLines.filter((row) => String(row.status || "").trim() && String(row.status || "").trim().toUpperCase() !== "OK");
   const jobNumber = String(options.jobNumber || "").trim();
   const deliveryLocation = String(options.deliveryLocation || "").trim();
   const fmrNumber = String(options.fmrNumber || "").trim();
@@ -1765,7 +1766,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
 
   const optsTop = info3Top - 18;
   content.push(rect(x0, optsTop - 24, totalWidth, 24));
-  content.push(makeText(x0 + 2, optsTop - 8, "THIS REPORT IS FOR:", "F2", 6));
+  content.push(makeText(x0 + 2, optsTop - 13, "THIS REPORT IS FOR:", "F2", 6));
   checkbox(x0 + 76, optsTop - 6, false, "OVERAGE");
   checkbox(x0 + 156, optsTop - 6, false, "SHORTAGE");
   checkbox(x0 + 278, optsTop - 6, false, "DAMAGED");
@@ -1774,19 +1775,19 @@ function buildMrrFormPdf(header, lines, options = {}) {
 
   const attachTop = optsTop - 24;
   content.push(rect(x0, attachTop - 30, totalWidth, 30));
-  content.push(makeText(x0 + 2, attachTop - 8, "ATACHMENTS:", "F2", 6));
-  content.push(makeText(x0 + 2, attachTop - 18, "CARRIER INSPECTION REPORT", "F2", 6));
-  checkbox(x0 + 188, attachTop - 18, false, "PHOTOS");
-  checkbox(x0 + 265, attachTop - 18, false, "PICK/SHIPPING TICKET");
-  checkbox(x0 + 403, attachTop - 18, false, "NCR(IF APPLICABLE)");
-  checkbox(x0 + 514, attachTop - 18, false, "MTRS");
-  checkbox(x0 + 550, attachTop - 18, false, "OTHER");
+  content.push(makeText(x0 + 2, attachTop - 13, "ATTACHMENTS:", "F2", 6));
+  checkbox(x0 + 76, attachTop - 6, false, "CARRIER INSPECTION REPORT");
+  checkbox(x0 + 265, attachTop - 6, false, "PHOTOS");
+  checkbox(x0 + 403, attachTop - 6, false, "PICK/SHIPPING TICKET");
+  checkbox(x0 + 76, attachTop - 19, false, "NCR(IF APPLICABLE)");
+  checkbox(x0 + 265, attachTop - 19, false, "MTRS");
+  checkbox(x0 + 403, attachTop - 19, false, "OTHER");
 
   const dispoTop = attachTop - 30;
   field(x0, dispoTop, 310, 18, "INSPECTING FIELD SUPT./ENG.:", "");
   field(x0 + 310, dispoTop, totalWidth - 310, 18, "DISPOSITION RECOMMENDED:", "");
 
-  const certTop = dispoTop - 22;
+  const certTop = dispoTop - 18;
   field(x0, certTop, totalWidth, 18, "I CERTIFY THE ABOVE REPORT TO BE TRUE AND IN ACCORDANCE WITH THE CONDITION OF THE GOODS UPON RECEIPT", "");
   const signTop = certTop - 18;
   field(x0, signTop, 194, 18, "DATE:", "");

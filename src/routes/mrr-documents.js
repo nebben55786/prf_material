@@ -80,7 +80,9 @@ export function registerMrrDocumentRoutes(app, dependencies) {
     if (!header) throw new Error("MRR log row not found.");
     const linkedFmr = linkedFmrRes.rows[0] || {};
     const deliveryMatch = String(linkedFmr.fmr_number || "").match(/^FMR-([A-Z0-9]+)-/i);
-    const printableLines = [...poReceiptLines.rows, ...manualLines.rows].map((row) => ({
+    const printableLines = [...poReceiptLines.rows, ...manualLines.rows]
+      .filter((row) => String(row.osd_status || "").trim().toUpperCase() !== "NOT ON THIS LOAD")
+      .map((row) => ({
       item_code: row.item_code || "",
       description: row.description || "",
       qty: formatQtyDisplay(row.received_qty),
