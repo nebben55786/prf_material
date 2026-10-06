@@ -14,6 +14,7 @@ import {
 } from "../src/shared-inventory.js";
 import { registerSharedInventoryRoutes } from "../src/routes/shared-inventory.js";
 import XLSX from "xlsx";
+import { createMaterialWorkflow } from "../src/material-workflow.js";
 
 async function fixture(t) {
   const db = new PGlite();
@@ -1082,6 +1083,120 @@ test("full Express app serves shared inventory and issues through authenticated 
   assert.ok(cookie);
   const select = await request("/jobs/select", { job_id: "101" });
   assert.equal(select.status, 302);
+  // One workflow while the session stays on A: explicitly order for B.
+  const rfqForm = await request("/rfq/new");
+  assert.equal(rfqForm.status, 200);
+  assert.match(await rfqForm.text(), /Ordered for/);
+  const createRfq = await request("/rfq", {
+    workflow_job_id: "102",
+    project_name: "Shared workflow purchase",
+    due_date: "2026-10-10",
+  });
+  assert.equal(createRfq.status, 302);
+  const rfqId = Number(createRfq.headers.get("location").split("/").pop());
+  assert.equal(
+    Number(
+      (await f.db.query("select job_id from rfqs where id=$1", [rfqId])).rows[0]
+        .job_id,
+    ),
+    102,
+  );
+  assert.equal((await request("/rfq/" + rfqId)).status, 200);
+  const combinedRfqs = await request("/rfq");
+  assert.equal(combinedRfqs.status, 200);
+  assert.match(await combinedRfqs.text(), /Shared workflow purchase/);
+  const createPo = await request("/po/add", {
+    workflow_job_id: "102",
+    po_no: "SHARED-ORDER-B",
+    vendor_id: "100",
+    description: "Workflow order B",
+  });
+  assert.equal(createPo.status, 302);
+  const newPo = (
+    await f.db.query(
+      "select * from purchase_orders where po_no='SHARED-ORDER-B'",
+    )
+  ).rows[0];
+  assert.equal(Number(newPo.job_id), 102);
+  await f.db.query(
+    "insert into po_lines(job_id,po_id,material_item_id,qty_ordered,size_1) values(102,$1,1002,10,'2')",
+    [newPo.id],
+  );
+  const pl = (
+    await f.db.query("select id from po_lines where po_id=$1", [newPo.id])
+  ).rows[0];
+  await f.db.query(
+    "insert into mrr_logs(job_id,mrr_number,material_description) values(101,'MRR-000009','Historic A'),(102,'MRR-000010','Historic B'),(103,'MRR-000100','Independent C')",
+  );
+  const wh = (
+    await f.db.query(
+      "insert into warehouses(job_id,name,is_active) values(102,'Yard',true) returning id",
+    )
+  ).rows[0];
+  await f.db.query(
+    "insert into warehouse_locations(job_id,warehouse_id,name,is_active) values(102,$1,'BIN-2',true)",
+    [wh.id],
+  );
+  const receivingForm = await request("/po/" + newPo.id + "/receive");
+  assert.equal(receivingForm.status, 200);
+  assert.match(await receivingForm.text(), /MRR-000011/);
+  const receipt = await request("/po/" + newPo.id + "/receive", {
+    mrr_number: "MRR-000011",
+    received_by: "Tester",
+    received_date: "2026-10-06",
+    po_line_ids: String(pl.id),
+    ["qty_received_" + pl.id]: "10",
+    ["warehouse_" + pl.id]: "Yard",
+    ["location_" + pl.id]: "BIN-2",
+    ["osd_status_" + pl.id]: "OK",
+  });
+  assert.equal(receipt.status, 302, await receipt.text());
+  const newMrr = (
+    await f.db.query("select * from mrr_logs where mrr_number='MRR-000011'")
+  ).rows[0];
+  assert.equal(Number(newMrr.job_id), 102);
+  const register = await request("/material-logs/mrr");
+  assert.equal(register.status, 200);
+  const registerHtml = await register.text();
+  assert.match(registerHtml, /Historic A/);
+  assert.match(registerHtml, /Historic B/);
+  assert.doesNotMatch(registerHtml, /Independent C/);
+  assert.match(registerHtml, /Ordered for B/);
+  assert.equal(
+    (await request("/material-logs/mrr/" + newMrr.id + "/form.pdf")).status,
+    200,
+  );
+  const nextManual = await request("/material-logs/mrr/new");
+  assert.equal(nextManual.status, 200);
+  assert.match(await nextManual.text(), /MRR-000012/);
+  const listPos = await request("/po");
+  assert.equal(listPos.status, 200);
+  assert.match(await listPos.text(), /SHARED-ORDER-B/);
+  const listReceive = await request("/receive/by-po");
+  assert.equal(listReceive.status, 200);
+  assert.match(await listReceive.text(), /SHARED-ORDER-B/);
+  for (const path of [
+    "/receive/osd",
+    "/material-logs/fmr",
+    "/material-logs/opi",
+    "/material-logs/issue-report",
+    "/material-logs/part-history",
+  ]) {
+    const page = await request(path);
+    assert.equal(page.status, 200, await page.text());
+  }
+  const destination = await request("/requisitions/new?workflow_job_id=102");
+  assert.equal(destination.status, 200);
+  assert.match(await destination.text(), /Issued to job/);
+  const denied = await request("/po/add", {
+    workflow_job_id: "103",
+    po_no: "FORBIDDEN",
+    vendor_id: "100",
+  });
+  assert.equal(denied.status, 403);
+  // Remove the extra ten receipts so the pre-existing stock assertions below remain exact.
+  await f.db.query("delete from receipts where po_line_id=$1", [pl.id]);
+
   const pool = await request("/inventory/pools/" + f.pool.id);
   assert.equal(pool.status, 200);
   assert.match(await pool.text(), /Shared Stock Locations/);
@@ -1158,5 +1273,89 @@ test("full Express app serves shared inventory and issues through authenticated 
   assert.equal(
     received.headers.get("location"),
     "/inventory/pools/" + f.pool.id,
+  );
+});
+
+test("material workflow scopes selected jobs, document access and numbering without changing session", async (t) => {
+  const f = await fixture(t);
+  const workflow = createMaterialWorkflow((sql, params) =>
+    f.db.query(sql, params),
+  );
+  const user = { job_id: 101, activeJob: f.jobs[0], accessibleJobs: f.jobs };
+  const req = {
+    user: { ...user },
+    path: "/po/1202/receive",
+    query: {},
+    body: {},
+  };
+  await workflow.prepare(req);
+  assert.equal(req.user.job_id, 102);
+  assert.equal(user.job_id, 101);
+  assert.deepEqual(workflow.jobIds(req), [101, 102]);
+  await assert.rejects(
+    workflow.prepare({
+      user: { ...user },
+      path: "/po/1203/edit",
+      query: {},
+      body: {},
+    }),
+    /authorized/,
+  );
+  const limited = { ...user, accessibleJobs: [f.jobs[0]] };
+  await assert.rejects(
+    workflow.prepare({
+      user: limited,
+      path: "/po/1202/receive",
+      query: {},
+      body: {},
+    }),
+    /authorized/,
+  );
+  await f.db.query(
+    "insert into mrr_logs(job_id,mrr_number) values(101,'MRR-000005')",
+  );
+  await assert.rejects(
+    f.db.query(
+      "insert into mrr_logs(job_id,mrr_number) values(102,'MRR-000005')",
+    ),
+    /already used/,
+  );
+  await f.db.query(
+    "insert into mrr_logs(job_id,mrr_number) values(103,'MRR-000005')",
+  );
+  await f.db.query(
+    "insert into material_items(id,job_id,item_code,description,material_type,uom) values(1901,102,'EARLY-RFQ','Early procurement','pipe','EA')",
+  );
+  const rfq = (
+    await f.db.query(
+      "insert into rfqs(job_id,rfq_no,project_name,due_date) values(102,'B-EARLY-RFQ','Early procurement','2026-10-10') returning id",
+    )
+  ).rows[0];
+  await f.db.query(
+    "insert into rfq_items(job_id,rfq_id,material_item_id,item_code_snapshot,qty,spec) values(102,$1,1901,'EARLY-RFQ',5,'EARLY-SPEC')",
+    [rfq.id],
+  );
+  const procurement = (await f.service.candidates(f.db, [102])).find(
+    (c) => c.item_code === "EARLY-RFQ",
+  );
+  assert.ok(procurement);
+  assert.equal(procurement.spec, "EARLY-SPEC");
+  assert.equal(procurement.qty_on_hand, 0);
+  await f.tx((db) =>
+    f.service.addMatch(db, {
+      poolId: f.pool.id,
+      row: procurement,
+      name: "Early shared material",
+      userId: 100,
+      reviewed: true,
+    }),
+  );
+  assert.equal(
+    (
+      await f.db.query(
+        "select * from inventory_pool_matches where item_code='EARLY-RFQ'",
+      )
+    ).rows.length,
+    1,
   );
 });

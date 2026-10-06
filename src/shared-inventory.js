@@ -419,6 +419,28 @@ export function createSharedInventory({ auditLog }) {
         [jobIds],
       )
     ).rows;
+    // RFQ and PO variants can be explicitly matched before the first receipt.
+    const procurement = (
+      await db.query(
+        `
+      select ri.job_id, coalesce(nullif(ri.item_code_snapshot,''),mi.item_code) as item_code,
+             coalesce(nullif(ri.description_snapshot,''),mi.description) as description,
+             coalesce(nullif(ri.uom_snapshot,''),mi.uom) as uom, coalesce(ri.spec,'') as spec, ri.size_1,ri.size_2,ri.thk_1,ri.thk_2
+      from rfq_items ri join material_items mi on mi.id=ri.material_item_id
+      where ri.job_id=any($1::bigint[])
+      union
+      select pl.job_id, coalesce(nullif(pl.item_code_snapshot,''),mi.item_code),
+             coalesce(nullif(pl.description_snapshot,''),mi.description),coalesce(nullif(pl.uom_snapshot,''),mi.uom),
+             coalesce(nullif(ri.spec,''),meta.inventory_spec,''),pl.size_1,pl.size_2,pl.thk_1,pl.thk_2
+      from po_lines pl join material_items mi on mi.id=pl.material_item_id
+      left join rfq_items ri on ri.id=pl.rfq_item_id
+      left join shared_inventory_item_metadata meta on meta.id=mi.id
+      where pl.job_id=any($1::bigint[])
+    `,
+        [jobIds],
+      )
+    ).rows;
+    demand.push(...procurement);
     const combined = new Map();
     for (const row of stock) {
       const key = ownedKey(row);
@@ -437,7 +459,12 @@ export function createSharedInventory({ auditLog }) {
     }
     for (const row of demand)
       if (!combined.has(ownedKey(row)))
-        combined.set(ownedKey(row), { ...row, ...variant(row) });
+        combined.set(ownedKey(row), {
+          ...row,
+          ...variant(row),
+          qty_on_hand: 0,
+          locations: [],
+        });
     return [...combined.values()];
   };
   const addMatch = async (

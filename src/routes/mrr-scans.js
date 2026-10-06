@@ -15,6 +15,9 @@ export function registerMrrScanRoutes(app, dependencies) {
     canAccess,
     contentDispositionFilename,
     currentJobId,
+    workflowJobIds = req => [currentJobId(req)],
+    workflowListFilter = () => "",
+    workflowJobLabel = () => "",
     del,
     esc,
     escAttr,
@@ -107,23 +110,23 @@ export function registerMrrScanRoutes(app, dependencies) {
     const imported = Number.parseInt(String(req.query.imported || ""), 10);
     const skipped = Number.parseInt(String(req.query.skipped || ""), 10);
     const rows = (await query(`
-      select m.id, m.discipline, m.mrr_number, m.vendor_name, coalesce(po.po_no, m.po_number) as po_number,
+      select m.id, m.job_id, m.discipline, m.mrr_number, m.vendor_name, coalesce(po.po_no, m.po_number) as po_number,
              coalesce(m.status, 'ACTIVE') as status,
              m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number,
              m.scanned_pdf_pathname, m.notes
       from mrr_logs m
       left join purchase_orders po on po.id = m.app_po_id
-      where m.job_id = $1
+      where m.job_id = any($1::bigint[])
         ${q ? "and (coalesce(m.mrr_number, '') ilike $2 or coalesce(m.vendor_name, '') ilike $2 or coalesce(po.po_no, m.po_number, '') ilike $2 or coalesce(m.material_description, '') ilike $2 or coalesce(m.received_by, '') ilike $2)" : ""}
       order by nullif(substring(coalesce(m.mrr_number, '') from '([0-9]+)$'), '')::bigint desc nulls last, m.id desc
       limit 200
-    `, q ? [jobId, `%${q}%`] : [jobId])).rows;
+    `, q ? [workflowJobIds(req), `%${q}%`] : [workflowJobIds(req)])).rows;
     const tableRows = rows.map((row) => {
       const isReversed = String(row.status || "").toUpperCase() === "REVERSED";
       const canUpload = canAccess(req.user, "material_logs", "edit");
       const hasScan = Boolean(row.scanned_pdf_pathname);
-      return `<tr data-mrr-scan-row data-mrr-id="${row.id}" data-has-scan="${hasScan}" data-upload-prefix="${escAttr(mrrScanPrefix(jobId, row.id))}" data-filename="${escAttr(mrrScanFilename(row.mrr_number))}">
-      <td class="mrr-number">${esc(row.mrr_number)}${isReversed ? `<div style="margin-top:4px;"><span class="chip">Reversed</span></div>` : ""}</td>
+      return `<tr data-mrr-scan-row data-mrr-id="${row.id}" data-has-scan="${hasScan}" data-upload-prefix="${escAttr(mrrScanPrefix(row.job_id || jobId, row.id))}" data-filename="${escAttr(mrrScanFilename(row.mrr_number))}">
+      <td class="mrr-number">${esc(row.mrr_number)}<div class="muted">Ordered for ${esc(workflowJobLabel(req, row.job_id))}</div>${isReversed ? `<div style="margin-top:4px;"><span class="chip">Reversed</span></div>` : ""}</td>
       <td>${esc(row.discipline)}</td>
       <td>${esc(row.vendor_name)}</td>
       <td>${esc(row.po_number)}</td>
@@ -152,6 +155,7 @@ export function registerMrrScanRoutes(app, dependencies) {
       ` : ""}
       <div class="card">
         <form method="get" action="/material-logs/mrr" class="stack">
+          ${workflowListFilter(req, "Ordered for")}
           <div class="grid" style="grid-template-columns: 1fr auto auto;">
             <div><label>Filter MRR Log</label><input name="q" value="${esc(q)}" placeholder="MRR, vendor, PO, description, received by" /></div>
             <div style="align-self:end;"><button type="submit">Apply Filter</button></div>

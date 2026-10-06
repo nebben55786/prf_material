@@ -145,3 +145,14 @@ Open **Yard → Multi-job Needs & Stock** to select any accessible jobs, includi
 Migration `048_shared_inventory.sql` is applied by the normal database initialization on startup (or `npm run db:init`). It adds pool, matching, reservation, movement, and audit records without enrolling any jobs or moving existing receipts. Stock changes use a transaction lock and deferred balance checks, including receipt reversals, inventory audits, and accepted requisition holds.
 
 Run `npm test` after installing development dependencies. Shared-inventory tests use an isolated PGlite PostgreSQL database, apply the full migration sequence, and never connect to the configured live database.
+
+
+### Shared material workflow
+
+The **Material Systems** screen chooses which jobs work together. Member jobs use the same RFQ, PO, receiving, MRR and issue screens; these lists include all authorized jobs in the system, with a job filter. Unlinked jobs remain independent.
+
+Choose **Ordered for** when creating an RFQ, manual PO or importing PO data. POs keep their job assignment. Choose **Issued to job** in the material request builder; issues keep that destination even when another member job bought the stock. Opening another member job's document preserves its original job and does not change the signed-in session's selected job.
+
+The MRR register and new MRR numbering span the whole system. Migration `049_shared_material_workflow.sql` rejects new duplicate MRR numbers across members atomically. Existing MRR records and historical numbers are preserved, and each receipt still identifies its ordering job and PO. Receiving uses common warehouse/location choices for the system.
+
+RFQ and PO material variants are available for explicit matching before receiving. Specifications, units and dimensions still must agree; the app does not match materials automatically. Needs & Stock defaults to the chosen system and retains shared-stock and reservation calculations. Material history and issue reports provide job filters for paperwork.

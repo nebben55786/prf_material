@@ -115,11 +115,11 @@ export function registerSharedInventoryRoutes(app, deps) {
       ).rows;
       res.send(
         layout(
-          "Inventory Pools",
-          `<h1>Inventory Pools</h1><div class="card"><p>Only jobs explicitly linked to a pool share stock. Unmatched items remain with their receiving job.</p><div class="actions">
-      ${canManage(req) ? '<a class="btn btn-primary" href="/inventory/pools/new">Create Pool</a>' : ""}
+          "Material Systems",
+          `<h1>Material Systems</h1><div class="card"><p>Chosen jobs use one material system from RFQs through issuing, with one MRR register. Orders and issues identify their job. Materials share stock only after specifications and units are explicitly matched.</p><div class="actions">
+      ${canManage(req) ? '<a class="btn btn-primary" href="/inventory/pools/new">Create Material System</a>' : ""}
       <a class="btn btn-secondary" href="/inventory/multi-job">Multi-job Needs &amp; Stock</a><a class="btn btn-secondary" href="/inventory">Job Inventory</a></div></div>
-      ${table(["Pool", "Action"], pools.map((p) => `<tr><td>${esc(p.name)}</td><td><a class="btn btn-secondary" href="/inventory/pools/${p.id}">Stock &amp; Reservations</a></td></tr>`).join(""))}`,
+      ${table(["Material System", "Action"], pools.map((p) => `<tr><td>${esc(p.name)}</td><td><a class="btn btn-secondary" href="/inventory/pools/${p.id}">Stock &amp; Reservations</a></td></tr>`).join(""))}`,
           req.user,
         ),
       );
@@ -138,15 +138,15 @@ export function registerSharedInventoryRoutes(app, deps) {
       const rows = ids.length ? await service.candidates({ query }, ids) : [];
       res.send(
         layout(
-          "Create Inventory Pool",
-          `<h1>Create Inventory Pool</h1><div class="card"><form method="get" class="stack"><label>Choose jobs to share this inventory</label><div class="check-grid">${jobChecks(jobs, ids)}</div><button>Review Existing Stock and Materials</button></form></div>
+          "Create Material System",
+          `<h1>Create Material System</h1><div class="card"><form method="get" class="stack"><label>Choose jobs for this material system</label><div class="check-grid">${jobChecks(jobs, ids)}</div><button>Review Existing Stock and Materials</button></form></div>
       ${
         ids.length
           ? reviewTable(rows, jobs) +
             `<div class="card"><form method="post" action="/inventory/pools" class="stack">${ids.map((id) => `<input type="hidden" name="job_ids" value="${id}" />`).join("")}
-      <label>Pool name</label><input name="name" required maxlength="120" />
+      <label>Material system name</label><input name="name" required maxlength="120" />
       <label class="check-option"><input type="checkbox" name="reviewed" required /><span>I reviewed the existing stock. These jobs hold different stock, not duplicated records of the same physical materials.</span></label>
-      <p>Materials will be matched explicitly after creating the pool. Nothing is combined automatically.</p><button>Create Pool</button></form></div>`
+      <p>Materials will be matched explicitly after creating the material system. Nothing is combined automatically.</p><button>Create Material System</button></form></div>`
           : ""
       }`,
           req.user,
@@ -438,7 +438,7 @@ export function registerSharedInventoryRoutes(app, deps) {
   );
   const reportData = async (db, req) => {
     const ids = selectedJobs(
-      req.query.job_ids,
+      req.query.job_ids || req.materialWorkflow?.jobs.map((j) => j.id),
       jobsFor(req),
       currentJobId(req),
     );
@@ -673,7 +673,7 @@ export function registerSharedInventoryRoutes(app, deps) {
       res.send(
         layout(
           "Multi-job Needs & Stock",
-          `<h1>Multi-job Needs &amp; Stock</h1><div class="card"><form method="get" class="stack">${data.sourceBomId ? `<input type="hidden" name="source_bom_id" value="${data.sourceBomId}" /><p>BOM source: #${data.sourceBomId}. <a href="/inventory/multi-job">Show all BOMs</a></p>` : ""}<label>Jobs to include</label><div class="check-grid">${jobChecks(jobsFor(req), data.ids)}</div><button>Load Report</button></form><div class="actions"><a class="btn btn-primary" href="/inventory/multi-job/export.xlsx?${data.ids.map((id) => "job_ids=" + id).join("&")}${data.sourceBomId ? "&source_bom_id=" + data.sourceBomId : ""}">Download Excel</a><button type="button" onclick="window.print()">Print Report</button><a class="btn btn-secondary" href="/inventory/pools">Inventory Pools</a></div><p>Shared stock and unreserved quantities appear once per material and pool. Job columns show needs and reservations; selecting jobs here does not link their inventory.</p><p>Available to selection includes unreserved stock plus selected jobs' reservations. Reservations for unselected members remain protected. To purchase uses Required − Ordered − Available, as in the Material Purchase Report. Totals are per material and unit.</p></div>${table(heads, rows)}<h2>Relevant Stock Locations</h2>${table(["Shared Material", "Source Job", "Source Item", "UOM", "Spec", "Size 1", "Size 2", "Thk 1", "Thk 2", "Warehouse", "Location", "On Hand", "OS&D"], data.stock.map((r) => cells([r.material_name, sourceJobName(r, req), r.item_code, r.uom, r.spec, r.size_1, r.size_2, r.thk_1, r.thk_2, r.warehouse, r.location, r.qty_on_hand, r.qty_osd])).join(""))}`,
+          `<h1>Multi-job Needs &amp; Stock</h1><div class="card"><form method="get" class="stack">${data.sourceBomId ? `<input type="hidden" name="source_bom_id" value="${data.sourceBomId}" /><p>BOM source: #${data.sourceBomId}. <a href="/inventory/multi-job">Show all BOMs</a></p>` : ""}<label>Jobs to include</label><div class="check-grid">${jobChecks(jobsFor(req), data.ids)}</div><button>Load Report</button></form><div class="actions"><a class="btn btn-primary" href="/inventory/multi-job/export.xlsx?${data.ids.map((id) => "job_ids=" + id).join("&")}${data.sourceBomId ? "&source_bom_id=" + data.sourceBomId : ""}">Download Excel</a><button type="button" onclick="window.print()">Print Report</button><a class="btn btn-secondary" href="/inventory/pools">Material Systems</a></div><p>Shared stock and unreserved quantities appear once per material and pool. Job columns show needs and reservations; selecting jobs here does not link their inventory.</p><p>Available to selection includes unreserved stock plus selected jobs' reservations. Reservations for unselected members remain protected. To purchase uses Required − Ordered − Available, as in the Material Purchase Report. Totals are per material and unit.</p></div>${table(heads, rows)}<h2>Relevant Stock Locations</h2>${table(["Shared Material", "Source Job", "Source Item", "UOM", "Spec", "Size 1", "Size 2", "Thk 1", "Thk 2", "Warehouse", "Location", "On Hand", "OS&D"], data.stock.map((r) => cells([r.material_name, sourceJobName(r, req), r.item_code, r.uom, r.spec, r.size_1, r.size_2, r.thk_1, r.thk_2, r.warehouse, r.location, r.qty_on_hand, r.qty_osd])).join(""))}`,
           req.user,
         ),
       );
