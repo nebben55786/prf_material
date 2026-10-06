@@ -22807,12 +22807,12 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
           <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="${escAttr(receiveRemainingHref)}">${esc(receiveRemainingLabel)}</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/export-flow.xlsx">Export to FLOW</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
         </form>
       </div>
-      ${reverseCard}
-      ${mrrPhotoSection}
       <div class="card scroll">
         <h3>MRR Lines</h3>
         <table><tr><th>Source</th><th>PO Line</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>Status</th><th>Date</th><th>Notes</th><th>Action</th></tr>${mrrLineRows || `<tr><td colspan="11" class="muted">No MRR lines found for this header yet.</td></tr>`}</table>
       </div>
+      ${mrrPhotoSection}
+      ${reverseCard}
     `, req.user));
   });
 
