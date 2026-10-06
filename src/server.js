@@ -17,9 +17,12 @@ import { addOnTheFlyBomItem } from "./on-the-fly-item.js";
 import { registerMaterialPhotoRoutes } from "./routes/material-photos.js";
 import { registerMrrDocumentRoutes } from "./routes/mrr-documents.js";
 import { registerMrrScanRoutes } from "./routes/mrr-scans.js";
+import { createSharedInventory, ownedKey, availableFromSnapshot, allocateStock } from "./shared-inventory.js";
+import { registerSharedInventoryRoutes } from "./routes/shared-inventory.js";
 import { initDb, query, withTransaction, auditLog, vendorCategories, setVendorCategories, permissionMatrix, setPermissionMatrix, pool } from "./db.js";
 
 const app = express();
+const sharedInventory = createSharedInventory({ auditLog });
 const upload = multer();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
@@ -66,6 +69,7 @@ const permissionSections = [
   { key: "vendors", label: "Vendors", href: "/vendors" },
   { key: "rfqs", label: "Purchasing", href: "/rfq" },
   { key: "inventory", label: "Items Master", href: "/items" },
+  { key: "inventory_pools", label: "Inventory Pools", href: "/inventory/pools" },
   { key: "pos", label: "POs", href: "/po" },
   { key: "bom", label: "BOM", href: "/bom" },
   { key: "receiving", label: "Receiving", href: "/receive" },
@@ -192,6 +196,10 @@ const defaultPermissionMatrix = {
     settings: { view: false, edit: false }
   }
 };
+defaultPermissionMatrix.admin.inventory_pools = { view: true, edit: true };
+for (const role of ["buyer", "warehouse", "field", "supervisor"]) {
+  defaultPermissionMatrix[role].inventory_pools = { view: true, edit: false };
+}
 defaultPermissionMatrix[roleMaterialController] = defaultPermissionMatrix[roleAdmin];
 
 function safeCookieDecode(value) {
@@ -5081,7 +5089,8 @@ async function getIssuedInventoryTotals(runner = { query }, jobId = null) {
       join material_requisitions mr on mr.id = mit.requisition_id
       join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
       join bom_lines bl on bl.id = mrl.bom_line_id
-      where coalesce(mit.qty_issued, 0) > 0
+      where mit.shared_movement_id is null
+        and coalesce(mit.qty_issued, 0) > 0
         and coalesce(mr.status, '') <> 'CANCELLED'
         and ($1::bigint is null or mr.job_id = $1)
       group by
@@ -5138,7 +5147,8 @@ async function getIssuedInventoryTotalsByItemAndLocation(runner = { query }, job
       join material_requisitions mr on mr.id = mit.requisition_id
       join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
       join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
-      where coalesce(mit.qty_issued, 0) > 0
+      where mit.shared_movement_id is null
+        and coalesce(mit.qty_issued, 0) > 0
         and coalesce(mr.status, '') <> 'CANCELLED'
         and ($1::bigint is null or mr.job_id = $1)
       group by
@@ -5182,7 +5192,8 @@ async function getIssuedInventoryTotalsByItem(runner = { query }, jobId = null) 
       join material_requisitions mr on mr.id = mit.requisition_id
       join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
       join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
-      where coalesce(mit.qty_issued, 0) > 0
+      where mit.shared_movement_id is null
+        and coalesce(mit.qty_issued, 0) > 0
         and coalesce(mr.status, '') <> 'CANCELLED'
         and ($1::bigint is null or mr.job_id = $1)
       group by bl.item_code
@@ -5223,7 +5234,8 @@ function getIssuedInventoryTotalsByItemSubquery(jobId = null) {
       join material_requisitions mr on mr.id = mit.requisition_id
       join material_requisition_lines mrl on mrl.id = mit.requisition_line_id
       join bom_lines bl on bl.id = coalesce(mit.source_bom_line_id, mrl.bom_line_id)
-      where coalesce(mit.qty_issued, 0) > 0
+      where mit.shared_movement_id is null
+        and coalesce(mit.qty_issued, 0) > 0
         and coalesce(mr.status, '') <> 'CANCELLED'
         ${jobFilterSql}
       group by bl.item_code
@@ -5303,6 +5315,16 @@ function getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId = null) {
 }
 
 async function getAvailableInventoryTotalsMap(runner = { query }, jobId = null, { allocatedOffsetMap = null } = {}) {
+  const pooled = jobId ? await sharedInventory.availableForJob(runner, jobId) : null;
+  if (pooled) {
+    const map = new Map();
+    for (const row of pooled) {
+      const key = buildInventoryIssueKey(row);
+      map.set(key, parseQtyValue((map.get(key) || 0) + row.qty_available));
+    }
+    return map;
+  }
+
   const [inventoryRes, issuedRows, allocatedRows] = await Promise.all([
     runner.query(getInventoryTotalsSubquery(jobId)),
     getIssuedInventoryTotals(runner, jobId),
@@ -5327,7 +5349,18 @@ async function getAvailableInventoryTotalsMap(runner = { query }, jobId = null, 
   return availableMap;
 }
 
-async function getAvailableInventoryByItemMap(runner = { query }, jobId = null, { allocatedOffsetMap = null } = {}) {
+async function getAvailableInventoryByItemMap(runner = { query }, jobId = null, { allocatedOffsetMap = null, context = {} } = {}) {
+
+  const pooled = jobId ? await sharedInventory.availableForJob(runner, jobId, context) : null;
+  if (pooled) {
+    const map = new Map();
+    for (const row of pooled) {
+      const key = buildInventoryItemKey(row);
+      map.set(key, parseQtyValue((map.get(key) || 0) + row.qty_available));
+    }
+    return map;
+  }
+
   const [inventoryRes, issuedRows, allocatedRows] = await Promise.all([
     runner.query(getInventoryTotalsByItemSubquery(jobId)),
     getIssuedInventoryTotalsByItem(runner, jobId),
@@ -5352,7 +5385,44 @@ async function getAvailableInventoryByItemMap(runner = { query }, jobId = null, 
   return availableMap;
 }
 
-async function getRequisitionMaterialShortages(runner = { query }, requisitionId, jobId) {
+async function applyPooledInventoryBalances(rows, runner, jobId, context = {}) {
+  const pool = await sharedInventory.membership(runner, jobId);
+  if (!pool) return rows;
+  const state = await sharedInventory.snapshot(runner, pool.id);
+  const available = availableFromSnapshot(state, jobId, context);
+  for (const row of rows) {
+    const key = ownedKey({ ...row, job_id: jobId });
+    const link = state.links.find((match) => ownedKey(match) === key);
+    const stock = state.stock.filter((entry) => link ? Number(entry.material_id) === Number(link.material_id) : !entry.material_id && ownedKey(entry) === key);
+    const held = state.reservations.filter((entry) => link ? Number(entry.material_id) === Number(link.material_id) : !entry.material_id && ownedKey(entry) === key);
+    row.qty_on_hand = stock.reduce((sum, entry) => sum + entry.qty_on_hand, 0);
+    row.qty_reserved = held.reduce((sum, entry) => sum + Number(entry.qty_remaining), 0);
+    row.qty_available = available.find((entry) => ownedKey(entry) === key)?.qty_available || 0;
+  }
+  return rows;
+}
+
+async function getRequisitionMaterialShortages(runner = { query }, requisitionId, jobId, reservationIds = {}) {
+  if (await sharedInventory.membership(runner, jobId)) {
+    const lines = (await runner.query(`
+      select bl.*, mrl.id as requisition_line_id, mrl.inventory_reservation_id, mrl.qty_requested from material_requisition_lines mrl
+      join bom_lines bl on bl.id=mrl.bom_line_id
+      where mrl.requisition_id=$1 and mrl.job_id=$2 order by mrl.id
+    `, [requisitionId, jobId])).rows;
+    const consumed = new Map();
+    const shortages = [];
+    for (const line of lines) {
+      const key = ownedKey({ ...line, job_id: jobId });
+      const reservationId = Object.hasOwn(reservationIds, line.requisition_line_id) ? reservationIds[line.requisition_line_id] : line.inventory_reservation_id;
+      const available = await sharedInventory.availableForJob(runner, jobId, { requisitionId, bomId: line.bom_id, reservationId });
+      const qtyAvailable = Math.max((available.find((r) => ownedKey(r) === key)?.qty_available || 0) - (consumed.get(key) || 0), 0);
+      const requested = parseQtyValue(line.qty_requested);
+      if (requested > qtyAvailable) shortages.push({ ...line, qty_available: qtyAvailable, qty_short: requested - qtyAvailable });
+      consumed.set(key, (consumed.get(key) || 0) + requested);
+    }
+    return shortages;
+  }
+
   const lines = (await runner.query(`
     select
       bl.item_code,
@@ -5589,6 +5659,10 @@ async function ensureUnallocatedBom(client, jobId) {
 
 async function rebuildUnallocatedBom(client, jobId) {
   const bom = await ensureUnallocatedBom(client, jobId);
+  if (await sharedInventory.membership(client, jobId)) {
+    await sharedInventory.rebuildUnallocated(client, jobId, bom.id);
+    return bom;
+  }
   const inventoryRows = await client.query(getInventoryTotalsByItemSubquery(jobId));
   const demandRows = await client.query(`
       select
@@ -5731,7 +5805,7 @@ async function rebuildUnallocatedBom(client, jobId) {
 async function markBomLinesReceivedFromInventory(client, bomId, jobId = null, userId = null) {
   const [linesRes, availableMap] = await Promise.all([
     client.query(`
-      select id, line_no, item_code, coalesce(size_1, '') as size_1, coalesce(size_2, '') as size_2,
+      select id, line_no, item_code, uom, spec, coalesce(size_1, '') as size_1, coalesce(size_2, '') as size_2,
              coalesce(thk_1, '') as thk_1, coalesce(thk_2, '') as thk_2,
              qty_required, qty_received, qty_issued, planning_status
       from bom_lines
@@ -5741,6 +5815,11 @@ async function markBomLinesReceivedFromInventory(client, bomId, jobId = null, us
     getAvailableInventoryByItemMap(client, jobId)
   ]);
 
+  const poolAvailable = await sharedInventory.availableForJob(client, jobId, { bomId });
+  if (poolAvailable) {
+    availableMap.clear();
+    for (const row of poolAvailable) availableMap.set(ownedKey(row), row.qty_available);
+  }
   let updatedCount = 0;
   let fullyReceivedCount = 0;
   let alreadyReceivedCount = 0;
@@ -5750,7 +5829,7 @@ async function markBomLinesReceivedFromInventory(client, bomId, jobId = null, us
     const qtyRequired = parseQtyValue(line.qty_required || 0);
     const qtyReceived = parseQtyValue(line.qty_received || 0);
     const qtyIssued = parseQtyValue(line.qty_issued || 0);
-    const key = buildInventoryItemKey(line);
+    const key = poolAvailable ? ownedKey({ ...line, job_id: jobId }) : buildInventoryItemKey(line);
     const availableQty = Math.max(parseQtyValue(availableMap.get(key) || 0), 0);
     const remainingQty = Math.max(qtyRequired - qtyReceived, 0);
 
@@ -5876,6 +5955,23 @@ function filterRedundantZeroInventoryRows(rows = []) {
 }
 
 async function getCurrentOnHandRows(runner = { query }, { jobId = null, whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
+  if (jobId && await sharedInventory.membership(runner, jobId)) {
+    // Apply historical issues without a recorded location before filtering audit rows.
+    const stock = await sharedInventory.ownedStock(runner, [jobId]);
+    const shiftedWhere = String(whereSql).replace(/\$(\d+)/g, (_, value) => `$${Number(value) + 1}`);
+    return (await runner.query(`
+      select inventory_by_location.* from (
+        select item_code,max(description) as description,size_1,size_2,thk_1,thk_2,warehouse,location,
+               sum(qty_on_hand) as qty_on_hand,sum(qty_osd) as qty_osd
+        from jsonb_to_recordset($1::jsonb) as stock(
+          item_code text,description text,size_1 text,size_2 text,thk_1 text,thk_2 text,
+          warehouse text,location text,qty_on_hand numeric,qty_osd numeric
+        )
+        group by item_code,size_1,size_2,thk_1,thk_2,warehouse,location
+      ) inventory_by_location ${shiftedWhere} order by ${orderSql}
+    `, [JSON.stringify(stock), ...params])).rows;
+  }
+
   const baseRows = (await runner.query(`
     select inventory_by_location.*
     from (${getInventoryByLocationSubquery(jobId)}) inventory_by_location
@@ -5887,6 +5983,10 @@ async function getCurrentOnHandRows(runner = { query }, { jobId = null, whereSql
 }
 
 async function getInventoryAuditVisibleRows(runner = { query }, { jobId = null, whereSql = "", params = [], orderSql = "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location" } = {}) {
+  if (jobId && await sharedInventory.membership(runner, jobId)) {
+    return filterRedundantZeroInventoryRows(await getCurrentOnHandRows(runner, { jobId, whereSql, params, orderSql }));
+  }
+
   const offsetWhereSql = String(whereSql || "").replace(/\$(\d+)/g, (_, value) => `$${Number(value) + 1}`);
   const baseRows = (await runner.query(`
     select inventory_by_location.*
@@ -7149,6 +7249,7 @@ async function getNextInventoryAuditReportNumber(client = null, jobId = null) {
 }
 
 async function saveInventoryAuditReport(client, { userId, jobId = null, warehouseFilter = "", locationFilter = "", identFilter = "", desiredRows = [], rebuildUnallocated = true }) {
+  await sharedInventory.lock(client);
   if (!desiredRows.length) throw new Error("No inventory rows were provided for this audit.");
   const currentRows = await getCurrentOnHandRows(client, { jobId });
   const currentMap = new Map(currentRows.map((row) => [buildInventoryEntryKey(row), row]));
@@ -8073,6 +8174,8 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
     <div class="card">
       <div class="actions">
         <a class="btn btn-primary" href="/inventory">Inventory</a>
+        <a class="btn btn-primary" href="/inventory/pools">Inventory Pools</a>
+        <a class="btn btn-primary" href="/inventory/multi-job">Multi-job Needs &amp; Stock</a>
         <a class="btn btn-primary" href="/yard/locations">Locations</a>
         <a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>
         ${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-primary" href="/yard/issue-by-po">Issue by PO</a>` : ""}
@@ -8177,6 +8280,7 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
   const poId = Number(req.params.poId || 0);
   if (!Number.isFinite(poId) || poId <= 0) throw new Error("PO not found.");
   const requisitionId = await withTransaction(async (client) => {
+    await sharedInventory.lock(client);
     await rebuildUnallocatedBom(client, jobId);
     const po = (await client.query(`
       select po.*, coalesce(v.name, '') as vendor_name, coalesce(r.rfq_no, '') as rfq_no
@@ -8195,10 +8299,11 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
         coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
         coalesce(nullif(pl.material_type_snapshot, ''), mi.material_type, 'misc') as material_type,
         coalesce(nullif(pl.uom_snapshot, ''), mi.uom, 'EA') as uom,
-        coalesce(pl.size_1, mi.size_1, '') as size_1,
-        coalesce(pl.size_2, mi.size_2, '') as size_2,
-        coalesce(pl.thk_1, mi.thk_1, '') as thk_1,
-        coalesce(pl.thk_2, mi.thk_2, '') as thk_2,
+        coalesce(nullif(ri.spec, ''), mi.inventory_spec, '') as spec,
+        coalesce(pl.size_1, '') as size_1,
+        coalesce(pl.size_2, '') as size_2,
+        coalesce(pl.thk_1, '') as thk_1,
+        coalesce(pl.thk_2, '') as thk_2,
         ${poLineReceivedQtySql("pl")} as qty_received,
         coalesce((
           select sum(mrl.qty_requested)
@@ -8209,7 +8314,8 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
             and coalesce(mr.status, '') <> 'CANCELLED'
         ), 0) as qty_already_requested
       from po_lines pl
-      join material_items mi on mi.id = pl.material_item_id
+      join shared_inventory_item_metadata mi on mi.id = pl.material_item_id
+      left join rfq_items ri on ri.id = pl.rfq_item_id
       where pl.po_id = $1 and pl.job_id = $2
       order by
         case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then 0 else 1 end,
@@ -8224,13 +8330,13 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
       .filter((line) => line.qty_available > 0);
     if (!poLines.length) throw new Error("No received PO material is available to issue.");
     const unallocatedLines = (await client.query(`
-      select bl.id, bl.item_code
+      select bl.*
       from bom_lines bl
       join bom_headers bh on bh.id = bl.bom_id
       where bh.job_id = $1
         and coalesce(bh.system_key, '') = $2
     `, [jobId, unallocatedBomSystemKey])).rows;
-    const unallocatedByItem = new Map(unallocatedLines.map((line) => [normalizeInventoryKeyPart(line.item_code), Number(line.id)]));
+    const unallocatedByItem = new Map(unallocatedLines.map((line) => [ownedKey({ ...line, job_id: jobId }), Number(line.id)]));
     const requisitionNo = await getNextRequisitionNumber(client, jobId);
     const insertReq = await client.query(`
       insert into material_requisitions (
@@ -8251,7 +8357,9 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
     let createdLineCount = 0;
     for (const line of poLines) {
       const itemCodeKey = normalizeInventoryKeyPart(line.item_code);
-      const bomLineId = unallocatedByItem.get(itemCodeKey);
+      const bomLineId = await sharedInventory.membership(client, jobId)
+        ? unallocatedByItem.get(ownedKey({ ...line, job_id: jobId }))
+        : unallocatedLines.find((row) => normalizeInventoryKeyPart(row.item_code) === itemCodeKey)?.id;
       if (!bomLineId) {
         throw new Error(`No BOM allocation was found for received PO item ${line.item_code}. Add it to a BOM or rebuild Un-Allocated Inventory before issuing.`);
       }
@@ -8265,6 +8373,10 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
     }
     if (!createdLineCount) throw new Error("No requisition lines were created.");
     await rebuildUnallocatedBom(client, jobId);
+    if (await sharedInventory.membership(client, jobId)) {
+      const shortages = await getRequisitionMaterialShortages(client, insertReq.rows[0].id, jobId);
+      if (shortages.length) throw new Error("This PO request exceeds available shared stock. Create a requisition for the available quantity instead.");
+    }
     await auditLog(client, req.user.id, "issue_by_po_request", "material_requisition", insertReq.rows[0].id, `${requisitionNo}|${po.po_no}`);
     return insertReq.rows[0].id;
   });
@@ -8336,6 +8448,7 @@ app.get("/settings", requireAuth, requirePermission("settings", "view"), async (
       <div class="actions">
         <a class="btn btn-primary" href="/settings/job-setup">Job Setup</a>
         <a class="btn btn-primary" href="/settings/warehouse-setup">Warehouse Setup</a>
+        ${canAccess(req.user, "inventory_pools", "edit") ? `<a class="btn btn-primary" href="/inventory/pools">Inventory Pools</a>` : ""}
         <a class="btn btn-primary" href="/settings/user-management">User Management</a>
         ${isAdminRole(req.user) ? `<a class="btn btn-primary" href="/settings/audit-log">Audit Log</a>` : ""}
       </div>
@@ -12570,6 +12683,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   let lineRows = "";
   let lineNumberOptionsHtml = "";
   const selectedBomUsesPackageLabel = selectedBom ? String(selectedBom.bom_type || "").trim().toLowerCase() === "equipment" : false;
+  const builderPool = selectedBom ? await sharedInventory.membership({ query }, jobId) : null;
   const selectedBomIsUnallocated = selectedBom ? isUnallocatedBom(selectedBom) : false;
   const lineLabel = selectedBomUsesPackageLabel ? "Package" : "Line";
   const tagNumberLabel = selectedBom && String(selectedBom.bom_no || "").trim().toUpperCase() === "KEQ3-BOM-00006"
@@ -12618,6 +12732,8 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         order by line_no
       `, [selectedBom.id])
     ]);
+    await applyPooledInventoryBalances(linesRes.rows, { query }, jobId, { bomId: selectedBom.id });
+    if (selectedBomIsUnallocated) for (const line of linesRes.rows) line.qty_available = Math.min(line.qty_available, line.qty_remaining);
     filteredCount = Number(filteredCountRes.rows[0]?.filtered_count || 0);
     lineNumberOptionsHtml = `<option value="">All ${esc(lineLabel)}s</option>${lineNumberOptionsRes.rows.map((row) => {
       const lineNo = String(row.line_no || "");
@@ -12736,7 +12852,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="nowrap" data-resizable="true">Size</th>
                 <th class="wrap" data-resizable="true">Description</th>
                 <th class="wrap" data-resizable="true">Required Qty</th>
-                <th class="wrap" data-resizable="true">Recvd Qty</th>
+                <th class="wrap" data-resizable="true">${builderPool ? "Pool On Hand" : "Recvd Qty"}</th>
                 <th class="wrap" data-resizable="true">Issued Qty</th>
                 <th class="wrap" data-resizable="true">Available</th>
                 <th class="wrap" data-resizable="true">Request Qty</th>
@@ -12979,6 +13095,7 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
     where ${where.join(" and ")}
     order by coalesce(bl.iwp_no, ''), coalesce(bl.line_no, ''), bl.id
   `, params)).rows;
+  await applyPooledInventoryBalances(lines, { query }, jobId, { bomId: bom.id });
   const canEditBomLines = canAccess(req.user, "bom", "edit") && manualBom;
   const canAddOnTheFlyItem = canEditBomLines && canEditInventoryAudit(req.user);
   const lineRows = lines.map((line) => `<tr>
@@ -13049,7 +13166,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   }
   const [linesResult, flagColorResult, trailerNumberResult] = await Promise.all([
     query(`
-      select mrl.id as requisition_line_id, mrl.qty_requested, mrl.qty_issued, mi.id as material_item_id, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
+      select mrl.id as requisition_line_id, mrl.qty_requested, mrl.qty_issued, mi.id as material_item_id, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2, mrl.inventory_reservation_id
       from material_requisition_lines mrl
       join bom_lines bl on bl.id = mrl.bom_line_id
       left join material_items mi on mi.job_id = mrl.job_id and lower(mi.item_code) = lower(bl.item_code)
@@ -13086,7 +13203,8 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     currentReqAllocMap.set(key, parseQtyValue(currentReqAllocMap.get(key) || 0) + parseQtyValue(line.qty_requested || 0));
   }
   const availableMap = await getAvailableInventoryByItemMap({ query }, jobId, {
-    allocatedOffsetMap: isVerifiedStageRequisitionStatus(header.status) ? currentReqAllocMap : null
+    allocatedOffsetMap: isVerifiedStageRequisitionStatus(header.status) ? currentReqAllocMap : null,
+    context: { requisitionId: header.id, bomId: header.bom_id }
   });
   const materialShortages = requisitionStatusKey(header.status) === "WAITING_ON_MATERIAL"
     ? await getRequisitionMaterialShortages({ query }, header.id, jobId)
@@ -13111,15 +13229,27 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   const flagColorOptionsHtml = flagColorValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
   const trailerNumberOptionsHtml = trailerNumberValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
   const canEditIssuedQty = isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user, "requisitions", "issue");
+  const requisitionPool = await sharedInventory.membership({ query }, jobId);
+  const poolState = requisitionPool ? await sharedInventory.snapshot({ query }, requisitionPool.id) : null;
+  const availableForRequisitionLine = (line) => poolState
+    ? availableFromSnapshot(poolState, jobId, { requisitionId: header.id, bomId: header.bom_id, reservationId: line.inventory_reservation_id })
+      .find((row) => ownedKey(row) === ownedKey({ ...line, job_id: jobId }))?.qty_available || 0
+    : availableMap.get(buildInventoryItemKey(line)) || 0;
+  const reservationOptionsForLine = (line, accepting = false) => {
+    if (!poolState || (!canEditIssuedQty && !accepting)) return "";
+    const match = poolState.links.find((m) => ownedKey(m) === ownedKey({ ...line, job_id: jobId }));
+    const options = poolState.reservations.filter((r) => !r.virtual && Number(r.job_id) === Number(jobId) && Number(r.material_id) === Number(match?.material_id) && (!r.requisition_id || Number(r.requisition_id) === Number(header.id)) && (!r.bom_id || Number(r.bom_id) === Number(header.bom_id)));
+    return `<label>Reservation / purpose</label><select name="reservation_id_${line.requisition_line_id}"><option value="">Applicable job / BOM / REQ reservations, then unreserved</option>${options.map((r) => `<option value="${r.id}" ${Number(line.inventory_reservation_id) === Number(r.id) ? "selected" : ""}>#${r.id} ${esc(r.purpose || "Job reservation")} — ${esc(r.qty_remaining)} remaining</option>`).join("")}</select>`;
+  };
   const issuedQtyFormId = `requisition-issued-qty-form-${header.id}`;
   const lineRows = lines.map((line) => `<tr>
     <td>${esc(line.line_no)}</td>
     <td>${esc(line.iwp_no || "")}</td>
     <td>${esc(line.item_code)}</td>
     <td>${esc(line.description)}</td>
-    <td>${esc(formatQtyDisplay(availableMap.get(buildInventoryItemKey(line)) || 0))}</td>
+    <td>${esc(formatQtyDisplay(availableForRequisitionLine(line)))}</td>
     <td>${esc(formatQtyDisplay(line.qty_requested))}</td>
-    <td>${canEditIssuedQty ? `<input name="qty_issued_${line.requisition_line_id}" value="${esc(formatQtyDisplay(line.qty_issued))}" inputmode="decimal" />` : esc(formatQtyDisplay(line.qty_issued))}</td>
+    <td>${canEditIssuedQty ? `<input name="qty_issued_${line.requisition_line_id}" value="${esc(formatQtyDisplay(line.qty_issued))}" inputmode="decimal" />` : esc(formatQtyDisplay(line.qty_issued))}${reservationOptionsForLine(line)}</td>
     <td>${esc(formatQtyDisplay(Math.max(parseQtyValue(line.qty_requested || 0) - parseQtyValue(line.qty_issued || 0), 0)))}</td>
     <td>${esc(line.uom)}</td>
     <td>${esc(line.spec || "")}</td>
@@ -13131,7 +13261,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Review / Edit Request</a>`);
   }
   if (["REQUESTED", "WAITING_ON_MATERIAL"].includes(requisitionStatusKey(header.status)) && canAccess(req.user, "requisitions", "verify")) {
-    headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Accept Request</button></form>`);
+    headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify" class="stack">${lines.map((line) => reservationOptionsForLine(line, true) ? `<div><label>${esc(line.item_code)}</label>${reservationOptionsForLine(line, true)}</div>` : "").join("")}<button type="submit">Accept Request</button></form>`);
   }
   if (isVerifiedStageRequisitionStatus(header.status)) {
     headerActions.push(`<a class="btn btn-secondary" target="_blank" href="/requisitions/${header.id}/pick-ticket.pdf">Open Pick Ticket PDF</a>`);
@@ -13473,7 +13603,7 @@ app.post("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermis
     `, [req.params.id, signedByName, signatureData, jobId]);
     await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|electronic|${signedByName}`);
     if (isVerifiedStageRequisitionStatus(header.status)) {
-      await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+      await issueRequisitionToField(client, req.params.id, jobId, req.user.id, req.body);
     }
   });
   res.redirect("/requisitions");
@@ -13505,7 +13635,7 @@ app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requir
     `, [req.params.id, signedByName, signedCopyFilename.slice(0, 255), file.mimetype, file.buffer, jobId]);
     await auditLog(client, req.user.id, "sign", "material_requisition", req.params.id, `${header.requisition_no}|upload|${signedByName}|${signedCopyFilename}`);
     if (isVerifiedStageRequisitionStatus(header.status)) {
-      await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+      await issueRequisitionToField(client, req.params.id, jobId, req.user.id, req.body);
     }
   });
   res.redirect("/requisitions");
@@ -13536,7 +13666,7 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, req
   if (!header) throw new Error("Requisition not found.");
   if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Pick tickets are only available for accepted, flagged, or loaded requisitions.");
   const lines = (await query(`
-    select mrl.qty_requested, mrl.qty_issued, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom,
+    select mrl.qty_requested, mrl.qty_issued, mrl.inventory_reservation_id, bl.spec, bl.bom_id, bl.line_no, bl.iwp_no, bl.iso_no, bl.item_code, bl.description, bl.uom,
            coalesce(bl.size_1, '') as size_1, coalesce(bl.size_2, '') as size_2,
            coalesce(bl.thk_1, '') as thk_1, coalesce(bl.thk_2, '') as thk_2
     from material_requisition_lines mrl
@@ -13544,6 +13674,31 @@ app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, req
     where mrl.requisition_id = $1 and mrl.job_id = $2
     order by bl.line_no, bl.id
   `, [req.params.id, jobId])).rows;
+
+  const pickPool = await sharedInventory.membership({ query }, jobId);
+  if (pickPool) {
+    const state = await sharedInventory.snapshot({ query }, pickPool.id);
+    const printableLines = [];
+    for (const line of lines) {
+      const key = ownedKey({ ...line, job_id: jobId });
+      const match = state.links.find((row) => ownedKey(row) === key);
+      const stock = state.stock.filter((row) => match ? Number(row.material_id) === Number(match.material_id) : !row.material_id && ownedKey(row) === key);
+      const available = availableFromSnapshot(state, jobId, { requisitionId: header.id, bomId: header.bom_id, reservationId: line.inventory_reservation_id });
+      const qty = parseQtyValue(line.qty_issued || 0);
+      if (qty > (available.find((row) => ownedKey(row) === key)?.qty_available || 0)) throw new Error("Pick quantity exceeds available stock for this material or purpose.");
+      const allocations = qty > 0 ? allocateStock(stock, qty) : [];
+      const locationRows = allocations.map((row) => ({ warehouse: row.warehouse, location: row.location, qty_available: row.qty }));
+      const pickLocation = qty > 0 ? buildPickLocationPlan(locationRows, qty) : "No issue quantity selected";
+      printableLines.push({ ...line, pick_location: pickLocation });
+      for (const allocation of allocations) {
+        const sourceRow = stock.find((row) => ownedKey(row) === ownedKey(allocation) && row.warehouse === allocation.warehouse && row.location === allocation.location);
+        sourceRow.qty_on_hand = parseQtyValue(sourceRow.qty_on_hand - allocation.qty);
+      }
+    }
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${String(header.requisition_no || "pick-ticket").replace(/[^A-Za-z0-9._-]/g, "_")}-pick-ticket.pdf"`);
+    return res.send(buildPickTicketPdf(header, printableLines));
+  }
 
   const inventoryRows = (await query(`
     select
@@ -13665,11 +13820,26 @@ registerMrrDocumentRoutes(app, {
 app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const result = await withTransaction(async (client) => {
+    await sharedInventory.lock(client);
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     const statusKey = requisitionStatusKey(header.status);
     if (!["REQUESTED", "WAITING_ON_MATERIAL"].includes(statusKey)) throw new Error("Only requested or waiting-on-material requisitions can be accepted.");
-    const shortages = await getRequisitionMaterialShortages(client, req.params.id, jobId);
+    const reservationIds = Object.fromEntries(Object.entries(req.body).filter(([key]) => key.startsWith("reservation_id_")).map(([key, value]) => [key.slice("reservation_id_".length), value]));
+    for (const [lineId, reservationId] of Object.entries(reservationIds)) {
+      if (reservationId && !(await client.query(`
+        select r.id from inventory_reservations r
+        join inventory_pool_matches m on m.material_id=r.material_id and m.job_id=$2
+        join material_requisition_lines mrl on mrl.id=$3 and mrl.requisition_id=$4 and mrl.job_id=$2
+        join bom_lines bl on bl.id=mrl.bom_line_id
+        where r.id=$1 and r.job_id=$2 and r.qty_remaining>0
+          and m.item_code=trim(bl.item_code) and m.uom=upper(trim(bl.uom)) and m.spec=trim(coalesce(bl.spec,''))
+          and m.size_1=trim(coalesce(bl.size_1,'')) and m.size_2=trim(coalesce(bl.size_2,'')) and m.thk_1=trim(coalesce(bl.thk_1,'')) and m.thk_2=trim(coalesce(bl.thk_2,''))
+          and (r.requisition_id is null or r.requisition_id=$4) and (r.bom_id is null or r.bom_id=bl.bom_id)
+      `, [reservationId, jobId, lineId, req.params.id])).rows.length) throw new Error("Selected reservation does not apply to this requisition line.");
+      await client.query("update material_requisition_lines set inventory_reservation_id=$2 where id=$1 and requisition_id=$3 and job_id=$4", [lineId, reservationId || null, req.params.id, jobId]);
+    }
+    const shortages = await getRequisitionMaterialShortages(client, req.params.id, jobId, reservationIds);
     if (shortages.length) {
       await client.query("update material_requisitions set status = 'WAITING_ON_MATERIAL' where id = $1 and job_id = $2", [req.params.id, jobId]);
       await auditLog(client, req.user.id, "waiting_material", "material_requisition", req.params.id, header.requisition_no);
@@ -13699,6 +13869,7 @@ app.post("/requisitions/:id/issued-qty", requireAuth, requireJobContext, require
   const shouldIssue = nextAction === "issue";
   const shouldSign = nextAction === "sign";
   await withTransaction(async (client) => {
+    await sharedInventory.lock(client);
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Issued quantities can only be edited on accepted, flagged, or loaded requisitions.");
@@ -13719,11 +13890,14 @@ app.post("/requisitions/:id/issued-qty", requireAuth, requireJobContext, require
       if (issuedQty > requestedQty) {
         throw new Error(`Issued qty for ${line.item_code} cannot exceed requested qty.`);
       }
+      if (Object.hasOwn(req.body, `reservation_id_${line.id}`)) {
+        await client.query("update material_requisition_lines set inventory_reservation_id=$2 where id=$1 and job_id=$3", [line.id, req.body[`reservation_id_${line.id}`] || null, jobId]);
+      }
       await client.query("update material_requisition_lines set qty_issued = $2 where id = $1 and job_id = $3", [line.id, issuedQty, jobId]);
     }
     await auditLog(client, req.user.id, "update_issued_qty", "material_requisition", req.params.id, header.requisition_no);
     if (shouldIssue) {
-      await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+      await issueRequisitionToField(client, req.params.id, jobId, req.user.id, req.body);
     }
   });
   res.redirect(shouldIssue ? `/requisitions/${req.params.id}` : shouldSign ? `/requisitions/${req.params.id}/sign` : `/requisitions/${req.params.id}?issued_qty_saved=1`);
@@ -13993,7 +14167,15 @@ app.post("/requisitions/:id/load", requireAuth, requireJobContext, requirePermis
   res.redirect(`/requisitions/${req.params.id}`);
 }));
 
-async function issueRequisitionToField(client, requisitionId, jobId, userId) {
+async function issueRequisitionToField(client, requisitionId, jobId, userId, body = {}) {
+  await sharedInventory.lock(client);
+  const reservationIds = Object.fromEntries(Object.entries(body).filter(([key]) => key.startsWith("reservation_id_")).map(([key, value]) => [key.slice("reservation_id_".length), value]));
+  if (await sharedInventory.issue(client, { jobId, requisitionId, userId, reservationIds })) {
+    await recomputeBomIssuedSummaries(client, jobId);
+    const memberJobs = (await client.query("select job_id from inventory_pool_jobs where pool_id=(select pool_id from inventory_pool_jobs where job_id=$1)", [jobId])).rows;
+    for (const member of memberJobs) await rebuildUnallocatedBom(client, member.job_id);
+    return (await client.query("select * from material_requisitions where id=$1 and job_id=$2", [requisitionId, jobId])).rows[0];
+  }
   const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [requisitionId, jobId])).rows[0];
   if (!header) throw new Error("Requisition not found.");
   if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Requisition must be accepted, flagged, or loaded before issue.");
@@ -14113,7 +14295,7 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
 app.post("/requisitions/:id/issue", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    await issueRequisitionToField(client, req.params.id, jobId, req.user.id);
+    await issueRequisitionToField(client, req.params.id, jobId, req.user.id, req.body);
   });
   res.redirect(`/requisitions/${req.params.id}`);
 }));
@@ -14122,9 +14304,11 @@ app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePerm
   if (!isAdminRole(req.user)) throw new Error("Only admins can cancel requisitions.");
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    await sharedInventory.lock(client);
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (header.status === "CANCELLED") return;
+    await sharedInventory.cancelIssues(client, req.params.id, req.user.id);
     await client.query(`delete from material_issue_transactions where requisition_id = $1 and job_id = $2`, [req.params.id, jobId]);
     await client.query(`
       update material_requisition_lines
@@ -14147,8 +14331,12 @@ app.post("/requisitions/:id/delete", requireAuth, requireJobContext, requirePerm
   if (!isAdminRole(req.user)) throw new Error("Only admins can delete requisitions.");
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    await sharedInventory.lock(client);
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    if ((await client.query("select id from shared_inventory_movements where requisition_id=$1 limit 1", [req.params.id])).rows.length) {
+      throw new Error("Shared issue history must be retained. Cancel this requisition instead of deleting it.");
+    }
     const issueCount = Number((await client.query("select count(*) as issue_count from material_issue_transactions where requisition_id = $1 and job_id = $2", [req.params.id, jobId])).rows[0]?.issue_count || 0);
     const statusKey = requisitionStatusKey(header.status);
     const isCancelled = statusKey === "CANCELLED";
@@ -20200,8 +20388,17 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
   res.redirect("/receive");
 });
 
+const sharedInventoryRoutes = registerSharedInventoryRoutes(app, {
+  query, withTransaction, sharedInventory, requireAuth, requireJobContext, requirePermission, asyncHandler,
+  layout, esc, canAccess, currentJobId, XLSX, recomputeBomIssuedSummaries, rebuildUnallocatedBom
+});
+
 app.get("/inventory", requireAuth, requireJobContext, requirePermission("inventory", "view"), async (req, res) => {
   const jobId = currentJobId(req);
+  if (req.query.job_ids) return res.redirect("/inventory/multi-job?" + new URLSearchParams([].concat(req.query.job_ids).map((id) => ["job_ids", id])).toString());
+  const inventoryPool = await sharedInventory.membership({ query }, jobId);
+  if (inventoryPool) return res.redirect("/inventory/pools/" + inventoryPool.id);
+
   const warehouseFilter = String(req.query.warehouse_filter || "").trim();
   const locationFilter = String(req.query.location_filter || "").trim();
   const identFilter = String(req.query.ident_filter || "").trim();
@@ -20313,6 +20510,8 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
 
 app.get("/inventory/export.xlsx", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
+  if (req.query.job_ids || await sharedInventory.membership({ query }, jobId)) return sharedInventoryRoutes.exportReport(req, res);
+
   const [currentRowsRaw, itemRows] = await Promise.all([
     getCurrentOnHandRows({ query }, {
       jobId,
@@ -21888,6 +22087,12 @@ app.get("/material-logs/purchase-report", requireAuth, requireJobContext, requir
   }
 
   const jobId = currentJobId(req);
+  if (req.query.job_ids || await sharedInventory.membership({ query }, jobId)) {
+    const parameters = [].concat(req.query.job_ids || jobId).map((id) => ["job_ids", id]);
+    if (req.query.source && req.query.source !== "combined") parameters.push(["source_bom_id", req.query.source]);
+    return res.redirect("/inventory/multi-job?" + new URLSearchParams(parameters).toString());
+  }
+
   const boms = (await query(`
     select id, bom_no, bom_name, description
     from bom_headers
