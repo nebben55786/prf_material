@@ -20041,12 +20041,9 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
       case when coalesce(pl.po_line, '') ~ '^[0-9]+$' then lpad(pl.po_line, 20, '0') else lower(coalesce(pl.po_line, '')) end,
       pl.id
   `, [po.id])).rows : [];
-  const mrrPoReceiptCount = po
-    ? Number((await query("select count(*) from receipts where mrr_log_id = $1 and job_id = $2", [mrr.id, jobId])).rows[0]?.count || 0)
-    : 0;
-  const canReceiveOnExistingMrr = !po || (openLines.length > 0 && mrrPoReceiptCount === 0);
-  const existingMrrReceiveMessage = mrrPoReceiptCount > 0
-    ? "Use Receive By PO to post remaining PO quantities on a new MRR."
+  const canReceiveOnExistingMrr = String(mrr.status || "").toUpperCase() !== "REVERSED" && (!po || openLines.length > 0);
+  const existingMrrReceiveMessage = String(mrr.status || "").toUpperCase() === "REVERSED"
+    ? "This MRR has been reversed. No lines can be added."
     : "All PO lines tied to this MRR are already fully received.";
   const lineOptions = openLines.map((line) => {
     const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0);
@@ -20066,6 +20063,7 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
     <div class="card">
       <h3>${po ? "Receive Against PO" : "Receive Without PO"}</h3>
       <form method="post" action="/receive/${mrr.id}" class="stack">
+        <input type="hidden" name="return_to" value="/receive/${mrr.id}?back=${escAttr(encodeURIComponent(backHref))}" />
         <input type="hidden" name="mode" value="${po ? "po" : "manual"}" />
         ${po ? `
           <div><label>PO Line</label><select name="po_line_id" required><option value="">Select open PO line</option>${lineOptions}</select></div>
@@ -20103,24 +20101,23 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
   `, req.user));
 });
 
-app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
+app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("receiving", "edit"), asyncHandler(async (req, res) => {
   const mrrId = Number(req.params.mrrId);
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const mrr = (await client.query("select * from mrr_logs where id = $1 and job_id = $2", [mrrId, jobId])).rows[0];
+    const mrr = (await client.query("select * from mrr_logs where id = $1 and job_id = $2 for update", [mrrId, jobId])).rows[0];
     if (!mrr) throw new Error("MRR not found.");
+    if (String(mrr.status || "").toUpperCase() === "REVERSED") throw new Error("Cannot add lines to a reversed MRR.");
     const qtyReceived = parseQtyValue(req.body.qty_received || 0);
     if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) throw new Error("Qty received must be greater than zero.");
     await assertValidWarehouseLocation(client, req.body.warehouse, req.body.location, jobId);
     const normalizedNames = normalizeWarehouseLocationValues(req.body.warehouse, req.body.location);
     if (String(req.body.mode || "") === "po") {
-      const existingReceiptCount = Number((await client.query(
-        "select count(*) from receipts where mrr_log_id = $1 and job_id = $2",
-        [mrrId, jobId]
-      )).rows[0]?.count || 0);
-      if (existingReceiptCount > 0) {
-        throw new Error("Use Receive By PO to post remaining PO quantities on a new MRR.");
-      }
+      const mrrPo = mrr.app_po_id
+        ? (await client.query("select id from purchase_orders where id=$1 and job_id=$2", [mrr.app_po_id, jobId])).rows[0]
+        : (mrr.po_number ? await findCanonicalPurchaseOrderByNumber(client, jobId, mrr.po_number) : null);
+      if (!mrrPo) throw new Error("This MRR has no linked PO.");
+      await client.query("select id from purchase_orders where id=$1 and job_id=$2 for update", [mrrPo.id, jobId]);
       const poLine = (await client.query(`
         select
           po.id as po_id,
@@ -20137,8 +20134,9 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
         join purchase_orders po on po.id = pl.po_id
         join material_items mi on mi.id = pl.material_item_id
         where pl.id = $1
-          and po.job_id = $2
-      `, [Number(req.body.po_line_id), jobId])).rows[0];
+          and po.job_id = $2 and pl.po_id = $3 and pl.job_id = $2
+        for update of pl
+      `, [Number(req.body.po_line_id) || 0, jobId, mrrPo.id])).rows[0];
       if (!poLine) throw new Error("PO line not found.");
       const poStatusKey = String(poLine.status || "").toUpperCase();
       if (["FULLY_RECEIVED", "CLOSED", "CANCELLED"].includes(poStatusKey)) {
@@ -20195,7 +20193,9 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
         await auditLog(client, req.user.id, "create", "osd_log", osdLog.id, osdLog.osd_number);
       }
       if (poLine?.po_id) await recalcPoStatus(client, poLine.po_id);
-      if (poLine?.rfq_id) await recalcRfqStatus(client, poLine.rfq_id);
+      const rfqIds = await getRfqIdsForPo(client, poLine.po_id);
+      if (poLine.rfq_id) rfqIds.push(Number(poLine.rfq_id));
+      for (const rfqId of new Set(rfqIds)) await recalcRfqStatus(client, rfqId);
       await auditLog(client, req.user.id, "create", "receipt", insert.rows[0].id, `mrr=${mrr.mrr_number};po_line=${req.body.po_line_id}`);
     } else {
       const result = await client.query(`
@@ -20221,8 +20221,8 @@ app.post("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("r
       await auditLog(client, req.user.id, "create", "material_receiving_log", result.rows[0].id, `mrr=${mrr.mrr_number}`);
     }
   });
-  res.redirect("/receive");
-});
+  res.redirect(getSafeReturnPath(req, `/material-logs/mrr/${mrrId}/edit`));
+}));
 
 app.get("/inventory", requireAuth, requireJobContext, requirePermission("inventory", "view"), async (req, res) => {
   const jobId = currentJobId(req);
@@ -22638,6 +22638,47 @@ app.post("/material-logs/mrr/:mrrId/receipts/:receiptId/edit", requireAuth, requ
   res.redirect(returnTo);
 }));
 
+app.post("/material-logs/mrr/:mrrId/lines/:source/:lineId/delete", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req), mrrId = Number(req.params.mrrId), lineId = Number(req.params.lineId);
+  await withTransaction(async (client) => {
+    const mrr = (await client.query("select * from mrr_logs where id=$1 and job_id=$2 for update", [mrrId, jobId])).rows[0];
+    if (!mrr) throw new Error("MRR not found.");
+    if (String(mrr.status || "").toUpperCase() === "REVERSED") throw new Error("Cannot delete lines from a reversed MRR.");
+    if (req.params.source === "receipt") {
+      const line = (await client.query(`
+        select r.*, pl.po_id,
+          coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
+          coalesce(pl.size_1, '') as size_1, coalesce(pl.size_2, '') as size_2,
+          coalesce(pl.thk_1, '') as thk_1, coalesce(pl.thk_2, '') as thk_2
+        from receipts r join po_lines pl on pl.id=r.po_line_id
+        join material_items mi on mi.id=pl.material_item_id
+        where r.id=$1 and r.mrr_log_id=$2 and r.job_id=$3 for update of r, pl
+      `, [lineId, mrrId, jobId])).rows[0];
+      if (!line) throw new Error("MRR line not found.");
+      if (receiptStatusAffectsInventory(line.osd_status) && Number(line.qty_received) > 0) {
+        const available = await getAvailableInventoryTotalsMap(client, jobId);
+        const qty = parseQtyValue(available.get(buildInventoryIssueKey(line)) || 0);
+        if (qty + 0.0001 < Number(line.qty_received)) throw new Error("Cannot delete this receipt because its material has been issued. Return or unissue the material first.");
+      }
+      const osd = (await client.query("select * from osd_logs where receipt_id=$1 and job_id=$2", [lineId, jobId])).rows;
+      await auditLog(client, req.user.id, "delete", "receipt", lineId, JSON.stringify({mrr: mrr.mrr_number, receipt: line, osd}));
+      await client.query("delete from osd_logs where receipt_id=$1 and job_id=$2", [lineId, jobId]);
+      await client.query("delete from receipts where id=$1 and mrr_log_id=$2 and job_id=$3", [lineId, mrrId, jobId]);
+      await recalcPoStatus(client, line.po_id);
+      const rfqIds = await getRfqIdsForPo(client, line.po_id);
+      const po = (await client.query("select rfq_id from purchase_orders where id=$1", [line.po_id])).rows[0];
+      if (po?.rfq_id) rfqIds.push(Number(po.rfq_id));
+      for (const rfqId of new Set(rfqIds)) await recalcRfqStatus(client, rfqId);
+    } else if (req.params.source === "manual") {
+      const line = (await client.query("select * from material_receiving_logs where id=$1 and job_id=$2 and lower(trim(mrr_number))=lower(trim($3)) for update", [lineId, jobId, mrr.mrr_number])).rows[0];
+      if (!line) throw new Error("MRR line not found.");
+      await auditLog(client, req.user.id, "delete", "material_receiving_log", lineId, JSON.stringify(line));
+      await client.query("delete from material_receiving_logs where id=$1 and job_id=$2", [lineId, jobId]);
+    } else throw new Error("Invalid MRR line type.");
+  });
+  res.redirect(`/material-logs/mrr/${mrrId}/edit`);
+}));
+
 app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
   const row = (await query("select * from mrr_logs where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
@@ -22716,7 +22757,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         <td>${esc(line.osd_status || "")}</td>
         <td>${esc(formatShortDateTime(line.line_date || ""))}</td>
         <td>${esc(line.notes || "")}</td>
-        <td><a class="btn btn-secondary" href="${esc(editHref)}">Edit</a></td>
+        <td><div class="actions"><a class="btn btn-secondary" href="${esc(editHref)}">Edit</a>${String(row.status || "").toUpperCase() !== "REVERSED" ? `<form method="post" action="/material-logs/mrr/${row.id}/lines/${line.source_type === "PO Receipt" ? "receipt" : "manual"}/${line.id}/delete" onsubmit="return confirm('Delete this received line from the MRR? Inventory and PO received totals will be updated.');"><button type="submit" class="btn btn-danger">Delete</button></form>` : ""}</div></td>
       </tr>`;
       }).join("");
     const mrrItemOptionMap = new Map();
@@ -22733,10 +22774,8 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
       subtitle: "Photos are saved as JPG files in Vercel Blob and linked to this MRR.",
       itemOptions: Array.from(mrrItemOptionMap.values())
     });
-    const receiveRemainingHref = row.app_po_id
-      ? `/po/${row.app_po_id}/receive`
-      : `/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit`;
-    const receiveRemainingLabel = row.app_po_id ? "Receive Remaining on New MRR" : "Receive Missed Line";
+    const receiveRemainingHref = `/receive/${row.id}?back=/material-logs/mrr/${row.id}/edit`;
+    const receiveRemainingLabel = "Add MRR Line";
     const isReversed = String(row.status || "").toUpperCase() === "REVERSED";
     const reverseCard = isReversed
       ? `<div class="card"><h3>Reverse MRR</h3><span class="chip">Reversed</span></div>`
