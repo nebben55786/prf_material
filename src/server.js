@@ -1,3 +1,4 @@
+import { registerDataBackupRoute } from "./data-backup.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -7558,9 +7559,9 @@ function userPage(req, { error = "", success = "" } = {}) {
   const backupCard = isAdminRole(req.user) ? `
     <div class="card">
       <h3>Backups</h3>
-      <p class="muted">Download read-only ZIP backups for signed material requests and files stored in Vercel Blob.</p>
+      <p class="muted">Download an Excel data backup, signed material requests, and uploaded files.</p>
       <div class="actions">
-        <a class="btn btn-primary" href="/user/backups">Backup Files</a>
+        <a class="btn btn-primary" href="/user/backups">Backups</a>
       </div>
     </div>
   ` : "";
@@ -7681,8 +7682,14 @@ app.get("/user/backups", requireAuth, requireRole(adminEquivalentRoles), asyncHa
   ]);
   const signedCount = Number(signedCountRes.rows[0]?.count || 0);
   const blobCount = Number(blobCountRes.rows[0]?.count || 0);
-  res.send(layout("Backup Files", `
-    <h1>Backup Files</h1>
+  res.send(layout("Backups", `
+    <h1>Backups</h1>
+    <div class="card">
+      <h3>Application Data</h3>
+      <p class="muted">Download all jobs' database records as an Excel workbook, with a worksheet for each table. Includes material needs, RFQs, POs, receipts, stock records, issues, settings, users and audit history.</p>
+      <p class="muted">Uploaded Blob files are backed up separately using the file backup below.</p>
+      <div class="actions"><a class="btn btn-primary" href="/user/backups/data.xlsx">Download Data Backup (Excel)</a></div>
+    </div>
     <div class="card">
       <h3>Signed Material Requests</h3>
       <p class="muted">Creates a ZIP from uploaded signed paper copies stored in the database.</p>
@@ -7704,6 +7711,8 @@ app.get("/user/backups", requireAuth, requireRole(adminEquivalentRoles), asyncHa
     </div>
   `, req.user));
 }));
+
+registerDataBackupRoute(app, { requireAuth, requireRole, adminEquivalentRoles, asyncHandler, withTransaction, auditLog, pool, backupTimestamp });
 
 app.get("/user/backups/signed-requests.zip", requireAuth, requireRole(adminEquivalentRoles), asyncHandler(async (req, res) => {
   const rows = (await query(`

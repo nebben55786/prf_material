@@ -125,3 +125,12 @@ The app will then run on Vercel against Neon or Supabase Postgres.
 ## Legacy app
 
 The old Python/SQLite app is still present as `app.py` and `app.db` for reference during the cutover.
+
+
+### Excel data backups
+
+Admins can open **User > Backups** and click **Download Data Backup (Excel)**. The workbook includes all application database tables and all jobs from one consistent snapshot, plus table/column metadata and sequence counters. Each data table has its own worksheet; very large tables are split into additional sheets listed in `_Tables`.
+
+Large identifiers and high precision quantities remain text where Excel would lose precision. Nulls are recorded in `_Nulls`. Notes or embedded database files that exceed Excel's cell limit are stored as ordered chunks in `_Long Values`, referenced by `@long:N` in the original cell. Database binary values use hexadecimal encoding. Keep the workbook private because it includes account records and password hashes.
+
+This is a data backup; automatic Excel restoration is not included. Blob references are included in the data, but download **Blob File Backup** separately to retain the uploaded files themselves.
