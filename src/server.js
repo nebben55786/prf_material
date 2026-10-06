@@ -1,3 +1,4 @@
+import { getDeliveryLocation, nextDeliveryRequestNumber, registerDeliveryLocationRoutes } from "./delivery-locations.js";
 import { registerDataBackupRoute } from "./data-backup.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -1406,7 +1407,8 @@ function buildPickTicketPdf(header, lines) {
   const headerGap = 2;
   const sectionGap = 3;
   const metaTop = top - headerHeight - headerGap;
-  const meta2Top = metaTop - metaHeight - sectionGap;
+  const deliveryHeight = header.delivery_location_name ? 24 : 0;
+  const meta2Top = metaTop - metaHeight - sectionGap - deliveryHeight;
   const tableTop = meta2Top - (header.notes ? notesHeight + sectionGap : sectionGap);
   const maxRowsWithoutFooter = Math.max(1, Math.floor((tableTop - bodyBottom) / rowHeight) - 1);
   const maxRowsWithFooter = Math.max(1, Math.floor((tableTop - footerReservedTop) / rowHeight) - 1);
@@ -1455,6 +1457,11 @@ function buildPickTicketPdf(header, lines) {
       metaX += metaWidths[i];
     }
 
+    if (header.delivery_location_name) {
+      content.push(rect(left, meta2Top, right - left, deliveryHeight));
+      content.push(makeText(left + 8, meta2Top + deliveryHeight - 8, "DELIVERY LOCATION", "F2", 7));
+      content.push(makeText(left + 8, meta2Top + deliveryHeight - 19, header.delivery_location_name, "F1", 9));
+    }
     if (header.notes) {
       content.push(rect(left, meta2Top - notesHeight, right - left, notesHeight));
       content.push(makeText(left + 8, meta2Top - 8, "NOTES", "F2", 7));
@@ -7258,14 +7265,7 @@ async function getNextRequisitionNumber(client = null, jobId = null) {
   const runner = client || { query };
   const jobSettings = await getJobSettings(jobId, client);
   const jobNumber = String(jobSettings.job_number || "0000").trim() || "0000";
-  const result = await runner.query(`
-    select coalesce(max(cast(right(requisition_no, 5) as integer)), 0) as max_no
-    from material_requisitions
-    where requisition_no ~ '-MR-[0-9]{5}$'
-      ${jobId ? "and job_id = $1" : ""}
-  `, jobId ? [jobId] : []);
-  const nextNumber = num(result.rows[0]?.max_no) + 1;
-  return `${jobNumber}-MR-${String(nextNumber).padStart(5, "0")}`;
+  return nextDeliveryRequestNumber(runner, jobId, {request_prefix: `${jobNumber}-MR`});
 }
 
 async function getNextBomNumber(client = null, jobId = null) {
@@ -8799,6 +8799,8 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
   `, req.user));
 });
 
+registerDeliveryLocationRoutes(app, { query, withTransaction, auditLog, requireAuth, requireJobContext, requirePermission, requireRole, adminEquivalentRoles, asyncHandler, currentJobId, layout, esc, canAccess });
+
 app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePermission("settings", "view"), async (req, res) => {
   const jobId = currentJobId(req);
   const warehousesRes = isAdminRole(req.user)
@@ -8843,7 +8845,7 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
     <h1>Warehouse Setup</h1>
     <div class="card">
       <div class="actions">
-        <a class="btn btn-secondary" href="/settings">Back To Settings</a>
+        <a class="btn btn-primary" href="/settings/warehouse-setup/delivery-locations">Delivery Locations</a><a class="btn btn-secondary" href="/settings">Back To Settings</a>
       </div>
     </div>
     ${isAdminRole(req.user) ? `
@@ -11331,6 +11333,7 @@ app.post("/bom/:id/to-rfq", requireAuth, requireJobContext, requirePermission("b
 app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
   const jobId = currentJobId(req);
+  const deliveryLocation = await getDeliveryLocation({query}, jobId, req.body.delivery_location_id);
   const issuedTo = String(req.body.issued_to || "").trim();
   if (!issuedTo) throw new Error("Issued To is required.");
   const previewAction = String(req.body.preview_action || "").trim();
@@ -11456,6 +11459,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
   const stagedSelectionJson = escAttr(JSON.stringify(stagedSelection));
   const backParams = new URLSearchParams({
     bom_id: String(bomId),
+    delivery_location_id: String(deliveryLocation.id),
     staged_selection: JSON.stringify(stagedSelection),
     draft_issued_to: issuedTo,
     draft_iwp_no: String(req.body.iwp_no || ""),
@@ -11468,6 +11472,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
       <h3>Review And Edit Before Saving</h3>
       <p class="muted">Adjust quantities or remove/add lines here. Saving creates the request only; it does not accept or issue it.</p>
       <form method="post" action="/bom/${bom.id}/requisitions/preview" class="stack">
+        <input type="hidden" name="delivery_location_id" value="${deliveryLocation.id}" /><p>Delivery Location: <strong>${esc(deliveryLocation.name)}</strong> | Request Prefix: ${esc(deliveryLocation.request_prefix)}</p>
         <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" />
         <input type="hidden" name="iso_no" value="${escAttr(req.body.iso_no || "")}" />
         <div class="grid-3">
@@ -11521,13 +11526,14 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
     if (bomIsUnallocated) {
       await rebuildUnallocatedBom(client, jobId);
     }
-    const requisitionNo = await getNextRequisitionNumber(client, jobId);
+    const deliveryLocation = await getDeliveryLocation(client, jobId, req.body.delivery_location_id, {lock:true});
+    const requisitionNo = await nextDeliveryRequestNumber(client, jobId, deliveryLocation);
     const availableMap = await getAvailableInventoryByItemMap(client, jobId);
       const insertReq = await client.query(`
-        insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, issued_to, iwp_no, iso_no, status, notes)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, issued_to, iwp_no, iso_no, status, notes, delivery_location_id, delivery_location_name, request_prefix)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         returning id
-    `, [jobId, requisitionNo, bomId, req.user.id, getUserDisplayName(req.user), issuedTo, req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || ""]);
+    `, [jobId, requisitionNo, bomId, req.user.id, getUserDisplayName(req.user), issuedTo, req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || "", deliveryLocation.id, deliveryLocation.name, deliveryLocation.request_prefix]);
       let createdLineCount = 0;
     for (const lineId of selectedLineIds) {
       const qtyRequested = selectedLineQtys.get(lineId);
@@ -12524,6 +12530,12 @@ app.get("/min-max/inventory", requireAuth, requireJobContext, requirePermission(
 
 app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("requisitions", "create"), async (req, res) => {
   const jobId = currentJobId(req);
+  const deliveryLocations = (await query("select * from delivery_locations where job_id=$1 and is_active=true order by lower(name),id", [jobId])).rows;
+  const deliveryLocationId = Number(req.query.delivery_location_id || 0);
+  const deliveryLocation = deliveryLocationId ? await getDeliveryLocation({query}, jobId, deliveryLocationId) : null;
+  const deliveryField = `<div><label>Select Delivery Location</label><select name="delivery_location_id" required><option value="">Choose delivery location</option>${deliveryLocations.map(row => `<option value="${row.id}" ${Number(row.id)===deliveryLocationId?'selected':''}>${esc(row.name)} (${esc(row.request_prefix)}-…)</option>`).join('')}</select></div>`;
+  const deliveryHidden = `<input type="hidden" name="delivery_location_id" value="${deliveryLocationId || ''}" />`;
+  const deliverySetup = deliveryLocations.length ? '' : `<p class="error">Configure a delivery location and material request prefix in Settings → Warehouse Setup → Delivery Locations before creating a request.</p>`;
   await withTransaction(async (client) => {
     await rebuildUnallocatedBom(client, jobId);
   });
@@ -12664,10 +12676,10 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   const requestHeading = minMaxLocked ? "New Min-Max Request" : "New Material Request";
   res.send(layout(requestPageTitle, `
     <h1>${requestHeading}</h1>
-    ${selectedBom ? `
+    ${selectedBom && deliveryLocation ? `
       <div class="card">
         <form method="get" action="/requisitions/new" class="stack" id="requisition-filter-form">
-          <input type="hidden" name="bom_id" value="${selectedBom.id}" />
+          ${deliveryHidden}<input type="hidden" name="bom_id" value="${selectedBom.id}" />
           ${minMaxLocked ? `<input type="hidden" name="min_max" value="1" />` : ""}
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
           <input type="hidden" name="draft_issued_to" value="${escAttr(draftIssuedTo)}" id="requisition-filter-draft-issued-to" />
@@ -12683,7 +12695,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           <div class="actions">
             <button type="submit">Load Lines</button>
             <button class="btn btn-secondary" type="submit" name="clear_filters" value="1">Clear Filter</button>
-            ${minMaxLocked ? "" : `<a class="btn btn-secondary" href="/requisitions/new">Change BOM</a>`}
+            ${minMaxLocked ? "" : `<a class="btn btn-secondary" href="/requisitions/new?delivery_location_id=${deliveryLocationId}">Change BOM</a>`}
             <a class="btn btn-secondary" href="${minMaxLocked ? "/min-max" : "/requisitions"}">${minMaxLocked ? "Back to Min-Max" : "Back to Requisitions"}</a>
           </div>
         </form>
@@ -12692,6 +12704,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         <h3>Create Material Requisition</h3>
         <p class="muted">BOM: ${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
         <form method="post" action="/bom/${selectedBom.id}/requisitions/preview" class="stack" id="requisition-create-form">
+          ${deliveryHidden}<p>Delivery Location: <strong>${esc(deliveryLocation.name)}</strong> | Request Prefix: ${esc(deliveryLocation.request_prefix)}</p>
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid-3">
             <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
@@ -12848,13 +12861,14 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         </script>
     ` : `<div class="card">
       <form method="get" action="/requisitions/new" class="stack">
+        ${deliveryField}${deliverySetup}${minMaxLocked ? '<input type="hidden" name="min_max" value="1" />' : ''}
         <div><label>Select BOM</label><select name="bom_id" required><option value="">Choose BOM</option>${bomOptions || ""}</select></div>
         <div class="actions">
-          <button type="submit">Continue</button>
+          <button type="submit" ${deliveryLocations.length ? "" : "disabled"}>Continue</button>
           <a class="btn btn-secondary" href="/requisitions">Back to Requisitions</a>
         </div>
       </form>
-      ${availableBoms.length ? `<p class="muted" style="margin-top:12px;">Choose the BOM first, then we'll take you to the request builder for that BOM.</p>` : `<div class="error" style="margin-top:12px;"><h3>No BOM Found</h3><p>Select or create a BOM first.</p></div>`}
+      ${availableBoms.length ? `<p class="muted" style="margin-top:12px;">Choose the delivery location and BOM, then continue to the request builder.</p>` : `<div class="error" style="margin-top:12px;"><h3>No BOM Found</h3><p>Select or create a BOM first.</p></div>`}
     </div>`}
   `, req.user));
 });
@@ -13199,6 +13213,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   }
   res.send(layout(`Requisition ${header.requisition_no}`, `
     <h1>Requisition ${esc(header.requisition_no)}</h1>
+    ${header.delivery_location_name ? `<p>Delivery Location: <strong>${esc(header.delivery_location_name)}</strong></p>` : ""}
     <div class="card">
       <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Issued To: ${esc(header.issued_to || "")} | Status: ${renderRequisitionStatusChip(header.status)} | Created: ${esc(formatShortDateTime(header.created_at))}</p>
       <p class="muted">IWP: ${esc(header.iwp_no || "")}</p>

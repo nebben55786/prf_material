@@ -134,3 +134,10 @@ Admins can open **User > Backups** and click **Download Data Backup (Excel)**. T
 Large identifiers and high precision quantities remain text where Excel would lose precision. Nulls are recorded in `_Nulls`. Notes or embedded database files that exceed Excel's cell limit are stored as ordered chunks in `_Long Values`, referenced by `@long:N` in the original cell. Database binary values use hexadecimal encoding. Keep the workbook private because it includes account records and password hashes.
 
 This is a data backup; automatic Excel restoration is not included. Blob references are included in the data, but download **Blob File Backup** separately to retain the uploaded files themselves.
+
+
+### Material request delivery locations
+
+Open **Settings > Warehouse Setup > Delivery Locations** to add a destination and its material request prefix, or change its active status. These are separate from stock warehouses and storage locations. Prefix `MH-MR` produces `MH-MR-00001`; numbering is allocated atomically for each job and prefix.
+
+On **New Material Request**, choose **Select Delivery Location** above **Select BOM**. The selection follows the request through filters, preview and saving and appears on the request and pick ticket. At least one active destination must be configured before creating a new request from the builder. Existing requests retain their original number and delivery snapshots when settings change.
