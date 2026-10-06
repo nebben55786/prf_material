@@ -1607,6 +1607,16 @@ function buildMrrFormPdf(header, lines, options = {}) {
       discrepancy: ""
     });
   }
+  const noteLines = wrapPdfText(String(header.notes || "").trim(), 48);
+  if (String(header.notes || "").trim()) {
+    for (let i = 0; i < noteLines.length; i += 2) {
+      normalizedLines.push({
+        item_code: i === 0 ? "NOTES" : "",
+        description: noteLines.slice(i, i + 2).join("\n"),
+        qty: "", location: "", grid: "", status: "", ordered: "", shipped: "", received: "", discrepancy: ""
+      });
+    }
+  }
   normalizedLines.push(...detailLines);
   const allLineItems = normalizedLines;
   const allDiscrepancyItems = lines.filter((row) => {
@@ -22788,6 +22798,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
         </div>`;
     res.send(layout("Edit MRR Log", `
       <h1>Edit MRR Header</h1>
+      ${req.query.saved === "1" ? `<p role="status">MRR saved.</p>` : ""}
       <div class="card">
       <form method="post" action="/material-logs/mrr/${row.id}/edit" class="stack">
         <div class="grid">
@@ -22931,7 +22942,7 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requireP
     }
     await auditLog(client, req.user.id, "update", "mrr_log", mrrId, requestedMrrNumber);
   });
-  res.redirect("/material-logs/mrr");
+  res.redirect(`/material-logs/mrr/${Number(req.params.id)}/edit?saved=1`);
 }));
 
 app.get("/material-logs/fmr/:id/edit", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {

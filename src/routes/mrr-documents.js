@@ -108,6 +108,7 @@ export function registerMrrDocumentRoutes(app, dependencies) {
       deliveryLocation: deliveryMatch?.[1] || "",
       fmrNumber: linkedFmr.fmr_number || ""
     });
+    res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="${String(header.mrr_number || "MRR").replace(/[^A-Za-z0-9._-]/g, "_")}.pdf"`);
     res.send(pdfBuffer);
