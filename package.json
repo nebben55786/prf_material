@@ -8,8 +8,7 @@
     "dev": "node src/server.js",
     "start": "node src/server.js",
     "db:init": "node src/init-db.js",
-    "db:migrate-sqlite": "node src/migrate-sqlite.js",
-    "test": "node --test"
+    "db:migrate-sqlite": "node src/migrate-sqlite.js"
   },
   "dependencies": {
     "@vercel/blob": "^2.3.3",
@@ -23,7 +22,6 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.8",
     "esbuild": "^0.28.2"
   }
 }

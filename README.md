@@ -125,34 +125,3 @@ The app will then run on Vercel against Neon or Supabase Postgres.
 ## Legacy app
 
 The old Python/SQLite app is still present as `app.py` and `app.db` for reference during the cutover.
-
-## Selected-job shared inventory
-
-Open **Yard → Inventory Pools**, create a named pool, select its member jobs, and review their existing stock. Jobs stay independent until explicitly linked; report selection never links jobs. Each job can belong to one pool.
-
-Use **Match a Material** to link an existing job variant to a shared material. Review its specification, unit, sizes, and thicknesses first. Equivalent item codes in different jobs are not matched automatically. Unmatched stock remains usable only by its receiving job. Ambiguous master specifications must be resolved before matching.
-
-Admins and material controllers can manage pools by default. To designate other inventory staff, enable **Inventory Pools → Edit** in **Settings → Job Setup → permissions**. Managing a pool also requires access to all its member jobs.
-
-Reserve quantities for a destination job and optionally a purpose, BOM ID, or requisition ID. Acceptance of a requisition continues to hold stock. Choose a purpose reservation when accepting or issuing the requisition; another job or purpose cannot consume that stock until its reservation is released or reassigned. Partial issues reduce the reservation balance. Return unused shared material from **Outstanding Shared Issues**; returns restore unreserved stock and update destination-job issue totals.
-
-Receipts, purchase orders, and MRRs retain their original job. Shared issue history records both the source and destination jobs. Removing a job requires resolving its stock, reservations, and outstanding shared issues.
-
-Open **Yard → Multi-job Needs & Stock** to select any accessible jobs, including jobs in different pools and independent jobs. The report shows job needs side by side, counts shared stock once per pool/material, and protects reservations for unselected pool members. Its Excel export includes combined balances, job needs, and relevant stock locations. Requirements are combined only for explicitly matched variants with compatible units.
-
-### Migration and tests
-
-Migration `048_shared_inventory.sql` is applied by the normal database initialization on startup (or `npm run db:init`). It adds pool, matching, reservation, movement, and audit records without enrolling any jobs or moving existing receipts. Stock changes use a transaction lock and deferred balance checks, including receipt reversals, inventory audits, and accepted requisition holds.
-
-Run `npm test` after installing development dependencies. Shared-inventory tests use an isolated PGlite PostgreSQL database, apply the full migration sequence, and never connect to the configured live database.
-
-
-### Shared material workflow
-
-The **Material Systems** screen chooses which jobs work together. Member jobs use the same RFQ, PO, receiving, MRR and issue screens; these lists include all authorized jobs in the system, with a job filter. Unlinked jobs remain independent.
-
-Choose **Ordered for** when creating an RFQ, manual PO or importing PO data. POs keep their job assignment. Choose **Issued to job** in the material request builder; issues keep that destination even when another member job bought the stock. Opening another member job's document preserves its original job and does not change the signed-in session's selected job.
-
-The MRR register and new MRR numbering span the whole system. Migration `049_shared_material_workflow.sql` rejects new duplicate MRR numbers across members atomically. Existing MRR records and historical numbers are preserved, and each receipt still identifies its ordering job and PO. Receiving uses common warehouse/location choices for the system.
-
-RFQ and PO material variants are available for explicit matching before receiving. Specifications, units and dimensions still must agree; the app does not match materials automatically. Needs & Stock defaults to the chosen system and retains shared-stock and reservation calculations. Material history and issue reports provide job filters for paperwork.
