@@ -4,7 +4,7 @@ document.querySelectorAll("[data-rfq-confirmation-row]").forEach((row) => {
   const input = row.querySelector("[data-scan-input]");
   const button = row.querySelector("[data-scan-upload]");
   const status = row.querySelector("[data-scan-status]");
-  if (!input || !button) return;
+  if (!input) return;
   let busy = false;
   const uploadScan = async (files) => {
     if (busy || !files?.length) return;
@@ -19,7 +19,8 @@ document.querySelectorAll("[data-rfq-confirmation-row]").forEach((row) => {
     }
     if (row.dataset.hasScan === "true" && !window.confirm("Replace the saved PO confirmation for " + row.dataset.filename + "?")) return;
     busy = true;
-    button.disabled = input.disabled = true;
+    if (button) button.disabled = true;
+    input.disabled = true;
     status.textContent = "Starting upload...";
     try {
       if (await file.slice(0, 5).text() !== "%PDF-") throw new Error("The selected file is not a PDF.");
@@ -47,11 +48,12 @@ document.querySelectorAll("[data-rfq-confirmation-row]").forEach((row) => {
       status.textContent = error.message || "Upload failed. Please try again.";
     } finally {
       busy = false;
-      button.disabled = input.disabled = false;
+      if (button) button.disabled = false;
+      input.disabled = false;
       input.value = "";
     }
   };
-  button.addEventListener("click", () => input.click());
+  if (button) button.addEventListener("click", () => input.click());
   input.addEventListener("change", () => uploadScan(input.files));
   row.addEventListener("dragover", (event) => {
     if (!event.dataTransfer?.types.includes("Files")) return;

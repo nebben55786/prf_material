@@ -14871,7 +14871,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
     <td class="rfq-list-client-request">${esc(rfq.client_request_no || "")}</td>
     <td class="rfq-list-date">${esc(formatShortDate(rfq.due_date || ""))}</td>
     <td class="rfq-list-date rfq-list-eta">${esc(formatShortDate(rfq.eta_date || ""))}</td>
-    <td class="rfq-list-status">${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}${canUploadConfirmation ? `<div style="margin-top:4px;"><button type="button" class="btn btn-secondary" data-scan-upload title="Upload PO confirmation PDF">&#8593; Confirmation</button><input type="file" accept=".pdf,application/pdf" data-scan-input hidden /></div>` : ""}<div data-scan-status role="status" aria-live="polite" class="muted"></div></td>
+    <td class="rfq-list-status">${renderRfqStatusChip(rfq.display_status || rfq.status, rfq.due_date)}${canUploadConfirmation ? `<input type="file" accept=".pdf,application/pdf" data-scan-input hidden />` : ""}<div data-scan-status role="status" aria-live="polite" class="muted"></div></td>
   </tr>`).join("");
   res.send(layout("Purchasing", `
     <style>
@@ -14889,7 +14889,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
       [data-scan-status] { white-space:normal; overflow-wrap:anywhere; }
     </style>
     <h1>Purchasing</h1>
-    ${canUploadConfirmation ? `<p class="muted">Drop a PO confirmation PDF onto an RFQ row or use its upload button. View saved confirmations on the RFQ detail page.</p>` : ""}
+    ${canUploadConfirmation ? `<p class="muted">Drop a PO confirmation PDF onto an RFQ row. View saved confirmations on the RFQ detail page.</p>` : ""}
     <div class="card">
       <form method="get" action="/rfq" class="stack">
         <div class="grid-4">
