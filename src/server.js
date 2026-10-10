@@ -1846,6 +1846,7 @@ function getUserHomePath(user) {
 }
 
 function layout(title, body, user) {
+  if (normalizeJobIdValue(user?.job_id)) body = disableJobFormHistory(body);
   const appHeaderTitle = getAppHeaderTitle(user);
   const navLinks = user
     ? permissionSections
@@ -4865,25 +4866,48 @@ async function saveMaterialLogLookup(client, kind, value, jobId = null) {
   `, [jobId, kind, normalized]);
 }
 
+function disableJobFormHistory(body) {
+  return body.replace(/<form\b[^>]*>/gi, (tag) => /\bautocomplete\s*=/i.test(tag)
+    ? tag
+    : tag.replace(/^<form\b/i, '<form autocomplete="off"'));
+}
+
+async function getRfqRequestorOptions(jobId) {
+  if (!normalizeJobIdValue(jobId)) return [];
+  const result = await query(`
+    select distinct trim(requestor_name) as requestor_name
+    from rfqs
+    where job_id = $1 and coalesce(trim(requestor_name), '') <> ''
+    order by requestor_name
+  `, [jobId]);
+  return result.rows.map((row) => row.requestor_name);
+}
+
+function renderRfqRequestorInput(requestors, value = "") {
+  return `<input name="requestor_name" value="${escAttr(value)}" list="rfq-requestor-options" autocomplete="off" />
+    <datalist id="rfq-requestor-options">${requestors.map((name) => `<option value="${escAttr(name)}"></option>`).join("")}</datalist>`;
+}
+
 async function getMaterialLogLookupOptions(kind, jobId = null) {
+  if (!normalizeJobIdValue(jobId)) return [];
   const result = await query(`
     select value
     from (
-      select value from material_log_lookup_values where kind = $1 and ($2::bigint is null or job_id = $2)
+      select value from material_log_lookup_values where kind = $1 and job_id = $2
       union
       select name as value from vendors where $1 = 'vendor_name' and coalesce(name, '') <> ''
       union
-      select po_no as value from purchase_orders where $1 = 'po_number' and coalesce(po_no, '') <> '' and ($2::bigint is null or job_id = $2)
+      select po_no as value from purchase_orders where $1 = 'po_number' and coalesce(po_no, '') <> '' and job_id = $2
       union
-      select discipline as value from mrr_logs where $1 = 'discipline' and coalesce(discipline, '') <> '' and ($2::bigint is null or job_id = $2)
+      select discipline as value from mrr_logs where $1 = 'discipline' and coalesce(discipline, '') <> '' and job_id = $2
       union
-      select discipline as value from material_receiving_logs where $1 = 'discipline' and coalesce(discipline, '') <> '' and ($2::bigint is null or job_id = $2)
+      select discipline as value from material_receiving_logs where $1 = 'discipline' and coalesce(discipline, '') <> '' and job_id = $2
       union
-      select received_by as value from mrr_logs where $1 = 'received_by' and coalesce(received_by, '') <> '' and ($2::bigint is null or job_id = $2)
+      select received_by as value from mrr_logs where $1 = 'received_by' and coalesce(received_by, '') <> '' and job_id = $2
       union
-      select received_by as value from material_receiving_logs where $1 = 'received_by' and coalesce(received_by, '') <> '' and ($2::bigint is null or job_id = $2)
+      select received_by as value from material_receiving_logs where $1 = 'received_by' and coalesce(received_by, '') <> '' and job_id = $2
       union
-      select vendor_name as value from mrr_logs where $1 = 'vendor_name' and coalesce(vendor_name, '') <> '' and ($2::bigint is null or job_id = $2)
+      select vendor_name as value from mrr_logs where $1 = 'vendor_name' and coalesce(vendor_name, '') <> '' and job_id = $2
     ) options
     where coalesce(value, '') <> ''
     order by value
@@ -13293,7 +13317,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         <h3>Electronic Signature</h3>
         <p class="muted">This works well on iPads and touch screens.</p>
         <form method="post" action="/requisitions/${header.id}/sign" class="stack" onsubmit="return submitRequisitionSignature();">
-          <div><label>Signed By</label><input id="requisition-signed-by-name" name="signed_by_name" list="requisition-signer-options" value="${esc(defaultSigner)}" autocomplete="name" required /></div>
+          <div><label>Signed By</label><input id="requisition-signed-by-name" name="signed_by_name" list="requisition-signer-options" value="${esc(defaultSigner)}" autocomplete="off" required /></div>
           <input type="hidden" id="requisition-signature-data" name="signature_data" />
           <div>
             <label>Draw Signature</label>
@@ -13312,7 +13336,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         <h3>Signed Paper Copy</h3>
         <p class="muted">Upload a photo, scan, or PDF of a physically signed pick ticket.</p>
         <form method="post" action="/requisitions/${header.id}/signed-copy" enctype="multipart/form-data" class="stack" id="signed-copy-upload-form">
-          <div><label>Signed By</label><input name="signed_by_name" list="requisition-signer-options" value="${esc(defaultSigner)}" autocomplete="name" required /></div>
+          <div><label>Signed By</label><input name="signed_by_name" list="requisition-signer-options" value="${esc(defaultSigner)}" autocomplete="off" required /></div>
           <div>
             <label>Signed Copy File</label>
             <div id="signed-copy-drop-zone" class="drop-zone" tabindex="0">
@@ -14931,10 +14955,11 @@ registerRfqConfirmationRoutes(app, {
 
 app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
-  const [nextRfqNo, jobNumber, vendorsRes] = await Promise.all([
+  const [nextRfqNo, jobNumber, vendorsRes, requestors] = await Promise.all([
     getNextRfqNumber(null, jobId),
     Promise.resolve(String(req.user.activeJob?.job_number || "")),
-    query("select id, name from vendors where is_active = true order by name")
+    query("select id, name from vendors where is_active = true order by name"),
+    getRfqRequestorOptions(jobId)
   ]);
   const vendors = vendorsRes.rows;
   const rfqStatusOptions = rfqStatuses.map((status) => `<option value="${status.value}" ${status.value === "WAITING_ON_QUOTES" ? "selected" : ""}>${esc(status.label)}</option>`).join("");
@@ -14955,7 +14980,7 @@ app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "e
         </div>
         <div class="grid">
           <div><label>Client Request #</label><input name="client_request_no" /></div>
-          <div><label>Requestor</label><input name="requestor_name" /></div>
+          <div><label>Requestor</label>${renderRfqRequestorInput(requestors)}</div>
         </div>
         <div class="grid">
           <div><label>Status</label><select name="status">${rfqStatusOptions}</select></div>
@@ -15938,7 +15963,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>RFQ not found.</h3></div>`, req.user));
     return;
   }
-  const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes, quoteFilesRes, stoPackagesRes, availableStoPackagesRes, poUsageRes] = await Promise.all([
+  const [itemsRes, vendorsRes, selectedVendorsRes, poCountRes, recentImportsRes, materialItemsRes, quotesRes, poRefsRes, quoteFilesRes, stoPackagesRes, availableStoPackagesRes, poUsageRes, requestors] = await Promise.all([
     query(`
       select ri.id, ri.po_line, ri.qty, ri.notes, coalesce(nullif(ri.spec, ''), item_specs.specs, '') as spec, ri.commodity_code, ri.tag_number, ri.size_1, ri.size_2, ri.thk_1, ri.thk_2, ri.updated_at,
              ri.award_status, ri.awarded_vendor_id, ri.awarded_unit_price, ri.awarded_lead_days, ri.award_notes,
@@ -16051,7 +16076,8 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
       where po.job_id = $1
         and coalesce(po.po_no, '') <> ''
       group by lower(po.po_no), po.po_no, po.vendor_id
-    `, [jobId, rfqId])
+    `, [jobId, rfqId]),
+    getRfqRequestorOptions(jobId)
   ]);
 
   const items = itemsRes.rows;
@@ -16483,7 +16509,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
           <div><label>Client Request #</label><input name="client_request_no" value="${esc(rfq.client_request_no || "")}" /></div>
           <div><label>PO Number</label><input id="rfq-po-number-${rfqId}" name="po_number" value="${esc(headerPoNumber)}" /></div>
           <div><label>Vendor Quote Number</label><input name="vendor_quote_number" value="${esc(rfq.vendor_quote_number || "")}" /></div>
-          <div><label>Requestor</label><input name="requestor_name" value="${esc(rfq.requestor_name || "")}" /></div>
+          <div><label>Requestor</label>${renderRfqRequestorInput(requestors, rfq.requestor_name || "")}</div>
         </div>
       </form>
       <div class="grid" style="grid-template-columns: minmax(280px, 0.55fr) minmax(320px, 1fr); align-items:start; margin-top:12px;">
