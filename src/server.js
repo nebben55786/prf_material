@@ -4289,7 +4289,7 @@ async function getRfqIdsForPo(client, poId) {
 }
 
 async function upsertRfqItemRow(client, rfqId, row, jobId, reservedCodes = new Set(), options = {}) {
-  const preserveDuplicateRows = Boolean(options.preserveDuplicateRows);
+  const preserveDuplicateRows = options.preserveDuplicateRows !== false;
   const initialItemCode = String(row.item_code || "").trim();
   const qty = parseQtyValue(row.qty);
   if (qty <= 0) return { status: "skipped", errorCode: "invalid_qty", message: "Qty must be greater than zero." };
@@ -4430,7 +4430,7 @@ async function upsertPurchaseOrderRow(client, row, jobId) {
   const effectiveSize2 = item.size_2 || "";
   const effectiveThk1 = item.thk_1 || "";
   const effectiveThk2 = item.thk_2 || "";
-  const existingLine = await findExistingPoLine(client, poId, item, poLine);
+  const existingLine = await findExistingPoLine(client, poId, item, poLine, { matchPoLineOnly: true });
   if (existingLine) {
     await client.query(`
       update po_lines
@@ -4543,7 +4543,7 @@ async function upsertPurchaseOrderLineRow(client, row, jobId) {
   const effectiveSize2 = item.size_2 || "";
   const effectiveThk1 = item.thk_1 || "";
   const effectiveThk2 = item.thk_2 || "";
-  const existingLine = await findExistingPoLine(client, poRow.id, item, poLine);
+  const existingLine = await findExistingPoLine(client, poRow.id, item, poLine, { matchPoLineOnly: true });
   if (existingLine) {
     await client.query(`
       update po_lines
@@ -17218,7 +17218,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
     <h1>Add Existing Items</h1>
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
-      <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ.</p>
+      <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ. Each add creates a separate line, even for the same item code.</p>
       <div class="actions" style="margin-bottom:12px;">
         <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
         ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
@@ -17708,7 +17708,7 @@ app.get("/rfq/:id/quotes/import-page", requireAuth, requireJobContext, requirePe
     <div class="card"><strong>${esc(rfq.rfq_no)}</strong>${rfq.project_name ? ` - ${esc(rfq.project_name)}` : ""}</div>
     <div class="card">
       ${selectedVendors.length > 0 ? `<div class="tab-row">${vendorTabs}</div>` : `<div class="muted">Save at least one selected vendor first.</div>`}
-      <p class="muted">CSV/XLSX columns: item_code, unit_price, lead_days. If you include vendor_name, it must match one of the selected RFQ vendors.</p>
+      <p class="muted">CSV/XLSX columns: po_line, item_code, unit_price, lead_days. Include po_line when an item code appears on multiple RFQ lines so each line gets its own price. If you include vendor_name, it must match one of the selected RFQ vendors.</p>
       <form method="post" enctype="multipart/form-data" action="/rfq/${rfqId}/quotes/import" class="stack">
         <input type="hidden" name="vendor_id" value="${esc(activeQuoteVendorId)}" />
         <div><label>Active Quote Vendor</label><input value="${esc(activeVendor?.name || "Select a participating vendor")}" readonly /></div>
@@ -17869,6 +17869,7 @@ app.post("/rfq/:id/quotes/import", requireAuth, requireJobContext, requirePermis
       const rowNumber = index + 2;
       const vendorName = scopedVendorId ? "" : String(row.vendor_name || "").trim();
       const itemCode = String(row.item_code || "").trim();
+      const poLine = String(row.po_line || row.line_no || row.line || "").trim();
       const unitPrice = num(row.unit_price, NaN);
       const leadDays = num(row.lead_days);
       if ((!scopedVendorId && !vendorName) || !itemCode || !Number.isFinite(unitPrice) || unitPrice < 0) {
@@ -17900,10 +17901,16 @@ app.post("/rfq/:id/quotes/import", requireAuth, requireJobContext, requirePermis
           and ri.job_id = $3
           and mi.job_id = $3
           and lower(coalesce(nullif(ri.item_code_snapshot, ''), mi.item_code)) = lower($2)
-      `, [rfqId, itemCode, currentJobId(req)]);
+          and ($4 = '' or coalesce(ri.po_line, '') = $4)
+      `, [rfqId, itemCode, currentJobId(req), poLine]);
       if (!rfqItemRes.rows[0]) {
         skippedCount += 1;
-        await addImportBatchError(client, batchId, rowNumber, "rfq_item_not_found", "Item code does not exist on this RFQ.", row);
+        await addImportBatchError(client, batchId, rowNumber, "rfq_item_not_found", "Item code or PO line does not exist on this RFQ.", row);
+        continue;
+      }
+      if (rfqItemRes.rows.length > 1) {
+        skippedCount += 1;
+        await addImportBatchError(client, batchId, rowNumber, "ambiguous_rfq_item", "Item code matches multiple RFQ lines. Include po_line to select the correct line.", row);
         continue;
       }
       const rfqItemId = rfqItemRes.rows[0].id;
