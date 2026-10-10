@@ -17067,6 +17067,23 @@ app.get("/rfq/:id/export-flow.xlsx", requireAuth, requireJobContext, requirePerm
   res.send(buffer);
 }));
 
+async function getExistingRfqItemEntries(client, rfqId, jobId) {
+  const result = await client.query(`
+    select material_item_id, coalesce(po_line, '') as po_line, qty
+    from rfq_items
+    where rfq_id = $1 and job_id = $2
+    order by
+      case when coalesce(po_line, '') = '' then 1 else 0 end,
+      case when coalesce(po_line, '') ~ '^[0-9]+$' then lpad(po_line, 20, '0') else lower(coalesce(po_line, '')) end,
+      id
+  `, [rfqId, jobId]);
+  return result.rows.map((row) => ({
+    materialItemId: String(row.material_item_id),
+    poLine: row.po_line,
+    qty: formatQtyDisplay(row.qty)
+  }));
+}
+
 app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), asyncHandler(async (req, res) => {
   const rfqId = Number(req.params.id);
   const jobId = currentJobId(req);
@@ -17112,11 +17129,12 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
         and mis_filter.spec_id = $${itemParams.length}
     )`);
   }
-  const [rfqRes, specOptions, materialItemsRes, nextPoLine, typeOptionResult] = await Promise.all([
+  const [rfqRes, specOptions, materialItemsRes, nextPoLine, typeOptionResult, addedItems] = await Promise.all([
     query("select id, rfq_no, project_name from rfqs where id = $1 and job_id = $2", [rfqId, jobId]),
     getMaterialSpecOptions(jobId),
     query(`
       select
+        mi.id,
         mi.item_code,
         mi.description,
         mi.material_type,
@@ -17143,7 +17161,8 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       where job_id = $1
         and trim(coalesce(material_type, '')) <> ''
       order by material_type
-    `, [jobId])
+    `, [jobId]),
+    getExistingRfqItemEntries(pool, rfqId, jobId)
   ]);
   const rfq = rfqRes.rows[0];
   if (!rfq) throw new Error("RFQ not found.");
@@ -17156,6 +17175,11 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
   const typeSelectOptions = [`<option value="">All Types</option>`]
     .concat(typeValues.map((value) => `<option value="${escAttr(value)}" ${value.toLowerCase() === typeQ.toLowerCase() ? "selected" : ""}>${esc(value)}</option>`))
     .join("");
+  const addedItemsById = new Map();
+  for (const entry of addedItems) {
+    if (!addedItemsById.has(entry.materialItemId)) addedItemsById.set(entry.materialItemId, []);
+    addedItemsById.get(entry.materialItemId).push(entry);
+  }
   const materialItemRows = materialItemsRes.rows
     .map((item) => `<tr>
       <td>${esc(item.item_code)}</td>
@@ -17168,6 +17192,8 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       <td>${esc(item.uom)}</td>
       <td>${esc(item.commodity_code || "")}</td>
       <td>${esc(item.specs || "")}</td>
+      <td data-rfq-added-item-id="${escAttr(item.id)}">${(addedItemsById.get(String(item.id)) || [])
+        .map((entry) => `<div>Line ${esc(entry.poLine || "—")} · Qty ${esc(entry.qty)}</div>`).join("") || `<span class="muted">—</span>`}</td>
       <td>
         <button
           type="button"
@@ -17215,8 +17241,8 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       </form>
       <div class="scroll">
         <table id="existing-items-table-${rfqId}">
-          <thead><tr><th>Item Code</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Commodity</th><th>Specs</th><th>Add</th></tr></thead>
-          <tbody>${materialItemRows || `<tr><td colspan="11" class="muted">No existing items found for the current filter.</td></tr>`}</tbody>
+          <thead><tr><th>Item Code</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Commodity</th><th>Specs</th><th>PO Line / Qty Added</th><th>Add</th></tr></thead>
+          <tbody>${materialItemRows || `<tr><td colspan="12" class="muted">No existing items found for the current filter.</td></tr>`}</tbody>
         </table>
       </div>
     </div>
@@ -17336,6 +17362,24 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
           });
           const payload = await response.json().catch(() => ({}));
           if (!response.ok || !payload.ok) throw new Error(payload.message || 'Item could not be added.');
+          const table = document.getElementById('existing-items-table-' + rfqId);
+          if (table && Array.isArray(payload.addedItems)) {
+            table.querySelectorAll('[data-rfq-added-item-id]').forEach((cell) => {
+              const entries = payload.addedItems.filter((entry) => String(entry.materialItemId) === cell.getAttribute('data-rfq-added-item-id'));
+              cell.replaceChildren();
+              entries.forEach((entry) => {
+                const line = document.createElement('div');
+                line.textContent = 'Line ' + (entry.poLine || '—') + ' · Qty ' + entry.qty;
+                cell.appendChild(line);
+              });
+              if (!entries.length) {
+                const empty = document.createElement('span');
+                empty.className = 'muted';
+                empty.textContent = '—';
+                cell.appendChild(empty);
+              }
+            });
+          }
           closeExistingRfqItemDialog(rfqId);
           const nextLineInput = document.getElementById('rfq-existing-item-next-line-' + rfqId);
           if (nextLineInput && payload.status === 'inserted') {
@@ -17722,7 +17766,7 @@ app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission
     const uom = String(req.body.uom || "").trim();
     if (!qtyText) throw new Error("Qty is required.");
     if (!uom) throw new Error("UOM is required.");
-    const status = await withTransaction(async (client) => {
+    const saved = await withTransaction(async (client) => {
       const result = await upsertRfqItemRow(client, rfqId, req.body, currentJobId(req));
       if (result.status === "skipped") throw new Error(result.message);
       if (result.itemId && parsePositiveLineNumber(req.body.po_line)) {
@@ -17734,10 +17778,13 @@ app.post("/rfq/:id/items/add", requireAuth, requireJobContext, requirePermission
         });
       }
       await auditLog(client, req.user.id, "upsert", "rfq_item", rfqId, `item=${req.body.item_code || ""}`);
-      return result.status;
+      return {
+        status: result.status,
+        addedItems: wantsJson ? await getExistingRfqItemEntries(client, rfqId, currentJobId(req)) : []
+      };
     });
     if (wantsJson) {
-      res.json({ ok: true, status });
+      res.json({ ok: true, ...saved });
       return;
     }
     res.redirect(`/rfq/${rfqId}`);
