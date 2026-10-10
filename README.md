@@ -53,8 +53,8 @@ Open:
 
 ## Default login
 
-- Username: `admin`
-- Password: `admin123`
+- Username: xxxxx
+- Password: xxxxx
 
 ## Included workflows
 
@@ -102,10 +102,10 @@ To deploy without installing Postgres locally:
 3. Add these Vercel environment variables:
 
 ```text
-DATABASE_URL=postgresql://neondb_owner:npg_91WTLxPMFAyt@ep-falling-thunder-a89uohj4-pooler.eastus2.azure.neon.tech/neondb?sslmode=require&channel_binding=require
+DATABASE_URL=xxxxx
 SESSION_SECRET=change-me
-DEFAULT_ADMIN_USERNAME=admin
-DEFAULT_ADMIN_PASSWORD=admin123
+DEFAULT_ADMIN_USERNAME=xxxxx
+DEFAULT_ADMIN_PASSWORD=xxxxx
 PORT=3000
 ```
 
