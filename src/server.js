@@ -1,3 +1,4 @@
+import { registerRequisitionLoadRoutes, assertNoRequisitionLoads, outstandingReservationSql } from "./requisition-loads.js";
 import { getDeliveryLocation, nextDeliveryRequestNumber, registerDeliveryLocationRoutes } from "./delivery-locations.js";
 import { registerDataBackupRoute } from "./data-backup.js";
 import crypto from "node:crypto";
@@ -487,6 +488,7 @@ function requisitionStatusLabel(status) {
   const statusKey = requisitionStatusKey(status);
   if (statusKey === "ACCEPTED" || statusKey === "VERIFIED") return "Accepted";
   if (statusKey === "WAITING_ON_MATERIAL") return "Waiting on Material";
+  if (statusKey === "PARTIALLY_ISSUED") return "Partially Issued";
   if (!statusKey) return "";
   return statusKey.charAt(0) + statusKey.slice(1).toLowerCase();
 }
@@ -505,6 +507,7 @@ function renderRequisitionStatusChip(status) {
 }
 
 function renderRequisitionActionButtons(row, user) {
+  if (row.has_loads) return `<a class="btn btn-secondary" href="/requisitions/${row.id}#request-loads">View Loads</a>`;
   return `<div class="actions">${
     requisitionStatusKey(row.status) === "CANCELLED" && isAdminRole(user)
       ? `<form method="post" action="/requisitions/${row.id}/restore" onsubmit="return confirm('Restore this cancelled requisition? It will return to Requested.');"><button type="submit">Restore</button></form>`
@@ -5300,7 +5303,7 @@ async function getVerifiedAllocatedInventoryTotals(runner = { query }, jobId = n
       coalesce(bl.size_2, '') as size_2,
       coalesce(bl.thk_1, '') as thk_1,
       coalesce(bl.thk_2, '') as thk_2,
-      sum(mrl.qty_requested) as qty_allocated_total
+      sum(${outstandingReservationSql}) as qty_allocated_total
     from material_requisition_lines mrl
     join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
@@ -5319,7 +5322,7 @@ async function getVerifiedAllocatedInventoryTotalsByItem(runner = { query }, job
   return (await runner.query(`
     select
       bl.item_code,
-      sum(mrl.qty_requested) as qty_allocated_total
+      sum(${outstandingReservationSql}) as qty_allocated_total
     from material_requisition_lines mrl
     join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
@@ -5334,7 +5337,7 @@ function getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId = null) {
   return `
     select
       bl.item_code,
-      sum(mrl.qty_requested) as qty_allocated_total
+      sum(${outstandingReservationSql}) as qty_allocated_total
     from material_requisition_lines mrl
     join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
@@ -12917,7 +12920,9 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
   if (description) {
     params.push(`%${description}%`);
     where.push(`(
-      coalesce(bh.bom_name, bh.description, bh.bom_no, '') ilike $${params.length}
+      mr.requisition_no ilike $${params.length}
+      or exists(select 1 from material_requisition_loads l where l.requisition_id=mr.id and l.load_no ilike $${params.length})
+      or coalesce(bh.bom_name, bh.description, bh.bom_no, '') ilike $${params.length}
       or exists (
         select 1
         from material_requisition_lines mrl_filter
@@ -12935,7 +12940,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const rows = (await query(`
-    select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description, count(mrl.id) as line_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
+    select mr.*, exists(select 1 from material_requisition_loads l where l.requisition_id=mr.id) as has_loads, exists(select 1 from material_requisition_loads l where l.requisition_id=mr.id and l.status='ISSUED') as has_issued_loads, bh.bom_no, bh.bom_name, bh.description as bom_description, count(mrl.id) as line_count, coalesce(sum(mrl.qty_requested), 0) as qty_requested
     from material_requisitions mr
     join bom_headers bh on bh.id = mr.bom_id
     left join material_requisition_lines mrl on mrl.requisition_id = mr.id
@@ -12952,7 +12957,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td>${esc(row.iwp_no || "")}</td>
     <td>${row.line_count}</td>
     <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
-    <td>${renderRequisitionStatusChip(row.status)}</td>
+    <td>${renderRequisitionStatusChip(row.has_issued_loads && isVerifiedStageRequisitionStatus(row.status) ? "PARTIALLY_ISSUED" : row.status)}</td>
     <td>${esc(formatShortDateTime(row.created_at))}</td>
     <td>${renderRequisitionActionButtons(row, req.user)}</td>
   </tr>`).join("");
@@ -12964,7 +12969,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <div class="card">
       <form method="get" action="/requisitions" class="stack">
         <div class="grid">
-          <div><label>Description</label><input name="description" value="${esc(description)}" /></div>
+          <div><label>Request, Load or Description</label><input name="description" value="${esc(description)}" /></div>
           <div><label>Status</label><select name="status"><option value="">All Statuses</option>${requisitionStatuses.map((value) => `<option value="${esc(value)}" ${status === value ? "selected" : ""}>${esc(requisitionStatusLabel(value))}</option>`).join("")}</select></div>
         </div>
         <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
@@ -13092,6 +13097,8 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
   `, req.user));
 }));
 
+registerRequisitionLoadRoutes(app, { query, withTransaction, requireAuth, requireJobContext, requirePermission, asyncHandler, currentJobId, layout, esc, canAccess, auditLog, upload, buildPickTicketPdf, renderRequisitionSignPage, canSignRequisition, signedCopyFilenameForRequisition, getCurrentOnHandRows, buildInventoryItemKey, buildPickLocationAllocations, recomputeBomIssuedSummaries, rebuildUnallocatedBom, getAvailableInventoryByItemMap });
+
 app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("requisitions", "view"), async (req, res) => {
   const jobId = currentJobId(req);
   const header = (await query(`
@@ -13104,6 +13111,10 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     res.status(404).send(layout("Not Found", `<div class="card error"><h3>Requisition not found.</h3></div>`, req.user));
     return;
   }
+  const loads = (await query("select * from material_requisition_loads where requisition_id=$1 and job_id=$2 order by load_sequence", [header.id, jobId])).rows;
+  const splitMode = loads.length > 0;
+  const loadQtyRows = (await query(`select ll.requisition_line_id, sum(ll.qty) as assigned from material_requisition_load_lines ll join material_requisition_loads l on l.id=ll.load_id where l.requisition_id=$1 and l.job_id=$2 and l.status<>'CANCELLED' group by ll.requisition_line_id`, [header.id,jobId])).rows;
+  const loadQtyMap = new Map(loadQtyRows.map(r=>[Number(r.requisition_line_id),Number(r.assigned)]));
   const [linesResult, flagColorResult, trailerNumberResult] = await Promise.all([
     query(`
       select mrl.id as requisition_line_id, mrl.qty_requested, mrl.qty_issued, mi.id as material_item_id, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
@@ -13140,7 +13151,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   const currentReqAllocMap = new Map();
   for (const line of lines) {
     const key = buildInventoryItemKey(line);
-    currentReqAllocMap.set(key, parseQtyValue(currentReqAllocMap.get(key) || 0) + parseQtyValue(line.qty_requested || 0));
+    currentReqAllocMap.set(key, parseQtyValue(currentReqAllocMap.get(key) || 0) + parseQtyValue(line.qty_requested || 0) - (splitMode ? parseQtyValue(line.qty_issued || 0) : 0));
   }
   const availableMap = await getAvailableInventoryByItemMap({ query }, jobId, {
     allocatedOffsetMap: isVerifiedStageRequisitionStatus(header.status) ? currentReqAllocMap : null
@@ -13167,7 +13178,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   ` : "";
   const flagColorOptionsHtml = flagColorValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
   const trailerNumberOptionsHtml = trailerNumberValues.map((value) => `<option value="${escAttr(value)}"></option>`).join("");
-  const canEditIssuedQty = isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user, "requisitions", "issue");
+  const canEditIssuedQty = !splitMode && isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user, "requisitions", "issue");
   const issuedQtyFormId = `requisition-issued-qty-form-${header.id}`;
   const lineRows = lines.map((line) => `<tr>
     <td>${esc(line.line_no)}</td>
@@ -13190,7 +13201,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   if (["REQUESTED", "WAITING_ON_MATERIAL"].includes(requisitionStatusKey(header.status)) && canAccess(req.user, "requisitions", "verify")) {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/verify"><button type="submit">Accept Request</button></form>`);
   }
-  if (isVerifiedStageRequisitionStatus(header.status)) {
+  if (!splitMode && isVerifiedStageRequisitionStatus(header.status)) {
     headerActions.push(`<a class="btn btn-secondary" target="_blank" href="/requisitions/${header.id}/pick-ticket.pdf">Open Pick Ticket PDF</a>`);
     if (canAccess(req.user, "requisitions", "unverify")) {
       headerActions.push(`<form method="post" action="/requisitions/${header.id}/unverify"><button class="btn btn-secondary" type="submit">Set To Un-Accepted</button></form>`);
@@ -13209,13 +13220,13 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       headerActions.push(`<button type="submit" form="${issuedQtyFormId}" name="next_action" value="issue">Issue To Field</button>`);
     }
   }
-  if (canSignRequisition(req.user, header)) {
+  if (!splitMode && canSignRequisition(req.user, header)) {
     const signLabel = hasLoggedRequisitionSignature(header) ? "Update Sign-Off" : "Sign Requisition";
     headerActions.push(canEditIssuedQty
       ? `<button class="btn btn-secondary" type="submit" form="${issuedQtyFormId}" name="next_action" value="sign">${signLabel}</button>`
       : `<a class="btn btn-secondary" href="/requisitions/${header.id}/sign">${signLabel}</a>`);
   }
-  if (isAdminRole(req.user) && header.status !== "CANCELLED") {
+  if (isAdminRole(req.user) && header.status !== "CANCELLED" && !loads.some(l=>l.status!=="CANCELLED")) {
     headerActions.push(`<form method="post" action="/requisitions/${header.id}/cancel" onsubmit="return confirm('Cancel this requisition? The record will be kept. If it was issued, BOM issued quantities will be rolled back.');"><button class="btn btn-danger" type="submit">Cancel Requisition</button></form>`);
   }
   if (isAdminRole(req.user) && header.status === "CANCELLED") {
@@ -13249,14 +13260,20 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     <h1>Requisition ${esc(header.requisition_no)}</h1>
     ${header.delivery_location_name ? `<p>Delivery Location: <strong>${esc(header.delivery_location_name)}</strong></p>` : ""}
     <div class="card">
-      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Issued To: ${esc(header.issued_to || "")} | Status: ${renderRequisitionStatusChip(header.status)} | Created: ${esc(formatShortDateTime(header.created_at))}</p>
+      <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | BOM #: ${esc(header.bom_no)} | Requested By: ${esc(header.requested_by_name)} | Issued To: ${esc(header.issued_to || "")} | Status: ${renderRequisitionStatusChip(loads.some(l=>l.status==="ISSUED") && isVerifiedStageRequisitionStatus(header.status) ? "PARTIALLY_ISSUED" : header.status)} | Created: ${esc(formatShortDateTime(header.created_at))}</p>
       <p class="muted">IWP: ${esc(header.iwp_no || "")}</p>
       ${handlingParts.length ? `<p class="muted">${handlingParts.join(" | ")}</p>` : ""}
       ${header.notes ? `<p class="muted">${esc(header.notes)}</p>` : ""}
       ${headerActions.length ? `<div class="actions">${headerActions.join("")}</div>` : ""}
     </div>
+    <div class="card" id="request-loads"><h3>Loads</h3>
+      <p>Each load has its own trailer, pick ticket and sign-off. Unissued quantities stay reserved on this request.</p>
+      ${splitMode && header.status !== 'ISSUED' && loads.some(l=>l.status==='ISSUED') ? '<p><strong>Partially Issued — remaining material is reserved.</strong></p>' : ''}
+      <table><tr><th>Load</th><th>Trailer</th><th>Status</th><th>Signed By</th></tr>${loads.map(l=>`<tr><td><a href="/requisitions/${header.id}/loads/${l.id}">${esc(l.load_no)}</a></td><td>${esc(l.trailer_number)}</td><td>${esc(l.status)}</td><td>${esc(l.signed_by_name||'')}</td></tr>`).join('')||'<tr><td colspan="4">No loads created.</td></tr>'}</table>
+      ${isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user,'requisitions','issue') ? `<details><summary>Create Load</summary><form method="post" action="/requisitions/${header.id}/loads"><label>Trailer Number</label><input name="trailer_number" maxlength="120" required><div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Unassigned</th><th>This Load</th><th>UOM</th></tr>${lines.map(line=>{const remaining=Math.max(Number(line.qty_requested)-(loadQtyMap.get(Number(line.requisition_line_id))||0),0);return `<tr><td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(formatQtyDisplay(remaining))}</td><td><input type="number" step="0.0001" min="0" max="${remaining}" name="qty_${line.requisition_line_id}" value="0" aria-label="Load quantity for ${esc(line.item_code)}"></td><td>${esc(line.uom)}</td></tr>`;}).join('')}</table></div><button>Create Load</button></form></details>`:''}
+    </div>
     ${waitingMaterialCard}
-    <div class="card" id="warehouse-sign-off">
+    ${!splitMode ? `<div class="card" id="warehouse-sign-off">
       <h3>Warehouse Sign-Off</h3>
       <p class="muted">Use either a signed paper copy upload or an electronic signature from an iPad. Both stay attached to this requisition.</p>
       <p class="muted">Signed By: ${esc(header.signed_by_name || "") || `<span class="muted">Not signed yet</span>`} ${header.signed_at ? `| Signed At: ${esc(formatShortDateTime(header.signed_at))}` : ""}</p>
@@ -13266,31 +13283,13 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
       </div>
       ${header.signed_signature_data ? `<div style="margin-top:12px;"><label>Electronic Signature</label><div class="card" style="padding:12px; background:#fff;"><img src="${escAttr(header.signed_signature_data)}" alt="Electronic requisition signature" style="max-width:100%; max-height:180px; display:block;" /></div></div>` : `<p class="muted">No electronic signature saved yet.</p>`}
       ${header.signed_copy_filename ? `<p class="muted">Uploaded signed copy: ${esc(header.signed_copy_filename)}</p>` : `<p class="muted">No signed paper copy uploaded yet.</p>`}
-    </div>
+    </div>` : ''}
     ${requisitionPhotoSection}
     ${canEditIssuedQty ? `<div class="card"><form id="${issuedQtyFormId}" method="post" action="/requisitions/${header.id}/issued-qty" class="stack"><div class="scroll">${linesTable}</div><div class="actions"><button type="submit">Save Issued Qty</button>${req.query.issued_qty_saved ? `<span class="muted">Issued quantities saved.</span>` : ""}</div></form></div>` : `<div class="card scroll">${linesTable}</div>`}
   `, req.user));
 });
 
-app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
-  const jobId = currentJobId(req);
-  const [header, requesterNameRows] = await Promise.all([
-    query(`
-      select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
-      from material_requisitions mr
-      join bom_headers bh on bh.id = mr.bom_id
-      where mr.id = $1 and mr.job_id = $2
-    `, [req.params.id, jobId]).then((result) => result.rows[0]),
-    query(`
-      select distinct requested_by_name
-      from material_requisitions
-      where job_id = $1
-        and coalesce(requested_by_name, '') <> ''
-      order by requested_by_name
-    `, [jobId]).then((result) => result.rows)
-  ]);
-  if (!header) throw new Error("Requisition not found.");
-  if (!canSignRequisition(req.user, header)) throw new Error("Only accepted, flagged, loaded, or issued requisitions can be signed.");
+function renderRequisitionSignPage(header, requesterNameRows, req, signBase = `/requisitions/${header.id}`) {
   const signerNames = Array.from(new Set([
     ...requesterNameRows.map((row) => String(row.requested_by_name || "").trim()).filter(Boolean),
     String(header.signed_by_name || "").trim(),
@@ -13300,7 +13299,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
   ].filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const defaultSigner = String(header.signed_by_name || header.issued_to || header.requested_by_name || getUserDisplayName(req.user)).trim();
   const signerOptionsHtml = signerNames.map((name) => `<option value="${esc(name)}"></option>`).join("");
-  res.send(layout(`Sign ${header.requisition_no}`, `
+  return layout(`Sign ${header.requisition_no}`, `
     <h1>Sign Requisition ${esc(header.requisition_no)}</h1>
     <datalist id="requisition-signer-options">
       ${signerOptionsHtml}
@@ -13308,7 +13307,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
     <div class="card">
       <p class="muted">BOM: <a href="/bom/${header.bom_id}">${esc(header.bom_name || header.bom_description || header.bom_no)}</a> | Status: ${renderRequisitionStatusChip(header.status)} | Requested By: ${esc(header.requested_by_name)} | Issued To: ${esc(header.issued_to || "")}</p>
       <div class="actions">
-        ${isVerifiedStageRequisitionStatus(header.status) ? `<a class="btn btn-secondary" target="_blank" href="/requisitions/${header.id}/pick-ticket.pdf">Open Pick Ticket PDF</a>` : ""}
+        ${isVerifiedStageRequisitionStatus(header.status) ? `<a class="btn btn-secondary" target="_blank" href="${signBase}/pick-ticket.pdf">Open Pick Ticket PDF</a>` : ""}
         <a class="btn btn-secondary" href="/requisitions/${header.id}">Back To Requisition</a>
       </div>
     </div>
@@ -13316,7 +13315,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
       <div class="card">
         <h3>Electronic Signature</h3>
         <p class="muted">This works well on iPads and touch screens.</p>
-        <form method="post" action="/requisitions/${header.id}/sign" class="stack" onsubmit="return submitRequisitionSignature();">
+        <form method="post" action="${signBase}/sign" class="stack" onsubmit="return submitRequisitionSignature();">
           <div><label>Signed By</label><input id="requisition-signed-by-name" name="signed_by_name" list="requisition-signer-options" value="${esc(defaultSigner)}" autocomplete="off" required /></div>
           <input type="hidden" id="requisition-signature-data" name="signature_data" />
           <div>
@@ -13335,7 +13334,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
       <div class="card">
         <h3>Signed Paper Copy</h3>
         <p class="muted">Upload a photo, scan, or PDF of a physically signed pick ticket.</p>
-        <form method="post" action="/requisitions/${header.id}/signed-copy" enctype="multipart/form-data" class="stack" id="signed-copy-upload-form">
+        <form method="post" action="${signBase}/signed-copy" enctype="multipart/form-data" class="stack" id="signed-copy-upload-form">
           <div><label>Signed By</label><input name="signed_by_name" list="requisition-signer-options" value="${esc(defaultSigner)}" autocomplete="off" required /></div>
           <div>
             <label>Signed Copy File</label>
@@ -13348,7 +13347,7 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
             <p class="muted">Uploaded file will be saved as ${esc(signedCopyFilenameForRequisition(header.requisition_no, "application/pdf"))} for PDFs.</p>
           </div>
           <div class="actions">
-            ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="/requisitions/${header.id}/signed-copy" target="_blank">Open Current Upload</a>` : ""}
+            ${header.signed_copy_filename ? `<a class="btn btn-secondary" href="${signBase}/signed-copy" target="_blank">Open Current Upload</a>` : ""}
           </div>
         </form>
         ${header.signed_copy_filename ? `<p class="muted" style="margin-top:12px;">Current file: ${esc(header.signed_copy_filename)}</p>` : ""}
@@ -13509,7 +13508,30 @@ app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermiss
         });
       }());
     </script>
-  `, req.user));
+  `, req.user);
+}
+
+app.get("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
+  const jobId = currentJobId(req);
+  const [header, requesterNameRows] = await Promise.all([
+    query(`
+      select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
+      from material_requisitions mr
+      join bom_headers bh on bh.id = mr.bom_id
+      where mr.id = $1 and mr.job_id = $2
+    `, [req.params.id, jobId]).then((result) => result.rows[0]),
+    query(`
+      select distinct requested_by_name
+      from material_requisitions
+      where job_id = $1
+        and coalesce(requested_by_name, '') <> ''
+      order by requested_by_name
+    `, [jobId]).then((result) => result.rows)
+  ]);
+  if (!header) throw new Error("Requisition not found.");
+  if (!canSignRequisition(req.user, header)) throw new Error("Only accepted, flagged, loaded, or issued requisitions can be signed.");
+  await assertNoRequisitionLoads({ query }, req.params.id, jobId);
+  res.send(renderRequisitionSignPage(header, requesterNameRows, req));
 }));
 
 app.post("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermission("requisitions", "issue"), asyncHandler(async (req, res) => {
@@ -13519,8 +13541,9 @@ app.post("/requisitions/:id/sign", requireAuth, requireJobContext, requirePermis
   if (!signedByName) throw new Error("Signer name is required.");
   if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signatureData)) throw new Error("A valid signature image is required.");
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    await assertNoRequisitionLoads(client, req.params.id, jobId);
     if (!canSignRequisition(req.user, header)) throw new Error("Only accepted, flagged, loaded, or issued requisitions can be signed.");
     await client.query(`
       update material_requisitions
@@ -13548,8 +13571,9 @@ app.post("/requisitions/:id/signed-copy", requireAuth, requireJobContext, requir
     throw new Error("Signed copy must be a PDF, PNG, or JPEG file.");
   }
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    await assertNoRequisitionLoads(client, req.params.id, jobId);
     if (!canSignRequisition(req.user, header)) throw new Error("Only accepted, flagged, loaded, or issued requisitions can be signed.");
     const signedCopyFilename = signedCopyFilenameForRequisition(header.requisition_no, file.mimetype);
     await client.query(`
@@ -13585,6 +13609,7 @@ app.get("/requisitions/:id/signed-copy", requireAuth, requireJobContext, require
 
 app.get("/requisitions/:id/pick-ticket.pdf", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
+  await assertNoRequisitionLoads({ query }, req.params.id, jobId);
   const header = (await query(`
     select mr.*, bh.bom_no, bh.bom_name, bh.description as bom_description
     from material_requisitions mr
@@ -13723,8 +13748,9 @@ registerMrrDocumentRoutes(app, {
 app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePermission("requisitions", "verify"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const result = await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    if ((await client.query("select 1 from material_requisition_loads where requisition_id=$1 and job_id=$2 and status<>'CANCELLED' limit 1",[req.params.id,jobId])).rows.length) throw Object.assign(new Error('This request already has active loads.'),{statusCode:400});
     const statusKey = requisitionStatusKey(header.status);
     if (!["REQUESTED", "WAITING_ON_MATERIAL"].includes(statusKey)) throw new Error("Only requested or waiting-on-material requisitions can be accepted.");
     const shortages = await getRequisitionMaterialShortages(client, req.params.id, jobId);
@@ -13742,7 +13768,7 @@ app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePerm
     `, [req.params.id, req.user.id, jobId]);
     await client.query(`
       update material_requisition_lines
-      set qty_issued = qty_requested
+      set qty_issued = case when exists(select 1 from material_requisition_loads where requisition_id=$1) then 0 else qty_requested end
       where requisition_id = $1 and job_id = $2
     `, [req.params.id, jobId]);
     await auditLog(client, req.user.id, "accept", "material_requisition", req.params.id, header.requisition_no);
@@ -13757,8 +13783,9 @@ app.post("/requisitions/:id/issued-qty", requireAuth, requireJobContext, require
   const shouldIssue = nextAction === "issue";
   const shouldSign = nextAction === "sign";
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    await assertNoRequisitionLoads(client, req.params.id, jobId);
     if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Issued quantities can only be edited on accepted, flagged, or loaded requisitions.");
     const lines = (await client.query(`
       select mrl.id, mrl.qty_requested, bl.item_code
@@ -13905,8 +13932,9 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
 app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermission("requisitions", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    await assertNoRequisitionLoads(client, req.params.id, jobId);
     if (!canEditRequisition(req.user, header)) throw new Error("Only requested or waiting-on-material requisitions can be edited.");
     const issuedTo = String(req.body.issued_to || "").trim();
     if (!issuedTo) throw new Error("Issued To is required.");
@@ -13983,8 +14011,9 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
 app.post("/requisitions/:id/unverify", requireAuth, requireJobContext, requirePermission("requisitions", "unverify"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    await assertNoRequisitionLoads(client, req.params.id, jobId);
     if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Only accepted, flagged, or loaded requisitions can be set to un-accepted.");
     await client.query(`
       update material_requisitions
@@ -14035,8 +14064,9 @@ app.post("/requisitions/:id/load", requireAuth, requireJobContext, requirePermis
   const trailerNumber = String(req.body.trailer_number || "").trim().slice(0, 120);
   if (!trailerNumber) throw new Error("Enter a trailer number.");
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    await assertNoRequisitionLoads(client, req.params.id, jobId);
     if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Only accepted, flagged, or loaded requisitions can be loaded.");
     await client.query(`
       update material_requisitions
@@ -14052,8 +14082,10 @@ app.post("/requisitions/:id/load", requireAuth, requireJobContext, requirePermis
 }));
 
 async function issueRequisitionToField(client, requisitionId, jobId, userId) {
-  const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [requisitionId, jobId])).rows[0];
+  const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [requisitionId, jobId])).rows[0];
   if (!header) throw new Error("Requisition not found.");
+  await assertNoRequisitionLoads(client, requisitionId, jobId);
+  await client.query('select id from jobs where id=$1 for update', [jobId]);
   if (!isVerifiedStageRequisitionStatus(header.status)) throw new Error("Requisition must be accepted, flagged, or loaded before issue.");
   const currentRows = await getCurrentOnHandRows(client, { jobId });
   const inventoryMap = new Map();
@@ -14180,8 +14212,9 @@ app.post("/requisitions/:id/cancel", requireAuth, requireJobContext, requirePerm
   if (!isAdminRole(req.user)) throw new Error("Only admins can cancel requisitions.");
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
+    if ((await client.query("select 1 from material_requisition_loads where requisition_id=$1 and job_id=$2 and status<>'CANCELLED' limit 1", [req.params.id,jobId])).rows.length) throw Object.assign(new Error('Cancel open loads first. Issued loads must retain their issue history.'), {statusCode:400});
     if (header.status === "CANCELLED") return;
     await client.query(`delete from material_issue_transactions where requisition_id = $1 and job_id = $2`, [req.params.id, jobId]);
     await client.query(`
@@ -14205,7 +14238,7 @@ app.post("/requisitions/:id/delete", requireAuth, requireJobContext, requirePerm
   if (!isAdminRole(req.user)) throw new Error("Only admins can delete requisitions.");
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     const issueCount = Number((await client.query("select count(*) as issue_count from material_issue_transactions where requisition_id = $1 and job_id = $2", [req.params.id, jobId])).rows[0]?.issue_count || 0);
     const statusKey = requisitionStatusKey(header.status);
@@ -14225,7 +14258,7 @@ app.post("/requisitions/:id/restore", requireAuth, requireJobContext, requirePer
   if (!isAdminRole(req.user)) throw new Error("Only admins can restore cancelled requisitions.");
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!header) throw new Error("Requisition not found.");
     if (header.status !== "CANCELLED") throw new Error("Only cancelled requisitions can be restored.");
     await client.query(`
