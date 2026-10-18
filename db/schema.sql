@@ -980,7 +980,7 @@ create table if not exists material_requisition_loads (
  job_id bigint not null references jobs(id),
  requisition_id bigint not null references material_requisitions(id) on delete cascade,
  load_sequence integer not null check(load_sequence>0),
- load_no text not null unique,
+ load_no text not null,
  trailer_number text not null check(trim(trailer_number)<>''),
  status text not null default 'PLANNED' check(status in ('PLANNED','LOADED','ISSUED','CANCELLED')),
  created_by bigint references users(id), created_at timestamptz not null default now(),
@@ -999,3 +999,11 @@ create table if not exists material_requisition_load_lines (
 alter table material_issue_transactions add column if not exists load_id bigint references material_requisition_loads(id);
 create index if not exists material_issue_transactions_load_idx on material_issue_transactions(load_id);
 create index if not exists material_requisition_loads_parent_idx on material_requisition_loads(job_id,requisition_id);
+
+create table if not exists material_load_counters (
+  job_id bigint not null references jobs(id),
+  prefix text not null,
+  last_number bigint not null check(last_number>0),
+  primary key(job_id,prefix)
+);
+create unique index if not exists material_requisition_loads_job_number_idx on material_requisition_loads(job_id,load_no);
