@@ -13113,8 +13113,26 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   }
   const loads = (await query("select * from material_requisition_loads where requisition_id=$1 and job_id=$2 order by load_sequence", [header.id, jobId])).rows;
   const splitMode = loads.length > 0;
-  const loadQtyRows = (await query(`select ll.requisition_line_id, sum(ll.qty) as assigned from material_requisition_load_lines ll join material_requisition_loads l on l.id=ll.load_id where l.requisition_id=$1 and l.job_id=$2 and l.status<>'CANCELLED' group by ll.requisition_line_id`, [header.id,jobId])).rows;
-  const loadQtyMap = new Map(loadQtyRows.map(r=>[Number(r.requisition_line_id),Number(r.assigned)]));
+  const loadDetailRows = (await query(`
+    select l.id as load_id, l.status, ll.requisition_line_id, ll.qty,
+           bl.item_code, bl.description, bl.uom,
+           coalesce((select sum(t.qty_issued) from material_issue_transactions t
+                     where t.load_id=l.id and t.requisition_line_id=ll.requisition_line_id),0) as issued_qty
+    from material_requisition_loads l
+    join material_requisition_load_lines ll on ll.load_id=l.id
+    join material_requisition_lines mrl on mrl.id=ll.requisition_line_id
+    join bom_lines bl on bl.id=mrl.bom_line_id
+    where l.requisition_id=$1 and l.job_id=$2
+    order by l.load_sequence, bl.line_no, bl.id
+  `, [header.id,jobId])).rows;
+  const loadQtyMap = new Map(), loadedQtyMap = new Map(), plannedQtyMap = new Map();
+  for (const row of loadDetailRows) {
+    if (row.status === 'CANCELLED') continue;
+    const id=Number(row.requisition_line_id), qty=Number(row.qty);
+    loadQtyMap.set(id,(loadQtyMap.get(id)||0)+qty);
+    if (row.status === 'LOADED') loadedQtyMap.set(id,(loadedQtyMap.get(id)||0)+Math.max(qty-Number(row.issued_qty),0));
+    if (row.status === 'PLANNED') plannedQtyMap.set(id,(plannedQtyMap.get(id)||0)+qty);
+  }
   const [linesResult, flagColorResult, trailerNumberResult] = await Promise.all([
     query(`
       select mrl.id as requisition_line_id, mrl.qty_requested, mrl.qty_issued, mi.id as material_item_id, bl.line_no, bl.iwp_no, bl.item_code, bl.description, bl.uom, bl.spec, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2
@@ -13269,8 +13287,18 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     <div class="card" id="request-loads"><h3>Loads</h3>
       <p>Each load has its own trailer, pick ticket and sign-off. Unissued quantities stay reserved on this request.</p>
       ${splitMode && header.status !== 'ISSUED' && loads.some(l=>l.status==='ISSUED') ? '<p><strong>Partially Issued — remaining material is reserved.</strong></p>' : ''}
-      <table><tr><th>Load</th><th>Trailer</th><th>Status</th><th>Signed By</th></tr>${loads.map(l=>`<tr><td><a href="/requisitions/${header.id}/loads/${l.id}">${esc(l.load_no)}</a></td><td>${esc(l.trailer_number)}</td><td>${esc(l.status)}</td><td>${esc(l.signed_by_name||'')}</td></tr>`).join('')||'<tr><td colspan="4">No loads created.</td></tr>'}</table>
-      ${isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user,'requisitions','issue') ? `<details><summary>Create Load</summary><form method="post" action="/requisitions/${header.id}/loads"><label>Trailer Number</label><input name="trailer_number" maxlength="120" required><div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Unassigned</th><th>This Load</th><th>UOM</th></tr>${lines.map(line=>{const remaining=Math.max(Number(line.qty_requested)-(loadQtyMap.get(Number(line.requisition_line_id))||0),0);return `<tr><td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(formatQtyDisplay(remaining))}</td><td><input type="number" step="0.0001" min="0" max="${remaining}" name="qty_${line.requisition_line_id}" value="0" aria-label="Load quantity for ${esc(line.item_code)}"></td><td>${esc(line.uom)}</td></tr>`;}).join('')}</table></div><button>Create Load</button></form></details>`:''}
+      <h4>Request Quantities</h4>
+      <p class="muted">Loaded means on a trailer but not yet issued. Remaining to issue includes unassigned, planned and loaded material. Quantities are shown per item and unit.</p>
+      <div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Requested</th><th>Unassigned</th><th>On Planned Loads</th><th>Loaded</th><th>Issued</th><th>Remaining to Issue</th><th>UOM</th></tr>${lines.map(line=>{
+        const id=Number(line.requisition_line_id), requested=Number(line.qty_requested), issued=splitMode?Number(line.qty_issued):(['ISSUED','CLOSED'].includes(header.status)?Number(line.qty_issued):0);
+        return `<tr><td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(formatQtyDisplay(requested))}</td><td>${esc(formatQtyDisplay(Math.max(requested-(loadQtyMap.get(id)||0)-(splitMode?0:issued),0)))}</td><td>${esc(formatQtyDisplay(plannedQtyMap.get(id)||0))}</td><td>${esc(formatQtyDisplay(loadedQtyMap.get(id)||0))}</td><td>${esc(formatQtyDisplay(issued))}</td><td>${esc(formatQtyDisplay(Math.max(requested-issued,0)))}</td><td>${esc(line.uom)}</td></tr>`;
+      }).join('')}</table></div>
+      <h4>Quantities by Load</h4>
+      <div class="scroll"><table><tr><th>Load</th><th>Trailer</th><th>Status</th><th>Item</th><th>Load Qty</th><th>Loaded</th><th>Issued</th><th>Remaining to Issue</th><th>UOM</th><th>Signed By</th></tr>${loads.map(l=>loadDetailRows.filter(row=>Number(row.load_id)===Number(l.id)).map(row=>{
+        const qty=Number(row.qty), issued=Number(row.issued_qty), remaining=l.status==='CANCELLED'?0:Math.max(qty-issued,0), loaded=l.status==='LOADED'?remaining:0;
+        return `<tr><td><a href="/requisitions/${header.id}/loads/${l.id}">${esc(l.load_no)}</a></td><td>${esc(l.trailer_number)}</td><td>${esc(l.status)}</td><td>${esc(row.item_code)}</td><td>${esc(formatQtyDisplay(qty))}</td><td>${esc(formatQtyDisplay(loaded))}</td><td>${esc(formatQtyDisplay(issued))}</td><td>${esc(formatQtyDisplay(remaining))}</td><td>${esc(row.uom)}</td><td>${esc(l.signed_by_name||'')}</td></tr>`;
+      }).join('')).join('')||'<tr><td colspan="10">No loads created.</td></tr>'}</table></div>
+      ${isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user,'requisitions','issue') ? `<div class="actions" style="margin-top:16px"><button class="btn btn-primary" type="button" style="min-height:48px;padding:12px 24px" aria-expanded="false" aria-controls="create-load-panel" onclick="const panel=document.getElementById('create-load-panel');panel.hidden=!panel.hidden;this.setAttribute('aria-expanded',String(!panel.hidden));if(!panel.hidden)panel.querySelector('input').focus();">Create Load</button></div><div id="create-load-panel" hidden><form method="post" action="/requisitions/${header.id}/loads" class="stack" style="margin-top:16px"><label>Trailer Number</label><input name="trailer_number" maxlength="120" required style="min-height:48px"><div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Unassigned</th><th>This Load</th><th>UOM</th></tr>${lines.map(line=>{const remaining=Math.max(Number(line.qty_requested)-(loadQtyMap.get(Number(line.requisition_line_id))||0),0);return `<tr><td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(formatQtyDisplay(remaining))}</td><td><input type="number" step="0.0001" min="0" max="${remaining}" name="qty_${line.requisition_line_id}" value="0" inputmode="decimal" style="min-height:48px;min-width:100px" aria-label="Load quantity for ${esc(line.item_code)}"></td><td>${esc(line.uom)}</td></tr>`;}).join('')}</table></div><div class="actions"><button type="submit" style="min-height:48px;padding:12px 24px">Save Load</button><button class="btn btn-secondary" type="button" style="min-height:48px;padding:12px 24px" onclick="document.getElementById('create-load-panel').hidden=true;const trigger=document.querySelector('[aria-controls=create-load-panel]');trigger.setAttribute('aria-expanded','false');trigger.focus();">Cancel</button></div></form></div>`:''}
     </div>
     ${waitingMaterialCard}
     ${!splitMode ? `<div class="card" id="warehouse-sign-off">

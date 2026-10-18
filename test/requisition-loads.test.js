@@ -109,6 +109,17 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.match(await (await request(path)).text(), /Create Load/);
   assert.match(await (await request("/requisitions")).text(), /View Loads/);
   const p1 = path + "/loads/" + loads[0].id, p2 = path + "/loads/" + loads[1].id, p3 = path + "/loads/" + loads[2].id;
+  function cells(html, marker) {
+    const row=(html.match(/<tr>[\s\S]*?<\/tr>/g)||[]).find(row=>row.includes(marker));
+    assert.ok(row,marker);
+    return [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(match=>match[1].replace(/<[^>]+>/g,'').trim());
+  }
+  let quantities=await (await request(path)).text();
+  assert.match(quantities,/<button[^>]*aria-controls="create-load-panel"[^>]*>Create Load<\/button>/);
+  assert.match(quantities,/<div id="create-load-panel" hidden>/);
+  assert.doesNotMatch(quantities,/<summary>Create Load/);
+  assert.deepEqual(cells(quantities,'MH-MR-00001-01').slice(4,9),['4','0','0','4','EA']);
+  assert.deepEqual(cells(quantities.split('<h4>Quantities by Load</h4>')[0],'<td>PIPE</td>').slice(2),['10','0','10','0','0','10','EA']);
   const ticket = await request(p1 + "/pick-ticket.pdf");
   assert.equal(ticket.status, 200);
   const pdf = Buffer.from(await ticket.arrayBuffer()).toString("latin1");
@@ -119,8 +130,17 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal(signPage.status, 200);
   assert.match(await signPage.text(), new RegExp(p1 + "/sign"));
   assert.equal((await request(p1 + "/load", { trailer_number: "TRAILER-A" })).status, 302);
+  quantities=await (await request(path)).text();
+  assert.deepEqual(cells(quantities,'MH-MR-00001-01').slice(4,9),['4','4','0','4','EA']);
+  assert.deepEqual(cells(quantities.split('<h4>Quantities by Load</h4>')[0],'<td>PIPE</td>').slice(2),['10','0','6','4','0','10','EA']);
+  const loadPage=await (await request(p1)).text();
+  assert.match(loadPage,/<th>Loaded<\/th><th>Issued<\/th><th>Remaining to Issue<\/th>/);
   const signature = { signed_by_name: "First Crew", signature_data: "data:image/png;base64,aGVsbG8=" };
   assert.equal((await request(p1 + "/sign", signature)).status, 302);
+  quantities=await (await request(path)).text();
+  assert.deepEqual(cells(quantities,'MH-MR-00001-01').slice(4,9),['4','0','4','0','EA']);
+  assert.deepEqual(cells(quantities.split('<h4>Quantities by Load</h4>')[0],'<td>PIPE</td>').slice(2),['10','0','6','0','4','6','EA']);
+
   async function totals() {
     return (await db.query(`select mrl.qty_issued,${outstandingReservationSql} as reserved,mr.status from material_requisition_lines mrl join material_requisitions mr on mr.id=mrl.requisition_id where mrl.id=$1`, [line])).rows[0];
   }
@@ -132,6 +152,10 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(path + "/cancel", {})).status, 400);
   assert.match(await (await request(path)).text(), /Partially Issued/);
   assert.equal((await request(p2 + "/cancel", {})).status, 302);
+  quantities=await (await request(path)).text();
+  assert.deepEqual(cells(quantities,'MH-MR-00001-02').slice(4,9),['3','0','0','0','EA']);
+  assert.deepEqual(cells(quantities.split('<h4>Quantities by Load</h4>')[0],'<td>PIPE</td>').slice(2),['10','3','3','0','4','6','EA']);
+
   assert.equal((await request(p2 + "/issue", {})).status, 400);
   assert.equal((await request(p2 + "/sign", signature)).status, 400);
   assert.equal((await add(3, "T4")).status, 302);
