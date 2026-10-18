@@ -138,6 +138,11 @@ This is a data backup; automatic Excel restoration is not included. Blob referen
 
 ### Material request delivery locations
 
-Open **Settings > Warehouse Setup > Delivery Locations** to add a destination and its material request prefix, or change its active status. These are separate from stock warehouses and storage locations. Prefix `MH-MR` produces `MH-MR-00001`; numbering is allocated atomically for each job and prefix.
+Open **Settings > Warehouse Setup > Delivery Locations** to add a destination and its material request prefix, or change its active status. These are separate from stock warehouses and storage locations. Area prefix `MH` (including the existing `MH-MR` setting) produces `MH-PT-0001`; numbering is allocated atomically for each job and prefix.
 
 On **New Material Request**, choose **Select Delivery Location** above **Select BOM**. The selection follows the request through filters, preview and saving and appears on the request and pick ticket. At least one active destination must be configured before creating a new request from the builder. Existing requests retain their original number and delivery snapshots when settings change.
+
+
+### Request and load numbers
+
+New requests use the existing delivery area's prefix with PT and a four-digit sequence, such as GR-PT-0001. Each load appends a three-digit sequence to its request: GR-PT-0001-001, GR-PT-0001-002, and so on. Existing request and load numbers are retained. Previously allocated standalone PT load numbers are skipped when allocating new request numbers.

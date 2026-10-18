@@ -51,7 +51,7 @@ test("per-prefix numbers allocate uniquely and failed transactions roll back cou
     db.transaction((tx) => nextDeliveryRequestNumber(tx, 101, location)),
     db.transaction((tx) => nextDeliveryRequestNumber(tx, 101, location)),
   ]);
-  assert.deepEqual(numbers, ["MH-MR-00001", "MH-MR-00002"]);
+  assert.deepEqual(numbers, ["MH-PT-0001", "MH-PT-0002"]);
   await assert.rejects(
     db.transaction(async (tx) => {
       await nextDeliveryRequestNumber(tx, 101, location);
@@ -61,15 +61,15 @@ test("per-prefix numbers allocate uniquely and failed transactions roll back cou
   );
   assert.equal(
     await db.transaction((tx) => nextDeliveryRequestNumber(tx, 101, location)),
-    "MH-MR-00003",
+    "MH-PT-0003",
   );
   assert.equal(
     await db.transaction((tx) =>
       nextDeliveryRequestNumber(tx, 101, { request_prefix: "GR-MR" }),
     ),
-    "GR-MR-00001",
+    "GR-PT-0001",
   );
-  assert.equal(await db.transaction(tx=>nextDeliveryRequestNumber(tx,101,{request_prefix:"Legacy Job-MR"})),"Legacy Job-MR-00001");
+  assert.equal(await db.transaction(tx=>nextDeliveryRequestNumber(tx,101,{request_prefix:"Legacy Job-MR"})),"Legacy Job-PT-0001");
 });
 test("request builder, preview, save and settings carry delivery location through actual authenticated routes", async (t) => {
   const db = await fixture(t);
@@ -167,7 +167,7 @@ test("request builder, preview, save and settings carry delivery location throug
   assert.equal(created.status, 302, await created.text());
   const req = (
     await db.query(
-      "select * from material_requisitions where requisition_no='MH-MR-00001'",
+      "select * from material_requisitions where requisition_no='MH-PT-0001'",
     )
   ).rows[0];
   assert.ok(req);
@@ -207,7 +207,7 @@ test("request builder, preview, save and settings carry delivery location throug
   assert.equal(
     (
       await db.query(
-        "select count(*)::int as n from material_requisitions where requisition_no='NEW-MR-00001'",
+        "select count(*)::int as n from material_requisitions where requisition_no='NEW-PT-0001'",
       )
     ).rows[0].n,
     1,

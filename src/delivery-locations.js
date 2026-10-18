@@ -31,24 +31,36 @@ export async function getDeliveryLocation(
     );
   return row;
 }
+export function deliveryRequestPrefix(value) {
+  const area = String(value || '').trim().replace(/-+$/, '').replace(/-(MR|REQ|PT)$/i, '');
+  if (!area) throw Object.assign(new Error('Material request prefix is required.'), {statusCode:400});
+  return area + '-PT';
+}
 export async function nextDeliveryRequestNumber(db, jobId, location) {
-  // Settings validate custom prefixes; retain legacy job prefixes exactly for PO-created requests.
-  const prefix = String(location.request_prefix || "").trim().replace(/-+$/, "");
+  const prefix = deliveryRequestPrefix(location.request_prefix);
   if (!prefix) throw Object.assign(new Error("Material request prefix is required."), {statusCode:400});
   const row = (
     await db.query(
       `
     insert into material_request_counters(job_id,prefix,last_number)
-    select $1,$2,coalesce(max(substring(requisition_no from length($2)+2)::bigint),0)+1
-    from material_requisitions where job_id=$1 and left(requisition_no,length($2)+1)=$2||'-'
-      and substring(requisition_no from length($2)+2) ~ '^[0-9]+$'
+    select $1,$2,coalesce(max(number),0)+1 from (
+      select substring(requisition_no from length($2)+2)::bigint as number
+      from material_requisitions where job_id=$1 and left(requisition_no,length($2)+1)=$2||'-'
+        and substring(requisition_no from length($2)+2) ~ '^[0-9]+$'
+      union all
+      select substring(load_no from length($2)+2)::bigint
+      from material_requisition_loads where job_id=$1 and left(load_no,length($2)+1)=$2||'-'
+        and substring(load_no from length($2)+2) ~ '^[0-9]+$'
+      union all
+      select last_number from material_load_counters where job_id=$1 and prefix=$2
+    ) previous_numbers
     on conflict(job_id,prefix) do update set last_number=greatest(material_request_counters.last_number+1,excluded.last_number)
     returning last_number
   `,
       [jobId, prefix],
     )
   ).rows[0];
-  return `${prefix}-${String(row.last_number).padStart(5, "0")}`;
+  return `${prefix}-${String(row.last_number).padStart(4, "0")}`;
 }
 export function registerDeliveryLocationRoutes(app, deps) {
   const {
@@ -85,7 +97,7 @@ export function registerDeliveryLocationRoutes(app, deps) {
       res.send(
         layout(
           "Delivery Locations",
-          `<style>.delivery-location-section { margin-bottom: 20px; } .delivery-location-table { table-layout: fixed; min-width: 650px; } .delivery-location-table th:nth-child(1) { width: 40%; } .delivery-location-table th:nth-child(2) { width: 30%; } .delivery-location-table th:nth-child(3) { width: 20%; } .delivery-location-table th:nth-child(4) { width: 10%; } .delivery-location-table input, .delivery-location-table select { width: 100%; min-width: 0; background: transparent; border: 1px solid transparent; box-shadow: none; border-radius: 0; padding-left: 0; } .delivery-location-table input:focus, .delivery-location-table select:focus { background: #fff; border-color: var(--line-strong); } .delivery-location-table button { width: auto; min-width: 65px; }</style><h1>Delivery Locations</h1><div class="delivery-location-section"><p>Choose delivery destinations and their material request number prefixes. Example: prefix MH-MR produces MH-MR-00001. These destinations are separate from stock warehouses and storage locations.</p><a class="btn btn-secondary" href="/settings/warehouse-setup">Back to Warehouse Setup</a></div>${edit ? `<div class="delivery-location-section"><h3>Add Delivery Location</h3><form method="post" action="${path}" class="stack"><div class="grid"><div><label>Delivery Location</label><input name="name" maxlength="120" required /></div><div><label>Material Request Prefix</label><input name="request_prefix" maxlength="60" placeholder="MH-MR" required /></div></div><button>Add Delivery Location</button></form></div>` : ""}<div class="card scroll"><table class="delivery-location-table"><tr><th>Delivery Location</th><th>Material Request Prefix</th><th>Status</th><th>Action</th></tr>${rows.map((row) => `<tr>${edit ? `<td><input form="delivery-location-${row.id}" name="name" aria-label="Delivery location" value="${esc(row.name)}" maxlength="120" required /></td><td><input form="delivery-location-${row.id}" name="request_prefix" aria-label="Material request prefix" value="${esc(row.request_prefix)}" maxlength="60" required /></td><td><select form="delivery-location-${row.id}" name="is_active" aria-label="Status"><option value="1" ${row.is_active ? "selected" : ""}>Active</option><option value="0" ${row.is_active ? "" : "selected"}>Inactive</option></select></td><td><form id="delivery-location-${row.id}" method="post" action="${path}/${row.id}"><button type="submit" class="btn btn-secondary">Save</button></form></td>` : `<td>${esc(row.name)}</td><td>${esc(row.request_prefix)}</td><td>${row.is_active ? "Active" : "Inactive"}</td><td></td>`}</tr>`).join("") || '<tr><td colspan="4">No delivery locations configured.</td></tr>'}</table></div>`,
+          `<style>.delivery-location-section { margin-bottom: 20px; } .delivery-location-table { table-layout: fixed; min-width: 650px; } .delivery-location-table th:nth-child(1) { width: 40%; } .delivery-location-table th:nth-child(2) { width: 30%; } .delivery-location-table th:nth-child(3) { width: 20%; } .delivery-location-table th:nth-child(4) { width: 10%; } .delivery-location-table input, .delivery-location-table select { width: 100%; min-width: 0; background: transparent; border: 1px solid transparent; box-shadow: none; border-radius: 0; padding-left: 0; } .delivery-location-table input:focus, .delivery-location-table select:focus { background: #fff; border-color: var(--line-strong); } .delivery-location-table button { width: auto; min-width: 65px; }</style><h1>Delivery Locations</h1><div class="delivery-location-section"><p>Choose delivery destinations and their material request number prefixes. Example: area prefix GR produces request GR-PT-0001, with loads GR-PT-0001-001, -002 and so on. These destinations are separate from stock warehouses and storage locations.</p><a class="btn btn-secondary" href="/settings/warehouse-setup">Back to Warehouse Setup</a></div>${edit ? `<div class="delivery-location-section"><h3>Add Delivery Location</h3><form method="post" action="${path}" class="stack"><div class="grid"><div><label>Delivery Location</label><input name="name" maxlength="120" required /></div><div><label>Material Request Prefix</label><input name="request_prefix" maxlength="60" placeholder="MH-MR" required /></div></div><button>Add Delivery Location</button></form></div>` : ""}<div class="card scroll"><table class="delivery-location-table"><tr><th>Delivery Location</th><th>Material Request Prefix</th><th>Status</th><th>Action</th></tr>${rows.map((row) => `<tr>${edit ? `<td><input form="delivery-location-${row.id}" name="name" aria-label="Delivery location" value="${esc(row.name)}" maxlength="120" required /></td><td><input form="delivery-location-${row.id}" name="request_prefix" aria-label="Material request prefix" value="${esc(row.request_prefix)}" maxlength="60" required /></td><td><select form="delivery-location-${row.id}" name="is_active" aria-label="Status"><option value="1" ${row.is_active ? "selected" : ""}>Active</option><option value="0" ${row.is_active ? "" : "selected"}>Inactive</option></select></td><td><form id="delivery-location-${row.id}" method="post" action="${path}/${row.id}"><button type="submit" class="btn btn-secondary">Save</button></form></td>` : `<td>${esc(row.name)}</td><td>${esc(row.request_prefix)}</td><td>${row.is_active ? "Active" : "Inactive"}</td><td></td>`}</tr>`).join("") || '<tr><td colspan="4">No delivery locations configured.</td></tr>'}</table></div>`,
           req.user,
         ),
       );

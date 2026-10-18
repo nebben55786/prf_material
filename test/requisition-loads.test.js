@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import { outstandingReservationSql, areaLoadPrefix, nextAreaLoadNumber, createRequisitionLoad } from "../src/requisition-loads.js";
+import { outstandingReservationSql, createRequisitionLoad } from "../src/requisition-loads.js";
 import { PGlite } from "@electric-sql/pglite";
 import {
   normalizeRequestPrefix,
@@ -84,7 +84,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request("/jobs/select", { job_id: "101" })).status, 302);
   const create = await request("/bom/1501/requisitions", { delivery_location_id: "100", issued_to: "Crew", selected_line_ids: "1601", request_qty_1601: "10" });
   assert.equal(create.status, 302, await create.text());
-  const id = (await db.query("select id from material_requisitions where requisition_no='MH-MR-00001'")).rows[0].id;
+  const id = (await db.query("select id from material_requisitions where requisition_no='MH-PT-0001'")).rows[0].id;
   const path = "/requisitions/" + id;
   assert.equal((await request(path + "/verify", {})).status, 302);
   assert.equal((await request(path + "/load", {trailer_number:"ORIGINAL"})).status,302);
@@ -100,9 +100,9 @@ test("split loads keep reservations, issue independently, and retain separate ti
     assert.equal(r.status, 302, await r.text());
   }
   let loads = (await db.query("select * from material_requisition_loads where requisition_id=$1 order by load_sequence", [id])).rows;
-  assert.deepEqual(loads.map((l) => l.load_no), ["MH-PT-0001", "MH-PT-0002", "MH-PT-0003"]);
+  assert.deepEqual(loads.map((l) => l.load_no), ["MH-PT-0001-001", "MH-PT-0001-002", "MH-PT-0001-003"]);
   assert.equal((await db.query("select trailer_number from material_requisitions where id=$1",[id])).rows[0].trailer_number,null);
-  assert.match(await (await request("/requisitions?description=MH-PT-0002")).text(),/MH-MR-00001/);
+  assert.match(await (await request("/requisitions?description=MH-PT-0001-002")).text(),/MH-PT-0001/);
   assert.equal((await add(1)).status, 400);
   for (const action of ["issue", "unverify", "load", "issued-qty", "sign"]) assert.equal((await request(path + "/" + action, { trailer_number: "OTHER", signed_by_name: "Crew", signature_data: "data:image/png;base64,aGVsbG8=" })).status, 400, action);
   assert.equal((await request(path + "/pick-ticket.pdf")).status, 400);
@@ -118,12 +118,12 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.match(quantities,/<button[^>]*aria-controls="create-load-panel"[^>]*>Create Load<\/button>/);
   assert.match(quantities,/<div id="create-load-panel" hidden>/);
   assert.doesNotMatch(quantities,/<summary>Create Load/);
-  assert.deepEqual(cells(quantities,'MH-PT-0001').slice(4,9),['4','0','0','4','EA']);
+  assert.deepEqual(cells(quantities,'MH-PT-0001-001').slice(4,9),['4','0','0','4','EA']);
   assert.deepEqual(cells(quantities.split('<h4>Quantities by Load</h4>')[0],'<td>PIPE</td>').slice(2),['10','0','10','0','0','10','EA']);
   const ticket = await request(p1 + "/pick-ticket.pdf");
   assert.equal(ticket.status, 200);
   const pdf = Buffer.from(await ticket.arrayBuffer()).toString("latin1");
-  assert.match(pdf, /MH-PT-0001/);
+  assert.match(pdf, /MH-PT-0001-001/);
   assert.match(pdf, /Trailer: T1/);
   assert.match(pdf, /\(4\) Tj/);
   const signPage = await request(p1 + "/sign");
@@ -131,14 +131,14 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.match(await signPage.text(), new RegExp(p1 + "/sign"));
   assert.equal((await request(p1 + "/load", { trailer_number: "TRAILER-A" })).status, 302);
   quantities=await (await request(path)).text();
-  assert.deepEqual(cells(quantities,'MH-PT-0001').slice(4,9),['4','4','0','4','EA']);
+  assert.deepEqual(cells(quantities,'MH-PT-0001-001').slice(4,9),['4','4','0','4','EA']);
   assert.deepEqual(cells(quantities.split('<h4>Quantities by Load</h4>')[0],'<td>PIPE</td>').slice(2),['10','0','6','4','0','10','EA']);
   const loadPage=await (await request(p1)).text();
   assert.match(loadPage,/<th>Loaded<\/th><th>Issued<\/th><th>Remaining to Issue<\/th>/);
   const signature = { signed_by_name: "First Crew", signature_data: "data:image/png;base64,aGVsbG8=" };
   assert.equal((await request(p1 + "/sign", signature)).status, 302);
   quantities=await (await request(path)).text();
-  assert.deepEqual(cells(quantities,'MH-PT-0001').slice(4,9),['4','0','4','0','EA']);
+  assert.deepEqual(cells(quantities,'MH-PT-0001-001').slice(4,9),['4','0','4','0','EA']);
   assert.deepEqual(cells(quantities.split('<h4>Quantities by Load</h4>')[0],'<td>PIPE</td>').slice(2),['10','0','6','0','4','6','EA']);
 
   async function totals() {
@@ -153,14 +153,14 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.match(await (await request(path)).text(), /Partially Issued/);
   assert.equal((await request(p2 + "/cancel", {})).status, 302);
   quantities=await (await request(path)).text();
-  assert.deepEqual(cells(quantities,'MH-PT-0002').slice(4,9),['3','0','0','0','EA']);
+  assert.deepEqual(cells(quantities,'MH-PT-0001-002').slice(4,9),['3','0','0','0','EA']);
   assert.deepEqual(cells(quantities.split('<h4>Quantities by Load</h4>')[0],'<td>PIPE</td>').slice(2),['10','3','3','0','4','6','EA']);
 
   assert.equal((await request(p2 + "/issue", {})).status, 400);
   assert.equal((await request(p2 + "/sign", signature)).status, 400);
   assert.equal((await add(3, "T4")).status, 302);
   const fourth = (await db.query("select * from material_requisition_loads where requisition_id=$1 and load_sequence=4", [id])).rows[0];
-  assert.equal(fourth.load_no, "MH-PT-0004");
+  assert.equal(fourth.load_no, "MH-PT-0001-004");
   assert.equal(Number((await totals()).reserved), 6);
   await db.exec("insert into bom_headers(id,job_id,job_number,bom_no,bom_type,status) values(1502,101,'A','SECOND','pipe','ACTIVE');insert into bom_lines(id,bom_id,line_no,item_code,description,uom,qty_required) values(1602,1502,'1','PIPE','Pipe','EA',20)");
   const competing = await request("/bom/1502/requisitions", { delivery_location_id: "100", issued_to: "Other", selected_line_ids: "1602", request_qty_1602: "11" });
@@ -201,7 +201,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(legacyPath+"/verify",{})).status,302);
   assert.equal((await request(legacyPath+"/pick-ticket.pdf")).status,200);
   assert.equal((await request(legacyPath+"/sign",signature)).status,302);
-  assert.equal((await db.query("select status from material_requisitions where requisition_no='MH-MR-00002'")).rows[0].status,"ISSUED");
+  assert.equal((await db.query("select status from material_requisitions where requisition_no='MH-PT-0002'")).rows[0].status,"ISSUED");
   await db.query("insert into users(id,username,password_hash,role) values(101,'load-field',$1,'field')", [await bcrypt.hash("test-password", 4)]);
   await db.query("insert into user_jobs(user_id,job_id) values(101,101)");
   await request("/login", { username: "load-field", password: "test-password" });
@@ -211,24 +211,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(p1 + "/sign", signature)).status, 403);
 });
 
-test('area load numbering is independent per area and job, atomic, and rolls back on failure',async(t)=>{
-  const db=await fixture(t);
-  assert.equal(areaLoadPrefix({request_prefix:'GR'}),'GR-PT');
-  assert.equal(areaLoadPrefix({request_prefix:'GR-MR'}),'GR-PT');
-  assert.equal(areaLoadPrefix({request_prefix:'MH-PT'}),'MH-PT');
-  assert.equal(areaLoadPrefix({requisition_no:'GR-00021'}),'GR-PT');
-  const numbers=await Promise.all([
-    db.transaction(tx=>nextAreaLoadNumber(tx,101,{request_prefix:'GR'})),
-    db.transaction(tx=>nextAreaLoadNumber(tx,101,{request_prefix:'GR'}))
-  ]);
-  assert.deepEqual(numbers,['GR-PT-0001','GR-PT-0002']);
-  await assert.rejects(db.transaction(async(tx)=>{await nextAreaLoadNumber(tx,101,{request_prefix:'GR'});throw new Error('rollback');}),/rollback/);
-  assert.equal(await db.transaction(tx=>nextAreaLoadNumber(tx,101,{request_prefix:'GR'})),'GR-PT-0003');
-  assert.equal(await db.transaction(tx=>nextAreaLoadNumber(tx,101,{request_prefix:'MH'})),'MH-PT-0001');
-  assert.equal(await db.transaction(tx=>nextAreaLoadNumber(tx,102,{request_prefix:'GR'})),'GR-PT-0001');
-});
-
-test('numbering migration preserves old loads and new loads use the existing request area',async(t)=>{
+test('old numbers stay intact and new requests get PT numbers with three-digit load suffixes',async(t)=>{
   const db=new PGlite();t.after(()=>db.close());
   for(const file of fs.readdirSync(new URL('../db/migrations/',import.meta.url)).filter(f=>f.endsWith('.sql')&&f<'055').sort())
     await db.exec(fs.readFileSync(new URL('../db/migrations/'+file,import.meta.url),'utf8'));
@@ -241,10 +224,20 @@ test('numbering migration preserves old loads and new loads use the existing req
     insert into material_requisition_load_lines(load_id,requisition_line_id,qty) values(1901,1801,4);`);
   await db.exec(fs.readFileSync(new URL('../db/migrations/055_area_load_numbers.sql',import.meta.url),'utf8'));
   const created=await db.transaction(tx=>createRequisitionLoad(tx,{id:1701,jobId:101,userId:null,trailer:'T2',body:{qty_1801:'6'}}));
-  assert.equal(created.load_no,'GR-PT-0001');assert.equal(created.load_sequence,2);
+  assert.equal(created.load_no,'GR-00001-002');assert.equal(created.load_sequence,2);
   const original=(await db.query('select load_no,signed_copy_filename from material_requisition_loads where id=1901')).rows[0];
   assert.deepEqual(original,{load_no:'GR-00001-01',signed_copy_filename:'GR-00001-01-signed.pdf'});
   assert.equal((await db.query('select requisition_no from material_requisitions where id=1701')).rows[0].requisition_no,'GR-00001');
+
+  // Avoid reusing a standalone PT number allocated by the previous release.
   await db.query("insert into material_requisition_loads(job_id,requisition_id,load_sequence,load_no,trailer_number) values(101,1701,3,'GR-PT-0042','T3')");
-  assert.equal(await db.transaction(tx=>nextAreaLoadNumber(tx,101,{request_prefix:'GR'})),'GR-PT-0043');
+  const requestNo=await db.transaction(tx=>nextDeliveryRequestNumber(tx,101,{request_prefix:'GR'}));
+  assert.equal(requestNo,'GR-PT-0043');
+  await db.query("insert into material_requisitions(id,job_id,requisition_no,bom_id,requested_by_name,status,request_prefix) values(1702,101,$1,1501,'Crew','ACCEPTED','GR')",[requestNo]);
+  await db.query('insert into material_requisition_lines(id,job_id,requisition_id,bom_line_id,qty_requested) values(1802,101,1702,1601,10)');
+  const first=await db.transaction(tx=>createRequisitionLoad(tx,{id:1702,jobId:101,userId:null,trailer:'T4',body:{qty_1802:'5'}}));
+  const second=await db.transaction(tx=>createRequisitionLoad(tx,{id:1702,jobId:101,userId:null,trailer:'T5',body:{qty_1802:'5'}}));
+  assert.equal(first.load_no,'GR-PT-0043-001');
+  assert.equal(second.load_no,'GR-PT-0043-002');
+
 });

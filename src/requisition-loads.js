@@ -13,25 +13,6 @@ async function getLoadLines(db, id) {
   return (await db.query(`select ll.*, coalesce((select sum(t.qty_issued) from material_issue_transactions t where t.load_id=ll.load_id and t.requisition_line_id=ll.requisition_line_id),0) as issued_qty, mrl.bom_line_id, bl.line_no, bl.item_code, bl.description, bl.uom, bl.size_1, bl.size_2, bl.thk_1, bl.thk_2, coalesce(bh.system_key,'') as system_key
     from material_requisition_load_lines ll join material_requisition_lines mrl on mrl.id=ll.requisition_line_id join bom_lines bl on bl.id=mrl.bom_line_id join bom_headers bh on bh.id=bl.bom_id where ll.load_id=$1 order by bl.line_no,bl.id`, [id])).rows;
 }
-function areaLoadPrefix(header) {
-  const requestPrefix = String(header.request_prefix || '').trim() || String(header.requisition_no || '').replace(/-[0-9]+$/, '');
-  const areaPrefix = requestPrefix.replace(/-(MR|REQ|PT)$/i, '').replace(/-+$/, '');
-  if (!areaPrefix) throw loadError('The request needs a delivery area prefix before creating loads.');
-  return areaPrefix.toUpperCase() + '-PT';
-}
-async function nextAreaLoadNumber(db, jobId, header) {
-  const prefix = areaLoadPrefix(header);
-  const row = (await db.query(`
-    insert into material_load_counters(job_id,prefix,last_number)
-    select $1,$2,coalesce(max(substring(load_no from length($2)+2)::bigint),0)+1
-    from material_requisition_loads where job_id=$1 and left(load_no,length($2)+1)=$2||'-'
-      and substring(load_no from length($2)+2) ~ '^[0-9]+$'
-    on conflict(job_id,prefix) do update
-      set last_number=greatest(material_load_counters.last_number+1,excluded.last_number)
-    returning last_number
-  `, [jobId,prefix])).rows[0];
-  return prefix + '-' + String(row.last_number).padStart(4,'0');
-}
 async function createRequisitionLoad(db, { id, jobId, userId, trailer, body }) {
   const header = (await db.query("select * from material_requisitions where id=$1 and job_id=$2 for update", [id, jobId])).rows[0];
   if (!header || !["ACCEPTED", "VERIFIED", "FLAGGED", "LOADED"].includes(header.status)) throw loadError("Accept this request before creating loads.");
@@ -49,7 +30,7 @@ async function createRequisitionLoad(db, { id, jobId, userId, trailer, body }) {
   if (!selected.length) throw loadError("Enter at least one load quantity.");
   const seq = Number((await db.query("select coalesce(max(load_sequence),0)+1 as n from material_requisition_loads where requisition_id=$1", [id])).rows[0].n);
   if (seq === 1) await db.query("update material_requisitions set status='ACCEPTED',trailer_number=null,loaded_at=null,loaded_by_user_id=null where id=$1", [id]);
-  const loadNo = await nextAreaLoadNumber(db, jobId, header);
+  const loadNo = header.requisition_no + "-" + String(seq).padStart(3, "0");
   const load = (await db.query(`insert into material_requisition_loads(job_id,requisition_id,load_sequence,load_no,trailer_number,created_by) values($1,$2,$3,$4,$5,$6) returning *`, [jobId, id, seq, loadNo, trailer, userId])).rows[0];
   for (const [lineId, qty] of selected) await db.query("insert into material_requisition_load_lines(load_id,requisition_line_id,qty) values($1,$2,$3)", [load.id, lineId, qty]);
   await db.query(`update material_requisition_lines mrl set qty_issued=coalesce((select sum(t.qty_issued) from material_issue_transactions t where t.requisition_line_id=mrl.id),0) where requisition_id=$1 and job_id=$2`, [id, jobId]);
@@ -201,8 +182,6 @@ function registerRequisitionLoadRoutes(app, d) {
   });
 }
 export {
-  areaLoadPrefix,
-  nextAreaLoadNumber,
   assertNoRequisitionLoads,
   createRequisitionLoad,
   getLoadLines,

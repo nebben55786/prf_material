@@ -1,5 +1,5 @@
 import { registerRequisitionLoadRoutes, assertNoRequisitionLoads, outstandingReservationSql } from "./requisition-loads.js";
-import { getDeliveryLocation, nextDeliveryRequestNumber, registerDeliveryLocationRoutes } from "./delivery-locations.js";
+import { getDeliveryLocation, deliveryRequestPrefix, nextDeliveryRequestNumber, registerDeliveryLocationRoutes } from "./delivery-locations.js";
 import { registerDataBackupRoute } from "./data-backup.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -11509,7 +11509,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
       <h3>Review And Edit Before Saving</h3>
       <p class="muted">Adjust quantities or remove/add lines here. Saving creates the request only; it does not accept or issue it.</p>
       <form method="post" action="/bom/${bom.id}/requisitions/preview" class="stack">
-        <input type="hidden" name="delivery_location_id" value="${deliveryLocation.id}" /><p>Delivery Location: <strong>${esc(deliveryLocation.name)}</strong> | Request Prefix: ${esc(deliveryLocation.request_prefix)}</p>
+        <input type="hidden" name="delivery_location_id" value="${deliveryLocation.id}" /><p>Delivery Location: <strong>${esc(deliveryLocation.name)}</strong> | Request Prefix: ${esc(deliveryRequestPrefix(deliveryLocation.request_prefix))}</p>
         <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" />
         <input type="hidden" name="iso_no" value="${escAttr(req.body.iso_no || "")}" />
         <div class="grid-3">
@@ -12570,7 +12570,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   const deliveryLocations = (await query("select * from delivery_locations where job_id=$1 and is_active=true order by lower(name),id", [jobId])).rows;
   const deliveryLocationId = Number(req.query.delivery_location_id || 0);
   const deliveryLocation = deliveryLocationId ? await getDeliveryLocation({query}, jobId, deliveryLocationId) : null;
-  const deliveryField = `<div><label>Select Delivery Location</label><select name="delivery_location_id" required><option value="">Choose delivery location</option>${deliveryLocations.map(row => `<option value="${row.id}" ${Number(row.id)===deliveryLocationId?'selected':''}>${esc(row.name)} (${esc(row.request_prefix)}-…)</option>`).join('')}</select></div>`;
+  const deliveryField = `<div><label>Select Delivery Location</label><select name="delivery_location_id" required><option value="">Choose delivery location</option>${deliveryLocations.map(row => `<option value="${row.id}" ${Number(row.id)===deliveryLocationId?'selected':''}>${esc(row.name)} (${esc(deliveryRequestPrefix(row.request_prefix))}-…)</option>`).join('')}</select></div>`;
   const deliveryHidden = `<input type="hidden" name="delivery_location_id" value="${deliveryLocationId || ''}" />`;
   const deliverySetup = deliveryLocations.length ? '' : `<p class="error">Configure a delivery location and material request prefix in Settings → Warehouse Setup → Delivery Locations before creating a request.</p>`;
   await withTransaction(async (client) => {
@@ -12741,7 +12741,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         <h3>Create Material Requisition</h3>
         <p class="muted">BOM: ${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
         <form method="post" action="/bom/${selectedBom.id}/requisitions/preview" class="stack" id="requisition-create-form">
-          ${deliveryHidden}<p>Delivery Location: <strong>${esc(deliveryLocation.name)}</strong> | Request Prefix: ${esc(deliveryLocation.request_prefix)}</p>
+          ${deliveryHidden}<p>Delivery Location: <strong>${esc(deliveryLocation.name)}</strong> | Request Prefix: ${esc(deliveryRequestPrefix(deliveryLocation.request_prefix))}</p>
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid-3">
             <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
