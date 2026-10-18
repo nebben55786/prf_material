@@ -13125,13 +13125,11 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     where l.requisition_id=$1 and l.job_id=$2
     order by l.load_sequence, bl.line_no, bl.id
   `, [header.id,jobId])).rows;
-  const loadQtyMap = new Map(), loadedQtyMap = new Map(), plannedQtyMap = new Map();
+  const loadQtyMap = new Map();
   for (const row of loadDetailRows) {
     if (row.status === 'CANCELLED') continue;
     const id=Number(row.requisition_line_id), qty=Number(row.qty);
     loadQtyMap.set(id,(loadQtyMap.get(id)||0)+qty);
-    if (row.status === 'LOADED') loadedQtyMap.set(id,(loadedQtyMap.get(id)||0)+Math.max(qty-Number(row.issued_qty),0));
-    if (row.status === 'PLANNED') plannedQtyMap.set(id,(plannedQtyMap.get(id)||0)+qty);
   }
   const [linesResult, flagColorResult, trailerNumberResult] = await Promise.all([
     query(`
@@ -13158,6 +13156,12 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     `, [jobId])
   ]);
   const lines = linesResult.rows;
+  const remainingLoadLines = lines.map(line => ({
+    ...line,
+    remaining_to_load: Math.max(Number(line.qty_requested) - (loadQtyMap.get(Number(line.requisition_line_id)) || 0)
+      - (!splitMode && ['ISSUED','CLOSED'].includes(header.status) ? Number(line.qty_issued) : 0), 0)
+  })).filter(line => line.remaining_to_load > 0);
+
   const flagColorValues = Array.from(new Set([
     ...flagColorResult.rows.map((row) => String(row.flag_color || "").trim()),
     String(header.flag_color || "").trim()
@@ -13287,18 +13291,17 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     <div class="card" id="request-loads"><h3>Loads</h3>
       <p>Each load has its own trailer, pick ticket and sign-off. Unissued quantities stay reserved on this request.</p>
       ${splitMode && header.status !== 'ISSUED' && loads.some(l=>l.status==='ISSUED') ? '<p><strong>Partially Issued — remaining material is reserved.</strong></p>' : ''}
-      <h4>Request Quantities</h4>
-      <p class="muted">Loaded means on a trailer but not yet issued. Remaining to issue includes unassigned, planned and loaded material. Quantities are shown per item and unit.</p>
-      <div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Requested</th><th>Unassigned</th><th>On Planned Loads</th><th>Loaded</th><th>Issued</th><th>Remaining to Issue</th><th>UOM</th></tr>${lines.map(line=>{
-        const id=Number(line.requisition_line_id), requested=Number(line.qty_requested), issued=splitMode?Number(line.qty_issued):(['ISSUED','CLOSED'].includes(header.status)?Number(line.qty_issued):0);
-        return `<tr><td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(formatQtyDisplay(requested))}</td><td>${esc(formatQtyDisplay(Math.max(requested-(loadQtyMap.get(id)||0)-(splitMode?0:issued),0)))}</td><td>${esc(formatQtyDisplay(plannedQtyMap.get(id)||0))}</td><td>${esc(formatQtyDisplay(loadedQtyMap.get(id)||0))}</td><td>${esc(formatQtyDisplay(issued))}</td><td>${esc(formatQtyDisplay(Math.max(requested-issued,0)))}</td><td>${esc(line.uom)}</td></tr>`;
-      }).join('')}</table></div>
+      <h4>Remaining Quantities</h4>
+      <p class="muted">Only items with quantities still available to assign to a load are shown.</p>
+      <div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Remaining to Load</th><th>UOM</th></tr>${remainingLoadLines.map(line=>
+        `<tr><td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(formatQtyDisplay(line.remaining_to_load))}</td><td>${esc(line.uom)}</td></tr>`
+      ).join('')||'<tr><td colspan="4">All requested quantities have been assigned to loads.</td></tr>'}</table></div>
       <h4>Quantities by Load</h4>
       <div class="scroll"><table><tr><th>Load</th><th>Trailer</th><th>Status</th><th>Item</th><th>Load Qty</th><th>Loaded</th><th>Issued</th><th>Remaining to Issue</th><th>UOM</th><th>Signed By</th></tr>${loads.map(l=>loadDetailRows.filter(row=>Number(row.load_id)===Number(l.id)).map(row=>{
         const qty=Number(row.qty), issued=Number(row.issued_qty), remaining=l.status==='CANCELLED'?0:Math.max(qty-issued,0), loaded=l.status==='LOADED'?remaining:0;
         return `<tr><td><a href="/requisitions/${header.id}/loads/${l.id}">${esc(l.load_no)}</a></td><td>${esc(l.trailer_number)}</td><td>${esc(l.status)}</td><td>${esc(row.item_code)}</td><td>${esc(formatQtyDisplay(qty))}</td><td>${esc(formatQtyDisplay(loaded))}</td><td>${esc(formatQtyDisplay(issued))}</td><td>${esc(formatQtyDisplay(remaining))}</td><td>${esc(row.uom)}</td><td>${esc(l.signed_by_name||'')}</td></tr>`;
       }).join('')).join('')||'<tr><td colspan="10">No loads created.</td></tr>'}</table></div>
-      ${isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user,'requisitions','issue') ? `<div class="actions" style="margin-top:16px"><button class="btn btn-primary" type="button" aria-expanded="false" aria-controls="create-load-panel" onclick="const panel=document.getElementById('create-load-panel');panel.hidden=!panel.hidden;this.setAttribute('aria-expanded',String(!panel.hidden));if(!panel.hidden)panel.querySelector('input').focus();">Create Load</button></div><div id="create-load-panel" hidden><form method="post" action="/requisitions/${header.id}/loads" class="stack" style="margin-top:16px"><label>Trailer Number</label><input name="trailer_number" maxlength="120" required style="min-height:48px"><div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Unassigned</th><th>This Load</th><th>UOM</th></tr>${lines.map(line=>{const remaining=Math.max(Number(line.qty_requested)-(loadQtyMap.get(Number(line.requisition_line_id))||0),0);return `<tr><td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(formatQtyDisplay(remaining))}</td><td><input type="number" step="0.0001" min="0" max="${remaining}" name="qty_${line.requisition_line_id}" value="0" inputmode="decimal" style="min-height:48px;min-width:100px" aria-label="Load quantity for ${esc(line.item_code)}"></td><td>${esc(line.uom)}</td></tr>`;}).join('')}</table></div><div class="actions"><button type="submit">Save Load</button><button class="btn btn-secondary" type="button" onclick="document.getElementById('create-load-panel').hidden=true;const trigger=document.querySelector('[aria-controls=create-load-panel]');trigger.setAttribute('aria-expanded','false');trigger.focus();">Cancel</button></div></form></div>`:''}
+      ${remainingLoadLines.length > 0 && isVerifiedStageRequisitionStatus(header.status) && canAccess(req.user,'requisitions','issue') ? `<div class="actions" style="margin-top:16px"><button class="btn btn-primary" type="button" aria-expanded="false" aria-controls="create-load-panel" onclick="const panel=document.getElementById('create-load-panel');panel.hidden=!panel.hidden;this.setAttribute('aria-expanded',String(!panel.hidden));if(!panel.hidden)panel.querySelector('input').focus();">Create Load</button></div><div id="create-load-panel" hidden><form method="post" action="/requisitions/${header.id}/loads" class="stack" style="margin-top:16px"><label>Trailer Number</label><input name="trailer_number" maxlength="120" required style="min-height:48px"><div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Unassigned</th><th>This Load</th><th>UOM</th></tr>${remainingLoadLines.map(line=>{const remaining=line.remaining_to_load;return `<tr><td>${esc(line.item_code)}</td><td>${esc(line.description)}</td><td>${esc(formatQtyDisplay(remaining))}</td><td><input type="number" step="0.0001" min="0" max="${remaining}" name="qty_${line.requisition_line_id}" value="0" inputmode="decimal" style="min-height:48px;min-width:100px" aria-label="Load quantity for ${esc(line.item_code)}"></td><td>${esc(line.uom)}</td></tr>`;}).join('')}</table></div><div class="actions"><button type="submit">Save Load</button><button class="btn btn-secondary" type="button" onclick="document.getElementById('create-load-panel').hidden=true;const trigger=document.querySelector('[aria-controls=create-load-panel]');trigger.setAttribute('aria-expanded','false');trigger.focus();">Cancel</button></div></form></div>`:''}
     </div>
     ${waitingMaterialCard}
     ${!splitMode ? `<div class="card" id="warehouse-sign-off">
