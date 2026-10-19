@@ -10885,7 +10885,7 @@ app.get("/bom", requireAuth, requireJobContext, requirePermission("bom", "view")
     select bh.*, coalesce((select count(*) from bom_lines bl where bl.bom_id = bh.id), 0) as line_count
     from bom_headers bh
     ${whereSql}
-    order by bh.id desc
+    order by lower(coalesce(nullif(trim(bh.bom_name), ''), nullif(trim(bh.description), ''), bh.bom_no)), bh.bom_no, bh.id
     limit 300
   `, params)).rows;
   const filterTypeOptions = [`<option value="">All Types</option>`].concat(
