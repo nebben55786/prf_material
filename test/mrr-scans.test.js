@@ -169,8 +169,8 @@ async function renderLog(canEdit = true) {
   const css = source.slice(source.indexOf("<style>") + 7, source.indexOf("</style>"));
   const { routes } = routeHarness({
     query: async () => ({ rows: [
-      { id: 2, mrr_number: "MRR-123", vendor_name: "Test Vendor", material_description: "Pipe fittings", scanned_pdf_pathname: "" },
-      { id: 3, mrr_number: "MRR-124", vendor_name: "Test Vendor", scanned_pdf_pathname: "saved.pdf" }
+      { id: 2, po_id: 57, po_number: "571019", mrr_number: "MRR-123", vendor_name: "Test Vendor", material_description: "Pipe fittings", scanned_pdf_pathname: "" },
+      { id: 3, po_number: "J7565-796 & A", mrr_number: "MRR-124", vendor_name: "Test Vendor", scanned_pdf_pathname: "saved.pdf" }
     ] }),
     canAccess: () => canEdit,
     esc: escape, escAttr: escape, formatShortDateTime: () => "09/17/2026",
@@ -184,6 +184,8 @@ async function renderLog(canEdit = true) {
 
 test("log disables missing scans, links saved scans, and hides upload for read-only users", async () => {
   const html = await renderLog();
+  assert.match(html, /href="\/po\/57\/edit">571019<\/a>/);
+  assert.match(html, /href="\/po\?po_no=J7565-796%20%26%20A">J7565-796 &amp; A<\/a>/);
   assert.match(html, /aria-disabled="true" tabindex="-1"/);
   assert.match(html, /href="\/material-logs\/mrr\/3\/scanned-pdf\/open"/);
   assert.match(html, /<button\b[^>]*data-scan-upload/);

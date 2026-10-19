@@ -107,12 +107,12 @@ export function registerMrrScanRoutes(app, dependencies) {
     const imported = Number.parseInt(String(req.query.imported || ""), 10);
     const skipped = Number.parseInt(String(req.query.skipped || ""), 10);
     const rows = (await query(`
-      select m.id, m.discipline, m.mrr_number, m.vendor_name, coalesce(po.po_no, m.po_number) as po_number,
+      select m.id, m.discipline, m.mrr_number, m.vendor_name, po.id as po_id, coalesce(po.po_no, m.po_number) as po_number,
              coalesce(m.status, 'ACTIVE') as status,
              m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number,
              m.scanned_pdf_pathname, m.notes
       from mrr_logs m
-      left join purchase_orders po on po.id = m.app_po_id
+      left join purchase_orders po on po.id = m.app_po_id and po.job_id = m.job_id
       where m.job_id = $1
         ${q ? "and (coalesce(m.mrr_number, '') ilike $2 or coalesce(m.vendor_name, '') ilike $2 or coalesce(po.po_no, m.po_number, '') ilike $2 or coalesce(m.material_description, '') ilike $2 or coalesce(m.received_by, '') ilike $2)" : ""}
       order by nullif(substring(coalesce(m.mrr_number, '') from '([0-9]+)$'), '')::bigint desc nulls last, m.id desc
@@ -126,7 +126,7 @@ export function registerMrrScanRoutes(app, dependencies) {
       <td class="mrr-number">${esc(row.mrr_number)}${isReversed ? `<div style="margin-top:4px;"><span class="chip">Reversed</span></div>` : ""}</td>
       <td>${esc(row.discipline)}</td>
       <td>${esc(row.vendor_name)}</td>
-      <td>${esc(row.po_number)}</td>
+      <td>${row.po_number ? `<a href="${escAttr(Number(row.po_id) > 0 ? `/po/${Number(row.po_id)}/edit` : `/po?po_no=${encodeURIComponent(row.po_number)}`)}">${esc(row.po_number)}</a>` : ""}</td>
       <td>${esc(row.pick_ticket)}</td>
       <td>${esc(formatShortDateTime(row.received_date))}</td>
       <td>${esc(row.received_by)}</td>
