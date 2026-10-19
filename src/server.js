@@ -19833,7 +19833,7 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
              pl.qty_ordered,
              pl.unit_price,
              coalesce(pl.size_1, '') as size_1, coalesce(pl.size_2, '') as size_2, coalesce(pl.thk_1, '') as thk_1, coalesce(pl.thk_2, '') as thk_2,
-             coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id), 0) as received_qty
+             coalesce((select sum(r.qty_received) from receipts r where r.po_line_id = pl.id and r.job_id = pl.job_id), 0) as received_qty
       from po_lines pl
       join material_items mi on mi.id = pl.material_item_id
       where pl.po_id = $1
@@ -19848,8 +19848,13 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
   const vendorOptions = vendors.rows.map((vendor) => `<option value="${vendor.id}" ${vendor.id === record.vendor_id ? "selected" : ""}>${esc(vendor.name)}</option>`).join("");
   const poLineRows = poLines.rows.map((line) => {
     const receivedQty = Number(line.received_qty || 0);
+    const orderedQty = Number(line.qty_ordered || 0);
+    const remainingQty = Math.max(orderedQty - receivedQty, 0);
+    const receivingStatus = receivedQty > 0
+      ? (remainingQty === 0 ? 'Fully Received' : 'Partially Received')
+      : 'Not Received';
     const deleteAction = receivedQty > 0
-      ? `<span class="chip">Received</span>`
+      ? `<span class="chip">${receivingStatus}</span>`
       : `<form method="post" action="/po-line/${line.id}/delete" onsubmit="return confirm('Delete PO line ${escAttr(String(line.po_line || line.item_code || line.id))}?');"><button class="btn btn-danger" type="submit">Delete Line</button></form>`;
     return `<tr>
     <td>${esc(line.po_line || "")}</td>
@@ -19859,7 +19864,9 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
     <td>${esc(formatPlainNumberDisplay(line.size_2))}</td>
     <td>${esc(formatPlainNumberDisplay(line.thk_1))}</td>
     <td>${esc(formatPlainNumberDisplay(line.thk_2))}</td>
-      <td>${esc(formatQtyDisplay(line.qty_ordered))}</td>
+    <td>${esc(formatQtyDisplay(orderedQty))}</td>
+    <td>${esc(formatQtyDisplay(receivedQty))}</td>
+    <td>${esc(formatQtyDisplay(remainingQty))}</td>
     <td>${esc(formatPlainNumberDisplay(line.unit_price))}</td>
     <td><div class="actions"><a class="btn btn-secondary" href="/po-line/${line.id}/edit">Edit Line</a>${deleteAction}</div></td>
   </tr>`;
@@ -19889,7 +19896,7 @@ app.get("/po/:id/edit", requireAuth, requireJobContext, requirePermission("pos",
     </div>
     <div class="card scroll">
       <h3>PO Lines</h3>
-      <table><tr><th>PO Line</th><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty</th><th>Unit Price</th><th>Action</th></tr>${poLineRows || `<tr><td colspan="10" class="muted">No PO lines found.</td></tr>`}</table>
+      <table><tr><th>PO Line</th><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Qty Ordered</th><th>Qty Received</th><th>Qty Remaining</th><th>Unit Price</th><th>Action</th></tr>${poLineRows || `<tr><td colspan="12" class="muted">No PO lines found.</td></tr>`}</table>
     </div>
   `, req.user));
 });
