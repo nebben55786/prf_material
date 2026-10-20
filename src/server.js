@@ -19506,7 +19506,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     <div class="card">
       ${canPostReceipt ? "" : `<p class="muted">${esc(receiveBlockedMessage)}</p>`}
       ${canPostReceipt && !hasWarehouseLocations ? `<div class="error"><strong>No warehouse locations are configured for this job.</strong> Add a warehouse location before entering receipt quantities.</div>` : ""}
-      <form method="post" action="/po/${record.id}/receive" class="stack" id="po-receive-form-${record.id}">
+      <form method="post" action="/po/${record.id}/receive" class="stack" id="po-receive-form-${record.id}" data-receiving-piece-count>
         <div class="grid">
           <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" required /></div>
           <div><label>Received Date</label><input name="received_date" type="date" value="${esc(today)}" required /></div>
@@ -19532,10 +19532,12 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
             ${lineRows || `<tr><td colspan="15" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
+        <div style="text-align:right;"><strong>Total Pieces Received: <output data-receiving-piece-total aria-live="polite" aria-atomic="true">0</output></strong></div>
         <div><label>MRR Notes</label><textarea name="mrr_notes"></textarea></div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions">${canPostReceipt ? `<button type="submit" ${hasWarehouseLocations ? "" : "disabled"}>Post Receipt</button>` : `<span class="chip">Fully Received</span>`}<a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
+      <script src="/public/receiving-piece-count.js" defer></script>
       <script>
         function setPoReceiptQuantities(poId, fill) {
           const form = document.getElementById("po-receive-form-" + poId);
@@ -19543,6 +19545,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           form.querySelectorAll('input[name^="qty_received_"]').forEach(function(input) {
             input.value = fill ? input.dataset.remaining : "0";
           });
+          form.dispatchEvent(new Event("input", {bubbles:true}));
         }
         function updatePoLineQuantityState(lineId) {
           const warehouse = document.getElementById("po-line-warehouse-" + lineId);
@@ -20223,7 +20226,7 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
     </div>
     <div class="card">
       <h3>${po ? "Receive Against PO" : "Receive Without PO"}</h3>
-      <form method="post" action="/receive/${mrr.id}" class="stack">
+      <form method="post" action="/receive/${mrr.id}" class="stack" data-receiving-piece-count>
         <input type="hidden" name="return_to" value="/receive/${mrr.id}?back=${escAttr(encodeURIComponent(backHref))}" />
         <input type="hidden" name="mode" value="${po ? "po" : "manual"}" />
         ${po ? `
@@ -20241,9 +20244,11 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
           <div><label>Location</label><select id="receive-location-${mrr.id}" name="location" data-placeholder="Select location" required onchange="updateReceiveQuantityState()"><option value="">Select location</option></select></div>
           <div><label>Short Handling</label><select name="short_action"><option value="not_on_load" selected>Not on this load</option><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
         </div>
+        <div style="text-align:right;"><strong>Total Pieces Received: <output data-receiving-piece-total aria-live="polite" aria-atomic="true">0</output></strong></div>
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions"><button type="submit" ${canReceiveOnExistingMrr ? "" : "disabled"}>${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="${escAttr(backHref)}">Back</a></div>
       </form>
+      <script src="/public/receiving-piece-count.js" defer></script>
       <script>
         function updateReceiveQuantityState() {
           const warehouse = document.getElementById("receive-warehouse-${mrr.id}");
