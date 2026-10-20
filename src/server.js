@@ -19452,7 +19452,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
   const receiveBlockedMessage = ["CLOSED", "CANCELLED"].includes(receiveStatusKey)
     ? `This PO is ${record.status || "closed"}. No additional receipts can be posted against it.`
     : "This PO is fully received. No additional receipts can be posted against it.";
-  const lineRows = visiblePoLines.map((line) => {
+  const lineRows = poLines.map((line) => {
     const lineId = Number(line.id);
     const remainingQty = Math.max(Number(line.qty_ordered || 0) - Number(line.qty_accounted || 0), 0);
     const locked = remainingQty <= 0;
@@ -19468,7 +19468,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     const locationCell = locked
       ? `<span>${esc(line.last_location || "")}</span>`
       : `<select id="po-line-location-${lineId}" name="location_${lineId}" tabindex="-1" data-placeholder="Select location" onchange='updatePoLineQuantityState("${lineId}")'><option value="">Select location</option></select>`;
-    return `<tr>
+    return `<tr data-po-receive-line data-fully-received="${locked}" ${hideFullyReceived && locked ? "hidden" : ""}>
       <td style="width:1%; white-space:nowrap;">${esc(line.po_line || "")}</td>
       <td style="width:1%; white-space:nowrap;">${esc(line.item_code)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_ordered))}</td>
@@ -19522,12 +19522,10 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
           <div><label>Short Qty Default</label><select name="short_action_default" onchange='document.querySelectorAll("select[name^=short_action_]").forEach(function(select){ select.value = this.value; }, this);'><option value="not_on_load" selected>Not on this load</option><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
         </div>
         <div class="actions">
-          ${hideFullyReceived
-            ? `<a class="btn btn-secondary" href="/po/${record.id}/receive">Show Fully Received Items</a>`
-            : `<a class="btn btn-secondary" href="/po/${record.id}/receive?hide_received=1">Hide Fully Received Items</a>`}
+          <button class="btn btn-secondary" type="button" data-toggle-received-items aria-pressed="${hideFullyReceived}">${hideFullyReceived ? 'Show Fully Received Items' : 'Hide Fully Received Items'}</button>
           <button class="btn btn-secondary" type="button" onclick='setPoReceiptQuantities("${record.id}", false)' ${canPostReceipt ? "" : "disabled"}>Clear All Quantities</button>
           <button class="btn btn-secondary" type="button" onclick='setPoReceiptQuantities("${record.id}", true)' ${canPostReceipt ? "" : "disabled"}>Fill All Quantities</button>
-          <span class="muted">${esc(String(visiblePoLines.length))} line(s) shown</span>
+          <span class="muted" data-receiving-line-count>${esc(String(visiblePoLines.length))} line(s) shown</span>
         </div>
         <div class="scroll">
           <table>
@@ -19540,6 +19538,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions">${canPostReceipt ? `<button type="submit" ${hasWarehouseLocations ? "" : "disabled"}>Post Receipt</button>` : `<span class="chip">Fully Received</span>`}<a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
+      <script src="/public/receiving-visibility.js" defer></script>
       <script src="/public/receiving-piece-count.js" defer></script>
       <script>
         function setPoReceiptQuantities(poId, fill) {
