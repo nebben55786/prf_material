@@ -19404,7 +19404,10 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       case when coalesce(sl.po_line, '') = '' then 1 else 0 end,
       case when coalesce(sl.po_line, '') ~ '^[0-9]+$' then lpad(sl.po_line, 20, '0') else lower(coalesce(sl.po_line, '')) end,
       sl.id
-  `, [poId, jobId])).rows;
+  `, [poId, jobId])).rows.sort((a, b) =>
+    String(a.item_code || '').localeCompare(String(b.item_code || ''), undefined, {numeric:true, sensitivity:'base'})
+    || String(a.po_line || '').localeCompare(String(b.po_line || ''), undefined, {numeric:true, sensitivity:'base'})
+    || Number(a.id) - Number(b.id));
   const history = (await query(`
     select
       r.received_at,
@@ -19468,16 +19471,16 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
     return `<tr>
       <td style="width:1%; white-space:nowrap;">${esc(line.po_line || "")}</td>
       <td style="width:1%; white-space:nowrap;">${esc(line.item_code)}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_ordered))}</td>
+      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(remainingQty))}</td>
+      <td style="width:84px; white-space:nowrap;">${qtyCell}</td>
       <td style="width:auto; min-width:320px;">${esc(line.description)}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatPlainNumberDisplay(line.size_1))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatPlainNumberDisplay(line.size_2))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatPlainNumberDisplay(line.thk_1))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatPlainNumberDisplay(line.thk_2))}</td>
-    <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_ordered))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_received))}</td>
       <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(line.qty_short_osd || 0))}</td>
-      <td style="width:1%; white-space:nowrap;">${esc(formatQtyDisplay(remainingQty))}</td>
-      <td style="width:84px; white-space:nowrap;">${qtyCell}</td>
       <td style="width:1%; white-space:nowrap;">${shortCell}</td>
       <td>${warehouseCell}</td>
       <td>${locationCell}</td>
@@ -19528,7 +19531,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         </div>
         <div class="scroll">
           <table>
-            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Short OS&amp;D</th><th style="width:1%; white-space:nowrap;">Open</th><th style="width:84px; white-space:nowrap;">Qty</th><th style="width:1%; white-space:nowrap;">Short Handling</th><th>Warehouse</th><th>Location</th></tr>
+            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Open</th><th style="width:84px; white-space:nowrap;">Qty</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Short OS&amp;D</th><th style="width:1%; white-space:nowrap;">Short Handling</th><th>Warehouse</th><th>Location</th></tr>
             ${lineRows || `<tr><td colspan="15" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
