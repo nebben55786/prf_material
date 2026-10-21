@@ -146,3 +146,8 @@ On **New Material Request**, choose **Select Delivery Location** above **Select 
 ### Request and load numbers
 
 New requests use the existing delivery area's prefix with PT and a four-digit sequence, such as GR-PT-0001. Each load appends a three-digit sequence to its request: GR-PT-0001-001, GR-PT-0001-002, and so on. Existing request and load numbers are retained. Previously allocated standalone PT load numbers are skipped when allocating new request numbers.
+
+
+### Concurrent MRR entry
+
+Opening a new manual MRR or Receive PO form reserves its displayed MRR number in the database. All automatic MRR creation uses the same per-job counter, so separate users and tabs receive different numbers before posting. Saved forms retain their reserved number. Abandoned forms can leave gaps; reserved numbers are not reused. Older forms opened before this update are assigned a fresh number when posted. Existing MRR numbers remain unchanged.

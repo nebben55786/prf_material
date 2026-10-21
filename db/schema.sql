@@ -1007,3 +1007,10 @@ create table if not exists material_load_counters (
   primary key(job_id,prefix)
 );
 create unique index if not exists material_requisition_loads_job_number_idx on material_requisition_loads(job_id,load_no);
+
+create table if not exists mrr_number_counters (
+  job_id bigint primary key references jobs(id),
+  prefix text not null,
+  number_width integer not null check(number_width>0),
+  last_number bigint not null check(last_number>0)
+);

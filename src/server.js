@@ -1,3 +1,4 @@
+import { reserveMrrNumber, useReservedMrrNumber } from "./mrr-numbers.js";
 import { registerRequisitionLoadRoutes, assertNoRequisitionLoads, outstandingReservationSql } from "./requisition-loads.js";
 import { getDeliveryLocation, deliveryRequestPrefix, nextDeliveryRequestNumber, registerDeliveryLocationRoutes } from "./delivery-locations.js";
 import { registerDataBackupRoute } from "./data-backup.js";
@@ -6162,23 +6163,22 @@ async function ensureWarehouseLocationExists(client, warehouseName, locationName
 }
 
 async function getNextMrrNumber(client = null, jobId = null) {
-  const runner = client || { query };
-  const normalizedJobId = normalizeJobIdValue(jobId);
-  const latest = (await runner.query(`
-    select mrr_number
-    from mrr_logs
-    where coalesce(mrr_number, '') <> '' and mrr_number ~ '\\d+$'
-      ${normalizedJobId ? "and job_id = $1::bigint" : ""}
-    order by ((regexp_match(mrr_number, '(\\d+)$'))[1])::bigint desc, id desc
-    limit 1
-  `, normalizedJobId ? [normalizedJobId] : [])).rows[0];
-  const current = String(latest?.mrr_number || "").trim();
-  if (!current) return "MRR-000001";
-  const match = current.match(/^(.*?)(\d+)$/);
-  if (!match) return "MRR-000001";
-  const prefix = match[1];
-  const nextValue = String(Number(match[2]) + 1).padStart(match[2].length, "0");
-  return `${prefix}${nextValue}`;
+  return reserveMrrNumber(client || { query }, normalizeJobIdValue(jobId));
+}
+
+function mrrNumberFormToken(req, number) {
+  return signSession({scope:'mrr_number',job_id:currentJobId(req),user_id:req.user.id,mrr_number:number});
+}
+
+async function mrrNumberForSubmission(client, req) {
+  const number=String(req.body.mrr_number || '').trim();
+  const token=readSession(String(req.body.mrr_number_token || ''));
+  if (token?.scope==='mrr_number' && Number(token.job_id)===Number(currentJobId(req))
+      && Number(token.user_id)===Number(req.user.id) && token.mrr_number===number) {
+    return useReservedMrrNumber(client,currentJobId(req),number);
+  }
+  // Forms opened before this update did not reserve a number. Allocate safely on save.
+  return getNextMrrNumber(client,currentJobId(req));
 }
 
 async function getNextFmrNumber(client = null, jobId = null) {
@@ -19327,8 +19327,9 @@ app.post("/po/add", requireAuth, requireJobContext, requirePermission("pos", "ed
   res.redirect("/po");
 });
 
-app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), async (req, res) => {
+app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), asyncHandler(async (req, res) => {
   const poId = Number(req.params.id);
+  res.setHeader("Cache-Control", "private, no-store");
   const jobId = currentJobId(req);
   const hideFullyReceived = String(req.query.hide_received || "") === "1";
   const [po, warehouseOptions, locationMap, nextMrrNumber, receivedByOptions] = await Promise.all([
@@ -19511,7 +19512,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       ${canPostReceipt && !hasWarehouseLocations ? `<div class="error"><strong>No warehouse locations are configured for this job.</strong> Add a warehouse location before entering receipt quantities.</div>` : ""}
       <form method="post" action="/po/${record.id}/receive" class="stack" id="po-receive-form-${record.id}" data-receiving-piece-count>
         <div class="grid">
-          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" required /></div>
+          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly required /><input type="hidden" name="mrr_number_token" value="${escAttr(mrrNumberFormToken(req,nextMrrNumber))}" /></div>
           <div><label>Received Date</label><input name="received_date" type="date" value="${esc(today)}" required /></div>
           <div><label>Received By</label><input name="received_by" list="${receivedByListId}" placeholder="Type received by" required /><datalist id="${receivedByListId}">${receivedByOptionsHtml}</datalist></div>
           <div><label>Load Number</label><input name="load_number" /></div>
@@ -19633,7 +19634,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       <table><tr><th>Received</th><th>Item</th><th>Description</th><th>Qty</th><th>Warehouse</th><th>Location</th><th>OS&D</th><th>Notes</th></tr>${historyRows || `<tr><td colspan="8" class="muted">No receipts posted yet for this PO.</td></tr>`}</table>
     </div>
   `, req.user));
-});
+}));
 
 app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("receiving", "edit"), asyncHandler(async (req, res) => {
   const poId = Number(req.params.id);
@@ -19653,7 +19654,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
         ? "This PO is fully received. No additional receipts can be posted against it."
         : `This PO is ${po.status}. No additional receipts can be posted against it.`);
     }
-    const mrrNumber = String(req.body.mrr_number || "").trim();
+    const mrrNumber = await mrrNumberForSubmission(client, req);
     const receivedBy = String(req.body.received_by || "").trim();
     const receivedDate = String(req.body.received_date || "").trim();
     const loadNumber = String(req.body.load_number || "").trim();
@@ -19661,16 +19662,6 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
     if (!mrrNumber) throw new Error("MRR Number is required.");
     if (!receivedBy) throw new Error("Received By is required.");
     if (!receivedDate) throw new Error("Received Date is required.");
-    const existingMrr = (await client.query(`
-      select id
-      from mrr_logs
-      where job_id = $1
-        and lower(trim(mrr_number)) = lower(trim($2::text))
-      limit 1
-    `, [jobId, mrrNumber])).rows[0];
-    if (existingMrr) {
-      throw new Error(`MRR Number ${mrrNumber} has already been used. Choose another MRR number before posting.`);
-    }
     const lineIds = Array.isArray(req.body.po_line_ids) ? req.body.po_line_ids : [req.body.po_line_ids].filter(Boolean);
     const openTotals = (await client.query(`
       with scoped_lines as (
@@ -21127,7 +21118,8 @@ app.post("/material-logs/mrr/:id/reverse", requireAuth, requireJobContext, requi
   res.redirect("/material-logs/mrr");
 }));
 
-app.get("/material-logs/mrr/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+app.get("/material-logs/mrr/new", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
   const jobId = currentJobId(req);
   const [disciplines, vendors, pos, receivers, nextMrrNumber, appPos] = await Promise.all([
     getMaterialLogLookupOptions("discipline", jobId),
@@ -21148,7 +21140,7 @@ app.get("/material-logs/mrr/new", requireAuth, requireJobContext, requirePermiss
     <div class="card">
       <form method="post" action="/material-logs/mrr/add" class="stack">
         <div class="grid">
-          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly /></div>
+          <div><label>MRR Number</label><input name="mrr_number" value="${esc(nextMrrNumber)}" readonly /><input type="hidden" name="mrr_number_token" value="${escAttr(mrrNumberFormToken(req,nextMrrNumber))}" /></div>
           <div><label>Discipline</label><select name="discipline">${optionList(disciplines, "Select discipline")}</select></div>
           <div><label>Vendor</label><div class="inline-field"><select name="vendor_name">${optionList(vendors, "Select vendor")}</select><a class="btn btn-secondary" href="/vendors/new">Add Vendor</a></div></div>
           <div><label>App PO</label><div class="inline-field"><select name="app_po_id">${appPoOptions}</select><a class="btn btn-secondary" href="/po/new">Add PO</a></div></div>
@@ -21166,7 +21158,7 @@ app.get("/material-logs/mrr/new", requireAuth, requireJobContext, requirePermiss
       </form>
     </div>
   `, req.user));
-});
+}));
 
 app.get("/material-logs/fmr", requireAuth, requireJobContext, requirePermission("material_logs", "view"), async (req, res) => {
   const jobId = currentJobId(req);
@@ -22524,10 +22516,10 @@ app.post("/material-logs/receiving/add", requireAuth, requireJobContext, require
   res.redirect("/material-logs");
 });
 
-app.post("/material-logs/mrr/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
+app.post("/material-logs/mrr/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const mrrNumber = await getNextMrrNumber(client, jobId);
+    const mrrNumber = await mrrNumberForSubmission(client, req);
     const appPoId = req.body.app_po_id ? Number(req.body.app_po_id) : null;
     const linkedPo = appPoId
       ? (await client.query("select id, po_no from purchase_orders where id = $1 and job_id = $2", [appPoId, jobId])).rows[0]
@@ -22563,7 +22555,7 @@ app.post("/material-logs/mrr/add", requireAuth, requireJobContext, requirePermis
     await auditLog(client, req.user.id, "create", "mrr_log", result.rows[0].id, mrrNumber);
   });
   res.redirect("/material-logs/mrr");
-});
+}));
 
 app.post("/material-logs/fmr/add", requireAuth, requireJobContext, requirePermission("material_logs", "edit"), async (req, res) => {
   const jobId = normalizeJobIdValue(currentJobId(req));
