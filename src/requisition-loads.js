@@ -36,6 +36,19 @@ async function createRequisitionLoad(db, { id, jobId, userId, trailer, body }) {
   await db.query(`update material_requisition_lines mrl set qty_issued=coalesce((select sum(t.qty_issued) from material_issue_transactions t where t.requisition_line_id=mrl.id),0) where requisition_id=$1 and job_id=$2`, [id, jobId]);
   return load;
 }
+async function getEditableLoadLines(db, h, l) {
+  return (await db.query(`select mrl.id, mrl.qty_requested, bl.item_code, bl.description, bl.uom,
+    coalesce((select qty from material_requisition_load_lines where load_id=$2 and requisition_line_id=mrl.id),0) as qty,
+    mrl.qty_requested-coalesce((select sum(ll.qty) from material_requisition_load_lines ll
+      join material_requisition_loads other on other.id=ll.load_id
+      where ll.requisition_line_id=mrl.id and other.id<>$2 and other.status<>'CANCELLED'),0) as max_qty
+    from material_requisition_lines mrl join bom_lines bl on bl.id=mrl.bom_line_id
+    where mrl.requisition_id=$1 order by bl.item_code, mrl.id`, [h.id,l.id])).rows;
+}
+function assertEditableLoad(h, l) {
+  if (!["PLANNED", "LOADED"].includes(l.status) || !["ACCEPTED", "VERIFIED", "FLAGGED", "LOADED"].includes(h.status) || l.signed_at)
+    throw loadError("Only unissued, unsigned loads can be edited.");
+}
 function registerRequisitionLoadRoutes(app, d) {
   const { query, withTransaction, requireAuth, requireJobContext, requirePermission, asyncHandler, currentJobId, layout, esc, canAccess, auditLog, upload, buildPickTicketPdf, renderRequisitionSignPage, canSignRequisition, signedCopyFilenameForRequisition, getCurrentOnHandRows, buildInventoryItemKey, buildPickLocationAllocations, recomputeBomIssuedSummaries, rebuildUnallocatedBom, getAvailableInventoryByItemMap } = d;
   const base = "/requisitions/:id/loads", url = (req) => `/requisitions/${req.params.id}/loads/${req.params.loadId}`;
@@ -101,7 +114,43 @@ function registerRequisitionLoadRoutes(app, d) {
   });
   get("/:loadId", async (req, res) => {
     const { h, l } = await load({ query }, req), lines = await getLoadLines({ query }, l.id), path = url(req), active = !["ISSUED", "CANCELLED"].includes(l.status) && !["CANCELLED", "CLOSED"].includes(h.status), edit = canAccess(req.user, "requisitions", "issue");
-    res.send(layout(l.load_no, `<h1>Load ${esc(l.load_no)}</h1><p><a href="/requisitions/${h.id}">Original request ${esc(h.requisition_no)}</a> | Trailer: ${esc(l.trailer_number)} | Status: ${esc(l.status)}</p><div class="card"><div class="actions"><a class="btn btn-secondary" href="${path}/pick-ticket.pdf" target="_blank">Pick Ticket PDF</a>${edit && l.status !== "CANCELLED" && h.status !== "CANCELLED" ? `<a class="btn" href="${path}/sign">Sign-Off</a>` : ""}</div>${edit && active ? `<form method="post" action="${path}/load"><label>Trailer Number</label><input name="trailer_number" maxlength="120" value="${esc(l.trailer_number)}" required><button>Save Loaded</button></form><form method="post" action="${path}/issue"><button>Issue Load To Field</button></form><form method="post" action="${path}/cancel" onsubmit="return confirm('Cancel this load and release its quantities for another load?')"><button class="btn btn-secondary">Cancel Load</button></form>` : ""}</div><div class="card scroll"><table><tr><th>Item</th><th>Description</th><th>Load Qty</th><th>Loaded</th><th>Issued</th><th>Remaining to Issue</th><th>UOM</th></tr>${lines.map((r) => `<tr><td>${esc(r.item_code)}</td><td>${esc(r.description)}</td><td>${esc(r.qty)}</td><td>${esc(l.status==='LOADED'?Math.max(Number(r.qty)-Number(r.issued_qty),0):0)}</td><td>${esc(r.issued_qty)}</td><td>${esc(l.status==='CANCELLED'?0:Math.max(Number(r.qty)-Number(r.issued_qty),0))}</td><td>${esc(r.uom)}</td></tr>`).join("")}</table></div><div class="card"><h3>Load Sign-Off</h3><p>Signed by: ${esc(l.signed_by_name || "Not signed")} ${esc(l.signed_at || "")}</p>${l.signed_signature_data ? `<img alt="Load signature" src="${esc(l.signed_signature_data)}" style="max-width:100%;max-height:180px">` : ""}${l.signed_copy_filename ? `<a href="${path}/signed-copy" target="_blank">${esc(l.signed_copy_filename)}</a>` : ""}</div>`, req.user));
+    res.send(layout(l.load_no, `<h1>Load ${esc(l.load_no)}</h1><p><a href="/requisitions/${h.id}">Original request ${esc(h.requisition_no)}</a> | Trailer: ${esc(l.trailer_number)} | Status: ${esc(l.status)}</p><div class="card"><div class="actions">${edit && active ? `<a class="btn btn-primary" href="${path}/edit">Edit Load</a>` : ""}<a class="btn btn-secondary" href="${path}/pick-ticket.pdf" target="_blank">Pick Ticket PDF</a>${edit && l.status !== "CANCELLED" && h.status !== "CANCELLED" ? `<a class="btn" href="${path}/sign">Sign-Off</a>` : ""}</div>${edit && active ? `<form method="post" action="${path}/load"><label>Trailer Number</label><input name="trailer_number" maxlength="120" value="${esc(l.trailer_number)}" required><button>Save Loaded</button></form><form method="post" action="${path}/issue"><button>Issue Load To Field</button></form><form method="post" action="${path}/cancel" onsubmit="return confirm('Cancel this load and release its quantities for another load?')"><button class="btn btn-secondary">Cancel Load</button></form>` : ""}</div><div class="card scroll"><table><tr><th>Item</th><th>Description</th><th>Load Qty</th><th>Loaded</th><th>Issued</th><th>Remaining to Issue</th><th>UOM</th></tr>${lines.map((r) => `<tr><td>${esc(r.item_code)}</td><td>${esc(r.description)}</td><td>${esc(r.qty)}</td><td>${esc(l.status==='LOADED'?Math.max(Number(r.qty)-Number(r.issued_qty),0):0)}</td><td>${esc(r.issued_qty)}</td><td>${esc(l.status==='CANCELLED'?0:Math.max(Number(r.qty)-Number(r.issued_qty),0))}</td><td>${esc(r.uom)}</td></tr>`).join("")}</table></div><div class="card"><h3>Load Sign-Off</h3><p>Signed by: ${esc(l.signed_by_name || "Not signed")} ${esc(l.signed_at || "")}</p>${l.signed_signature_data ? `<img alt="Load signature" src="${esc(l.signed_signature_data)}" style="max-width:100%;max-height:180px">` : ""}${l.signed_copy_filename ? `<a href="${path}/signed-copy" target="_blank">${esc(l.signed_copy_filename)}</a>` : ""}</div>`, req.user));
+  });
+  get("/:loadId/edit", async (req, res) => {
+    if (!canAccess(req.user, "requisitions", "issue")) throw loadError("Load editing permission required.");
+    const {h,l} = await load({query},req);
+    assertEditableLoad(h,l);
+    const lines = await getEditableLoadLines({query},h,l), path=url(req);
+    res.send(layout("Edit Load", `<h1>Edit Load ${esc(l.load_no)}</h1><div class="card">
+      <p>Add parts from the original request or change quantities. Available for this load includes its current quantity and excludes quantities assigned to other loads. Enter 0 to remove a part. Saving returns the load to Planned so loading can be confirmed again.</p>
+      <form method="post" action="${path}/edit">
+        <label>Trailer Number</label><input name="trailer_number" maxlength="120" value="${esc(l.trailer_number)}" required>
+        <div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Requested</th><th>Available for This Load</th><th>Load Qty</th><th>UOM</th></tr>
+        ${lines.filter(r=>Number(r.max_qty)>0 || Number(r.qty)>0).map(r=>`<tr><td>${esc(r.item_code)}</td><td>${esc(r.description)}</td><td>${esc(r.qty_requested)}</td><td>${esc(r.max_qty)}</td><td><input type="number" name="qty_${r.id}" min="0" max="${esc(r.max_qty)}" step="0.0001" value="${esc(r.qty)}" aria-label="Load quantity for ${esc(r.item_code)}"></td><td>${esc(r.uom)}</td></tr>`).join("")}
+        </table></div><div class="actions"><button>Save Load</button><a class="btn btn-secondary" href="${path}">Back</a></div>
+      </form></div>`,req.user));
+  });
+  post("/:loadId/edit", async (req,res) => {
+    await withTransaction(async db => {
+      const {h,l}=await load(db,req,true);
+      assertEditableLoad(h,l);
+      if ((await db.query("select 1 from material_issue_transactions where load_id=$1 limit 1",[l.id])).rows.length) throw loadError("Issued loads cannot be edited.");
+      const trailer=String(req.body.trailer_number || "").trim();
+      if (!trailer || trailer.length>120) throw loadError("Enter a trailer number (maximum 120 characters).");
+      const lines=await getEditableLoadLines(db,h,l), selected=[];
+      for (const row of lines) {
+        const qty=Number(String(req.body["qty_"+row.id] ?? "0").trim());
+        if (!Number.isFinite(qty) || qty<0 || Math.abs(qty*1e4-Math.round(qty*1e4))>1e-5 || qty>Number(row.max_qty)+1e-7)
+          throw loadError("Load quantities must be nonnegative, have at most four decimals, and cannot exceed the quantity available for this load.");
+        if(qty>0) selected.push([row.id,qty]);
+      }
+      if(!selected.length) throw loadError("Keep at least one part on the load, or use Cancel Load.");
+      await db.query("delete from material_requisition_load_lines where load_id=$1",[l.id]);
+      for(const [id,qty] of selected) await db.query("insert into material_requisition_load_lines(load_id,requisition_line_id,qty) values($1,$2,$3)",[l.id,id,qty]);
+      await db.query("update material_requisition_loads set trailer_number=$2,status='PLANNED',loaded_at=null where id=$1",[l.id,trailer]);
+      await auditLog(db,req.user.id,"edit","material_requisition_load",l.id,l.load_no);
+    });
+    res.redirect(url(req));
   });
   post("/:loadId/load", async (req, res) => {
     await withTransaction(async (db) => {

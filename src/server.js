@@ -9293,6 +9293,48 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(adminE
     params: [`%${itemFilter}%`],
     orderSql: "inventory_by_location.warehouse, inventory_by_location.location, inventory_by_location.item_code"
   }) : [];
+  const bomRows = itemFilter ? (await query(`
+    select bh.id as bom_id, bh.bom_no, bh.bom_name, bh.description as bom_description,
+      bh.status as bom_status, bl.line_no, bl.item_code, bl.description, bl.uom,
+      bl.size_1, bl.size_2, bl.qty_required, bl.qty_issued
+    from bom_lines bl join bom_headers bh on bh.id = bl.bom_id
+    where bh.job_id = $2 and (bl.item_code ilike $1 or bl.description ilike $1)
+    order by lower(coalesce(nullif(bh.bom_name, ''), bh.bom_no)), bh.bom_no, bl.line_no, bl.id
+  `, [`%${itemFilter}%`, jobId])).rows : [];
+  const bomMarkup = bomRows.map(row => `<tr>
+    <td>${esc(row.item_code)}</td><td>${esc(row.description || "")}</td>
+    <td><a href="/bom/${row.bom_id}">${esc(row.bom_name || row.bom_description || row.bom_no)}</a></td>
+    <td>${esc(row.bom_no)}</td><td>${esc(row.bom_status || "")}</td><td>${esc(row.line_no || "")}</td>
+    <td>${esc(formatCombinedSize(row.size_1, row.size_2))}</td>
+    <td>${esc(formatQtyDisplay(row.qty_required))}</td><td>${esc(formatQtyDisplay(row.qty_issued))}</td><td>${esc(row.uom || "")}</td>
+  </tr>`).join("");
+  const reservationRows = itemFilter ? (await query(`
+    select bl.item_code, bl.uom, mr.id, mr.requisition_no, mr.status, mr.issued_to,
+      sum(${outstandingReservationSql}) as qty_reserved
+    from material_requisition_lines mrl
+    join material_requisitions mr on mr.id = mrl.requisition_id
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    where mr.job_id = $2 and (bl.item_code ilike $1 or bl.description ilike $1)
+      and mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
+    group by bl.item_code, bl.uom, mr.id
+    having sum(${outstandingReservationSql}) > 0
+    order by bl.item_code, mr.requisition_no, mr.id, bl.uom
+  `, [`%${itemFilter}%`, jobId])).rows : [];
+  const reservationTotals = new Map();
+  for (const row of reservationRows) {
+    const key = JSON.stringify([row.item_code, row.uom]);
+    const total = reservationTotals.get(key) || { item_code: row.item_code, uom: row.uom, qty_reserved: 0 };
+    total.qty_reserved += Number(row.qty_reserved || 0);
+    reservationTotals.set(key, total);
+  }
+  const reservationSummaryMarkup = [...reservationTotals.values()].map(row => `<tr>
+    <td>${esc(row.item_code)}</td><td><a href="/requisitions/reservations?item_code=${encodeURIComponent(row.item_code)}" target="_blank" rel="noopener">${esc(formatQtyDisplay(row.qty_reserved))}</a></td><td>${esc(row.uom || "")}</td>
+  </tr>`).join("");
+  const reservationMarkup = reservationRows.map(row => `<tr>
+    <td>${esc(row.item_code)}</td><td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
+    <td>${esc(row.status)}</td><td>${esc(row.issued_to || "")}</td>
+    <td>${esc(formatQtyDisplay(row.qty_reserved))}</td><td>${esc(row.uom || "")}</td>
+  </tr>`).join("");
   const currentRowMarkup = currentRows.map((row) => `<tr>
     <td>${esc(row.item_code)}</td>
     <td>${esc(row.description)}</td>
@@ -9335,8 +9377,20 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(adminE
     </div>
     ${itemFilter ? `
       <div class="card scroll">
+        <h3 style="margin-top:0;">Matching BOM Lines</h3>
+        <p class="muted">BOM lines in the current job matching this item code or description, including parts that have not been received. Required quantities show BOM demand.</p>
+        <table><tr><th>Item</th><th>Description</th><th>BOM Name</th><th>BOM #</th><th>Status</th><th>Line</th><th>Size</th><th>Required Qty</th><th>Issued Qty</th><th>UOM</th></tr>${bomMarkup || `<tr><td colspan="10" class="muted">No BOM lines match that filter.</td></tr>`}</table>
+      </div>
+      <div class="card scroll">
         <h3 style="margin-top:0;">Current Inventory Rows</h3>
         <table><tr><th>Item</th><th>Description</th><th>Warehouse</th><th>Location</th><th>Qty On Hand</th><th>Qty OS&D</th></tr>${currentRowMarkup || `<tr><td colspan="6" class="muted">No current inventory rows match that filter.</td></tr>`}</table>
+      </div>
+      <div class="card scroll">
+        <h3 style="margin-top:0;">Reserved Quantities</h3>
+        <p class="muted">Reservations are held across the job, rather than assigned to a warehouse/location. They reduce availability for new requests without reducing on-hand quantities. Issued material is excluded.</p>
+        <table><tr><th>Item</th><th>Reserved Qty</th><th>UOM</th></tr>${reservationSummaryMarkup || `<tr><td colspan="3" class="muted">No active reservations match that filter.</td></tr>`}</table>
+        <h4>Requests Holding Material</h4>
+        <table><tr><th>Item</th><th>Request</th><th>Status</th><th>Issued To</th><th>Reserved Qty</th><th>UOM</th></tr>${reservationMarkup || `<tr><td colspan="6" class="muted">No active requests are reserving these items.</td></tr>`}</table>
       </div>
       <div class="card scroll">
         <h3 style="margin-top:0;">Transaction History</h3>
@@ -12565,6 +12619,41 @@ app.get("/min-max/inventory", requireAuth, requireJobContext, requirePermission(
   `, req.user));
 }));
 
+app.get("/requisitions/reservations", requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
+  const itemCode = String(req.query.item_code || "").trim();
+  const rows = (await query(`
+    select mr.id, mr.requisition_no, mr.status, mr.requested_by_name, mr.issued_to,
+      bh.bom_name, bh.bom_no, bl.uom,
+      sum(${outstandingReservationSql}) as qty_reserved
+    from material_requisition_lines mrl
+    join material_requisitions mr on mr.id = mrl.requisition_id
+    join bom_lines bl on bl.id = mrl.bom_line_id
+    join bom_headers bh on bh.id = mr.bom_id
+    where mr.job_id = $1 and bl.item_code = $2
+      and mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
+    group by mr.id, bh.bom_name, bh.bom_no, bl.uom
+    having sum(${outstandingReservationSql}) > 0
+    order by mr.requisition_no, mr.id, bl.uom
+  `, [currentJobId(req), itemCode])).rows;
+  res.set("Cache-Control", "private, no-store");
+  res.send(layout("Reserved Quantities", `
+    <h1>Reserved Quantities: ${esc(itemCode)}</h1>
+    <div class="card">
+      <p>These quantities are held by active requests and are unavailable for a new request. Issued quantities are excluded. Planned and loaded material stays reserved until issued.</p>
+      <p class="muted">This page opens separately so your unfinished request stays in its original tab.</p>
+      <div class="scroll"><table>
+        <thead><tr><th>Request</th><th>BOM</th><th>Status</th><th>Requested By</th><th>Issued To</th><th>Reserved Qty</th><th>UOM</th></tr></thead>
+        <tbody>${rows.map(row => `<tr>
+          <td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
+          <td>${esc(row.bom_name || row.bom_no)}</td><td>${esc(row.status)}</td>
+          <td>${esc(row.requested_by_name || "")}</td><td>${esc(row.issued_to || "")}</td>
+          <td>${esc(formatQtyDisplay(row.qty_reserved))}</td><td>${esc(row.uom || "")}</td>
+        </tr>`).join("") || `<tr><td colspan="7" class="muted">No active requests are reserving this item.</td></tr>`}</tbody>
+      </table></div>
+    </div>
+  `, req.user));
+}));
+
 app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("requisitions", "create"), async (req, res) => {
   const jobId = currentJobId(req);
   const deliveryLocations = (await query("select * from delivery_locations where job_id=$1 and is_active=true order by lower(name),id", [jobId])).rows;
@@ -12649,7 +12738,8 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           bl.*,
           greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining,
           coalesce(inv.qty_on_hand, 0) as qty_on_hand,
-          ${qtyAvailableSql} as qty_available
+          ${qtyAvailableSql} as qty_available,
+          coalesce(alloc.qty_allocated_total, 0) as qty_reserved
         from bom_lines bl
         left join (
           ${getInventoryTotalsByItemSubquery(jobId)}
@@ -12696,6 +12786,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(formatQtyDisplay(line.qty_required))}</td>
       <td>${esc(formatQtyDisplay(line.qty_on_hand))}</td>
       <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
+      <td>${Number(line.qty_reserved) > 0 ? `<a href="/requisitions/reservations?item_code=${encodeURIComponent(line.item_code)}" target="_blank" rel="noopener" aria-label="${escAttr(`View requests reserving ${line.item_code} (opens in a new tab)`)}">${esc(formatQtyDisplay(line.qty_reserved))}</a>` : "0"}</td>
       <td>${esc(formatQtyDisplay(line.qty_available))}</td>
       <td><input class="requisition-request-qty-input" name="request_qty_${line.id}" value="${esc(requestQtyValue)}" /></td>
       <td>${esc(line.uom)}</td>
@@ -12779,6 +12870,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:72px" />
                 <col style="width:72px" />
                 <col style="width:84px" />
+                <col style="width:84px" />
                 <col style="width:90px" />
                 <col style="width:56px" />
                 <col style="width:110px" />
@@ -12797,6 +12889,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="wrap" data-resizable="true">Required Qty</th>
                 <th class="wrap" data-resizable="true">Recvd Qty</th>
                 <th class="wrap" data-resizable="true">Issued Qty</th>
+                <th class="wrap" data-resizable="true">Reserved Qty</th>
                 <th class="wrap" data-resizable="true">Available</th>
                 <th class="wrap" data-resizable="true">Request Qty</th>
                 <th class="nowrap" data-resizable="true">UOM</th>
@@ -12808,7 +12901,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               </tr>
               </thead>
               <tbody>
-              ${lineRows || `<tr><td colspan="16" class="muted">No BOM lines match the current filter.</td></tr>`}
+              ${lineRows || `<tr><td colspan="17" class="muted">No BOM lines match the current filter.</td></tr>`}
               </tbody>
             </table>
           </div>
