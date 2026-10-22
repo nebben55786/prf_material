@@ -1856,7 +1856,6 @@ function layout(title, body, user) {
     ? permissionSections
         .filter((section) => canAccess(user, section.key, "view"))
         .filter((section) => section.key !== "settings" && section.key !== "min_max")
-        .filter((section) => !(isWarehouseUser(user) && section.key === "yard"))
         .map((section) => `<a href="${isWarehouseUser(user) && section.key === "dashboard" ? "/yard" : section.href}">${section.label}</a>`)
         .concat(isAdminRole(user) ? `<a href="/notes">Notes</a>` : "")
         .concat(`<a href="/user">User</a>`)
