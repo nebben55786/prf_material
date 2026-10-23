@@ -14462,7 +14462,7 @@ app.get("/vendors", requireAuth, requireJobContext, requirePermission("vendors",
         <td>${(vendor.categories || "").split(",").filter(Boolean).map((value) => `<span class="chip">${esc(value)}</span>`).join(" ") || `<span class="muted">None</span>`}</td>
         <td>${esc(vendor.contact_count)}</td>
         <td>${vendor.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-        <td><div class="actions"><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit#contacts">Contacts</a></div></td>
+        <td style="width:1%; white-space:nowrap;"><div class="actions" style="flex-wrap:nowrap;"><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit">Edit</a><a class="btn btn-secondary" href="/vendors/${vendor.id}/edit#contacts">Contacts</a></div></td>
       </tr>`).join("");
   const categoryOptions = [`<option value="">All Categories</option>`]
     .concat(vendorCategories.map((value) => `<option value="${esc(value)}" ${category === value ? "selected" : ""}>${esc(value)}</option>`))
