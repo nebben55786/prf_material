@@ -1,3 +1,4 @@
+import { registerRequestCorrectionRoutes } from "./request-corrections.js";
 import { reserveMrrNumber, useReservedMrrNumber } from "./mrr-numbers.js";
 import { registerRequisitionLoadRoutes, assertNoRequisitionLoads, outstandingReservationSql } from "./requisition-loads.js";
 import { getDeliveryLocation, deliveryRequestPrefix, nextDeliveryRequestNumber, registerDeliveryLocationRoutes } from "./delivery-locations.js";
@@ -13191,6 +13192,8 @@ app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom
 
 registerRequisitionLoadRoutes(app, { query, withTransaction, requireAuth, requireJobContext, requirePermission, asyncHandler, currentJobId, layout, esc, canAccess, auditLog, upload, buildPickTicketPdf, renderRequisitionSignPage, canSignRequisition, signedCopyFilenameForRequisition, getCurrentOnHandRows, buildInventoryItemKey, buildPickLocationAllocations, recomputeBomIssuedSummaries, rebuildUnallocatedBom, getAvailableInventoryByItemMap });
 
+registerRequestCorrectionRoutes(app, {query, withTransaction, requireAuth, requireJobContext, requirePermission, asyncHandler, currentJobId, isAdminRole, layout, esc, auditLog, assertNoRequisitionLoads, issueRequisitionToField});
+
 app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("requisitions", "view"), async (req, res) => {
   const jobId = currentJobId(req);
   const header = (await query(`
@@ -13309,6 +13312,10 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   </tr>`).join("");
   const linesTable = `<table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Available Qty</th><th>Qty Requested</th><th>Qty Issued</th><th>Qty Not Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table>`;
   const headerActions = [];
+  if (!splitMode && header.status === "ISSUED" && isAdminRole(req.user) && canAccess(req.user, "requisitions", "issue")) {
+    headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/correct-quantities">Correct Quantities</a>`);
+  }
+
   if (canEditRequisition(req.user, header)) {
     headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/edit">Review / Edit Request</a>`);
   }

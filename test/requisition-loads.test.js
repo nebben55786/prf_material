@@ -228,12 +228,39 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(legacyPath+"/pick-ticket.pdf")).status,200);
   assert.equal((await request(legacyPath+"/sign",signature)).status,302);
   assert.equal((await db.query("select status from material_requisitions where requisition_no='MH-PT-0002'")).rows[0].status,"ISSUED");
+  const correctionPath=legacyPath+'/correct-quantities';
+  assert.equal((await request(correctionPath)).status,400); // signed requests are immutable
+  const legacyId=Number(legacyPath.split('/').at(-1));
+  await db.query("update material_requisitions set signed_at=null,signed_by_name=null,signed_signature_data=null where id=$1",[legacyId]);
+  const correctionLine=(await db.query('select * from material_requisition_lines where requisition_id=$1',[legacyId])).rows[0];
+  const correctionBody=async(qty)=>{
+    const r=(await db.query('select * from material_requisition_lines where id=$1',[correctionLine.id])).rows[0];
+    return {snapshot:JSON.stringify([[String(r.id),String(r.qty_requested),String(r.qty_issued)]]),reason:'Correct field count', ['requested_'+r.id]:String(qty),['issued_'+r.id]:String(qty)};
+  };
+  assert.match(await (await request(legacyPath)).text(),/Correct Quantities/);
+  assert.equal((await request(correctionPath)).status,200);
+  const stale=await correctionBody(5);
+  assert.equal((await request(correctionPath,stale)).status,302);
+  assert.equal((await request(correctionPath,stale)).status,400);
+  assert.equal(Number((await db.query('select sum(qty_issued) as n from material_issue_transactions where requisition_id=$1',[legacyId])).rows[0].n),5);
+  assert.equal((await request(correctionPath,await correctionBody(11))).status,400); // only ten stock remain
+  assert.equal(Number((await db.query('select qty_issued from material_requisition_lines where id=$1',[correctionLine.id])).rows[0].qty_issued),5);
+  assert.equal((await request(correctionPath,{...await correctionBody(6),reason:''})).status,400);
+  assert.equal((await request(correctionPath,await correctionBody(6))).status,302);
+  assert.equal(Number((await db.query('select qty_issued from material_requisition_lines where id=$1',[correctionLine.id])).rows[0].qty_issued),6);
+  const log=(await db.query("select details from audit_log where action='correct_quantities' and entity_id=$1 order by id desc",[String(legacyId)])).rows;
+  assert.equal(log.length,2);assert.equal(JSON.parse(log[0].details).before[0].issued,'5.0000');
+  assert.equal((await request(path+'/correct-quantities')).status,400); // split loads use their own workflow
+  await request('/jobs/select',{job_id:'102'});
+  assert.equal((await request(correctionPath)).status,400);
+  await request('/jobs/select',{job_id:'101'});
   await db.query("insert into users(id,username,password_hash,role) values(101,'load-field',$1,'field')", [await bcrypt.hash("test-password", 4)]);
   await db.query("insert into user_jobs(user_id,job_id) values(101,101)");
   await request("/login", { username: "load-field", password: "test-password" });
   await request("/jobs/select", { job_id: "101" });
   assert.equal((await request(p1)).status, 200);
   assert.equal((await request(p1 + "/issue", {})).status, 403);
+  assert.equal((await request(correctionPath)).status,403);
   assert.equal((await request(p1 + "/sign", signature)).status, 403);
 });
 
