@@ -11562,7 +11562,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
     <div class="card">
       <h3>Review And Edit Before Saving</h3>
       <p class="muted">Adjust quantities or remove/add lines here. Saving creates the request only; it does not accept or issue it.</p>
-      <form method="post" action="/bom/${bom.id}/requisitions/preview" class="stack">
+      <form method="post" action="/bom/${bom.id}/requisitions/preview" class="stack" data-request-piece-count>
         <input type="hidden" name="delivery_location_id" value="${deliveryLocation.id}" /><p>Delivery Location: <strong>${esc(deliveryLocation.name)}</strong> | Request Prefix: ${esc(deliveryRequestPrefix(deliveryLocation.request_prefix))}</p>
         <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" />
         <input type="hidden" name="iso_no" value="${escAttr(req.body.iso_no || "")}" />
@@ -11591,6 +11591,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
             <p class="muted">Only available lines from this BOM that are not already on the request are shown.</p>
           ` : `<p class="muted">No additional available BOM lines to add.</p>`}
         </div>
+        <div style="text-align:right;"><strong>Total Pieces on Request: <output data-request-piece-total aria-live="polite" aria-atomic="true">0</output></strong></div>
         <div class="actions">
           <button type="submit" name="preview_action" value="update">Update Preview</button>
           <button type="submit" name="preview_action" value="add">Add Selected Line</button>
@@ -11599,6 +11600,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
         </div>
       </form>
     </div>
+    <script src="/public/request-piece-count.js" defer></script>
   `, req.user));
 }));
 
@@ -12831,7 +12833,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <div class="card">
         <h3>Create Material Requisition</h3>
         <p class="muted">BOM: ${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}. Showing up to ${esc(lineFilter.limit)} rows, ${filteredCount} matching the current filter.</p>
-        <form method="post" action="/bom/${selectedBom.id}/requisitions/preview" class="stack" id="requisition-create-form">
+        <form method="post" action="/bom/${selectedBom.id}/requisitions/preview" class="stack" id="requisition-create-form" data-request-piece-count="builder">
           ${deliveryHidden}<p>Delivery Location: <strong>${esc(deliveryLocation.name)}</strong> | Request Prefix: ${esc(deliveryRequestPrefix(deliveryLocation.request_prefix))}</p>
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid-3">
@@ -12905,8 +12907,10 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               </tbody>
             </table>
           </div>
+          <div style="text-align:right;"><strong>Total Pieces on Request: <output data-request-piece-total aria-live="polite" aria-atomic="true">0</output></strong></div>
         </form>
       </div>
+      <script src="/public/request-piece-count.js" defer></script>
       <script>
         enableResizableTable("requisition-builder-table");
         (function () {
@@ -14039,7 +14043,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
     <h1>Edit Requisition ${esc(header.requisition_no)}</h1>
     <div class="card">
       <p class="muted">BOM: ${esc(header.bom_name || header.bom_description || header.bom_no)} | BOM #: ${esc(header.bom_no)} | Status: ${renderRequisitionStatusChip(header.status)}</p>
-      <form method="post" action="/requisitions/${header.id}/edit" class="stack">
+      <form method="post" action="/requisitions/${header.id}/edit" class="stack" data-request-piece-count>
         <div class="grid-3">
           <div><label>Requested By</label><input value="${esc(header.requested_by_name)}" readonly /></div>
           <div><label>Issued To</label><input name="issued_to" value="${esc(header.issued_to || "")}" required /></div>
@@ -14057,9 +14061,11 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
             <p class="muted">Only lines from this BOM that are not already on the request are shown.</p>
           ` : `<p class="muted">No additional available BOM lines to add.</p>`}
         </div>
+        <div style="text-align:right;"><strong>Total Pieces on Request: <output data-request-piece-total aria-live="polite" aria-atomic="true">0</output></strong></div>
         <div class="actions"><button type="submit">Save Requisition</button><a class="btn btn-secondary" href="/requisitions/${header.id}">Back</a></div>
       </form>
     </div>
+    <script src="/public/request-piece-count.js" defer></script>
   `, req.user));
 }));
 
