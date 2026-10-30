@@ -1,7 +1,7 @@
 function error(message) { return Object.assign(new Error(message), {statusCode:400}); }
 function snapshot(lines) { return JSON.stringify(lines.map(r=>[String(r.id),String(r.qty_requested),String(r.qty_issued)])); }
 export function registerRequestCorrectionRoutes(app,d) {
-  const {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,isAdminRole,layout,esc,auditLog,assertNoRequisitionLoads,issueRequisitionToField}=d;
+  const {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,isAdminRole,layout,esc,auditLog,assertNoRequisitionLoads,issueRequisitionToField,recomputeBomIssuedSummaries,rebuildUnallocatedBom}=d;
   const route='/requisitions/:id/correct-quantities';
   async function context(db,req,lock=false) {
     if(!isAdminRole(req.user)) throw error('Only admins and material controllers can correct issued quantities.');
@@ -13,6 +13,22 @@ export function registerRequestCorrectionRoutes(app,d) {
     return {h,lines};
   }
   const middleware=[requireAuth,requireJobContext,requirePermission('requisitions','issue')];
+  app.post('/requisitions/:id/unissue',...middleware,asyncHandler(async(req,res)=>{
+    await withTransaction(async db=>{
+      const {h,lines}=await context(db,req,true),jobId=currentJobId(req);
+      await db.query('select id from jobs where id=$1 for update',[jobId]);
+      const reason=String(req.body.reason||'').trim();
+      if(!reason || reason.length>2000) throw error('Enter an un-issue reason (maximum 2000 characters).');
+      const issues=(await db.query('select * from material_issue_transactions where requisition_id=$1 and job_id=$2 order by id',[h.id,jobId])).rows;
+      await db.query('delete from material_issue_transactions where requisition_id=$1 and job_id=$2',[h.id,jobId]);
+      await db.query('update material_requisition_lines set qty_issued=0 where requisition_id=$1 and job_id=$2',[h.id,jobId]);
+      await db.query("update material_requisitions set status='ACCEPTED',issued_at=null,issued_by_user_id=null,loaded_at=null,loaded_by_user_id=null,trailer_number=null where id=$1 and job_id=$2",[h.id,jobId]);
+      await recomputeBomIssuedSummaries(db,jobId);
+      await rebuildUnallocatedBom(db,jobId);
+      await auditLog(db,req.user.id,'unissue','material_requisition',h.id,JSON.stringify({request:h.requisition_no,reason,previousIssuedAt:h.issued_at,lines:lines.map(r=>({id:r.id,item_code:r.item_code,requested:r.qty_requested,issued:r.qty_issued})),issues}));
+    });
+    res.redirect('/requisitions/'+req.params.id);
+  }));
   app.get(route,...middleware,asyncHandler(async(req,res)=>{
     const {h,lines}=await context({query},req);
     res.send(layout('Correct Quantities',`<h1>Correct Quantities: ${esc(h.requisition_no)}</h1><div class="card">
