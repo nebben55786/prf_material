@@ -260,8 +260,8 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(legacyPath+'/unissue',{reason:'Wrong job'})).status,400);
   await request('/jobs/select',{job_id:'101'});
   assert.match(await (await request(legacyPath)).text(),/>Un-Issue<\/button>/);
-  assert.equal((await request(legacyPath+'/unissue',{reason:''})).status,400);
-  assert.equal((await request(legacyPath+'/unissue',{reason:'Issued in error'})).status,302);
+  assert.doesNotMatch(await (await request(legacyPath)).text(),/Un-Issue Reason/);
+  assert.equal((await request(legacyPath+'/unissue',{})).status,302);
   const undone=(await db.query('select status,issued_at from material_requisitions where id=$1',[legacyId])).rows[0];
   assert.equal(undone.status,'ACCEPTED');assert.equal(undone.issued_at,null);
   const undoneLine=(await db.query('select qty_requested,qty_issued from material_requisition_lines where id=$1',[correctionLine.id])).rows[0];
@@ -270,7 +270,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal(Number((await db.query(`select ${outstandingReservationSql} as qty from material_requisition_lines mrl where id=$1`,[correctionLine.id])).rows[0].qty),6);
   assert.equal((await request(legacyPath+'/unissue',{reason:'Repeat'})).status,400);
   const undoAudit=(await db.query("select details from audit_log where action='unissue' and entity_id=$1",[String(legacyId)])).rows;
-  assert.equal(undoAudit.length,1);assert.equal(JSON.parse(undoAudit[0].details).reason,'Issued in error');
+  assert.equal(undoAudit.length,1);assert.equal(JSON.parse(undoAudit[0].details).request,'MH-PT-0002');
   assert.equal((await request(legacyPath+'/issued-qty',{['qty_issued_'+correctionLine.id]:'6',next_action:'issue'})).status,302);
   assert.equal(Number((await db.query('select sum(qty_issued) as n from material_issue_transactions where requisition_id=$1',[legacyId])).rows[0].n),6);
   await db.query("insert into users(id,username,password_hash,role) values(101,'load-field',$1,'field')", [await bcrypt.hash("test-password", 4)]);

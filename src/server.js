@@ -13315,7 +13315,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
   if (!splitMode && header.status === "ISSUED" && isAdminRole(req.user) && canAccess(req.user, "requisitions", "issue")) {
     headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/correct-quantities">Correct Quantities</a>`);
     if (!header.signed_at && !header.signed_signature_data && !header.signed_copy_data) {
-      headerActions.push(`<form method="post" action="/requisitions/${header.id}/unissue" class="inline-field" onsubmit="return confirm('Un-issue this request? Inventory will be restored and the request returned to Accepted with its parts reserved.')"><div><label>Un-Issue Reason</label><input name="reason" maxlength="2000" placeholder="Reason for reversing this issue" required /></div><button class="btn btn-secondary" type="submit">Un-Issue</button></form>`);
+      headerActions.push(`<form method="post" action="/requisitions/${header.id}/unissue" class="inline-field" onsubmit="return confirm('Un-issue this request? Inventory will be restored and the request returned to Accepted with its parts reserved.')"><button class="btn btn-secondary" type="submit">Un-Issue</button></form>`);
     }
 
   }

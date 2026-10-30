@@ -17,15 +17,13 @@ export function registerRequestCorrectionRoutes(app,d) {
     await withTransaction(async db=>{
       const {h,lines}=await context(db,req,true),jobId=currentJobId(req);
       await db.query('select id from jobs where id=$1 for update',[jobId]);
-      const reason=String(req.body.reason||'').trim();
-      if(!reason || reason.length>2000) throw error('Enter an un-issue reason (maximum 2000 characters).');
       const issues=(await db.query('select * from material_issue_transactions where requisition_id=$1 and job_id=$2 order by id',[h.id,jobId])).rows;
       await db.query('delete from material_issue_transactions where requisition_id=$1 and job_id=$2',[h.id,jobId]);
       await db.query('update material_requisition_lines set qty_issued=0 where requisition_id=$1 and job_id=$2',[h.id,jobId]);
       await db.query("update material_requisitions set status='ACCEPTED',issued_at=null,issued_by_user_id=null,loaded_at=null,loaded_by_user_id=null,trailer_number=null where id=$1 and job_id=$2",[h.id,jobId]);
       await recomputeBomIssuedSummaries(db,jobId);
       await rebuildUnallocatedBom(db,jobId);
-      await auditLog(db,req.user.id,'unissue','material_requisition',h.id,JSON.stringify({request:h.requisition_no,reason,previousIssuedAt:h.issued_at,lines:lines.map(r=>({id:r.id,item_code:r.item_code,requested:r.qty_requested,issued:r.qty_issued})),issues}));
+      await auditLog(db,req.user.id,'unissue','material_requisition',h.id,JSON.stringify({request:h.requisition_no,previousIssuedAt:h.issued_at,lines:lines.map(r=>({id:r.id,item_code:r.item_code,requested:r.qty_requested,issued:r.qty_issued})),issues}));
     });
     res.redirect('/requisitions/'+req.params.id);
   }));
