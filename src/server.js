@@ -12693,11 +12693,13 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     ? minMaxBom
     : availableBoms.find((row) => Number(row.id) === selectedBomId) || null;
   const clearFilters = String(req.query.clear_filters || "") === "1";
+  const requestedRowLimit = Number(req.query.limit);
+  const showIssued = (String(req.query.show_issued || "") === "1") !== (String(req.query.toggle_issued || "") === "1");
   const lineFilter = {
     description: clearFilters ? "" : String(req.query.description || "").trim(),
     itemCode: clearFilters ? "" : String(req.query.item_code || "").trim(),
     lineNo: clearFilters ? "" : String(req.query.line_no || "").trim(),
-    limit: 250
+    limit: Number.isSafeInteger(requestedRowLimit) && requestedRowLimit > 0 ? requestedRowLimit : 500
   };
   let stagedSelection = {};
   try {
@@ -12727,6 +12729,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   if (selectedBom) {
     const lineWhere = ["bom_id = $1"];
     const lineParams = [selectedBom.id];
+    if (!showIssued) lineWhere.push("coalesce(qty_issued, 0) < coalesce(qty_required, 0)");
     if (lineFilter.description) { lineParams.push(`%${lineFilter.description}%`); lineWhere.push(`coalesce(description, '') ilike $${lineParams.length}`); }
     if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
     if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
@@ -12811,19 +12814,21 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         <form method="get" action="/requisitions/new" class="stack" id="requisition-filter-form">
           ${deliveryHidden}<input type="hidden" name="bom_id" value="${selectedBom.id}" />
           ${minMaxLocked ? `<input type="hidden" name="min_max" value="1" />` : ""}
+          <input type="hidden" name="show_issued" value="${showIssued ? "1" : "0"}" />
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
           <input type="hidden" name="draft_issued_to" value="${escAttr(draftIssuedTo)}" id="requisition-filter-draft-issued-to" />
           <input type="hidden" name="draft_iwp_no" value="${escAttr(draftIwpNo)}" id="requisition-filter-draft-iwp-no" />
           <input type="hidden" name="draft_notes" value="${escAttr(draftNotes)}" id="requisition-filter-draft-notes" />
           <div class="grid">
             <div><label>BOM</label><input value="${esc(selectedBom.bom_name || selectedBom.description || selectedBom.bom_no)} | ${esc(selectedBom.bom_no)}" readonly /></div>
-            <div><label>Max Rows</label><input value="${esc(lineFilter.limit)}" readonly /></div>
+            <div><label>Max Rows</label><input type="number" name="limit" min="1" step="1" value="${esc(lineFilter.limit)}" required /></div>
             <div><label>Description</label><input name="description" value="${esc(lineFilter.description)}" /></div>
             <div><label>Item Code</label><input name="item_code" value="${esc(lineFilter.itemCode)}" /></div>
             <div><label>${esc(lineLabel)}</label><select name="line_no">${lineNumberOptionsHtml}</select></div>
           </div>
           <div class="actions">
             <button type="submit">Load Lines</button>
+            <button class="btn btn-secondary" type="submit" name="toggle_issued" value="1">${showIssued ? "Hide Fully Issued Items" : "Show Fully Issued Items"}</button>
             <button class="btn btn-secondary" type="submit" name="clear_filters" value="1">Clear Filter</button>
             ${minMaxLocked ? "" : `<a class="btn btn-secondary" href="/requisitions/new?delivery_location_id=${deliveryLocationId}">Change BOM</a>`}
             <a class="btn btn-secondary" href="${minMaxLocked ? "/min-max" : "/requisitions"}">${minMaxLocked ? "Back to Min-Max" : "Back to Requisitions"}</a>
