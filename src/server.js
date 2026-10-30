@@ -11447,9 +11447,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
       await rebuildUnallocatedBom(client, jobId);
     });
   }
-  const qtyAvailableSql = bomIsUnallocated
-    ? "least(greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0), greatest(bl.qty_required - bl.qty_issued, 0))"
-    : "greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0)";
+  const qtyAvailableSql = "greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0)";
   const lines = (await query(`
     select
       bl.*,
@@ -11479,8 +11477,8 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
     const qtyRequested = selectedLineQtys.get(Number(line.id));
     const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
     const available = num(line.qty_available);
-    if (qtyRequested <= 0 || qtyRequested > remaining) {
-      throw new Error(`Requested qty for ${line.item_code} must be greater than zero and cannot exceed the remaining BOM qty.`);
+    if (!Number.isFinite(qtyRequested) || qtyRequested <= 0) {
+      throw new Error(`Requested qty for ${line.item_code} must be greater than zero.`);
     }
     if (qtyRequested > available) {
       throw new Error(`Requested qty for ${line.item_code} cannot exceed available inventory.`);
@@ -11529,7 +11527,6 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
       on alloc.item_code = bl.item_code
     where bl.bom_id = $1
       and not (bl.id = any($2::bigint[]))
-      and greatest(bl.qty_required - bl.qty_issued, 0) > 0
       and ${qtyAvailableSql} > 0
     order by bl.line_no, bl.id
     limit 500
@@ -11645,11 +11642,11 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
       `, [lineId, bomId])).rows[0];
       if (!line) continue;
       const remaining = Math.max(num(line.qty_required) - num(line.qty_issued), 0);
-      if (qtyRequested <= 0 || qtyRequested > remaining) {
-        throw new Error(`Requested qty for ${line.item_code} must be greater than zero and cannot exceed the remaining BOM qty.`);
+      if (!Number.isFinite(qtyRequested) || qtyRequested <= 0) {
+        throw new Error(`Requested qty for ${line.item_code} must be greater than zero.`);
       }
       const itemAvailableQty = parseQtyValue(availableMap.get(buildInventoryItemKey(line)) || 0, 0);
-      const availableQty = bomIsUnallocated ? Math.min(itemAvailableQty, remaining) : itemAvailableQty;
+      const availableQty = itemAvailableQty;
       if (qtyRequested > availableQty) {
         throw new Error(`Requested qty for ${line.item_code} cannot exceed available inventory.`);
       }
@@ -12734,9 +12731,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
     if (lineFilter.itemCode) { lineParams.push(`%${lineFilter.itemCode}%`); lineWhere.push(`item_code ilike $${lineParams.length}`); }
     if (lineFilter.lineNo) { lineParams.push(`%${lineFilter.lineNo}%`); lineWhere.push(`line_no ilike $${lineParams.length}`); }
     const lineWhereSql = lineWhere.join(" and ");
-    const qtyAvailableSql = selectedBomIsUnallocated
-      ? "least(greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0), greatest(bl.qty_required - bl.qty_issued, 0))"
-      : "greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0)";
+    const qtyAvailableSql = "greatest(coalesce(inv.qty_on_hand, 0) - coalesce(issued.qty_issued_total, 0) - coalesce(alloc.qty_allocated_total, 0), 0)";
     const [linesRes, filteredCountRes, lineNumberOptionsRes] = await Promise.all([
       query(`
         select
@@ -14006,7 +14001,6 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
       greatest(bl.qty_required - bl.qty_issued, 0) as qty_remaining
     from bom_lines bl
     where bl.bom_id = $1
-      and greatest(bl.qty_required - bl.qty_issued, 0) > 0
       and not exists (
         select 1
         from material_requisition_lines mrl
@@ -14029,7 +14023,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
     return `<option value="${line.id}">${esc(label)}</option>`;
   }).join("");
   const lineRows = lines.map((line) => {
-    const maxQty = Math.max(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_requested));
+    const maxQty = parseQtyValue(line.qty_available || 0);
     return `<tr>
       <td>${esc(line.line_no)}</td>
       <td>${esc(line.iwp_no || "")}</td>
@@ -14041,7 +14035,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
       <td>${esc(line.uom)}</td>
       <td><input name="qty_requested_${line.requisition_line_id}" value="${esc(formatQtyDisplay(line.qty_requested))}" /></td>
       <td><button class="btn btn-danger" type="submit" name="remove_line_id" value="${line.requisition_line_id}">Remove</button></td>
-      <td class="muted">Max ${esc(formatQtyDisplay(maxQty))}</td>
+      <td class="muted">Available ${esc(formatQtyDisplay(maxQty))}</td>
     </tr>`;
   }).join("");
   res.send(layout(`Edit ${header.requisition_no}`, `
@@ -14112,8 +14106,6 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
       }
       const requestedQty = parseQtyValue(req.body[`qty_requested_${line.requisition_line_id}`]);
       if (requestedQty <= 0) throw new Error(`Requested qty for ${line.item_code} must be greater than zero.`);
-      const maxQty = Math.max(Math.max(num(line.qty_required) - num(line.qty_issued), 0), num(line.qty_requested));
-      if (requestedQty > maxQty) throw new Error(`Requested qty for ${line.item_code} exceeds the remaining BOM qty.`);
       await client.query("update material_requisition_lines set qty_requested = $2 where id = $1 and job_id = $3", [line.requisition_line_id, requestedQty, jobId]);
     }
     const addLineId = Number(req.body.add_line_id || 0);
@@ -14132,10 +14124,6 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
         where requisition_id = $1 and bom_line_id = $2 and job_id = $3
       `, [req.params.id, addLineId, jobId])).rows[0];
       if (existing) throw new Error("That BOM line is already on this requisition.");
-      const remaining = Math.max(num(lineToAdd.qty_required) - num(lineToAdd.qty_issued), 0);
-      if (addQty > remaining) {
-        throw new Error(`Requested qty for ${lineToAdd.item_code} cannot exceed the remaining BOM qty.`);
-      }
       await client.query(`
         insert into material_requisition_lines (job_id, requisition_id, bom_line_id, qty_requested)
         values ($1, $2, $3, $4)

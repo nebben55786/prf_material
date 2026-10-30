@@ -176,12 +176,14 @@ test("request builder, preview, save and settings carry delivery location throug
   assert.doesNotMatch(grid,/<td>FULLY-DONE<\/td>/);
   grid=await render('&limit=-1');assert.match(grid,/name="limit" min="1" step="1" value="500"/);
   await db.query("delete from bom_lines where description in ('Row limit fixture','Fully issued fixture')");
+  await db.query('update bom_lines set qty_required=1 where id=1601'); // stock, rather than BOM demand, limits requests
   const body = {
     delivery_location_id: "100",
     issued_to: "Crew",
     selected_line_ids: "1601",
     request_qty_1601: "3",
   };
+  assert.equal((await request('/bom/1501/requisitions/preview',{...body,request_qty_1601:'99999'})).status,400);
   const preview = await request("/bom/1501/requisitions/preview", body);
   assert.equal(preview.status, 200, await preview.text());
   const created = await request("/bom/1501/requisitions", body);
