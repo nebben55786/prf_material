@@ -273,6 +273,50 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal(undoAudit.length,1);assert.equal(JSON.parse(undoAudit[0].details).request,'MH-PT-0002');
   assert.equal((await request(legacyPath+'/issued-qty',{['qty_issued_'+correctionLine.id]:'6',next_action:'issue'})).status,302);
   assert.equal(Number((await db.query('select sum(qty_issued) as n from material_issue_transactions where requisition_id=$1',[legacyId])).rows[0].n),6);
+  // Location counts post stock adjustments, without fabricating receiving documents.
+  await db.exec("insert into warehouses(id,job_id,name,is_active) values(9001,101,'Yard',true); insert into warehouse_locations(job_id,warehouse_id,name,is_active) values(101,9001,'BIN',true),(101,9001,'NEW',true)");
+  const li='/yard/location-inventory',loc=li+'?warehouse=Yard&location=BIN';
+  const tokenFrom=html=>{const m=html.match(/name="token" value="([^"]+)"/);assert.ok(m);return m[1].replaceAll('&quot;','"').replaceAll('&amp;','&');};
+  let page=await (await request(loc)).text();assert.match(page,/Actual Qty/);assert.match(page,/Photos/);
+  const countToken=tokenFrom(page);
+  const countPayload=JSON.parse(Buffer.from(countToken.split('.')[0],'base64url').toString());
+  const pipeIndex=countPayload.rows.findIndex(r=>r.item_code==='PIPE');assert.ok(pipeIndex>=0);
+  let response=await request(li+'/review',{token:countToken,['actual_'+pipeIndex]:'7'});assert.equal(response.status,200,await response.clone().text());
+  let reviewToken=tokenFrom(await response.text());
+  const receiptCount=Number((await db.query('select count(*) as n from receipts')).rows[0].n);
+  assert.equal((await request(li+'/save',{token:reviewToken})).status,302);
+  assert.equal((await request(li+'/save',{token:reviewToken})).status,400); // stale/repeated save
+  assert.equal(Number((await db.query('select count(*) as n from receipts')).rows[0].n),receiptCount);
+  assert.equal(Number((await db.query("select actual_qty from inventory_audit_counts where job_id=101 and item_code='PIPE' and warehouse='Yard' and location='BIN'")).rows[0].actual_qty),7);
+  page=await (await request(li+'?warehouse=Yard&location=NEW')).text();
+  const emptyToken=tokenFrom(page);
+  response=await request(li+'/review',{token:emptyToken,item_code:'START-NEW',description:'Starting stock',uom:'EA',material_type:'misc',add_qty:'12'});
+  assert.equal(response.status,200,await response.clone().text());reviewToken=tokenFrom(await response.text());
+  assert.equal((await db.query("select id from material_items where item_code='START-NEW'")).rows.length,0); // preview has no writes
+  response=await request(li+'/save',{token:reviewToken});assert.equal(response.status,302,await response.clone().text());
+  assert.match(response.headers.get('location'),/photo_item=/);
+  page=await (await request(response.headers.get('location'))).text();assert.match(page,/Item Photos: START-NEW/);
+  const newItem=(await db.query("select * from material_items where job_id=101 and item_code='START-NEW'")).rows[0];assert.ok(newItem);
+  assert.equal((await request(li+'/save',{token:reviewToken})).status,400);
+  page=await (await request(loc)).text();
+  response=await request(li+'/review',{token:tokenFrom(page),item_id:String(newItem.id),add_qty:'3'});assert.equal(response.status,200);
+  assert.equal((await request(li+'/save',{token:tokenFrom(await response.text())})).status,302);
+  assert.equal((await request(li+'/review',{token:countToken,['actual_'+pipeIndex]:'-1'})).status,400);
+  page=await (await request(loc)).text();
+  let latest=tokenFrom(page);
+  const latestRows=JSON.parse(Buffer.from(latest.split('.')[0],'base64url').toString()).rows;
+  const at=latestRows.findIndex(r=>r.item_code==='PIPE');
+  assert.equal((await request(li+'/review',{token:latest})).status,400); // blanks make no changes
+  await db.query("update material_requisitions set status='ACCEPTED' where id=$1",[legacyId]);
+  await db.query('update material_requisition_lines set qty_requested=20 where id=$1',[correctionLine.id]);
+  response=await request(li+'/review',{token:latest,['actual_'+at]:'0'});
+  assert.equal(response.status,200);const warningPage=await response.text();assert.match(warningPage,/below reserved quantity/);
+  assert.equal((await request(li+'/save',{token:tokenFrom(warningPage)})).status,302);
+  assert.equal(Number((await db.query("select actual_qty from inventory_audit_counts where job_id=101 and item_code='PIPE' and warehouse='Yard' and location='BIN'")).rows[0].actual_qty),0);
+
+  await request('/jobs/select',{job_id:'102'});
+  assert.equal((await request(li+'/save',{token:reviewToken})).status,400);
+  await request('/jobs/select',{job_id:'101'});
   await db.query("insert into users(id,username,password_hash,role) values(101,'load-field',$1,'field')", [await bcrypt.hash("test-password", 4)]);
   await db.query("insert into user_jobs(user_id,job_id) values(101,101)");
   await request("/login", { username: "load-field", password: "test-password" });
@@ -280,8 +324,17 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(p1)).status, 200);
   assert.equal((await request(p1 + "/issue", {})).status, 403);
   assert.equal((await request(correctionPath)).status,403);
+  assert.equal((await request('/yard/location-inventory')).status,403);
   assert.equal((await request(legacyPath+'/unissue',{reason:'Forbidden'})).status,403);
   assert.equal((await request(p1 + "/sign", signature)).status, 403);
+  await db.query("insert into users(id,username,password_hash,role) values(102,'location-warehouse',$1,'warehouse')",[await bcrypt.hash('test-password',4)]);
+  await db.query('insert into user_jobs(user_id,job_id) values(102,101)');
+  await request('/login',{username:'location-warehouse',password:'test-password'});
+  await request('/jobs/select',{job_id:'101'});
+  assert.equal((await request(li)).status,200);
+  page=await (await request(li+'?warehouse=Yard&location=NEW&photo_item='+newItem.id)).text();
+  assert.match(page,/Item Photos: START-NEW/);assert.match(page,/data-photo-upload/);
+
 });
 
 test('old numbers stay intact and new requests get PT numbers with three-digit load suffixes',async(t)=>{

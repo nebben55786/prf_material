@@ -1,3 +1,4 @@
+import { registerLocationInventoryRoutes } from "./location-inventory.js";
 import { registerRequestCorrectionRoutes } from "./request-corrections.js";
 import { reserveMrrNumber, useReservedMrrNumber } from "./mrr-numbers.js";
 import { registerRequisitionLoadRoutes, assertNoRequisitionLoads, outstandingReservationSql } from "./requisition-loads.js";
@@ -8104,6 +8105,8 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
   `, req.user));
 });
 
+registerLocationInventoryRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requireInventoryAuditEdit,asyncHandler,currentJobId,layout,esc,signSession,readSession,getWarehouseOptions,getWarehouseLocationMap,normalizeWarehouseLocationValues,assertValidWarehouseLocation,getCurrentOnHandRows,buildInventoryEntryKey,saveInventoryAuditReport,upsertMaterialMasterItem,getVerifiedAllocatedInventoryTotalsByItem,auditLog});
+
 app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view"), async (req, res) => {
   const jobId = currentJobId(req);
   const [unverifiedRes, waitingMaterialRes, verifiedRes] = await Promise.all([
@@ -8119,6 +8122,7 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
     <div class="card">
       <div class="actions">
         <a class="btn btn-primary" href="/inventory">Inventory</a>
+        ${canEditInventoryAudit(req.user) ? `<a class="btn btn-primary" href="/yard/location-inventory">Location Inventory</a>` : ""}
         <a class="btn btn-primary" href="/yard/locations">Locations</a>
         <a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>
         ${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-primary" href="/yard/issue-by-po">Issue by PO</a>` : ""}
@@ -21095,6 +21099,7 @@ app.get("/material-logs", requireAuth, requireJobContext, requirePermission("mat
 });
 
 registerMaterialPhotoRoutes(app, {
+  canEditInventoryAudit,
   asyncHandler,
   auditLog,
   canAccess,

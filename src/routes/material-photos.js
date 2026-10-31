@@ -73,6 +73,7 @@ export function registerMaterialPhotoRoutes(app, dependencies) {
     asyncHandler,
     auditLog,
     canAccess,
+    canEditInventoryAudit,
     contentDispositionFilename,
     currentJobId,
     del,
@@ -90,7 +91,7 @@ export function registerMaterialPhotoRoutes(app, dependencies) {
   } = dependencies;
 
   function canUsePhotoScope(user, config, mode) {
-    return Boolean(user?.activeJob || user?.job_id) && canAccess(user, config.permission, photoPermission(config, mode));
+    return Boolean(user?.activeJob || user?.job_id) && (canAccess(user, config.permission, photoPermission(config, mode)) || (config.processType === "item" && canEditInventoryAudit?.(user)));
   }
 
   function renderMaterialPhotoSection({ scope, targetId, jobId, namePrefix = "", title, subtitle = "", itemOptions = [], canUpload, photos }) {
