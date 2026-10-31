@@ -48,38 +48,46 @@ export function registerLocationInventoryRoutes(app,d) {
       <form method="post" action="${base}/review" class="stack" data-location-inventory-draft="${esc(JSON.stringify([req.user.id,jobId,storage.warehouse,storage.location]))}" data-draft-version="${esc(JSON.stringify(current.map(r=>[buildInventoryEntryKey(r),r.qty_on_hand])))}" data-draft-saved="${req.query.saved ? "1":"0"}"><input type="hidden" name="token" value="${esc(formToken)}">
       <div class="scroll"><table><tr><th>Item</th><th>Description</th><th>Size / Thickness</th><th>UOM</th><th>Current Qty</th><th>Reserved Qty (Job)</th><th>Actual Qty</th><th>Photos</th></tr>
       ${current.map((r,i)=>{const item=items.find(m=>String(m.item_code).toLowerCase()===String(r.item_code).toLowerCase());return `<tr><td>${esc(r.item_code)}</td><td>${esc(r.description)}</td><td>${esc([r.size_1,r.size_2,r.thk_1,r.thk_2].filter(Boolean).join(' / '))}</td><td>${esc(item?.uom||r.uom||'')}</td><td>${esc(r.qty_on_hand)}</td><td>${esc(reservedMap.get(String(r.item_code).toLowerCase())||0)}</td><td><input name="actual_${i}" inputmode="decimal" placeholder="Unchanged" aria-label="Actual quantity for ${esc(r.item_code)}"></td><td>${item?`<a class="btn btn-secondary" href="${url(storage,'&photo_item='+item.id)}#item-photos">Photos</a>`:`<button class="btn btn-secondary" type="submit" formaction="${base}/photo-item" name="photo_row" value="${i}">Photos</button>`}</td></tr>`;}).join('')||'<tr><td colspan="8">No inventory is recorded at this location.</td></tr>'}</table></div>
-      <div class="card"><h3>Add Item to This Location</h3><p>Choose an existing item, or enter a new item below. Enter its final quantity at this location, including any quantity already there.</p>
-      <div class="grid" data-existing-item-filters>
-      <div><label>Filter Item Number</label><input name="existing_filter_code" data-item-filter="code" placeholder="Item number"></div>
-      <div><label>Filter Description</label><input name="existing_filter_description" data-item-filter="description" placeholder="Description"></div>
-      <div><label>Filter Size</label><input name="existing_filter_size" data-item-filter="size" placeholder="Size or thickness"></div></div>
-      <div class="actions"><button type="button" class="btn btn-secondary" data-clear-item-filters>Clear Item Filters</button><span class="muted" data-item-match-count aria-live="polite"></span></div>
-      <label>Existing Item</label><select name="item_id" data-existing-item-picker><option value="">Create new item</option>${items.map(i=>`<option value="${i.id}" data-code="${esc(i.item_code)}" data-description="${esc(i.description)}" data-size="${esc([i.size_1,i.size_2,i.thk_1,i.thk_2].filter(Boolean).join(' / '))}">${esc(i.item_code)} | ${esc(i.description)}${[i.size_1,i.size_2,i.thk_1,i.thk_2].some(Boolean)?' | '+esc([i.size_1,i.size_2,i.thk_1,i.thk_2].filter(Boolean).join(' / ')):''}</option>`).join('')}</select>
-      <div class="grid"><div><label>New Item Code</label><input name="item_code"></div><div><label>Description</label><input name="description"></div><div><label>UOM</label><input name="uom" value="EA"></div><div><label>Type</label><select name="material_type"><option>misc</option><option>pipe</option><option>steel</option><option>equipment</option></select></div>${['size_1','size_2','thk_1','thk_2'].map(k=>`<div><label>${k.replace('_',' ')}</label><input name="${k}"></div>`).join('')}<div><label>Actual Quantity at Location</label><input name="add_qty" inputmode="decimal"></div></div></div>
+      <div class="card"><h3>Add Items From Item Master</h3><p>Filter the master list and add items to the pending list. Enter each item's final quantity at this location, including any stock already there. Nothing posts until you review and save.</p>
+      <input type="hidden" name="item_queue" value="[]" data-location-item-queue>
+      <h4>Pending Items</h4><div class="scroll"><table><thead><tr><th>Item</th><th>Description</th><th>Size / Thickness</th><th>UOM</th><th>Actual Qty at Location</th><th>Action</th></tr></thead><tbody data-location-queue-rows></tbody></table></div>
+      <span class="muted" data-location-queue-count aria-live="polite"></span>
+      <details><summary class="btn btn-secondary">Browse Item Master</summary>
+      <div class="grid">
+      <div><label>Item Number</label><input name="master_filter_code" data-master-filter="code" placeholder="Item number"></div>
+      <div><label>Description</label><input name="master_filter_description" data-master-filter="description" placeholder="Description"></div>
+      <div><label>Size / Thickness</label><input name="master_filter_size" data-master-filter="size" placeholder="Size or thickness"></div>
+      <div><label>Type</label><input name="master_filter_type" data-master-filter="type" placeholder="Material type"></div></div>
+      <div class="actions"><button type="button" class="btn btn-secondary" data-clear-master-filters>Clear Item Filters</button><span class="muted" data-master-match-count aria-live="polite"></span></div>
+      <div class="scroll" style="max-height:420px;"><table><thead><tr><th>Item</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Add</th></tr></thead><tbody>
+      ${items.map(i=>`<tr data-master-row data-id="${i.id}" data-code="${esc(i.item_code)}" data-description="${esc(i.description)}" data-size="${esc([i.size_1,i.size_2,i.thk_1,i.thk_2].filter(Boolean).join(' / '))}" data-type="${esc(i.material_type)}" data-uom="${esc(i.uom)}"><td>${esc(i.item_code)}</td><td>${esc(i.description)}</td>${['size_1','size_2','thk_1','thk_2'].map(k=>`<td>${esc(i[k]||'')}</td>`).join('')}<td>${esc(i.material_type)}</td><td>${esc(i.uom)}</td><td><button type="button" class="btn btn-secondary" data-queue-add="${i.id}">Add</button></td></tr>`).join('')||'<tr><td colspan="9">No items are in this job’s master.</td></tr>'}
+      </tbody></table></div></details></div>
       <button>Review Inventory Changes</button></form></div>`:''}
-      <div id="item-photos">${photos}</div><script src="/public/location-inventory.js" defer></script><script src="/public/location-item-filter.js" defer></script>`,req.user));
+      <div id="item-photos">${photos}</div><script src="/public/location-inventory.js" defer></script><script src="/public/location-item-queue.js" defer></script>`,req.user));
   }));
   app.post(base+'/review',...middleware,asyncHandler(async(req,res)=>{
     const data=decode(req,req.body.token,'count'),jobId=currentJobId(req),changes=new Map();
     await assertValidWarehouseLocation({query},data.storage.warehouse,data.storage.location,jobId);
     data.rows.forEach((r,i)=>{if(String(req.body['actual_'+i]??'').trim()!=='') changes.set(buildInventoryEntryKey(r),{...r,actual_qty:qty(req.body['actual_'+i]),expected:Number(r.qty_on_hand)});});
-    let added=null;
+    let entries=[];
+    try { entries=JSON.parse(String(req.body.item_queue||'[]')); } catch (_) { throw fail('Invalid pending item list.'); }
+    if(!Array.isArray(entries) || entries.length>10000) throw fail('Invalid pending item list.');
+    // An older open form may still submit one master item.
     if(String(req.body.add_qty??'').trim()!=='') {
-      const actual=qty(req.body.add_qty),id=Number(req.body.item_id||0);
-      if(id) {
-        added=(await query('select * from material_items where id=$1 and job_id=$2',[id,jobId])).rows[0];
-        if(!added) throw fail('Item not found for this job.');
-      } else {
-        added=Object.fromEntries(['item_code','description','uom','material_type','size_1','size_2','thk_1','thk_2'].map(k=>[k,String(req.body[k]||'').trim()]));
-        if(!added.item_code || !added.description || !added.uom) throw fail('Enter a new item code, description, and UOM.');
-        if((await query('select id from material_items where job_id=$1 and lower(item_code)=lower($2)',[jobId,added.item_code])).rows.length) throw fail('That item already exists. Select it from Existing Item.');
-        added.is_new=true;
-      }
-      const row={...added,...data.storage},key=buildInventoryEntryKey(row),existing=data.rows.find(r=>buildInventoryEntryKey(r)===key);
-      if(changes.has(key)) throw fail('This item is already being adjusted in the table. Enter its final count there.');
-      changes.set(key,{...row,actual_qty:actual,expected:Number(existing?.qty_on_hand||0)});
+      if(!Number(req.body.item_id)) throw fail('Select items from Item Master before adding stock.');
+      entries.push({id:Number(req.body.item_id),qty:req.body.add_qty});
     }
-    const desired=[...changes.values()].filter(r=>r.actual_qty!==r.expected || r.is_new);
+    const ids=entries.map(e=>Number(e?.id));
+    if(ids.some(id=>!Number.isSafeInteger(id)||id<=0) || new Set(ids).size!==ids.length) throw fail('Select each master item only once.');
+    const masters=ids.length?(await query('select * from material_items where job_id=$1 and id=any($2::bigint[])',[jobId,ids])).rows:[];
+    if(masters.length!==ids.length) throw fail('One or more items were not found in this job’s master. Reload the location.');
+    for(const entry of entries) {
+      const master=masters.find(i=>Number(i.id)===Number(entry.id));
+      const row={...master,...data.storage},key=buildInventoryEntryKey(row),existing=data.rows.find(r=>buildInventoryEntryKey(r)===key);
+      if(changes.has(key)) throw fail(master.item_code+' is already being adjusted in the current inventory table. Enter its final count there.');
+      changes.set(key,{...row,actual_qty:qty(entry.qty),expected:Number(existing?.qty_on_hand||0)});
+    }
+    const desired=[...changes.values()].filter(r=>r.actual_qty!==r.expected);
     if(!desired.length) throw fail('Enter at least one changed actual quantity or add an item.');
     const allStock=await getCurrentOnHandRows({query},{jobId}),reservationRows=await getVerifiedAllocatedInventoryTotalsByItem({query},jobId);
     const warnings=[];

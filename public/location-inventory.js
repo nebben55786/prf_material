@@ -2,7 +2,7 @@
   const form=document.querySelector('form[data-location-inventory-draft]');
   if(!form) return;
   const key='location-inventory:'+form.dataset.locationInventoryDraft,version=form.dataset.draftVersion;
-  const fields=Array.from(form.querySelectorAll('input:not([type="hidden"]),select'));
+  const fields=Array.from(form.querySelectorAll('input:not([type="hidden"]),select,input[data-location-item-queue]'));
   try {
     if(form.dataset.draftSaved==='1') sessionStorage.removeItem(key);
     const draft=JSON.parse(sessionStorage.getItem(key)||'null');
