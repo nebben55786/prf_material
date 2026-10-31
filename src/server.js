@@ -12754,10 +12754,27 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         ) alloc
           on alloc.item_code = bl.item_code
         where ${lineWhereSql.replace(/\bbom_id\b/g, "bl.bom_id").replace(/\bdescription\b/g, "bl.description").replace(/\bitem_code\b/g, "bl.item_code").replace(/\bline_no\b/g, "bl.line_no")}
+          and ${qtyAvailableSql} > 0
         order by coalesce(bl.iwp_no, ''), bl.line_no, bl.id
         limit ${lineFilter.limit}
       `, lineParams),
-      query(`select count(*) as filtered_count from bom_lines where ${lineWhereSql}`, lineParams),
+      query(`select count(*) as filtered_count
+        from bom_lines bl
+        left join (
+          ${getInventoryTotalsByItemSubquery(jobId)}
+        ) inv
+          on inv.item_code = bl.item_code
+        left join (
+          ${getIssuedInventoryTotalsByItemSubquery(jobId)}
+        ) issued
+          on issued.item_code = bl.item_code
+        left join (
+          ${getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId)}
+        ) alloc
+          on alloc.item_code = bl.item_code
+        where ${lineWhereSql.replace(/\bbom_id\b/g, "bl.bom_id").replace(/\bdescription\b/g, "bl.description").replace(/\bitem_code\b/g, "bl.item_code").replace(/\bline_no\b/g, "bl.line_no")}
+          and ${qtyAvailableSql} > 0
+      `, lineParams),
       query(`
         select distinct line_no
         from bom_lines

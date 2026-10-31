@@ -156,26 +156,29 @@ test("request builder, preview, save and settings carry delivery location throug
   assert.equal(builder.status, 200);
   assert.match(await builder.text(), /name="delivery_location_id" value="100"/);
   await db.exec(`insert into bom_lines(bom_id,line_no,item_code,description,uom,qty_required,qty_issued)
-    select 1501,'Z-'||n,'FILTER-'||n,'Row limit fixture','EA',1,0 from generate_series(1,510) n;
+    select 1501,'Z-'||n,'PIPE','Row limit fixture','EA',1,0 from generate_series(1,510) n;
     insert into bom_lines(bom_id,line_no,item_code,description,uom,qty_required,qty_issued)
-    values(1501,'0','FULLY-DONE','Fully issued fixture','EA',2,2)`);
+    values(1501,'0','PIPE','Fully issued fixture','EA',2,2);
+    insert into bom_lines(bom_id,line_no,item_code,description,uom,qty_required) values(1501,'000','ZERO-STOCK','Zero available fixture','EA',10)`);
   const builderUrl='/requisitions/new?bom_id=1501&delivery_location_id=100';
   const render=async suffix=>{const r=await request(builderUrl+suffix);assert.equal(r.status,200);return r.text();};
   let grid=await render('');
   assert.match(grid,/name="limit" min="1" step="1" value="500"/);
   assert.match(grid,/Show Fully Issued Items/);
-  assert.doesNotMatch(grid,/<td>FULLY-DONE<\/td>/);
+  assert.doesNotMatch(grid,/<td>ZERO-STOCK<\/td>/);
+  assert.doesNotMatch(grid,/<td>Fully issued fixture<\/td>/);
   assert.equal((grid.match(/class="requisition-request-qty-input"/g)||[]).length,500);
   grid=await render('&limit=700&show_issued=0&toggle_issued=1&draft_issued_to=KeepCrew&staged_selection='+encodeURIComponent(JSON.stringify({'1601':'3'})));
   assert.match(grid,/Hide Fully Issued Items/);
-  assert.match(grid,/<td>FULLY-DONE<\/td>/);
+  assert.doesNotMatch(grid,/<td>ZERO-STOCK<\/td>/);
+  assert.match(grid,/<td>Fully issued fixture<\/td>/);
   assert.match(grid,/value="KeepCrew"/);
   assert.ok((grid.match(/class="requisition-request-qty-input"/g)||[]).length>500);
   grid=await render('&limit=3&show_issued=1&toggle_issued=1');
   assert.equal((grid.match(/class="requisition-request-qty-input"/g)||[]).length,3);
-  assert.doesNotMatch(grid,/<td>FULLY-DONE<\/td>/);
+  assert.doesNotMatch(grid,/<td>Fully issued fixture<\/td>/);
   grid=await render('&limit=-1');assert.match(grid,/name="limit" min="1" step="1" value="500"/);
-  await db.query("delete from bom_lines where description in ('Row limit fixture','Fully issued fixture')");
+  await db.query("delete from bom_lines where description in ('Row limit fixture','Fully issued fixture','Zero available fixture')");
   await db.query('update bom_lines set qty_required=1 where id=1601'); // stock, rather than BOM demand, limits requests
   const body = {
     delivery_location_id: "100",
