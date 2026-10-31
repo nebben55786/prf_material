@@ -12781,6 +12781,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td><input type="checkbox" name="selected_line_ids" value="${line.id}" tabindex="-1" ${stagedSelection[String(line.id)] !== undefined ? "checked" : ""} /></td>
       <td>${esc(line.line_no)}</td>
       <td>${esc(line.item_code)}</td>
+      <td><input class="requisition-request-qty-input" name="request_qty_${line.id}" value="${esc(requestQtyValue)}" inputmode="decimal" data-available-qty="${escAttr(line.qty_available)}" data-item-code="${escAttr(line.item_code)}" /></td>
       <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
       <td>${esc(line.description)}</td>
       <td>${esc(formatQtyDisplay(line.qty_required))}</td>
@@ -12788,7 +12789,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       <td>${esc(formatQtyDisplay(line.qty_issued))}</td>
       <td>${Number(line.qty_reserved) > 0 ? `<a href="/requisitions/reservations?item_code=${encodeURIComponent(line.item_code)}" target="_blank" rel="noopener" aria-label="${escAttr(`View requests reserving ${line.item_code} (opens in a new tab)`)}">${esc(formatQtyDisplay(line.qty_reserved))}</a>` : "0"}</td>
       <td>${esc(formatQtyDisplay(line.qty_available))}</td>
-      <td><input class="requisition-request-qty-input" name="request_qty_${line.id}" value="${esc(requestQtyValue)}" /></td>
       <td>${esc(line.uom)}</td>
       <td>${esc(line.tag_number || "")}</td>
       <td>${esc(formatPlainNumberDisplay(line.thk_1))}</td>
@@ -12866,6 +12866,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:80px" />
                 <col style="width:150px" />
                 <col style="width:100px" />
+                <col style="width:90px" />
                 <col style="width:110px" />
                 <col style="width:360px" />
                 <col style="width:72px" />
@@ -12873,7 +12874,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <col style="width:72px" />
                 <col style="width:84px" />
                 <col style="width:84px" />
-                <col style="width:90px" />
                 <col style="width:56px" />
                 <col style="width:110px" />
                 <col style="width:80px" />
@@ -12886,6 +12886,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="nowrap" data-resizable="true"><label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="requisition-select-all-visible" tabindex="-1" /> Pick</label></th>
                 <th class="wrap" data-resizable="true">${esc(lineLabel)}</th>
                 <th class="nowrap" data-resizable="true">Item</th>
+                <th class="wrap" data-resizable="true">Request Qty</th>
                 <th class="nowrap" data-resizable="true">Size</th>
                 <th class="wrap" data-resizable="true">Description</th>
                 <th class="wrap" data-resizable="true">Required Qty</th>
@@ -12893,7 +12894,6 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
                 <th class="wrap" data-resizable="true">Issued Qty</th>
                 <th class="wrap" data-resizable="true">Reserved Qty</th>
                 <th class="wrap" data-resizable="true">Available</th>
-                <th class="wrap" data-resizable="true">Request Qty</th>
                 <th class="nowrap" data-resizable="true">UOM</th>
                 <th class="wrap" data-resizable="true">${esc(tagNumberLabel)}</th>
                 <th class="nowrap" data-resizable="true">Thk 1</th>
@@ -12911,6 +12911,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
         </form>
       </div>
       <script src="/public/request-piece-count.js" defer></script>
+      <script src="/public/request-quantity-validation.js" defer></script>
       <script>
         enableResizableTable("requisition-builder-table");
         (function () {
