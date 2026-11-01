@@ -29,6 +29,7 @@ const app = express();
 const upload = multer();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
+const loginSessionMaxAgeMs = 14 * 60 * 60 * 1000;
 const authContextCacheMs = Math.max(0, Number(process.env.AUTH_CONTEXT_CACHE_MS || 15000));
 const slowRequestMs = Math.max(0, Number(process.env.SLOW_REQUEST_MS || 1000));
 const configuredQuoteFileUploadMaxBytes = Number(process.env.QUOTE_FILE_UPLOAD_MAX_BYTES || 100 * 1024 * 1024);
@@ -6704,13 +6705,13 @@ async function getAccessibleJobsForUser(userId, role, client = null) {
 }
 
 function setSessionCookie(res, payload) {
-  const token = signSession(payload);
-  res.cookie("session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
+  const token = signSession({ ...payload, expires_at: Date.now() + loginSessionMaxAgeMs });
+  res.cookie("session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/", maxAge: loginSessionMaxAgeMs });
 }
 
 function setVendorSessionCookie(res, payload) {
-  const token = signSession({ ...payload, scope: "vendor" });
-  res.cookie("vendor_session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/" });
+  const token = signSession({ ...payload, scope: "vendor", expires_at: Date.now() + loginSessionMaxAgeMs });
+  res.cookie("vendor_session_token", token, { httpOnly: true, sameSite: "lax", secure: true, path: "/", maxAge: loginSessionMaxAgeMs });
 }
 
 function buildSessionPayload(user, jobId = null) {
@@ -6742,13 +6743,14 @@ async function resolveJobContextForUser(user, client = null, requestedJobId = nu
 
 function currentUser(req) {
   const sessionToken = req?.cookies?.session_token;
-  return sessionToken ? readSession(sessionToken) : null;
+  const session = sessionToken ? readSession(sessionToken) : null;
+  return session && Number.isFinite(session.expires_at) && session.expires_at > Date.now() ? session : null;
 }
 
 function currentVendorUser(req) {
   const sessionToken = req?.cookies?.vendor_session_token;
   const session = sessionToken ? readSession(sessionToken) : null;
-  return session?.scope === "vendor" ? session : null;
+  return session?.scope === "vendor" && Number.isFinite(session.expires_at) && session.expires_at > Date.now() ? session : null;
 }
 
 const authContextCache = new Map();
