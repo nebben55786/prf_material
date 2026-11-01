@@ -40,6 +40,18 @@ async function convertToJpeg(file) {
   }
 }
 
+async function readPhotoSaveResponse(response) {
+  if (response.redirected || response.status === 401) throw new Error("Your session changed. Sign in and upload again.");
+  const text = await response.text();
+  let result;
+  try { result = JSON.parse(text); } catch (_) {
+    if (response.status === 403) throw new Error("You do not have permission to save this photo. Refresh the page or sign in again.");
+    throw new Error("Unable to save photo (server response " + response.status + "). Please retry. Your selected photo has been kept.");
+  }
+  if (!response.ok) throw new Error(result.error || "Unable to save photo. Please retry.");
+  return result;
+}
+
 document.querySelectorAll("[data-photo-section]").forEach((section) => {
   if (initializedSections.has(section)) return;
   initializedSections.add(section);
@@ -72,6 +84,7 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
       return;
     }
 
+    let completed = false;
     busy = true;
     input.disabled = true;
     form.querySelectorAll("button").forEach((button) => { button.disabled = true; });
@@ -109,10 +122,9 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
             material_item_id: item ? item.value : ""
           })
         });
-        if (response.redirected) throw new Error("Your session changed. Sign in and upload again.");
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Unable to save photo.");
+        await readPhotoSaveResponse(response);
       }
+      completed = true;
       setStatus("Photo saved. Refreshing...");
       window.location.reload();
     } catch (error) {
@@ -121,7 +133,7 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
       busy = false;
       input.disabled = false;
       form.querySelectorAll("button").forEach((button) => { button.disabled = false; });
-      input.value = "";
+      if (completed) input.value = "";
       updateFileLabel();
     }
   };

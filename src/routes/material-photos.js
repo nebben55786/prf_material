@@ -248,6 +248,11 @@ export function registerMaterialPhotoRoutes(app, dependencies) {
         pathname,
         req.user.id
       ];
+      // Item photos already use material_item_id as their target column.
+      if (config.idColumn === "material_item_id") {
+        columns.splice(2, 1);
+        values.splice(2, 1);
+      }
       const row = (await client.query(`
         insert into material_photos (${columns.join(", ")})
         values (${values.map((_, index) => `$${index + 1}`).join(", ")})
@@ -258,6 +263,16 @@ export function registerMaterialPhotoRoutes(app, dependencies) {
     });
     res.json({ ok: true, id: inserted.id, openUrl: `/photos/${inserted.id}/open` });
   }));
+
+  app.use("/photos", (error, req, res, next) => {
+    if (!req.path.endsWith("/complete") && !req.path.endsWith("/client-upload")) return next(error);
+    if (res.headersSent) return next(error);
+    console.error("Photo upload failed", error);
+    const status = Number(error.statusCode || error.status || 400);
+    res.status(status >= 400 && status <= 599 ? status : 400).json({
+      error: error.code ? "Unable to save photo. Please retry or contact your material controller." : error.message || "Unable to save photo. Please retry."
+    });
+  });
 
   app.get("/photos/:id/open", requireAuth, requireJobContext, asyncHandler(async (req, res) => {
     const jobId = currentJobId(req);
