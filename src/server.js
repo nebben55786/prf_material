@@ -11583,8 +11583,8 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
           <div><label>Issued To</label><input name="issued_to" value="${esc(issuedTo)}" required /></div>
         </div>
         <div class="grid">
-          <div><label>IWP</label><input name="iwp_no" value="${esc(req.body.iwp_no || "")}" /></div>
           <div><label>Notes</label><input name="notes" value="${esc(req.body.notes || "")}" /></div>
+          <div><label>IWP</label><input name="iwp_no" value="${esc(req.body.iwp_no || "")}" /></div>
         </div>
         <div class="scroll">
           <table class="data-grid" data-phone-request-table>
@@ -14093,9 +14093,11 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
           <div><label>Requested By</label><input name="requested_by_name" value="${esc(header.requested_by_name)}" required /></div>
           <div><label>Created By</label><input value="${esc(header.created_by_name || "Unknown")}" readonly /></div>
           <div><label>Issued To</label><input name="issued_to" value="${esc(header.issued_to || "")}" required /></div>
+        </div>
+        <div class="grid">
+          <div><label>Notes</label><textarea name="notes">${esc(header.notes || "")}</textarea></div>
           <div><label>IWP</label><input name="iwp_no" value="${esc(header.iwp_no || "")}" /></div>
         </div>
-        <div><label>Notes</label><textarea name="notes">${esc(header.notes || "")}</textarea></div>
         <div class="card scroll"><table data-phone-request-table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Available</th><th>UOM</th><th>New Qty</th><th>Remove</th><th>Limit</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table></div>
         <div class="card">
           <h3>Add BOM Line</h3>
