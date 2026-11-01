@@ -1977,6 +1977,8 @@ function layout(title, body, user) {
     </style>
     <link rel="stylesheet" href="/public/mobile-header.css" />
     <script src="/public/mobile-header.js" defer></script>
+    <link rel="stylesheet" href="/public/mobile-requests.css" />
+    <script src="/public/mobile-requests.js" defer></script>
     <script>
       function togglePassword(button, targetId) {
         const input = document.getElementById(targetId);
@@ -11579,7 +11581,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
           <div><label>Notes</label><input name="notes" value="${esc(req.body.notes || "")}" /></div>
         </div>
         <div class="scroll">
-          <table class="data-grid">
+          <table class="data-grid" data-phone-request-table>
             <thead><tr><th>Line</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Remaining</th><th>Available</th><th>Request Qty</th><th>UOM</th><th>Size</th><th>Thk</th><th>Remove</th></tr></thead>
             <tbody>${lineRows}</tbody>
           </table>
@@ -12884,7 +12886,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
             }
           </style>
           <div class="scroll" id="requisition-builder-scroll">
-            <table id="requisition-builder-table" class="data-grid">
+            <table id="requisition-builder-table" class="data-grid" data-phone-request-table>
               <colgroup>
                 <col style="width:80px" />
                 <col style="width:150px" />
@@ -13338,7 +13340,7 @@ app.get("/requisitions/:id", requireAuth, requireJobContext, requirePermission("
     <td>${esc(line.spec || "")}</td>
     <td>${esc(formatCombinedSize(line.size_1, line.size_2))}</td>
   </tr>`).join("");
-  const linesTable = `<table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Available Qty</th><th>Qty Requested</th><th>Qty Issued</th><th>Qty Not Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table>`;
+  const linesTable = `<table data-phone-request-table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Available Qty</th><th>Qty Requested</th><th>Qty Issued</th><th>Qty Not Issued</th><th>UOM</th><th>Spec</th><th>Size</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table>`;
   const headerActions = [];
   if (!splitMode && header.status === "ISSUED" && isAdminRole(req.user) && canAccess(req.user, "requisitions", "issue")) {
     headerActions.push(`<a class="btn btn-secondary" href="/requisitions/${header.id}/correct-quantities">Correct Quantities</a>`);
@@ -14073,7 +14075,7 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
           <div><label>IWP</label><input name="iwp_no" value="${esc(header.iwp_no || "")}" /></div>
         </div>
         <div><label>Notes</label><textarea name="notes">${esc(header.notes || "")}</textarea></div>
-        <div class="card scroll"><table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Available</th><th>UOM</th><th>New Qty</th><th>Remove</th><th>Limit</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table></div>
+        <div class="card scroll"><table data-phone-request-table><tr><th>Line</th><th>IWP</th><th>Item</th><th>Description</th><th>Req Qty</th><th>Issued</th><th>Available</th><th>UOM</th><th>New Qty</th><th>Remove</th><th>Limit</th></tr>${lineRows || `<tr><td colspan="11" class="muted">No lines on this requisition.</td></tr>`}</table></div>
         <div class="card">
           <h3>Add BOM Line</h3>
           ${candidateLines.length ? `
