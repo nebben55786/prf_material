@@ -29,6 +29,12 @@ test('photo saves persist item, receiving and request targets and failures retur
   const base='http://127.0.0.1:'+server.address().port;
   const post=(scope,id=1)=>fetch(base+'/photos/'+scope+'/'+id+'/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pathname:'material-photos/job-101/'+scope+'/'+id+'/12345678-1234-4123-8123-123456789abc/photo.jpg',material_item_id:'1',caption:'Phone photo'})});
   for(const scope of ['item','mrr','requisition']) {const r=await post(scope);assert.equal(r.status,200,await r.clone().text());assert.equal((await r.json()).ok,true);}
+  const photoHtml=await app.locals.renderPhotoSectionForTarget({user:{id:1,job_id:101,role:'warehouse'}},{scope:'item',targetId:1});
+  assert.match(photoHtml,/data-photo-pick>Choose Photo/);
+  assert.match(photoHtml,/data-photo-camera-pick>Take Photo/);
+  const fileTags=[...photoHtml.matchAll(/<input type="file"[^>]+>/g)].map(m=>m[0]);
+  assert.ok(fileTags.some(tag=>tag.includes('data-photo-input')&&!tag.includes('capture=')));
+  assert.ok(fileTags.some(tag=>tag.includes('data-photo-camera-input')&&tag.includes('capture="environment"')));
   const saved=(await db.query('select * from material_photos order by id')).rows;
   assert.equal(saved.length,3);assert.equal(Number(saved[0].material_item_id),1);assert.equal(saved[0].process_type,'item');assert.equal(saved[0].caption,'Phone photo');assert.equal(Number(saved[1].mrr_log_id),1);assert.equal(Number(saved[2].requisition_id),1);
   let duplicate=await post('item');assert.equal(duplicate.status,400);assert.match((await duplicate.json()).error,/Unable to save photo/);

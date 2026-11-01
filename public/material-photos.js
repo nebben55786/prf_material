@@ -58,6 +58,8 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
   const form = section.querySelector("[data-photo-upload-form]");
   const input = section.querySelector("[data-photo-input]");
   const pick = section.querySelector("[data-photo-pick]");
+  const cameraInput = section.querySelector("[data-photo-camera-input]");
+  const cameraPick = section.querySelector("[data-photo-camera-pick]");
   const fileLabel = section.querySelector("[data-photo-file-label]");
   const status = section.querySelector("[data-photo-status]");
   const item = section.querySelector("[data-photo-item]");
@@ -65,10 +67,11 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
   if (!form || !input || !status) return;
 
   let busy = false;
+  let selectedFiles = [];
   const setStatus = (message) => { status.textContent = message || ""; };
   const updateFileLabel = () => {
     if (!fileLabel) return;
-    const count = input.files ? input.files.length : 0;
+    const count = selectedFiles.length;
     fileLabel.textContent = count ? count + " photo" + (count === 1 ? "" : "s") + " selected" : "No photo selected";
   };
   const uploadFiles = async (files) => {
@@ -87,6 +90,7 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
     let completed = false;
     busy = true;
     input.disabled = true;
+    if (cameraInput) cameraInput.disabled = true;
     form.querySelectorAll("button").forEach((button) => { button.disabled = true; });
     try {
       const { upload } = await import(section.dataset.clientModuleUrl);
@@ -132,16 +136,29 @@ document.querySelectorAll("[data-photo-section]").forEach((section) => {
     } finally {
       busy = false;
       input.disabled = false;
+      if (cameraInput) cameraInput.disabled = false;
       form.querySelectorAll("button").forEach((button) => { button.disabled = false; });
-      if (completed) input.value = "";
+      if (completed) {
+        input.value = "";
+        if (cameraInput) cameraInput.value = "";
+        selectedFiles = [];
+      }
       updateFileLabel();
     }
   };
 
   if (pick) pick.addEventListener("click", () => input.click());
-  input.addEventListener("change", updateFileLabel);
+  if (cameraPick && cameraInput) cameraPick.addEventListener("click", () => cameraInput.click());
+  function selectPhotos(source) {
+    if (!source.files?.length) return;
+    selectedFiles = Array.from(source.files);
+    setStatus("");
+    updateFileLabel();
+  }
+  input.addEventListener("change", () => selectPhotos(input));
+  if (cameraInput) cameraInput.addEventListener("change", () => selectPhotos(cameraInput));
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    uploadFiles(input.files);
+    uploadFiles(selectedFiles);
   });
 });

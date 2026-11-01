@@ -1,0 +1,11 @@
+@media (max-width: 600px) {
+  .location-inventory-page { min-width: 0; }
+  .location-inventory-page .card { min-width: 0; padding: 10px; }
+  .location-inventory-page .grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .location-inventory-page .actions { align-items: stretch; }
+  .location-inventory-page button, .location-inventory-page .btn { min-height: 44px; height: auto; padding: 8px 10px; white-space: normal; }
+  .location-inventory-page input:not([type="hidden"]), .location-inventory-page select, .location-inventory-page textarea { min-width: 0; max-width: 100%; font-size: 16px; }
+  .location-inventory-page details > summary { margin-top: 10px; }
+  .location-inventory-page h3, .location-inventory-page p { overflow-wrap: anywhere; }
+  .location-inventory-page .material-photo-grid { grid-template-columns: minmax(0, 1fr); }
+}

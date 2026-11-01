@@ -5,6 +5,7 @@
   [data-phone-request-table] colgroup, [data-phone-request-table] .phone-request-header { display: none; }
   [data-phone-request-table] thead { display: none; }
   [data-phone-request-table] tbody { display: block; width: 100%; }
+  [data-phone-request-table] tr[hidden] { display: none !important; }
   [data-phone-request-table] .phone-request-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; padding: 12px; border: 1px solid var(--line-strong); background: #fff; }
   [data-phone-request-table] .phone-request-cell { display: block; min-width: 0; width: auto !important; padding: 0; border: 0; background: transparent; overflow: visible; overflow-wrap: anywhere; white-space: normal !important; }
   [data-phone-request-table] .phone-request-cell::before { content: attr(data-phone-label); display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }

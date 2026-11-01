@@ -109,10 +109,12 @@ export function registerMaterialPhotoRoutes(app, dependencies) {
           <div>
             <label>Photo</label>
             <div class="actions">
-              <button type="button" class="btn btn-primary" data-photo-pick>TAKE PHOTO</button>
+              <button type="button" class="btn btn-primary" data-photo-pick>Choose Photo</button>
+              <button type="button" class="btn btn-primary" data-photo-camera-pick>Take Photo</button>
               <span class="muted" data-photo-file-label>No photo selected</span>
             </div>
-            <input type="file" accept="image/*,.heic,.heif" capture="environment" multiple data-photo-input style="position:absolute; opacity:0; width:1px; height:1px; pointer-events:none;" tabindex="-1" />
+            <input type="file" accept="image/*,.heic,.heif" multiple data-photo-input style="position:absolute; opacity:0; width:1px; height:1px; pointer-events:none;" tabindex="-1" />
+            <input type="file" accept="image/*" capture="environment" data-photo-camera-input style="position:absolute; opacity:0; width:1px; height:1px; pointer-events:none;" tabindex="-1" />
           </div>
           ${scope === "item" ? "" : `<div><label>Tag Item</label><select data-photo-item><option value="">No item tag</option>${itemSelectOptions}</select></div>`}
         </div>

@@ -29,6 +29,7 @@
     if(!queue.length) {const tr=document.createElement('tr'),td=cell(tr,'No pending items. Browse Item Master and click Add.');td.colSpan=6;body.appendChild(tr);}
     catalog.forEach(row=>{const button=row.querySelector('[data-queue-add]'),added=queue.some(e=>String(e.id)===String(row.dataset.id));button.disabled=added;button.textContent=added?'Added':'Add';});
     count.textContent=queue.length+' item(s) pending';
+    body.closest?.('table')?.dispatchEvent(new Event('request-rows-updated'));
   }
   catalog.forEach(row=>row.querySelector('[data-queue-add]').addEventListener('click',()=>{
     if(queue.some(e=>String(e.id)===String(row.dataset.id))) return;
