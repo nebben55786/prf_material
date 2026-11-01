@@ -82,7 +82,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
     302
   );
   assert.equal((await request("/jobs/select", { job_id: "101" })).status, 302);
-  const create = await request("/bom/1501/requisitions", { delivery_location_id: "100", issued_to: "Crew", selected_line_ids: "1601", request_qty_1601: "10" });
+  const create = await request("/bom/1501/requisitions", { requested_by_name: "Field Requester", delivery_location_id: "100", issued_to: "Crew", selected_line_ids: "1601", request_qty_1601: "10" });
   assert.equal(create.status, 302, await create.text());
   const id = (await db.query("select id from material_requisitions where requisition_no='MH-PT-0001'")).rows[0].id;
   const path = "/requisitions/" + id;
@@ -189,7 +189,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal(fourth.load_no, "MH-PT-0001-004");
   assert.equal(Number((await totals()).reserved), 6);
   await db.exec("insert into bom_headers(id,job_id,job_number,bom_no,bom_type,status) values(1502,101,'A','SECOND','pipe','ACTIVE');insert into bom_lines(id,bom_id,line_no,item_code,description,uom,qty_required) values(1602,1502,'1','PIPE','Pipe','EA',20)");
-  const competing = await request("/bom/1502/requisitions", { delivery_location_id: "100", issued_to: "Other", selected_line_ids: "1602", request_qty_1602: "11" });
+  const competing = await request("/bom/1502/requisitions", { requested_by_name: "Field Requester", delivery_location_id: "100", issued_to: "Other", selected_line_ids: "1602", request_qty_1602: "11" });
   assert.equal(competing.status, 400, await competing.text());
   assert.equal((await request("/jobs/select", { job_id: "102" })).status, 302);
   assert.equal((await request(p3 + "/issue", {})).status, 400);
@@ -221,7 +221,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(p1 + "/signed-copy")).status, 400);
   assert.equal(Number((await totals()).qty_issued), 10);
   // Requests without split loads retain the original accept, ticket and sign workflow.
-  const legacy=await request("/bom/1502/requisitions",{delivery_location_id:"100",issued_to:"Legacy Crew",selected_line_ids:"1602",request_qty_1602:"10"});
+  const legacy=await request("/bom/1502/requisitions",{requested_by_name:"Field Requester",delivery_location_id:"100",issued_to:"Legacy Crew",selected_line_ids:"1602",request_qty_1602:"10"});
   assert.equal(legacy.status,302,await legacy.text());
   const legacyPath=legacy.headers.get("location");
   assert.equal((await request(legacyPath+"/verify",{})).status,302);

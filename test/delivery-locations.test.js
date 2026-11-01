@@ -181,6 +181,8 @@ test("request builder, preview, save and settings carry delivery location throug
   await db.query("delete from bom_lines where description in ('Row limit fixture','Fully issued fixture','Zero available fixture')");
   await db.query('update bom_lines set qty_required=1 where id=1601'); // stock, rather than BOM demand, limits requests
   const body = {
+    requested_by_name: "Jim Requester",
+    notes: "GRPT-123 <note>",
     delivery_location_id: "100",
     issued_to: "Crew",
     selected_line_ids: "1601",
@@ -197,6 +199,14 @@ test("request builder, preview, save and settings carry delivery location throug
     )
   ).rows[0];
   assert.ok(req);
+  assert.equal(req.requested_by_name,'Jim Requester');assert.equal(req.created_by_name,'delivery-tester');assert.equal(Number(req.created_by_user_id),100);
+  const editHtml=await (await request('/requisitions/'+req.id+'/edit')).text();assert.match(editHtml,/name="requested_by_name" value="Jim Requester"/);
+  const lineId=(await db.query('select id from material_requisition_lines where requisition_id=$1',[req.id])).rows[0].id;
+  assert.equal((await request('/requisitions/'+req.id+'/edit',{requested_by_name:'Changed Requester',created_by_name:'Spoofed Creator',issued_to:'Crew',notes:body.notes,['qty_requested_'+lineId]:'3'})).status,302);
+  const edited=(await db.query('select * from material_requisitions where id=$1',[req.id])).rows[0];assert.equal(edited.requested_by_name,'Changed Requester');assert.equal(edited.created_by_name,'delivery-tester');
+  const list=await (await request('/requisitions')).text();assert.match(list,/<th>Issued To<\/th><th>Notes<\/th>/);assert.match(list,/<th>Created By<\/th>/);assert.match(list,/GRPT-123 &lt;note&gt;/);
+  assert.equal((await request('/bom/1501/requisitions',{...body,requested_by_name:''})).status,400);
+
   assert.equal(req.delivery_location_name, "Memphis");
   assert.equal(req.request_prefix, "MH-MR");
   await db.query(

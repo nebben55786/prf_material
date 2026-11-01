@@ -8291,9 +8291,9 @@ app.post("/yard/issue-by-po/:poId", requireAuth, requireJobContext, requirePermi
     const insertReq = await client.query(`
       insert into material_requisitions (
         job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name,
-        issued_to, iwp_no, iso_no, status, notes, verified_at, verified_by_user_id
+        issued_to, iwp_no, iso_no, status, notes, verified_at, verified_by_user_id, created_by_user_id, created_by_name
       )
-      values ($1, $2, $3, $4, $5, $6, '', '', 'ACCEPTED', $7, now(), $4)
+      values ($1, $2, $3, $4, $5, $6, '', '', 'ACCEPTED', $7, now(), $4, $4, $5)
       returning id
     `, [
       jobId,
@@ -11435,6 +11435,8 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
   const bomId = Number(req.params.id);
   const jobId = currentJobId(req);
   const deliveryLocation = await getDeliveryLocation({query}, jobId, req.body.delivery_location_id);
+  const requestedBy = String(req.body.requested_by_name || "").trim();
+  if (!requestedBy) throw new Error("Requested By is required.");
   const issuedTo = String(req.body.issued_to || "").trim();
   if (!issuedTo) throw new Error("Issued To is required.");
   const previewAction = String(req.body.preview_action || "").trim();
@@ -11559,6 +11561,7 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
     bom_id: String(bomId),
     delivery_location_id: String(deliveryLocation.id),
     staged_selection: JSON.stringify(stagedSelection),
+    draft_requested_by: requestedBy,
     draft_issued_to: issuedTo,
     draft_iwp_no: String(req.body.iwp_no || ""),
     draft_notes: String(req.body.notes || "")
@@ -11575,7 +11578,8 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
         <input type="hidden" name="iso_no" value="${escAttr(req.body.iso_no || "")}" />
         <div class="grid-3">
           <div><label>BOM</label><input value="${esc(bom.bom_name || bom.description || bom.bom_no)} | ${esc(bom.bom_no)}" readonly /></div>
-          <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
+          <div><label>Requested By</label><input name="requested_by_name" value="${esc(requestedBy)}" required /></div>
+          <div><label>Created By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
           <div><label>Issued To</label><input name="issued_to" value="${esc(issuedTo)}" required /></div>
         </div>
         <div class="grid">
@@ -11614,6 +11618,8 @@ app.post("/bom/:id/requisitions/preview", requireAuth, requireJobContext, requir
 app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "create"), asyncHandler(async (req, res) => {
   const bomId = Number(req.params.id);
   const jobId = currentJobId(req);
+  const requestedBy = String(req.body.requested_by_name || "").trim();
+  if (!requestedBy) throw new Error("Requested By is required.");
   const issuedTo = String(req.body.issued_to || "").trim();
   if (!issuedTo) throw new Error("Issued To is required.");
   const selectedLineQtys = collectSelectedRequisitionLineQtys(req.body);
@@ -11630,10 +11636,10 @@ app.post("/bom/:id/requisitions", requireAuth, requireJobContext, requirePermiss
     const requisitionNo = await nextDeliveryRequestNumber(client, jobId, deliveryLocation);
     const availableMap = await getAvailableInventoryByItemMap(client, jobId);
       const insertReq = await client.query(`
-        insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, issued_to, iwp_no, iso_no, status, notes, delivery_location_id, delivery_location_name, request_prefix)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        insert into material_requisitions (job_id, requisition_no, bom_id, requested_by_user_id, requested_by_name, issued_to, iwp_no, iso_no, status, notes, delivery_location_id, delivery_location_name, request_prefix, created_by_user_id, created_by_name)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $4, $14)
         returning id
-    `, [jobId, requisitionNo, bomId, req.user.id, getUserDisplayName(req.user), issuedTo, req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || "", deliveryLocation.id, deliveryLocation.name, deliveryLocation.request_prefix]);
+    `, [jobId, requisitionNo, bomId, req.user.id, requestedBy, issuedTo, req.body.iwp_no || "", req.body.iso_no || "", "REQUESTED", req.body.notes || "", deliveryLocation.id, deliveryLocation.name, deliveryLocation.request_prefix, getUserDisplayName(req.user)]);
       let createdLineCount = 0;
     for (const lineId of selectedLineIds) {
       const qtyRequested = selectedLineQtys.get(lineId);
@@ -12721,6 +12727,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   } catch {
     stagedSelection = {};
   }
+  const draftRequestedBy = String(req.query.draft_requested_by || "").trim();
   const draftIssuedTo = String(req.query.draft_issued_to || "").trim();
   const draftIwpNo = String(req.query.draft_iwp_no || "").trim();
   const draftNotes = String(req.query.draft_notes || "").trim();
@@ -12838,6 +12845,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           ${minMaxLocked ? `<input type="hidden" name="min_max" value="1" />` : ""}
           <input type="hidden" name="show_issued" value="${showIssued ? "1" : "0"}" />
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-filter-staged-selection" />
+          <input type="hidden" name="draft_requested_by" value="${escAttr(draftRequestedBy)}" id="requisition-filter-draft-requested-by" />
           <input type="hidden" name="draft_issued_to" value="${escAttr(draftIssuedTo)}" id="requisition-filter-draft-issued-to" />
           <input type="hidden" name="draft_iwp_no" value="${escAttr(draftIwpNo)}" id="requisition-filter-draft-iwp-no" />
           <input type="hidden" name="draft_notes" value="${escAttr(draftNotes)}" id="requisition-filter-draft-notes" />
@@ -12864,7 +12872,8 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           ${deliveryHidden}<p>Delivery Location: <strong>${esc(deliveryLocation.name)}</strong> | Request Prefix: ${esc(deliveryRequestPrefix(deliveryLocation.request_prefix))}</p>
           <input type="hidden" name="staged_selection" value="${stagedSelectionJson}" id="requisition-create-staged-selection" />
           <div class="grid-3">
-            <div><label>Requested By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
+            <div><label>Requested By</label><input name="requested_by_name" value="${esc(draftRequestedBy)}" placeholder="Enter requester name" required /></div>
+            <div><label>Created By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
             <div><label>Issued To</label><input name="issued_to" value="${esc(draftIssuedTo)}" required /></div>
             <div><label>IWP</label><input name="iwp_no" value="${esc(draftIwpNo)}" /></div>
           </div>
@@ -12946,6 +12955,8 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           const rowCheckboxes = Array.from(document.querySelectorAll('input[name="selected_line_ids"]'));
           const filterInput = document.getElementById("requisition-filter-staged-selection");
           const createInput = document.getElementById("requisition-create-staged-selection");
+          const requestedByInput = document.querySelector('#requisition-create-form input[name="requested_by_name"]');
+          const filterRequestedByInput = document.getElementById("requisition-filter-draft-requested-by");
           const issuedToInput = document.querySelector('#requisition-create-form input[name="issued_to"]');
           const iwpInput = document.querySelector('#requisition-create-form input[name="iwp_no"]');
           const notesInput = document.querySelector('#requisition-create-form input[name="notes"]');
@@ -12954,6 +12965,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           const filterNotesInput = document.getElementById("requisition-filter-draft-notes");
           const selectAllVisible = document.getElementById("requisition-select-all-visible");
           function syncDraftFields() {
+            if (filterRequestedByInput && requestedByInput) filterRequestedByInput.value = requestedByInput.value || "";
             if (filterIssuedToInput && issuedToInput) filterIssuedToInput.value = issuedToInput.value || "";
             if (filterIwpInput && iwpInput) filterIwpInput.value = iwpInput.value || "";
             if (filterNotesInput && notesInput) filterNotesInput.value = notesInput.value || "";
@@ -13012,7 +13024,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
           }
           const filterForm = document.getElementById("requisition-filter-form");
           const createForm = document.getElementById("requisition-create-form");
-          [issuedToInput, iwpInput, notesInput].forEach((input) => {
+          [requestedByInput, issuedToInput, iwpInput, notesInput].forEach((input) => {
             if (input) input.addEventListener("input", syncDraftFields);
           });
           if (filterForm) filterForm.addEventListener("submit", syncStagedSelection);
@@ -13079,10 +13091,12 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     <td>${esc(row.bom_name || row.bom_description || row.bom_no)}</td>
     <td>${esc(row.requested_by_name)}</td>
     <td>${esc(row.issued_to || "")}</td>
+    <td style="white-space:pre-wrap; overflow-wrap:anywhere;">${esc(row.notes || "")}</td>
     <td>${esc(row.iwp_no || "")}</td>
     <td>${row.line_count}</td>
     <td>${esc(formatQtyDisplay(row.qty_requested))}</td>
     <td>${renderRequisitionStatusChip(row.has_issued_loads && isVerifiedStageRequisitionStatus(row.status) ? "PARTIALLY_ISSUED" : row.status)}</td>
+    <td>${esc(row.created_by_name || "Unknown")}</td>
     <td>${esc(formatShortDateTime(row.created_at))}</td>
     <td>${renderRequisitionActionButtons(row, req.user)}</td>
   </tr>`).join("");
@@ -13100,7 +13114,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
         <div class="actions"><button type="submit">Filter Requisitions</button><a class="btn btn-secondary" href="/requisitions">Clear</a></div>
       </form>
     </div>
-    <div class="card scroll"><table><tr><th>Req #</th><th>BOM</th><th>Requested By</th><th>Issued To</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="10" class="muted">No requisitions yet.</td></tr>`}</table></div>
+    <div class="card scroll"><table><tr><th>Req #</th><th>BOM</th><th>Requested By</th><th>Issued To</th><th>Notes</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created By</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No requisitions yet.</td></tr>`}</table></div>
   `, req.user));
 });
 
@@ -14072,7 +14086,8 @@ app.get("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermiss
       <p class="muted">BOM: ${esc(header.bom_name || header.bom_description || header.bom_no)} | BOM #: ${esc(header.bom_no)} | Status: ${renderRequisitionStatusChip(header.status)}</p>
       <form method="post" action="/requisitions/${header.id}/edit" class="stack" data-request-piece-count>
         <div class="grid-3">
-          <div><label>Requested By</label><input value="${esc(header.requested_by_name)}" readonly /></div>
+          <div><label>Requested By</label><input name="requested_by_name" value="${esc(header.requested_by_name)}" required /></div>
+          <div><label>Created By</label><input value="${esc(header.created_by_name || "Unknown")}" readonly /></div>
           <div><label>Issued To</label><input name="issued_to" value="${esc(header.issued_to || "")}" required /></div>
           <div><label>IWP</label><input name="iwp_no" value="${esc(header.iwp_no || "")}" /></div>
         </div>
@@ -14103,13 +14118,15 @@ app.post("/requisitions/:id/edit", requireAuth, requireJobContext, requirePermis
     if (!header) throw new Error("Requisition not found.");
     await assertNoRequisitionLoads(client, req.params.id, jobId);
     if (!canEditRequisition(req.user, header)) throw new Error("Only requested or waiting-on-material requisitions can be edited.");
+    const requestedBy = String(req.body.requested_by_name || "").trim();
+    if (!requestedBy) throw new Error("Requested By is required.");
     const issuedTo = String(req.body.issued_to || "").trim();
     if (!issuedTo) throw new Error("Issued To is required.");
     await client.query(`
       update material_requisitions
       set requested_by_name = $2, issued_to = $3, iwp_no = $4, notes = $5
       where id = $1 and job_id = $6
-    `, [req.params.id, getUserDisplayName(req.user), issuedTo, req.body.iwp_no || "", req.body.notes || "", jobId]);
+    `, [req.params.id, requestedBy, issuedTo, req.body.iwp_no || "", req.body.notes || "", jobId]);
     const lines = (await client.query(`
       select
         mrl.id as requisition_line_id,
