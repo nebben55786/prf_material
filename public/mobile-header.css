@@ -1,0 +1,19 @@
+/* Header only: forms and tables keep their existing layouts. */
+.app-menu { min-width: 0; }
+.app-menu > summary { display: none; }
+@media (max-width: 900px) {
+  .topbar { align-items: stretch; gap: 12px; }
+  .topbar .brand-wrap { flex-direction: column; align-items: stretch; gap: 12px; min-width: 0; }
+  .topbar .brand-link { width: 100%; align-items: flex-start; }
+  .topbar .brand-logo { width: 48px; height: 36px; }
+  .topbar .brand-copy { flex: 1; overflow-wrap: anywhere; }
+  .topbar .brand { font-size: 18px; line-height: 1.25; }
+  .topbar .userline { margin-top: 4px; overflow-wrap: anywhere; }
+  .topbar .job-switcher { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; width: 100%; margin-left: 0; min-width: 0; }
+  .topbar .job-switcher select { min-width: 0; max-width: 100%; width: 100%; min-height: 44px; font-size: 16px; }
+  .app-menu { width: 100%; }
+  .app-menu > summary { display: list-item; padding: 10px 12px; min-height: 44px; border: 1px solid var(--line-strong); border-radius: 2px; background: #edf1f4; color: #12324b; font-weight: 700; cursor: pointer; }
+  .app-menu nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding-top: 6px; }
+  .app-menu nav a { display: flex; align-items: center; min-height: 44px; padding: 8px 10px; overflow-wrap: anywhere; }
+  .app-menu summary:focus-visible, .app-menu nav a:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+}

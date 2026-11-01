@@ -1975,6 +1975,8 @@ function layout(title, body, user) {
       .stack { display: grid; gap: 10px; }
       @media (max-width: 900px) { .grid, .grid-3, .grid-4, .stats, .summary-grid { grid-template-columns: 1fr; } .topbar { flex-direction: column; align-items: flex-start; } }
     </style>
+    <link rel="stylesheet" href="/public/mobile-header.css" />
+    <script src="/public/mobile-header.js" defer></script>
     <script>
       function togglePassword(button, targetId) {
         const input = document.getElementById(targetId);
@@ -2406,7 +2408,7 @@ function layout(title, body, user) {
           </a>
           ${user ? renderJobSwitcher(user) : ""}
         </div>
-        ${user ? `<nav>${navLinks}</nav>` : ""}
+        ${user ? `<details class="app-menu" open><summary>Menu</summary><nav aria-label="Main navigation">${navLinks}</nav></details>` : ""}
       </div>
       ${body}
     </div>
