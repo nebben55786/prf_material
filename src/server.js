@@ -12875,9 +12875,11 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
             <div><label>Requested By</label><input name="requested_by_name" value="${esc(draftRequestedBy)}" placeholder="Enter requester name" required /></div>
             <div><label>Created By</label><input value="${esc(getUserDisplayName(req.user))}" readonly /></div>
             <div><label>Issued To</label><input name="issued_to" value="${esc(draftIssuedTo)}" required /></div>
+          </div>
+          <div class="grid">
+            <div><label>Notes</label><input name="notes" value="${esc(draftNotes)}" /></div>
             <div><label>IWP</label><input name="iwp_no" value="${esc(draftIwpNo)}" /></div>
           </div>
-          <div><label>Notes</label><input name="notes" value="${esc(draftNotes)}" /></div>
           <div class="actions">
             <button type="submit">Create Material Requisition</button>
           </div>
@@ -12886,7 +12888,8 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
               max-width: calc(90vw - 24px);
             }
             #requisition-builder-scroll {
-              max-height: calc(100vh - 240px);
+              max-height: 100vh;
+              max-height: 100dvh;
               overflow: auto;
             }
             #requisition-builder-table thead th {
@@ -12948,6 +12951,7 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
       </div>
       <script src="/public/request-piece-count.js" defer></script>
       <script src="/public/request-quantity-validation.js" defer></script>
+      <script src="/public/request-table-scroll.js" defer></script>
       <script>
         enableResizableTable("requisition-builder-table");
         (function () {
