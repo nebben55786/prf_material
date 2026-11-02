@@ -425,10 +425,26 @@ test("split loads keep reservations, issue independently, and retain separate ti
 
   // Renaming one master ident updates all structured references without changing quantities or other jobs.
   await db.exec("insert into rfqs(id,job_id,rfq_no,project_name) values(9400,101,'RENAME-RFQ','Rename'); insert into rfq_items(job_id,rfq_id,material_item_id,item_code_snapshot,qty) values(101,9400,1001,'PIPE',2); insert into material_receiving_logs(job_id,item_code,ident_code,fluor_item_code) values(101,'PIPE','PIPE','PIPE'),(101,'ORPHAN-IDENT','',''); insert into osd_logs(job_id,item_code) values(101,'PIPE'); insert into vendor_fmr_request_lines(job_id,item_code) values(101,'PIPE'); insert into material_items(job_id,item_code,description,material_type,uom) values(102,'PIPE','Other job','pipe','EA')");
-  assert.match(await (await request('/items?q=PIPE')).text(),/Change Ident/);
+  assert.doesNotMatch(await (await request('/items?q=PIPE')).text(),/>Change Ident<\/a>/);
+  assert.match(await (await request('/items/1001/edit')).text(),/Ident locked by issued requests/);
+  assert.equal((await request('/items/1001/change-ident')).status,400);
+  // Also block partial issues whose header no longer says Issued, and issued split loads.
+  await db.query("update material_requisitions set status='ACCEPTED' where job_id=101");
+  assert.equal((await request('/items/1001/change-ident')).status,400);
+  await db.query('update material_requisition_lines set qty_issued=0 where requisition_id in (select id from material_requisitions where job_id=101)');
+  assert.equal((await request('/items/1001/change-ident')).status,400); // posted issue ledger
+  await db.query('delete from material_issue_transactions where job_id=101');
+  assert.equal((await request('/items/1001/change-ident')).status,400); // issued load
+  await db.query("update material_requisition_loads set status='PLANNED' where job_id=101");
+  assert.match(await (await request('/items/1001/edit')).text(),/href="\/items\/1001\/change-ident"/);
   assert.match(await (await request('/items/1001/edit')).text(),/name="item_code"[^>]+readonly/);
   const renamePage=await (await request('/items/1001/change-ident')).text();
   const renameToken=tokenFrom(renamePage);
+  const issuingRequest=(await db.query("select mr.id from material_requisitions mr join material_requisition_lines mrl on mrl.requisition_id=mr.id join bom_lines bl on bl.id=mrl.bom_line_id where mr.job_id=101 and bl.item_code='PIPE' limit 1")).rows[0];
+  await db.query("update material_requisitions set status='ISSUED' where id=$1",[issuingRequest.id]);
+  response=await request('/items/1001/change-ident',{token:renameToken,new_ident:'BLOCKED-AFTER-OPEN'});assert.equal(response.status,400);assert.match(await response.text(),/used on issued requests/);
+  assert.equal((await db.query('select item_code from material_items where id=1001')).rows[0].item_code,'PIPE');
+  await db.query("update material_requisitions set status='ACCEPTED' where id=$1",[issuingRequest.id]);
   assert.equal((await request('/items/1001/change-ident',{token:renameToken,new_ident:'batch-2'})).status,400);
   assert.equal((await request('/items/1001/change-ident',{token:renameToken,new_ident:'ORPHAN-IDENT'})).status,400);
   await assert.rejects(db.transaction(tx=>renameItemIdent(tx,{jobId:101,itemId:1001,oldIdent:'PIPE',newIdent:'ROLLBACK-PIPE',userId:100,auditLog:async()=>{throw new Error('rollback rename');}})),/rollback rename/);

@@ -1,4 +1,4 @@
-import { registerItemIdentRoutes } from "./item-ident.js";
+import { registerItemIdentRoutes, getIssuedIdentRequests } from "./item-ident.js";
 import { registerInventoryMoveRoutes, inventoryAtStorage } from "./inventory-moves.js";
 import { registerLocationInventoryRoutes } from "./location-inventory.js";
 import { registerRequestCorrectionRoutes } from "./request-corrections.js";
@@ -9984,7 +9984,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
     <td>${esc(formatPlainNumberDisplay(item.thk_2))}</td>
     <td>${esc(item.specs)}</td>
     <td>${esc(item.notes)}</td>
-    <td>${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/${item.id}/edit">Edit</a><a class="btn btn-secondary" href="/items/${item.id}/change-ident">Change Ident</a>` : ""}</td>
+    <td>${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/${item.id}/edit">Edit</a>` : ""}</td>
   </tr>`).join("");
   res.send(layout("Item Master", `
     <h1>Item Master</h1>
@@ -10615,6 +10615,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
   ]);
   const item = itemResult.rows[0];
   if (!item) throw new Error("Item not found.");
+  const issuedIdentRequests = await getIssuedIdentRequests({query},jobId,item.item_code);
   const itemUsage = await getMaterialItemUsageSummary(pool, item.id, item.item_code, jobId);
   const usageSummary = itemUsage.entries.map((entry) => `${entry.count} ${entry.label}`).join(", ");
   const deleteSection = itemUsage.total === 0
@@ -10648,7 +10649,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
       <form method="post" action="/items/${item.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(item.updated_token)}" />
         <div class="grid-4">
-          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" readonly /><a class="btn btn-secondary" href="/items/${item.id}/change-ident">Change Ident</a></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" readonly />${issuedIdentRequests.length ? `<button type="button" class="btn btn-secondary" disabled>Change Ident</button><p class="muted">Ident locked by issued requests: ${issuedIdentRequests.map(r=>`<a href="/requisitions/${r.id}">${esc(r.requisition_no)}</a>`).join(", ")}</p>` : `<a class="btn btn-secondary" href="/items/${item.id}/change-ident">Change Ident</a>`}</div>
           <div><label>Description</label><input name="description" value="${esc(item.description)}" required /></div>
           <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
           <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
