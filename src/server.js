@@ -20823,7 +20823,7 @@ app.get("/inventory-audit", requireAuth, requireJobContext, requirePermission("i
         <p class="muted">Upload the current inventory workbook to create one full replacement audit. Rows in the workbook become the new on-hand truth, and inventory rows missing from the file are reset to zero.</p>
         <form method="post" enctype="multipart/form-data" action="/inventory-audit/import" class="stack">
           <div><label>Inventory Workbook</label><input type="file" name="sheet" required /></div>
-          <div class="actions"><button type="submit">Import Current Inventory</button></div>
+          <div class="actions"><button type="submit">Import Current Inventory</button><a class="btn btn-secondary" href="/inventory-audit/template.xlsx">Download XLSX Template</a></div>
         </form>
       </div>
     ` : ""}
@@ -20832,6 +20832,35 @@ app.get("/inventory-audit", requireAuth, requireJobContext, requirePermission("i
       <table><tr><th>Report #</th><th>Created</th><th>Created By</th><th>Action</th></tr>${recentReportRows || `<tr><td colspan="4" class="muted">No audit reports created yet.</td></tr>`}</table>
     </div>
   `, req.user));
+}));
+
+app.get("/inventory-audit/template.xlsx", requireAuth, requireJobContext, requireInventoryAuditEdit, asyncHandler(async (req, res) => {
+  const workbook = XLSX.utils.book_new();
+  const headers = ["Item Code", "Description", "Size 1", "Size 2", "Thk 1", "Thk 2", "Warehouse", "Location", "Actual Qty"];
+  const sheet = XLSX.utils.aoa_to_sheet([headers]);
+  sheet["!cols"] = [24,55,16,16,14,14,26,22,16].map(wch => ({wch}));
+  sheet["!autofilter"] = {ref:"A1:I1"};
+  XLSX.utils.book_append_sheet(workbook, sheet, "Inventory");
+  const instructions = XLSX.utils.aoa_to_sheet([
+    ["Inventory Reset Template"],
+    ["Enter inventory on the Inventory sheet. Keep the column headings unchanged."],
+    ["Required: Item Code, Warehouse, Location, Actual Qty. Enter the final quantity at that location, not an adjustment."],
+    ["Use zero or a positive quantity. Enter sizes/thicknesses exactly as recorded for that stock row."],
+    ["This is a full reset for the CURRENT JOB. Inventory rows omitted from the workbook are set to zero."],
+    ["Include ALL inventory you want to keep in this job before importing. Blank quantities are treated as zero."],
+    ["The Locations sheet lists active warehouse/location names for the current job."],
+    ["The template contains no example stock rows. Downloading does not change inventory."]
+  ]);
+  instructions["!cols"] = [{wch:125}];
+  XLSX.utils.book_append_sheet(workbook, instructions, "Instructions");
+  const locations = await getWarehouseLocationOptions(currentJobId(req));
+  const locationSheet = XLSX.utils.aoa_to_sheet([["Warehouse", "Location"], ...locations.map(row => [row.warehouse_name,row.name])]);
+  locationSheet["!cols"] = [{wch:30},{wch:24}];
+  XLSX.utils.book_append_sheet(workbook, locationSheet, "Locations");
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="inventory-reset-template.xlsx"');
+  res.setHeader("Cache-Control", "private, no-store");
+  res.send(XLSX.write(workbook, {bookType:"xlsx",type:"buffer"}));
 }));
 
 app.get("/inventory-audit/new", requireAuth, requireJobContext, requireInventoryAuditEdit, asyncHandler(async (req, res) => {

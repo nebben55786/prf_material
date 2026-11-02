@@ -388,6 +388,27 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request('/settings/warehouses/9200/toggle',{})).status,302);
   assert.equal((await db.query('select is_active from warehouses where id=9200')).rows[0].is_active,false);
 
+  // Downloaded reset template can be filled and imported without changing another job.
+  assert.match(await (await request('/inventory-audit')).text(),/Download XLSX Template/);
+  response=await request('/inventory-audit/template.xlsx');assert.equal(response.status,200);assert.match(response.headers.get('content-disposition'),/inventory-reset-template.xlsx/);
+  const XLSX=(await import('xlsx')).default;
+  const templateBook=XLSX.read(Buffer.from(await response.arrayBuffer()),{type:'buffer'});
+  assert.deepEqual(templateBook.SheetNames,['Inventory','Instructions','Locations']);
+  assert.deepEqual(XLSX.utils.sheet_to_json(templateBook.Sheets.Inventory,{header:1})[0],['Item Code','Description','Size 1','Size 2','Thk 1','Thk 2','Warehouse','Location','Actual Qty']);
+  assert.match(JSON.stringify(XLSX.utils.sheet_to_json(templateBook.Sheets.Instructions,{header:1})),/omitted.*zero/);
+  const job101Stock=Number((await db.query('select sum(qty_adjustment) as qty from inventory_adjustment_lines where job_id=101')).rows[0].qty);
+  await request('/jobs/select',{job_id:'102'});
+  response=await request('/inventory-audit/template.xlsx');
+  const otherTemplate=XLSX.read(Buffer.from(await response.arrayBuffer()),{type:'buffer'});
+  assert.ok(!JSON.stringify(XLSX.utils.sheet_to_json(otherTemplate.Sheets.Locations,{header:1})).includes('Move Target'));
+  XLSX.utils.sheet_add_aoa(otherTemplate.Sheets.Inventory,[['TEMPLATE-VALVE','Template valve','42','','','','Template Yard','T1',7]],{origin:'A2'});
+  const uploadForm=new FormData();uploadForm.append('sheet',new Blob([XLSX.write(otherTemplate,{type:'buffer',bookType:'xlsx'})]),'inventory-reset-template.xlsx');
+  response=await fetch(base+'/inventory-audit/import',{method:'POST',headers:{Cookie:cookie},body:uploadForm,redirect:'manual'});
+  assert.equal(response.status,302,await response.clone().text());
+  assert.equal(Number((await db.query("select actual_qty from inventory_audit_counts where job_id=102 and item_code='TEMPLATE-VALVE'")).rows[0].actual_qty),7);
+  assert.equal(Number((await db.query('select sum(qty_adjustment) as qty from inventory_adjustment_lines where job_id=101')).rows[0].qty),job101Stock);
+  await request('/jobs/select',{job_id:'101'});
+
   await request('/jobs/select',{job_id:'102'});
   assert.equal((await request(li+'/save',{token:reviewToken})).status,400);
   await request('/jobs/select',{job_id:'101'});
@@ -400,6 +421,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(correctionPath)).status,403);
   assert.equal((await request('/yard/location-inventory')).status,403);
   assert.equal((await request('/yard/move-inventory?location_id=9300')).status,403);
+  assert.equal((await request('/inventory-audit/template.xlsx')).status,403);
   assert.equal((await request(legacyPath+'/unissue',{reason:'Forbidden'})).status,403);
   assert.equal((await request(p1 + "/sign", signature)).status, 403);
   await db.query("insert into users(id,username,password_hash,role) values(102,'location-warehouse',$1,'warehouse')",[await bcrypt.hash('test-password',4)]);
