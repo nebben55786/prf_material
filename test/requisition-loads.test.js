@@ -331,6 +331,31 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(li+'/save',{token:tokenFrom(warningPage)})).status,302);
   assert.equal(Number((await db.query("select actual_qty from inventory_audit_counts where job_id=101 and item_code='PIPE' and warehouse='Yard' and location='BIN'")).rows[0].actual_qty),0);
 
+  // Warehouse and location selections are exact, not substring matches.
+  await db.exec("insert into warehouses(id,job_id,name,is_active) values(9199,101,'Yard Annex',true); insert into warehouse_locations(job_id,warehouse_id,name,is_active) values(101,9199,'BIN',true),(101,9001,'BIN-2',true); insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,1301,2,'Yard Annex','BIN','OK'),(101,1301,1,'Yard','BIN-2','OK')");
+  const auditKeys=html=>Array.from(html.matchAll(/name="key_\d+" value="([^"]+)"/g),m=>JSON.parse(Buffer.from(m[1],'base64url').toString()));
+  let auditPage=await (await request('/inventory-audit/new?warehouse_filter=Yard')).text();
+  let filteredKeys=auditKeys(auditPage);assert.ok(filteredKeys.length>0);assert.ok(filteredKeys.every(r=>r.warehouse==='Yard'));
+  auditPage=await (await request('/inventory-audit/new?warehouse_filter=yard&location_filter=bin')).text();
+  filteredKeys=auditKeys(auditPage);assert.ok(filteredKeys.length>0);assert.ok(filteredKeys.every(r=>r.warehouse==='Yard'&&r.location==='BIN'));
+  assert.match(auditPage,/data-audit-toggle-zero/);assert.match(auditPage,/data-zero-qty="1"/);assert.match(auditPage,/inventory-audit-visibility.js/);
+  auditPage=await (await request('/inventory-audit/new?location_filter=BIN')).text();
+  filteredKeys=auditKeys(auditPage);assert.ok(filteredKeys.every(r=>r.location==='BIN'));
+
+  // Zeroing legacy stock does not require its old warehouse/location to remain active.
+  await db.exec("insert into warehouses(id,job_id,name,is_active) values(9198,101,'Legacy Yard',false); insert into warehouse_locations(job_id,warehouse_id,name,is_active) values(101,9198,'OLD',false); insert into material_items(id,job_id,item_code,description,material_type,uom) values(9198,101,'VALVE-ZERO','Legacy valves','valve','EA'); insert into po_lines(id,job_id,po_id,material_item_id,qty_ordered,size_1) values(9197,101,1201,9198,12,''),(9198,101,1201,9198,40,'42'); insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,9197,12,'Legacy Yard','OLD','OK'),(101,9198,40,'Legacy Yard','OLD','OK')");
+  const legacyAuditPage=await (await request('/inventory-audit/new?warehouse_filter=Legacy%20Yard&ident_filter=VALVE-ZERO')).text();
+  const legacyKeys=Array.from(legacyAuditPage.matchAll(/name="key_\d+" value="([^"]+)"/g),m=>m[1]);assert.equal(legacyKeys.length,2);
+  const clearLegacy={row_count:'2',key_0:legacyKeys[0],actual_qty_0:'0',key_1:legacyKeys[1],actual_qty_1:'0'};
+  response=await request('/inventory-audit/commit',{...clearLegacy,actual_qty_0:'1'});assert.equal(response.status,400);assert.match(await response.text(),/Legacy Yard/);
+  await request('/jobs/select',{job_id:'102'});
+  assert.equal((await request('/inventory-audit/commit',clearLegacy)).status,400);
+  await request('/jobs/select',{job_id:'101'});
+  response=await request('/inventory-audit/commit',clearLegacy);assert.equal(response.status,302,await response.clone().text());
+  const clearedValveRows=(await db.query("select size_1,sum(qty_adjustment) as qty from inventory_adjustment_lines where job_id=101 and item_code='VALVE-ZERO' group by size_1 order by size_1")).rows;
+  assert.deepEqual(clearedValveRows.map(r=>[r.size_1,Number(r.qty)]),[['',-12],['42',-40]]);
+  assert.equal(Number((await db.query("select sum(qty_received) as qty from receipts where po_line_id in (9197,9198)")).rows[0].qty),52);
+
   // Occupied storage cannot be disabled. Moves preserve on-hand and OS&D, then allow deactivation.
   await db.exec("insert into warehouses(id,job_id,name,is_active) values(9200,101,'Move Source',true),(9201,101,'Move Target',true),(9202,102,'Other',true); insert into warehouse_locations(id,job_id,warehouse_id,name,is_active) values(9300,101,9200,'SRC',true),(9301,101,9201,'DEST',true),(9302,102,9202,'DEST',true); insert into po_lines(id,job_id,po_id,material_item_id,qty_ordered,description_snapshot) values(1302,101,1201,1001,3,'Alternate historical description'); insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,1301,7,'Move Source','SRC','OK'),(101,1302,3,'Move Source','SRC','OK'),(101,1301,2,'Move Source','SRC','DAMAGED')");
   const movePath='/yard/move-inventory';

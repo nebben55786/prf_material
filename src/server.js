@@ -6129,11 +6129,12 @@ async function assertValidWarehouseLocation(client, warehouseName, locationName,
     where w.is_active = true
       and wl.is_active = true
       and ($3::bigint is null or wl.job_id = $3)
-      and lower(w.name) = lower($1)
-      and lower(wl.name) = lower($2)
+      and ($3::bigint is null or w.job_id = $3)
+      and lower(btrim(w.name)) = lower($1)
+      and lower(btrim(wl.name)) = lower($2)
     limit 1 for share of w, wl
   `, [warehouse, location, jobId])).rows[0];
-  if (!match) throw new Error("Select a valid location for the chosen warehouse.");
+  if (!match) throw new Error(`Select an active location for ${warehouse} / ${location} in the current job. Existing stock can still be cleared by setting its actual quantity to zero.`);
 }
 
 async function ensureWarehouseLocationExists(client, warehouseName, locationName, jobId = null) {
@@ -7219,11 +7220,15 @@ async function saveInventoryAuditReport(client, { userId, jobId = null, warehous
   `, [jobId, reportNo, userId || null, String(warehouseFilter || ""), String(locationFilter || ""), String(identFilter || "")]);
   const reportId = Number(reportInsert.rows[0]?.id || 0);
   for (const desiredRow of desiredRows) {
-    await assertValidWarehouseLocation(client, desiredRow.warehouse, desiredRow.location, jobId);
     const key = buildInventoryEntryKey(desiredRow);
     const currentRow = currentMap.get(key);
     const bookQty = parseQtyValue(currentRow?.qty_on_hand || 0);
     const actualQty = parseQtyValue(desiredRow.actual_qty || 0);
+    // Existing stock may predate storage setup or remain in an inactive location.
+    // Clearing that exact job-scoped stock row must not require reactivating it.
+    if (!(currentRow && actualQty === 0)) {
+      await assertValidWarehouseLocation(client, desiredRow.warehouse, desiredRow.location, jobId);
+    }
     const adjustmentQty = parseQtyValue(actualQty - bookQty);
     const lineInsert = await client.query(`
       insert into inventory_audit_report_lines (
@@ -20841,12 +20846,12 @@ app.get("/inventory-audit/new", requireAuth, requireJobContext, requireInventory
   const params = [];
   const where = [];
   if (warehouseFilter) {
-    params.push(`%${warehouseFilter}%`);
-    where.push(`coalesce(inventory_by_location.warehouse, '') ilike $${params.length}`);
+    params.push(warehouseFilter);
+    where.push(`lower(coalesce(inventory_by_location.warehouse, '')) = lower($${params.length})`);
   }
   if (locationFilter) {
-    params.push(`%${locationFilter}%`);
-    where.push(`coalesce(inventory_by_location.location, '') ilike $${params.length}`);
+    params.push(locationFilter);
+    where.push(`lower(coalesce(inventory_by_location.location, '')) = lower($${params.length})`);
   }
   if (identFilter) {
     params.push(`%${identFilter}%`);
@@ -20883,7 +20888,7 @@ app.get("/inventory-audit/new", requireAuth, requireJobContext, requireInventory
     const warehouseSelectId = `inventory-audit-row-warehouse-${index}`;
     const locationSelectId = `inventory-audit-row-location-${index}`;
     rowLocationScripts.push(`syncLocationOptions("${warehouseSelectId}", "${locationSelectId}", ${JSON.stringify(locationMap)}, ${JSON.stringify(row.location || "")});`);
-    return `<tr>
+    return `<tr data-audit-stock-row data-zero-qty="${Number(row.qty_on_hand) === 0 ? "1" : "0"}">
       <td>${esc(row.item_code)}</td>
       <td>${esc(row.description)}</td>
       <td>${esc(formatPlainNumberDisplay(row.size_1))}</td>
@@ -20952,6 +20957,7 @@ app.get("/inventory-audit/new", requireAuth, requireJobContext, requireInventory
       <div class="card">
         <div class="actions">
           <button type="submit">Save Audit</button>
+          <button type="button" class="btn btn-secondary" data-audit-toggle-zero aria-pressed="false">Show Zero Qty</button>
         </div>
         <p class="muted" style="margin:8px 0 0 0;">Enter only the rows you counted. You can also change warehouse and location before saving. Saving creates one audit report and applies all entered quantity adjustments together.</p>
       </div>
@@ -20963,6 +20969,7 @@ app.get("/inventory-audit/new", requireAuth, requireJobContext, requireInventory
       </div>
       ${rows.length ? `<div class="card"><div class="actions"><button type="submit">Save Audit</button></div></div>` : ""}
     </form>
+    <script src="/public/inventory-audit-visibility.js" defer></script>
     <script>
       syncLocationOptions("inventory-audit-warehouse", "inventory-audit-location", ${JSON.stringify(locationMap)}, ${JSON.stringify(locationFilter)});
       ${rowLocationScripts.join("\n      ")}
@@ -20971,9 +20978,10 @@ app.get("/inventory-audit/new", requireAuth, requireJobContext, requireInventory
         const qtyInputs = Array.from(document.querySelectorAll('input[data-qty-input="true"]'));
         if (!commitForm || !qtyInputs.length) return;
         function focusNextQty(currentInput) {
-          const currentIndex = qtyInputs.indexOf(currentInput);
-          if (currentIndex >= 0 && currentIndex < qtyInputs.length - 1) {
-            const nextInput = qtyInputs[currentIndex + 1];
+          const visibleInputs = qtyInputs.filter(input => !input.closest("tr").hidden);
+          const currentIndex = visibleInputs.indexOf(currentInput);
+          if (currentIndex >= 0 && currentIndex < visibleInputs.length - 1) {
+            const nextInput = visibleInputs[currentIndex + 1];
             nextInput.focus();
             nextInput.select();
           }
@@ -23384,7 +23392,7 @@ app.get("/material-logs/fmr/:id/edit", requireAuth, requireJobContext, requirePe
   });
 
 app.use((error, req, res, _next) => {
-  const user = currentUser(req);
+  const user = req.user || null;
   const statusCode = getHttpErrorStatus(error);
   if (statusCode >= 500) console.error(error);
   res.status(statusCode).send(layout("Error", `<div class="card error"><h3>Error</h3><pre>${esc(error.message)}</pre></div>`, user));
