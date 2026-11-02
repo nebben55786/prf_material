@@ -8882,10 +8882,12 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
       <td>${esc(normalizeWarehouseName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>
-        <form method="post" action="/settings/warehouses/${row.id}/toggle">
+        <div class="actions" style="flex-wrap:nowrap;">
+        <form style="margin:0;" method="post" action="/settings/warehouses/${row.id}/toggle">
           <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
           <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
         </form><a class="btn btn-secondary" href="/yard/move-inventory?warehouse_id=${row.id}">Move Inventory</a>
+        </div>
       </td>
     </tr>
   `).join("");
@@ -8895,10 +8897,12 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
       <td>${esc(normalizeLocationName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
       <td>
-        <form method="post" action="/settings/warehouse-locations/${row.id}/toggle">
+        <div class="actions" style="flex-wrap:nowrap;">
+        <form style="margin:0;" method="post" action="/settings/warehouse-locations/${row.id}/toggle">
           <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
           <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
         </form><a class="btn btn-secondary" href="/yard/move-inventory?location_id=${row.id}">Move Inventory</a>
+        </div>
       </td>
     </tr>
   `).join("");
