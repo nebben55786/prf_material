@@ -9665,6 +9665,11 @@ async function storageHasInventory(client, jobId, warehouse, location = null) {
   return inventoryAtStorage(await getCurrentOnHandRows(client, {jobId}), warehouse, location).length > 0;
 }
 
+async function deactivateWarehouseLocations(client, jobId, warehouseId, userId) {
+  const changed = (await client.query("update warehouse_locations set is_active=false where warehouse_id=$1 and job_id=$2 and is_active=true returning id,name", [warehouseId,jobId])).rows;
+  for (const location of changed) await auditLog(client,userId,"deactivate","warehouse_location",location.id,`Warehouse deactivated: ${location.name}`);
+}
+
 app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   let blocked = false;
@@ -9675,6 +9680,7 @@ app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requ
     if (current.is_active && await storageHasInventory(client, jobId, current.name)) { blocked = true; return; }
     const nextState = !current.is_active;
     await client.query("update warehouses set is_active = $2 where id = $1", [req.params.id, nextState]);
+    if (!nextState) await deactivateWarehouseLocations(client, jobId, current.id, req.user.id);
     await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse", req.params.id, current.name);
   });
   if (blocked) return res.redirect(`/yard/move-inventory?warehouse_id=${Number(req.params.id)}&blocked=1`);
@@ -9688,8 +9694,10 @@ app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, re
   if (!warehouseId) throw new Error("Warehouse is required.");
   if (!name) throw new Error("Location name is required.");
   await withTransaction(async (client) => {
-    const warehouse = (await client.query("select name from warehouses where id = $1 and job_id = $2", [warehouseId, jobId])).rows[0];
+    await client.query("select id from jobs where id=$1 for update", [jobId]);
+    const warehouse = (await client.query("select name,is_active from warehouses where id = $1 and job_id = $2 for update", [warehouseId, jobId])).rows[0];
     if (!warehouse) throw new Error("Warehouse not found.");
+    if (!warehouse.is_active) throw Object.assign(new Error("Activate the warehouse before adding or activating a location within it."), {statusCode:400});
     const insert = await client.query(`
       insert into warehouse_locations (job_id, warehouse_id, name, is_active)
       values ($1, $2, $3, true)
@@ -9708,7 +9716,7 @@ app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobCont
   await withTransaction(async (client) => {
     await client.query("select id from jobs where id=$1 for update", [jobId]);
     const current = (await client.query(`
-      select wl.id, wl.name, wl.is_active, w.name as warehouse_name
+      select wl.id, wl.name, wl.is_active, w.name as warehouse_name, w.is_active as warehouse_active
       from warehouse_locations wl
       join warehouses w on w.id = wl.warehouse_id
       where wl.id = $1 and wl.job_id = $2 and w.job_id = $2 for update of w, wl
@@ -9716,6 +9724,7 @@ app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobCont
     if (!current) throw new Error("Warehouse location not found.");
     if (current.is_active && await storageHasInventory(client, jobId, current.warehouse_name, current.name)) { blocked = true; return; }
     const nextState = !current.is_active;
+    if (nextState && !current.warehouse_active) throw Object.assign(new Error("Activate the warehouse before activating this location."), {statusCode:400});
     await client.query("update warehouse_locations set is_active = $2 where id = $1", [req.params.id, nextState]);
     await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse_location", req.params.id, `${current.warehouse_name}:${current.name}`);
   });
@@ -9761,6 +9770,7 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext,
           returning id, name
         `, [jobId, warehouseName, isActive])).rows[0];
       }
+      if (!isActive) await deactivateWarehouseLocations(client, jobId, warehouse.id, req.user.id);
       if (!locationId && !locationName) {
         importedCount += 1;
         continue;

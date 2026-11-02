@@ -1,5 +1,5 @@
 const occupied = row => Math.abs(Number(row.qty_on_hand || 0)) > 0.00001 || Math.abs(Number(row.qty_osd || 0)) > 0.00001;
-export const inventoryAtStorage = (rows, warehouse, location) => rows.filter(r => String(r.warehouse).toLowerCase() === String(warehouse).toLowerCase() && (location == null || String(r.location).toLowerCase() === String(location).toLowerCase()) && occupied(r));
+export const inventoryAtStorage = (rows, warehouse, location) => rows.filter(r => String(r.warehouse).trim().toLowerCase() === String(warehouse).trim().toLowerCase() && (location == null || String(r.location).trim().toLowerCase() === String(location).trim().toLowerCase()) && occupied(r));
 export function registerInventoryMoveRoutes(app, d) {
   const {query,withTransaction,requireAuth,requireJobContext,requireRole,adminEquivalentRoles,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,getCurrentOnHandRows,buildInventoryEntryKey,auditLog}=d;
   const path='/yard/move-inventory', middleware=[requireAuth,requireJobContext,requireRole(adminEquivalentRoles),requirePermission('settings','edit')];

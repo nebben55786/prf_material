@@ -359,10 +359,13 @@ test("split loads keep reservations, issue independently, and retain separate ti
 
   // Occupied storage cannot be disabled. Moves preserve on-hand and OS&D, then allow deactivation.
   await db.exec("insert into warehouses(id,job_id,name,is_active) values(9200,101,'Move Source',true),(9201,101,'Move Target',true),(9202,102,'Other',true); insert into warehouse_locations(id,job_id,warehouse_id,name,is_active) values(9300,101,9200,'SRC',true),(9301,101,9201,'DEST',true),(9302,102,9202,'DEST',true); insert into po_lines(id,job_id,po_id,material_item_id,qty_ordered,description_snapshot) values(1302,101,1201,1001,3,'Alternate historical description'); insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,1301,7,'Move Source','SRC','OK'),(101,1302,3,'Move Source','SRC','OK'),(101,1301,2,'Move Source','SRC','DAMAGED')");
+  await db.exec("insert into warehouse_locations(id,job_id,warehouse_id,name,is_active) values(9303,101,9200,'EMPTY',true)");
   const movePath='/yard/move-inventory';
   response=await request('/settings/warehouses/9200/toggle',{});assert.equal(response.status,302);assert.match(response.headers.get('location'),/move-inventory.*blocked=1/);
   response=await request('/settings/warehouse-locations/9300/toggle',{});assert.match(response.headers.get('location'),/location_id=9300.*blocked=1/);
   assert.equal((await db.query('select is_active from warehouses where id=9200')).rows[0].is_active,true);
+  assert.ok((await db.query('select is_active from warehouse_locations where warehouse_id=9200')).rows.every(r=>r.is_active)); // blocked parent leaves all children unchanged
+  assert.equal((await db.query('select is_active from warehouse_locations where id=9300')).rows[0].is_active,true);
   response=await request('/settings/warehouse-locations/import',{csv_text:'warehouse_id,warehouse_name,is_active\n9200,Move Source,false'});assert.equal(response.status,400);
   page=await (await request(movePath+'?location_id=9300&blocked=1')).text();assert.match(page,/Cannot set this warehouse or location inactive/);
   const moveSelect=tokenFrom(page);
@@ -388,6 +391,22 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await db.query('select is_active from warehouse_locations where id=9300')).rows[0].is_active,false);
   assert.equal((await request('/settings/warehouses/9200/toggle',{})).status,302);
   assert.equal((await db.query('select is_active from warehouses where id=9200')).rows[0].is_active,false);
+  assert.ok((await db.query('select is_active from warehouse_locations where warehouse_id=9200')).rows.every(r=>!r.is_active));
+  assert.equal((await db.query('select is_active from warehouse_locations where id=9301')).rows[0].is_active,true); // other warehouse unchanged
+  assert.equal((await request('/settings/warehouse-locations/9303/toggle',{})).status,400);
+  assert.equal((await request('/settings/warehouse-locations/add',{warehouse_id:'9200',name:'NEW-UNDER-INACTIVE'})).status,400);
+  assert.equal((await db.query('select is_active from warehouse_locations where id=9303')).rows[0].is_active,false);
+  assert.equal((await request('/settings/warehouses/9200/toggle',{})).status,302);
+  assert.equal((await request('/settings/warehouse-locations/9303/toggle',{})).status,302);
+  assert.equal((await db.query('select is_active from warehouse_locations where id=9303')).rows[0].is_active,true);
+  // OS&D-only material also prevents both location and parent deactivation.
+  await db.exec("insert into warehouses(id,job_id,name,is_active) values(9203,101,'OSD Yard',true),(9204,101,'Empty Import Yard',true); insert into warehouse_locations(id,job_id,warehouse_id,name,is_active) values(9304,101,9203,'HOLD',true),(9305,101,9204,'A',true),(9306,101,9204,'B',true); insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,1301,2,'OSD Yard','HOLD','DAMAGED')");
+  assert.match((await request('/settings/warehouse-locations/9304/toggle',{})).headers.get('location'),/blocked=1/);
+  assert.match((await request('/settings/warehouses/9203/toggle',{})).headers.get('location'),/blocked=1/);
+  assert.equal((await db.query('select is_active from warehouse_locations where id=9304')).rows[0].is_active,true);
+  assert.equal((await db.query('select is_active from warehouses where id=9203')).rows[0].is_active,true);
+  response=await request('/settings/warehouse-locations/import',{csv_text:'warehouse_id,warehouse_name,is_active\n9204,Empty Import Yard,false'});assert.equal(response.status,302,await response.clone().text());
+  assert.ok((await db.query('select is_active from warehouse_locations where warehouse_id=9204')).rows.every(r=>!r.is_active));
 
   // Inventory size filtering and zero visibility work together without hiding OS&D stock.
   await db.exec("insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,9198,3,'Yard','NEW','DAMAGED')");
