@@ -388,6 +388,19 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request('/settings/warehouses/9200/toggle',{})).status,302);
   assert.equal((await db.query('select is_active from warehouses where id=9200')).rows[0].is_active,false);
 
+  // Inventory size filtering and zero visibility work together without hiding OS&D stock.
+  await db.exec("insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,9198,3,'Yard','NEW','DAMAGED')");
+  let inventoryPage=await (await request('/inventory?ident_filter=VALVE-ZERO&size_filter=42')).text();
+  assert.match(inventoryPage,/Show Zero Quantities/);
+  assert.equal(Array.from(inventoryPage.matchAll(/<tr>\s*<td>VALVE-ZERO<\/td>/g)).length,1);
+  assert.match(inventoryPage,/size_filter=42/);assert.match(inventoryPage,/show_zero=1/);
+  inventoryPage=await (await request('/inventory?ident_filter=VALVE-ZERO&size_filter=42&show_zero=1')).text();
+  assert.match(inventoryPage,/Hide Zero Quantities/);
+  assert.equal(Array.from(inventoryPage.matchAll(/<tr>\s*<td>VALVE-ZERO<\/td>/g)).length,2);
+  inventoryPage=await (await request('/inventory?warehouse_filter=Yard&location_filter=NEW&ident_filter=VALVE-ZERO&size_filter=99999&show_zero=1')).text();
+  assert.match(inventoryPage,/No inventory rows match these filters/);
+  assert.match(inventoryPage,/size_filter=99999/);assert.match(inventoryPage,/warehouse_filter=Yard/);assert.match(inventoryPage,/location_filter=NEW/);
+
   // Downloaded reset template can be filled and imported without changing another job.
   assert.match(await (await request('/inventory-audit')).text(),/Download XLSX Template/);
   response=await request('/inventory-audit/template.xlsx');assert.equal(response.status,200);assert.match(response.headers.get('content-disposition'),/inventory-reset-template.xlsx/);

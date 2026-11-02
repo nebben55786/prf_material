@@ -20583,6 +20583,8 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
   const warehouseFilter = String(req.query.warehouse_filter || "").trim();
   const locationFilter = String(req.query.location_filter || "").trim();
   const identFilter = String(req.query.ident_filter || "").trim();
+  const sizeFilter = String(req.query.size_filter || "").trim();
+  const showZero = req.query.show_zero === "1";
   const allowedSorts = {
     item_code: "coalesce(item_code, '')",
     description: "coalesce(description, '')",
@@ -20605,31 +20607,38 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
   const params = [];
   const where = [];
   if (warehouseFilter) {
-    params.push(`%${warehouseFilter}%`);
-    where.push(`coalesce(warehouse, '') ilike $${params.length}`);
+    params.push(warehouseFilter);
+    where.push(`lower(coalesce(warehouse, '')) = lower($${params.length})`);
   }
   if (locationFilter) {
-    params.push(`%${locationFilter}%`);
-    where.push(`coalesce(location, '') ilike $${params.length}`);
+    params.push(locationFilter);
+    where.push(`lower(coalesce(location, '')) = lower($${params.length})`);
   }
   if (identFilter) {
     params.push(`%${identFilter}%`);
     where.push(`(coalesce(item_code, '') ilike $${params.length} or coalesce(description, '') ilike $${params.length})`);
+  }
+  if (sizeFilter) {
+    params.push(`%${sizeFilter}%`);
+    where.push(`concat_ws(' / ', size_1, size_2, thk_1, thk_2) ilike $${params.length}`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const inventoryQueryString = (source = {}) => new URLSearchParams({
     warehouse_filter: String(source.warehouse_filter || ""),
     location_filter: String(source.location_filter || ""),
     ident_filter: String(source.ident_filter || ""),
+    size_filter: String(source.size_filter ?? sizeFilter),
+    show_zero: String(source.show_zero ?? (showZero ? "1" : "0")),
     sort: String(source.sort || sort),
     dir: String(source.dir || dir)
   }).toString();
-  const rows = filterRedundantZeroInventoryRows(await getCurrentOnHandRows({ query }, {
+  const allRows = await getCurrentOnHandRows({ query }, {
     jobId,
     whereSql,
     params,
     orderSql: `${sortSql} ${dir}, inventory_by_location.item_code asc, inventory_by_location.warehouse asc, inventory_by_location.location asc`
-  }));
+  });
+  const rows = showZero ? allRows : allRows.filter(row => Number(row.qty_on_hand) !== 0 || Number(row.qty_osd) !== 0);
   const sortLink = (column) => `/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter, ident_filter: identFilter, sort: column, dir: nextSortDir(sort, dir, column) })}`;
   const warehouseOptionsHtml = [`<option value="">All warehouses</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
@@ -20651,6 +20660,8 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
           <select id="inventory-warehouse" name="warehouse_filter" onchange='syncLocationOptions("inventory-warehouse", "inventory-location", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(locationFilter)}")'>${warehouseOptionsHtml}</select>
           <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
           <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="size_filter" value="${esc(sizeFilter)}" />
+          <input type="hidden" name="show_zero" value="${showZero ? "1" : "0"}" />
           <input type="hidden" name="sort" value="${esc(sort)}" />
           <input type="hidden" name="dir" value="${esc(dir)}" />
           <div class="actions">
@@ -20663,6 +20674,8 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
           <label>Location</label>
           <select id="inventory-location" name="location_filter" data-placeholder="All locations"><option value="">All locations</option></select>
           <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+          <input type="hidden" name="size_filter" value="${esc(sizeFilter)}" />
+          <input type="hidden" name="show_zero" value="${showZero ? "1" : "0"}" />
           <input type="hidden" name="sort" value="${esc(sort)}" />
           <input type="hidden" name="dir" value="${esc(dir)}" />
           <div class="actions">
@@ -20675,6 +20688,8 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
           <input name="ident_filter" value="${esc(identFilter)}" />
           <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
           <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+          <input type="hidden" name="size_filter" value="${esc(sizeFilter)}" />
+          <input type="hidden" name="show_zero" value="${showZero ? "1" : "0"}" />
           <input type="hidden" name="sort" value="${esc(sort)}" />
           <input type="hidden" name="dir" value="${esc(dir)}" />
           <div class="actions">
@@ -20683,8 +20698,19 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
           </div>
         </form>
       </div>
+      <form method="get" action="/inventory" class="stack" style="margin-top:12px;">
+        <label>Size / Thickness</label><input name="size_filter" value="${esc(sizeFilter)}" placeholder="Search size or thickness" />
+        <input type="hidden" name="warehouse_filter" value="${esc(warehouseFilter)}" />
+        <input type="hidden" name="location_filter" value="${esc(locationFilter)}" />
+        <input type="hidden" name="ident_filter" value="${esc(identFilter)}" />
+        <input type="hidden" name="sort" value="${esc(sort)}" />
+        <input type="hidden" name="dir" value="${esc(dir)}" />
+        <input type="hidden" name="show_zero" value="${showZero ? "1" : "0"}" />
+        <div class="actions"><button>Apply Size Filter</button><a class="btn btn-secondary" href="/inventory?${inventoryQueryString({warehouse_filter:warehouseFilter,location_filter:locationFilter,ident_filter:identFilter,size_filter:""})}">Clear Size</a>
+        <a class="btn btn-secondary" href="/inventory?${inventoryQueryString({warehouse_filter:warehouseFilter,location_filter:locationFilter,ident_filter:identFilter,show_zero:showZero?"0":"1"})}">${showZero?"Hide Zero Quantities":"Show Zero Quantities"}</a></div>
+      </form>
     </div>
-    <div class="card scroll"><table><tr><th><a href="${sortLink("item_code")}">${esc(sortLabel("Item", sort, dir, "item_code"))}</a></th><th><a href="${sortLink("description")}">${esc(sortLabel("Description", sort, dir, "description"))}</a></th><th><a href="${sortLink("size_1")}">${esc(sortLabel("Size 1", sort, dir, "size_1"))}</a></th><th><a href="${sortLink("size_2")}">${esc(sortLabel("Size 2", sort, dir, "size_2"))}</a></th><th><a href="${sortLink("thk_1")}">${esc(sortLabel("Thk 1", sort, dir, "thk_1"))}</a></th><th><a href="${sortLink("thk_2")}">${esc(sortLabel("Thk 2", sort, dir, "thk_2"))}</a></th><th><a href="${sortLink("warehouse")}">${esc(sortLabel("Warehouse", sort, dir, "warehouse"))}</a></th><th><a href="${sortLink("location")}">${esc(sortLabel("Location", sort, dir, "location"))}</a></th><th><a href="${sortLink("qty_on_hand")}">${esc(sortLabel("Qty On Hand", sort, dir, "qty_on_hand"))}</a></th><th><a href="${sortLink("qty_osd")}">${esc(sortLabel("Qty OS&D", sort, dir, "qty_osd"))}</a></th></tr>${tableRows}</table></div>
+    <div class="card scroll"><table><tr><th><a href="${sortLink("item_code")}">${esc(sortLabel("Item", sort, dir, "item_code"))}</a></th><th><a href="${sortLink("description")}">${esc(sortLabel("Description", sort, dir, "description"))}</a></th><th><a href="${sortLink("size_1")}">${esc(sortLabel("Size 1", sort, dir, "size_1"))}</a></th><th><a href="${sortLink("size_2")}">${esc(sortLabel("Size 2", sort, dir, "size_2"))}</a></th><th><a href="${sortLink("thk_1")}">${esc(sortLabel("Thk 1", sort, dir, "thk_1"))}</a></th><th><a href="${sortLink("thk_2")}">${esc(sortLabel("Thk 2", sort, dir, "thk_2"))}</a></th><th><a href="${sortLink("warehouse")}">${esc(sortLabel("Warehouse", sort, dir, "warehouse"))}</a></th><th><a href="${sortLink("location")}">${esc(sortLabel("Location", sort, dir, "location"))}</a></th><th><a href="${sortLink("qty_on_hand")}">${esc(sortLabel("Qty On Hand", sort, dir, "qty_on_hand"))}</a></th><th><a href="${sortLink("qty_osd")}">${esc(sortLabel("Qty OS&D", sort, dir, "qty_osd"))}</a></th></tr>${tableRows || `<tr><td colspan="10" class="muted">No inventory rows match these filters.</td></tr>`}</table></div>
     <script>syncLocationOptions("inventory-warehouse", "inventory-location", ${JSON.stringify(locationMap)}, ${JSON.stringify(locationFilter)});</script>
   `, req.user));
 });
