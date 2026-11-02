@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import { outstandingReservationSql, createRequisitionLoad } from "../src/requisition-loads.js";
+import { identTargets, renameItemIdent } from "../src/item-ident.js";
 import { PGlite } from "@electric-sql/pglite";
 import {
   normalizeRequestPrefix,
@@ -422,6 +423,38 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal(Number((await db.query('select sum(qty_adjustment) as qty from inventory_adjustment_lines where job_id=101')).rows[0].qty),job101Stock);
   await request('/jobs/select',{job_id:'101'});
 
+  // Renaming one master ident updates all structured references without changing quantities or other jobs.
+  await db.exec("insert into rfqs(id,job_id,rfq_no,project_name) values(9400,101,'RENAME-RFQ','Rename'); insert into rfq_items(job_id,rfq_id,material_item_id,item_code_snapshot,qty) values(101,9400,1001,'PIPE',2); insert into material_receiving_logs(job_id,item_code,ident_code,fluor_item_code) values(101,'PIPE','PIPE','PIPE'),(101,'ORPHAN-IDENT','',''); insert into osd_logs(job_id,item_code) values(101,'PIPE'); insert into vendor_fmr_request_lines(job_id,item_code) values(101,'PIPE'); insert into material_items(job_id,item_code,description,material_type,uom) values(102,'PIPE','Other job','pipe','EA')");
+  assert.match(await (await request('/items?q=PIPE')).text(),/Change Ident/);
+  assert.match(await (await request('/items/1001/edit')).text(),/name="item_code"[^>]+readonly/);
+  const renamePage=await (await request('/items/1001/change-ident')).text();
+  const renameToken=tokenFrom(renamePage);
+  assert.equal((await request('/items/1001/change-ident',{token:renameToken,new_ident:'batch-2'})).status,400);
+  assert.equal((await request('/items/1001/change-ident',{token:renameToken,new_ident:'ORPHAN-IDENT'})).status,400);
+  await assert.rejects(db.transaction(tx=>renameItemIdent(tx,{jobId:101,itemId:1001,oldIdent:'PIPE',newIdent:'ROLLBACK-PIPE',userId:100,auditLog:async()=>{throw new Error('rollback rename');}})),/rollback rename/);
+  assert.equal((await db.query('select item_code from material_items where id=1001')).rows[0].item_code,'PIPE');
+  assert.equal(Number((await db.query("select count(*) as n from inventory_location_moves where item_code='ROLLBACK-PIPE'")).rows[0].n),0);
+  const issueBeforeRename=Number((await db.query('select sum(qty_issued) as n from material_issue_transactions where job_id=101')).rows[0].n);
+  const receiptBeforeRename=Number((await db.query('select sum(qty_received) as n from receipts where job_id=101')).rows[0].n);
+  response=await request('/items/1001/change-ident',{token:renameToken,new_ident:'PIPE-RENAMED'});assert.equal(response.status,302,await response.clone().text());
+  assert.equal((await request('/items/1001/change-ident',{token:renameToken,new_ident:'PIPE-AGAIN'})).status,400);
+  for(const [table,column,scope] of identTargets){
+    const oldReferences=(await db.query(`select count(*) as n from ${table} where ${scope} and lower(btrim(${column}))='pipe'`,[101])).rows[0].n;
+    assert.equal(Number(oldReferences),0,table+'.'+column);
+    assert.ok(Number((await db.query(`select count(*) as n from ${table} where ${scope} and ${column}='PIPE-RENAMED'`,[101])).rows[0].n)>0,table+'.'+column);
+  }
+  assert.equal((await db.query('select item_code from material_items where id=1001')).rows[0].item_code,'PIPE-RENAMED');
+  assert.equal((await db.query("select item_code from material_items where job_id=102 and item_code='PIPE'")).rows[0].item_code,'PIPE');
+  assert.equal(Number((await db.query('select sum(qty_issued) as n from material_issue_transactions where job_id=101')).rows[0].n),issueBeforeRename);
+  assert.equal(Number((await db.query('select sum(qty_received) as n from receipts where job_id=101')).rows[0].n),receiptBeforeRename);
+  const renameAudit=JSON.parse((await db.query("select details from audit_log where action='rename_ident' and entity_id='1001'")).rows[0].details);
+  assert.equal(renameAudit.old_ident,'PIPE');assert.equal(renameAudit.new_ident,'PIPE-RENAMED');
+  assert.match(await (await request('/yard/item-history?item=PIPE-RENAMED')).text(),/PIPE-RENAMED/);
+  await request('/jobs/select',{job_id:'102'});
+  assert.equal((await request('/items/1001/change-ident')).status,400);
+  assert.equal((await request('/items/1001/change-ident',{token:renameToken,new_ident:'WRONG-JOB'})).status,400);
+  await request('/jobs/select',{job_id:'101'});
+
   await request('/jobs/select',{job_id:'102'});
   assert.equal((await request(li+'/save',{token:reviewToken})).status,400);
   await request('/jobs/select',{job_id:'101'});
@@ -435,6 +468,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request('/yard/location-inventory')).status,403);
   assert.equal((await request('/yard/move-inventory?location_id=9300')).status,403);
   assert.equal((await request('/inventory-audit/template.xlsx')).status,403);
+  assert.equal((await request('/items/1001/change-ident')).status,403);
   assert.equal((await request(legacyPath+'/unissue',{reason:'Forbidden'})).status,403);
   assert.equal((await request(p1 + "/sign", signature)).status, 403);
   await db.query("insert into users(id,username,password_hash,role) values(102,'location-warehouse',$1,'warehouse')",[await bcrypt.hash('test-password',4)]);

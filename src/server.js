@@ -1,3 +1,4 @@
+import { registerItemIdentRoutes } from "./item-ident.js";
 import { registerInventoryMoveRoutes, inventoryAtStorage } from "./inventory-moves.js";
 import { registerLocationInventoryRoutes } from "./location-inventory.js";
 import { registerRequestCorrectionRoutes } from "./request-corrections.js";
@@ -8122,6 +8123,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
   `, req.user));
 });
 
+registerItemIdentRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,auditLog});
 registerInventoryMoveRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requireRole,adminEquivalentRoles,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,getCurrentOnHandRows,buildInventoryEntryKey,auditLog});
 registerLocationInventoryRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requireInventoryAuditEdit,asyncHandler,currentJobId,layout,esc,signSession,readSession,getWarehouseOptions,getWarehouseLocationMap,normalizeWarehouseLocationValues,assertValidWarehouseLocation,getCurrentOnHandRows,buildInventoryEntryKey,saveInventoryAuditReport,upsertMaterialMasterItem,getVerifiedAllocatedInventoryTotalsByItem,auditLog});
 
@@ -9982,10 +9984,11 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
     <td>${esc(formatPlainNumberDisplay(item.thk_2))}</td>
     <td>${esc(item.specs)}</td>
     <td>${esc(item.notes)}</td>
-    <td>${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/${item.id}/edit">Edit</a>` : ""}</td>
+    <td>${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/${item.id}/edit">Edit</a><a class="btn btn-secondary" href="/items/${item.id}/change-ident">Change Ident</a>` : ""}</td>
   </tr>`).join("");
   res.send(layout("Item Master", `
     <h1>Item Master</h1>
+    ${req.query.ident_changed ? `<div class="card success">Ident changed throughout the current job.</div>` : ""}
     <div class="card">
       <form method="get" action="/items" class="stack">
         <div class="grid">
@@ -10645,7 +10648,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
       <form method="post" action="/items/${item.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(item.updated_token)}" />
         <div class="grid-4">
-          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" required /></div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" readonly /><a class="btn btn-secondary" href="/items/${item.id}/change-ident">Change Ident</a></div>
           <div><label>Description</label><input name="description" value="${esc(item.description)}" required /></div>
           <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
           <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
@@ -10673,8 +10676,9 @@ app.post("/items/:id/edit", requireAuth, requireJobContext, requirePermission("i
   const itemId = Number(req.params.id);
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
-    const current = (await client.query("select id from material_items where id = $1 and job_id = $2 and extract(epoch from updated_at)::text = $3", [itemId, jobId, req.body.updated_token || ""])).rows[0];
+    const current = (await client.query("select id, item_code from material_items where id = $1 and job_id = $2 and extract(epoch from updated_at)::text = $3 for update", [itemId, jobId, req.body.updated_token || ""])).rows[0];
     if (!current) throw new Error("This item was modified by another user. Refresh and try again.");
+    if (String(req.body.item_code || "").trim() !== current.item_code) throw new Error("Use Change Ident to rename this item throughout the job.");
     const result = await updateMaterialMasterItemById(client, itemId, req.body, jobId);
     if (result.status === "skipped") throw new Error(result.message);
     await auditLog(client, req.user.id, "update", "material_item", result.id, result.item.item_code);
