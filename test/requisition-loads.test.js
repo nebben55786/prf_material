@@ -278,6 +278,12 @@ test("split loads keep reservations, issue independently, and retain separate ti
   const li='/yard/location-inventory',loc=li+'?warehouse=Yard&location=BIN';
   const tokenFrom=html=>{const m=html.match(/name="token" value="([^"]+)"/);assert.ok(m);return m[1].replaceAll('&quot;','"').replaceAll('&amp;','&');};
   let page=await (await request(loc)).text();assert.match(page,/Actual Qty/);assert.match(page,/Photos/);
+  // Display current master attributes, even when receipt dimensions differ.
+  const originalMaster=(await db.query("select * from material_items where job_id=101 and item_code='PIPE'")).rows[0];
+  await db.query("update material_items set description='Current master description',size_1='MASTER-SIZE' where id=$1",[originalMaster.id]);
+  const masterPage=await (await request(loc)).text();
+  assert.match(masterPage,/<td>PIPE<\/td><td>Current master description<\/td><td>MASTER-SIZE/);
+  await db.query('update material_items set description=$1,size_1=$2 where id=$3',[originalMaster.description,originalMaster.size_1,originalMaster.id]);
   const countToken=tokenFrom(page);
   const countPayload=JSON.parse(Buffer.from(countToken.split('.')[0],'base64url').toString());
   const pipeIndex=countPayload.rows.findIndex(r=>r.item_code==='PIPE');assert.ok(pipeIndex>=0);
