@@ -1,3 +1,4 @@
+import { registerInventoryMoveRoutes, inventoryAtStorage } from "./inventory-moves.js";
 import { registerLocationInventoryRoutes } from "./location-inventory.js";
 import { registerRequestCorrectionRoutes } from "./request-corrections.js";
 import { reserveMrrNumber, useReservedMrrNumber } from "./mrr-numbers.js";
@@ -944,7 +945,7 @@ async function runResetTarget(client, target, user) {
   if (!user?.id) throw new Error("A signed-in admin user is required.");
   switch (target) {
     case "full_reset":
-        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_sto_packages, sto_packages, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+        await client.query(`truncate table inventory_location_moves, inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_sto_packages, sto_packages, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
       await client.query("delete from users where id <> $1", [user.id]);
       await client.query("update users set is_active = true where id = $1", [user.id]);
       await client.query(`
@@ -956,7 +957,7 @@ async function runResetTarget(client, target, user) {
       await auditLog(client, user.id, "reset", "app_data", target, "Full reset completed.");
       return;
     case "data_only":
-        await client.query(`truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_sto_packages, sto_packages, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
+        await client.query(`truncate table inventory_location_moves, inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, receipts, po_lines, purchase_orders, rfq_sto_packages, sto_packages, rfq_quote_files, quote_revisions, quotes, rfq_vendors, rfq_items, rfqs, material_issue_transactions, material_requisition_lines, material_requisitions, bom_lines, bom_headers, material_items, vendor_contacts, vendors, warehouse_locations, warehouses, import_batch_errors, import_batches, material_log_lookup_values, access_requests, audit_log restart identity cascade`);
       await auditLog(client, user.id, "reset", "app_data", target, "Operational data reset completed.");
       return;
     case "vendors":
@@ -972,7 +973,7 @@ async function runResetTarget(client, target, user) {
       await client.query("truncate table vendor_fmr_request_lines, opi_logs, osd_logs, fmr_logs, mrr_logs, material_receiving_logs, material_log_lookup_values restart identity cascade");
       break;
     case "inventory":
-      await client.query("truncate table inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, warehouse_locations, warehouses restart identity cascade");
+      await client.query("truncate table inventory_location_moves, inventory_adjustment_lines, inventory_audit_report_lines, inventory_audit_reports, inventory_audit_counts, warehouse_locations, warehouses restart identity cascade");
       break;
     case "imports":
       await client.query("truncate table import_batch_errors, import_batches restart identity cascade");
@@ -5007,11 +5008,11 @@ function getInventoryByLocationSubquery(jobId = null) {
       coalesce(receipt_inventory.warehouse, adjustment_inventory.warehouse) as warehouse,
       coalesce(receipt_inventory.location, adjustment_inventory.location) as location,
       coalesce(receipt_inventory.qty_on_hand, 0) + coalesce(adjustment_inventory.qty_adjustment, 0) as qty_on_hand,
-      coalesce(receipt_inventory.qty_osd, 0) as qty_osd
+      coalesce(receipt_inventory.qty_osd, 0) + coalesce(adjustment_inventory.qty_osd_adjustment, 0) as qty_osd
       from (
         select
         coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code) as item_code,
-        coalesce(nullif(pl.description_snapshot, ''), mi.description) as description,
+        max(coalesce(nullif(pl.description_snapshot, ''), mi.description)) as description,
         coalesce(pl.size_1, '') as size_1,
         coalesce(pl.size_2, '') as size_2,
         coalesce(pl.thk_1, '') as thk_1,
@@ -5026,7 +5027,6 @@ function getInventoryByLocationSubquery(jobId = null) {
       ${jobFilterSql}
       group by
         coalesce(nullif(pl.item_code_snapshot, ''), mi.item_code),
-        coalesce(nullif(pl.description_snapshot, ''), mi.description),
         coalesce(pl.size_1, ''),
         coalesce(pl.size_2, ''),
         coalesce(pl.thk_1, ''),
@@ -5037,19 +5037,25 @@ function getInventoryByLocationSubquery(jobId = null) {
     full outer join (
       select
         item_code,
-        description,
+        max(description) as description,
         coalesce(size_1, '') as size_1,
         coalesce(size_2, '') as size_2,
         coalesce(thk_1, '') as thk_1,
         coalesce(thk_2, '') as thk_2,
         initcap(lower(coalesce(warehouse, ''))) as warehouse,
         upper(coalesce(location, '')) as location,
-        sum(qty_adjustment) as qty_adjustment
-      from inventory_adjustment_lines
+        sum(qty_adjustment) as qty_adjustment,
+        sum(qty_osd_adjustment) as qty_osd_adjustment
+      from (
+        select job_id,item_code,description,size_1,size_2,thk_1,thk_2,warehouse,location,qty_adjustment,0::numeric as qty_osd_adjustment from inventory_adjustment_lines
+        union all
+        select job_id,item_code,description,size_1,size_2,thk_1,thk_2,from_warehouse,from_location,-qty,-qty_osd from inventory_location_moves
+        union all
+        select job_id,item_code,description,size_1,size_2,thk_1,thk_2,to_warehouse,to_location,qty,qty_osd from inventory_location_moves
+      ) inventory_offsets
       ${adjustmentJobFilterSql}
       group by
         item_code,
-        description,
         coalesce(size_1, ''),
         coalesce(size_2, ''),
         coalesce(thk_1, ''),
@@ -6125,7 +6131,7 @@ async function assertValidWarehouseLocation(client, warehouseName, locationName,
       and ($3::bigint is null or wl.job_id = $3)
       and lower(w.name) = lower($1)
       and lower(wl.name) = lower($2)
-    limit 1
+    limit 1 for share of w, wl
   `, [warehouse, location, jobId])).rows[0];
   if (!match) throw new Error("Select a valid location for the chosen warehouse.");
 }
@@ -8111,6 +8117,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
   `, req.user));
 });
 
+registerInventoryMoveRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requireRole,adminEquivalentRoles,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,getCurrentOnHandRows,buildInventoryEntryKey,auditLog});
 registerLocationInventoryRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requireInventoryAuditEdit,asyncHandler,currentJobId,layout,esc,signSession,readSession,getWarehouseOptions,getWarehouseLocationMap,normalizeWarehouseLocationValues,assertValidWarehouseLocation,getCurrentOnHandRows,buildInventoryEntryKey,saveInventoryAuditReport,upsertMaterialMasterItem,getVerifiedAllocatedInventoryTotalsByItem,auditLog});
 
 app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view"), async (req, res) => {
@@ -8871,7 +8878,7 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
         <form method="post" action="/settings/warehouses/${row.id}/toggle">
           <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
           <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
-        </form>
+        </form><a class="btn btn-secondary" href="/yard/move-inventory?warehouse_id=${row.id}">Move Inventory</a>
       </td>
     </tr>
   `).join("");
@@ -8884,7 +8891,7 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
         <form method="post" action="/settings/warehouse-locations/${row.id}/toggle">
           <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
           <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
-        </form>
+        </form><a class="btn btn-secondary" href="/yard/move-inventory?location_id=${row.id}">Move Inventory</a>
       </td>
     </tr>
   `).join("");
@@ -9211,6 +9218,16 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(adminE
       where ial.job_id = $2 and (ial.item_code ilike $1 or ial.description ilike $1)
 
       union all
+      select mv.created_at,mv.item_code,mv.description,
+        initcap(lower(case when side.direction=-1 then mv.from_warehouse else mv.to_warehouse end)),
+        upper(case when side.direction=-1 then mv.from_location else mv.to_location end),
+        mv.qty+mv.qty_osd,side.direction*mv.qty,mv.qty>0,'Inventory Move',coalesce(u.username,''),
+        concat('Move #',mv.id,' | ',mv.from_warehouse,' / ',mv.from_location,' to ',mv.to_warehouse,' / ',mv.to_location,' | Stock: ',mv.qty,' | OS&D: ',mv.qty_osd)
+      from inventory_location_moves mv cross join (values(-1),(1)) side(direction)
+      left join users u on u.id=mv.created_by
+      where mv.job_id=$2 and (mv.item_code ilike $1 or mv.description ilike $1)
+
+      union all
 
       select
         mrl.created_at as transaction_date,
@@ -9426,7 +9443,7 @@ app.get("/yard/locations", requireAuth, requireJobContext, requirePermission("ya
     <tr>
       <td>${esc(normalizeWarehouseName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-      <td>${canManageLocations ? `<form method="post" action="/settings/warehouses/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}</td>
+      <td>${canManageLocations ? `<form method="post" action="/settings/warehouses/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form><a class="btn btn-secondary" href="/yard/move-inventory?warehouse_id=${row.id}">Move Inventory</a>` : ""}</td>
     </tr>
   `).join("");
   const locationRows = warehouseLocationsRes.rows.map((row) => `
@@ -9434,11 +9451,12 @@ app.get("/yard/locations", requireAuth, requireJobContext, requirePermission("ya
       <td>${esc(normalizeWarehouseName(row.warehouse_name))}</td>
       <td>${esc(normalizeLocationName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-      <td>${canManageLocations ? `<form method="post" action="/settings/warehouse-locations/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}</td>
+      <td>${canManageLocations ? `<form method="post" action="/settings/warehouse-locations/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form><a class="btn btn-secondary" href="/yard/move-inventory?location_id=${row.id}">Move Inventory</a>` : ""}</td>
     </tr>
   `).join("");
   res.send(layout("Locations", `
     <h1>Locations</h1>
+    ${req.query.moved ? `<div class="card">Inventory moved successfully. The move is recorded in Item History.</div>` : ""}
     <div class="card">
       <div class="actions">
         <a class="btn btn-secondary" href="/yard">Back To Yard</a>
@@ -9632,15 +9650,23 @@ app.post("/settings/warehouses/add", requireAuth, requireJobContext, requireRole
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
+async function storageHasInventory(client, jobId, warehouse, location = null) {
+  return inventoryAtStorage(await getCurrentOnHandRows(client, {jobId}), warehouse, location).length > 0;
+}
+
 app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
+  let blocked = false;
   await withTransaction(async (client) => {
-    const current = (await client.query("select * from warehouses where id = $1 and job_id = $2", [req.params.id, jobId])).rows[0];
+    await client.query("select id from jobs where id=$1 for update", [jobId]);
+    const current = (await client.query("select * from warehouses where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
     if (!current) throw new Error("Warehouse not found.");
+    if (current.is_active && await storageHasInventory(client, jobId, current.name)) { blocked = true; return; }
     const nextState = !current.is_active;
     await client.query("update warehouses set is_active = $2 where id = $1", [req.params.id, nextState]);
     await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse", req.params.id, current.name);
   });
+  if (blocked) return res.redirect(`/yard/move-inventory?warehouse_id=${Number(req.params.id)}&blocked=1`);
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
@@ -9667,18 +9693,22 @@ app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, re
 
 app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
+  let blocked = false;
   await withTransaction(async (client) => {
+    await client.query("select id from jobs where id=$1 for update", [jobId]);
     const current = (await client.query(`
       select wl.id, wl.name, wl.is_active, w.name as warehouse_name
       from warehouse_locations wl
       join warehouses w on w.id = wl.warehouse_id
-      where wl.id = $1 and wl.job_id = $2
+      where wl.id = $1 and wl.job_id = $2 and w.job_id = $2 for update of w, wl
     `, [req.params.id, jobId])).rows[0];
     if (!current) throw new Error("Warehouse location not found.");
+    if (current.is_active && await storageHasInventory(client, jobId, current.warehouse_name, current.name)) { blocked = true; return; }
     const nextState = !current.is_active;
     await client.query("update warehouse_locations set is_active = $2 where id = $1", [req.params.id, nextState]);
     await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse_location", req.params.id, `${current.warehouse_name}:${current.name}`);
   });
+  if (blocked) return res.redirect(`/yard/move-inventory?location_id=${Number(req.params.id)}&blocked=1`);
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
@@ -9687,6 +9717,7 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext,
   if (rows.length === 0) throw new Error("No rows found.");
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
+    await client.query("select id from jobs where id=$1 for update", [jobId]);
     let importedCount = 0;
     for (const row of rows) {
       const warehouseId = Number(row.warehouse_id || 0);
@@ -9695,6 +9726,12 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext,
       const locationName = normalizeLocationName(row.location_name);
       const isActive = parseImportActiveFlag(row.is_active, true);
       if (!warehouseId && !warehouseName) continue;
+      const previousWarehouse = (await client.query("select * from warehouses where job_id=$1 and (id=$2 or ($2=0 and lower(name)=lower($3))) for update", [jobId,warehouseId,warehouseName])).rows[0];
+      if (previousWarehouse && (!isActive || (warehouseName && warehouseName !== previousWarehouse.name)) && await storageHasInventory(client,jobId,previousWarehouse.name)) throw new Error("Cannot deactivate or rename a warehouse containing inventory. Use Move Inventory from Locations first.");
+      if (locationId || locationName) {
+        const previousLocations = (await client.query("select wl.*,w.name as warehouse_name from warehouse_locations wl join warehouses w on w.id=wl.warehouse_id where wl.job_id=$1 and w.job_id=$1 and (wl.id=$2 or ($2=0 and lower(wl.name)=lower($3) and w.id=$4)) for update of w,wl",[jobId,locationId,locationName,previousWarehouse?.id||0])).rows;
+        for (const previous of previousLocations) if ((!isActive || (locationName && locationName !== previous.name) || (previousWarehouse ? Number(previous.warehouse_id)!==Number(previousWarehouse.id) : warehouseName && warehouseName!==previous.warehouse_name)) && await storageHasInventory(client,jobId,previous.warehouse_name,previous.name)) throw new Error("Cannot deactivate, rename, or reassign a location containing inventory. Use Move Inventory from Locations first.");
+      }
       let warehouse;
       if (warehouseId > 0) {
         warehouse = (await client.query(`

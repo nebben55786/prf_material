@@ -331,6 +331,38 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(li+'/save',{token:tokenFrom(warningPage)})).status,302);
   assert.equal(Number((await db.query("select actual_qty from inventory_audit_counts where job_id=101 and item_code='PIPE' and warehouse='Yard' and location='BIN'")).rows[0].actual_qty),0);
 
+  // Occupied storage cannot be disabled. Moves preserve on-hand and OS&D, then allow deactivation.
+  await db.exec("insert into warehouses(id,job_id,name,is_active) values(9200,101,'Move Source',true),(9201,101,'Move Target',true),(9202,102,'Other',true); insert into warehouse_locations(id,job_id,warehouse_id,name,is_active) values(9300,101,9200,'SRC',true),(9301,101,9201,'DEST',true),(9302,102,9202,'DEST',true); insert into po_lines(id,job_id,po_id,material_item_id,qty_ordered,description_snapshot) values(1302,101,1201,1001,3,'Alternate historical description'); insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,1301,7,'Move Source','SRC','OK'),(101,1302,3,'Move Source','SRC','OK'),(101,1301,2,'Move Source','SRC','DAMAGED')");
+  const movePath='/yard/move-inventory';
+  response=await request('/settings/warehouses/9200/toggle',{});assert.equal(response.status,302);assert.match(response.headers.get('location'),/move-inventory.*blocked=1/);
+  response=await request('/settings/warehouse-locations/9300/toggle',{});assert.match(response.headers.get('location'),/location_id=9300.*blocked=1/);
+  assert.equal((await db.query('select is_active from warehouses where id=9200')).rows[0].is_active,true);
+  response=await request('/settings/warehouse-locations/import',{csv_text:'warehouse_id,warehouse_name,is_active\n9200,Move Source,false'});assert.equal(response.status,400);
+  page=await (await request(movePath+'?location_id=9300&blocked=1')).text();assert.match(page,/Cannot set this warehouse or location inactive/);
+  const moveSelect=tokenFrom(page);
+  assert.equal((await request(movePath+'/review',{token:moveSelect,destination_id:'9302',selected_0:'1',qty_0:'1'})).status,400);
+  assert.equal((await request(movePath+'/review',{token:moveSelect,destination_id:'9301',selected_0:'1',qty_0:'11'})).status,400);
+  response=await request(movePath+'/review',{token:moveSelect,destination_id:'9301',selected_0:'1',qty_0:'4',osd_0:'0'});assert.equal(response.status,200,await response.clone().text());
+  const firstMove=tokenFrom(await response.text());
+  await db.query('update warehouse_locations set is_active=false where id=9301');
+  assert.equal((await request(movePath+'/save',{token:firstMove})).status,400);
+  await db.query('update warehouse_locations set is_active=true where id=9301');
+  assert.equal((await request(movePath+'/save',{token:firstMove})).status,302);
+  assert.equal((await request(movePath+'/save',{token:firstMove})).status,400);
+  let sourceInventory=JSON.parse(Buffer.from(tokenFrom(await (await request(li+'?warehouse=Move%20Source&location=SRC')).text()).split('.')[0],'base64url').toString()).rows;
+  assert.equal(Number(sourceInventory[0].qty_on_hand),6);assert.equal(Number(sourceInventory[0].qty_osd),2);
+  assert.match((await request('/settings/warehouses/9200/toggle',{})).headers.get('location'),/blocked=1/);
+  page=await (await request(movePath+'?warehouse_id=9200')).text();
+  response=await request(movePath+'/review',{token:tokenFrom(page),destination_id:'9301',selected_0:'1',qty_0:'6',osd_0:'2'});assert.equal(response.status,200,await response.clone().text());
+  assert.equal((await request(movePath+'/save',{token:tokenFrom(await response.text())})).status,302);
+  let targetInventory=JSON.parse(Buffer.from(tokenFrom(await (await request(li+'?warehouse=Move%20Target&location=DEST')).text()).split('.')[0],'base64url').toString()).rows;
+  assert.equal(Number(targetInventory[0].qty_on_hand),10);assert.equal(Number(targetInventory[0].qty_osd),2);
+  assert.match(await (await request('/yard/item-history?item=PIPE')).text(),/Inventory Move/);
+  assert.equal((await request('/settings/warehouse-locations/9300/toggle',{})).status,302);
+  assert.equal((await db.query('select is_active from warehouse_locations where id=9300')).rows[0].is_active,false);
+  assert.equal((await request('/settings/warehouses/9200/toggle',{})).status,302);
+  assert.equal((await db.query('select is_active from warehouses where id=9200')).rows[0].is_active,false);
+
   await request('/jobs/select',{job_id:'102'});
   assert.equal((await request(li+'/save',{token:reviewToken})).status,400);
   await request('/jobs/select',{job_id:'101'});
@@ -342,6 +374,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request(p1 + "/issue", {})).status, 403);
   assert.equal((await request(correctionPath)).status,403);
   assert.equal((await request('/yard/location-inventory')).status,403);
+  assert.equal((await request('/yard/move-inventory?location_id=9300')).status,403);
   assert.equal((await request(legacyPath+'/unissue',{reason:'Forbidden'})).status,403);
   assert.equal((await request(p1 + "/sign", signature)).status, 403);
   await db.query("insert into users(id,username,password_hash,role) values(102,'location-warehouse',$1,'warehouse')",[await bcrypt.hash('test-password',4)]);
