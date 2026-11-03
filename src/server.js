@@ -1,3 +1,4 @@
+import { resolveRolePermissions, hasSectionPermission, yardPermissionActions } from "./permissions.js";
 import { registerItemMergeRoutes } from "./item-merge.js";
 import { withItemMasterAttributes } from "./inventory-display.js";
 import { registerItemIdentRoutes, getIssuedIdentRequests } from "./item-ident.js";
@@ -76,7 +77,8 @@ const permissionSections = [
   { key: "material_logs", label: "Material Logs", href: "/material-logs" },
   { key: "vendors", label: "Vendors", href: "/vendors" },
   { key: "rfqs", label: "Purchasing", href: "/rfq" },
-  { key: "inventory", label: "Items Master", href: "/items" },
+  { key: "items", label: "Items Master", href: "/items" },
+  { key: "inventory", label: "Inventory", href: "/inventory" },
   { key: "pos", label: "POs", href: "/po" },
   { key: "bom", label: "BOM", href: "/bom" },
   { key: "receiving", label: "Receiving", href: "/receive" },
@@ -214,22 +216,11 @@ function safeCookieDecode(value) {
 }
 
 function getPermissionsForRole(role) {
-  const key = normalizeRole(role);
-  return {
-    ...(defaultPermissionMatrix[key] || {}),
-    ...(permissionMatrix[key] || {})
-  };
+  return resolveRolePermissions(defaultPermissionMatrix, permissionMatrix, normalizeRole(role));
 }
 
 function canAccess(user, section, action = "view") {
-  if (!user) return false;
-  const roleKey = normalizeRole(user.role);
-  const rolePermissions = getPermissionsForRole(roleKey);
-  const sectionPermissions = {
-    ...(defaultPermissionMatrix[roleKey]?.[section] || {}),
-    ...(rolePermissions[section] || {})
-  };
-  return Boolean(sectionPermissions[action]);
+  return Boolean(user) && hasSectionPermission(getPermissionsForRole(user.role), section, action);
 }
 
 function isCheckedFormValue(value) {
@@ -239,7 +230,7 @@ function isCheckedFormValue(value) {
 
 function canEditInventoryAudit(user) {
   if (!user) return false;
-  return isAdminRole(user) || normalizeRole(user.role) === "warehouse" || canAccess(user, "inventory", "edit");
+  return canAccess(user, "inventory", "edit");
 }
 
 function canViewMaterialPurchaseReport(user) {
@@ -8144,15 +8135,15 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
     <h1>Yard</h1>
     <div class="card">
       <div class="actions">
-        <a class="btn btn-primary" href="/inventory">Inventory</a>
+        ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-primary" href="/inventory">Inventory</a>` : ""}
         ${canEditInventoryAudit(req.user) ? `<a class="btn btn-primary" href="/yard/location-inventory">Location Inventory</a>` : ""}
-        <a class="btn btn-primary" href="/yard/locations">Locations</a>
-        <a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>
+        ${canAccess(req.user, "yard", "locations") ? `<a class="btn btn-primary" href="/yard/locations">Locations</a>` : ""}
+        ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-primary" href="/inventory-audit">Inventory Audit</a>` : ""}
         ${canAccess(req.user, "requisitions", "issue") ? `<a class="btn btn-primary" href="/yard/issue-by-po">Issue by PO</a>` : ""}
-        ${isAdminRole(req.user) ? `<a class="btn btn-primary" href="/yard/item-history">Item History</a>` : ""}
+        ${canAccess(req.user, "yard", "item_history") ? `<a class="btn btn-primary" href="/yard/item-history">Item History</a>` : ""}
       </div>
     </div>
-    <div class="stats">
+    ${canAccess(req.user, "requisitions", "view") ? `<div class="stats">
       <a class="stat" href="/requisitions?status=REQUESTED" style="text-decoration:none;color:inherit;">
         <div>Unaccepted Requests</div>
         <strong>${unverifiedCount}</strong>
@@ -8165,7 +8156,7 @@ app.get("/yard", requireAuth, requireJobContext, requirePermission("yard", "view
         <div>Accepted Requests</div>
         <strong>${verifiedCount}</strong>
       </a>
-    </div>
+    </div>` : ""}
   `, req.user));
 });
 
@@ -8750,10 +8741,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
   const permissionRoleHeaders = permissionRoles.map((role) => `<th>${esc(displayRole(role))}</th>`).join("");
   const permissionRows = permissionSections.map((section) => {
     const cells = permissionRoles.map((role) => {
-      const perms = {
-        ...(defaultPermissionMatrix[role]?.[section.key] || {}),
-        ...(permissionMatrix[role]?.[section.key] || {})
-      };
+      const perms = getPermissionsForRole(role)[section.key] || {};
       const viewChecked = perms.view ? "checked" : "";
       const editChecked = perms.edit ? "checked" : "";
       const createChecked = perms.create ? "checked" : "";
@@ -8764,7 +8752,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
       return `<td>
         <div class="stack">
           <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__view" ${viewChecked} /><span>View</span></label>
-          <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__edit" ${editChecked} /><span>Edit</span></label>
+          ${section.key === "yard" ? yardPermissionActions.map(({ key, label }) => `<label class="check-option"><input type="checkbox" name="perm__${role}__yard__${key}" ${perms[key] ? "checked" : ""} /><span>${esc(label)}</span></label>`).join("") : `<label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__edit" ${editChecked} /><span>Edit</span></label>`}
           ${["requisitions", "min_max"].includes(section.key) ? `
             <label class="check-option"><input type="checkbox" name="perm__${role}__${section.key}__create" ${createChecked} /><span>Create</span></label>
           ` : ""}
@@ -8850,6 +8838,7 @@ app.get("/settings/job-setup", requireAuth, requirePermission("settings", "view"
     ${isAdminRole(req.user) ? `
       <div class="card scroll">
         <h3>Sheet Permissions</h3>
+        <p class="muted">Items Master controls item details, idents, merges, and specs. Inventory Edit controls quantity changes and audits. View is required for actions in each section. Managing or moving locations also requires View Locations. Issue by PO uses REQs Issue.</p>
         <form method="post" action="/settings/permissions" class="stack">
           <input type="hidden" name="return_to" value="/settings/job-setup" />
           <table>
@@ -8867,10 +8856,10 @@ registerDeliveryLocationRoutes(app, { query, withTransaction, auditLog, requireA
 
 app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePermission("settings", "view"), async (req, res) => {
   const jobId = currentJobId(req);
-  const warehousesRes = isAdminRole(req.user)
+  const warehousesRes = canAccess(req.user, "yard", "manage_locations")
     ? await query("select id, name, is_active from warehouses where job_id = $1 order by name", [jobId])
     : { rows: [] };
-  const warehouseLocationsRes = isAdminRole(req.user)
+  const warehouseLocationsRes = canAccess(req.user, "yard", "manage_locations")
     ? await query(`
         select wl.id, wl.name, wl.is_active, wl.warehouse_id, w.name as warehouse_name
         from warehouse_locations wl
@@ -8889,7 +8878,7 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
         <form style="margin:0;" method="post" action="/settings/warehouses/${row.id}/toggle">
           <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
           <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
-        </form><a class="btn btn-secondary" href="/yard/move-inventory?warehouse_id=${row.id}">Move Inventory</a>
+        </form>${canAccess(req.user, "yard", "move_inventory") ? `<a class="btn btn-secondary" href="/yard/move-inventory?warehouse_id=${row.id}">Move Inventory</a>` : ""}
         </div>
       </td>
     </tr>
@@ -8904,7 +8893,7 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
         <form style="margin:0;" method="post" action="/settings/warehouse-locations/${row.id}/toggle">
           <input type="hidden" name="return_to" value="/settings/warehouse-setup" />
           <button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button>
-        </form><a class="btn btn-secondary" href="/yard/move-inventory?location_id=${row.id}">Move Inventory</a>
+        </form>${canAccess(req.user, "yard", "move_inventory") ? `<a class="btn btn-secondary" href="/yard/move-inventory?location_id=${row.id}">Move Inventory</a>` : ""}
         </div>
       </td>
     </tr>
@@ -8916,7 +8905,7 @@ app.get("/settings/warehouse-setup", requireAuth, requireJobContext, requirePerm
         <a class="btn btn-primary" href="/settings/warehouse-setup/delivery-locations">Delivery Locations</a><a class="btn btn-secondary" href="/settings">Back To Settings</a>
       </div>
     </div>
-    ${isAdminRole(req.user) ? `
+    ${canAccess(req.user, "yard", "manage_locations") ? `
       <div class="card">
         <h3>Warehouses</h3>
         <form method="post" action="/settings/warehouses/add" class="stack">
@@ -9179,7 +9168,7 @@ app.get("/settings/users/:id", requireAuth, requireRole(adminEquivalentRoles), a
   `, req.user));
 }));
 
-app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("yard", "view"), asyncHandler(async (req, res) => {
+app.get("/yard/item-history", requireAuth, requireJobContext, requirePermission("yard", "item_history"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const itemFilter = String(req.query.item || "").trim();
   const historyRows = itemFilter ? (await query(`
@@ -9441,7 +9430,7 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requireRole(adminE
   `, req.user));
 }));
 
-app.get("/yard/locations", requireAuth, requireJobContext, requirePermission("yard", "view"), async (req, res) => {
+app.get("/yard/locations", requireAuth, requireJobContext, requirePermission("yard", "locations"), async (req, res) => {
   const jobId = currentJobId(req);
   const warehousesRes = await query("select id, name, is_active from warehouses where job_id = $1 order by name", [jobId]);
   const warehouseLocationsRes = await query(`
@@ -9452,12 +9441,13 @@ app.get("/yard/locations", requireAuth, requireJobContext, requirePermission("ya
     order by w.name, wl.name
   `, [jobId]);
   const warehouseOptions = warehousesRes.rows.map((row) => `<option value="${row.id}">${esc(row.name)}</option>`).join("");
-  const canManageLocations = isAdminRole(req.user) || canAccess(req.user, "settings", "edit");
+  const canManageLocations = canAccess(req.user, "yard", "manage_locations");
+  const canMoveInventory = canAccess(req.user, "yard", "move_inventory");
   const warehouseRows = warehousesRes.rows.map((row) => `
     <tr>
       <td>${esc(normalizeWarehouseName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-      <td>${canManageLocations ? `<form method="post" action="/settings/warehouses/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form><a class="btn btn-secondary" href="/yard/move-inventory?warehouse_id=${row.id}">Move Inventory</a>` : ""}</td>
+      <td>${canManageLocations ? `<form method="post" action="/settings/warehouses/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}${canMoveInventory ? `<a class="btn btn-secondary" href="/yard/move-inventory?warehouse_id=${row.id}">Move Inventory</a>` : ""}</td>
     </tr>
   `).join("");
   const locationRows = warehouseLocationsRes.rows.map((row) => `
@@ -9465,7 +9455,7 @@ app.get("/yard/locations", requireAuth, requireJobContext, requirePermission("ya
       <td>${esc(normalizeWarehouseName(row.warehouse_name))}</td>
       <td>${esc(normalizeLocationName(row.name))}</td>
       <td>${row.is_active ? `<span class="chip">Active</span>` : `<span class="chip error">Inactive</span>`}</td>
-      <td>${canManageLocations ? `<form method="post" action="/settings/warehouse-locations/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form><a class="btn btn-secondary" href="/yard/move-inventory?location_id=${row.id}">Move Inventory</a>` : ""}</td>
+      <td>${canManageLocations ? `<form method="post" action="/settings/warehouse-locations/${row.id}/toggle"><input type="hidden" name="return_to" value="/yard/locations" /><button type="submit">${row.is_active ? "Set Inactive" : "Set Active"}</button></form>` : ""}${canMoveInventory ? `<a class="btn btn-secondary" href="/yard/move-inventory?location_id=${row.id}">Move Inventory</a>` : ""}</td>
     </tr>
   `).join("");
   res.send(layout("Locations", `
@@ -9647,7 +9637,7 @@ app.post("/settings/vendor-categories", requireAuth, requirePermission("settings
   res.redirect(getSafeReturnPath(req, "/settings/job-setup"));
 });
 
-app.post("/settings/warehouses/add", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouses/add", requireAuth, requireJobContext, requirePermission("yard", "manage_locations"), asyncHandler(async (req, res) => {
   const name = normalizeWarehouseName(req.body.name);
   if (!name) throw new Error("Warehouse name is required.");
   const jobId = currentJobId(req);
@@ -9673,7 +9663,7 @@ async function deactivateWarehouseLocations(client, jobId, warehouseId, userId) 
   for (const location of changed) await auditLog(client,userId,"deactivate","warehouse_location",location.id,`Warehouse deactivated: ${location.name}`);
 }
 
-app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requirePermission("yard", "manage_locations"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   let blocked = false;
   await withTransaction(async (client) => {
@@ -9686,11 +9676,14 @@ app.post("/settings/warehouses/:id/toggle", requireAuth, requireJobContext, requ
     if (!nextState) await deactivateWarehouseLocations(client, jobId, current.id, req.user.id);
     await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse", req.params.id, current.name);
   });
-  if (blocked) return res.redirect(`/yard/move-inventory?warehouse_id=${Number(req.params.id)}&blocked=1`);
+  if (blocked) {
+    if (canAccess(req.user, "yard", "move_inventory")) return res.redirect(`/yard/move-inventory?warehouse_id=${Number(req.params.id)}&blocked=1`);
+    return res.status(409).send(layout("Inventory Remains", `<div class="card error"><p>Inventory remains here. A user with Move Inventory permission must move the stock before this can be set inactive. Negative balances must be corrected in Location Inventory.</p><a class="btn btn-secondary" href="/yard/locations">Back To Locations</a></div>`, req.user));
+  }
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, requirePermission("yard", "manage_locations"), asyncHandler(async (req, res) => {
   const warehouseId = Number(req.body.warehouse_id);
   const name = normalizeLocationName(req.body.name);
   const jobId = currentJobId(req);
@@ -9713,7 +9706,7 @@ app.post("/settings/warehouse-locations/add", requireAuth, requireJobContext, re
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobContext, requirePermission("yard", "manage_locations"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   let blocked = false;
   await withTransaction(async (client) => {
@@ -9731,11 +9724,14 @@ app.post("/settings/warehouse-locations/:id/toggle", requireAuth, requireJobCont
     await client.query("update warehouse_locations set is_active = $2 where id = $1", [req.params.id, nextState]);
     await auditLog(client, req.user.id, nextState ? "activate" : "deactivate", "warehouse_location", req.params.id, `${current.warehouse_name}:${current.name}`);
   });
-  if (blocked) return res.redirect(`/yard/move-inventory?location_id=${Number(req.params.id)}&blocked=1`);
+  if (blocked) {
+    if (canAccess(req.user, "yard", "move_inventory")) return res.redirect(`/yard/move-inventory?location_id=${Number(req.params.id)}&blocked=1`);
+    return res.status(409).send(layout("Inventory Remains", `<div class="card error"><p>Inventory remains here. A user with Move Inventory permission must move the stock before this can be set inactive. Negative balances must be corrected in Location Inventory.</p><a class="btn btn-secondary" href="/yard/locations">Back To Locations</a></div>`, req.user));
+  }
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext, requirePermission("yard", "manage_locations"), upload.single("sheet"), asyncHandler(async (req, res) => {
   const rows = parseUploadedRows(req.file, req.body.csv_text).map(normalizeWarehouseLocationImportRow);
   if (rows.length === 0) throw new Error("No rows found.");
   const jobId = currentJobId(req);
@@ -9801,7 +9797,7 @@ app.post("/settings/warehouse-locations/import", requireAuth, requireJobContext,
   res.redirect(getSafeReturnPath(req, "/settings/warehouse-setup"));
 }));
 
-app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireJobContext, requireRole(adminEquivalentRoles), requirePermission("settings", "edit"), asyncHandler(async (req, res) => {
+app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireJobContext, requirePermission("yard", "manage_locations"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const rows = (await query(`
     select
@@ -9841,7 +9837,7 @@ app.get("/settings/warehouse-locations/export.xlsx", requireAuth, requireJobCont
   res.send(buffer);
 }));
 
-app.get("/items/import/template", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (_req, res) => {
+app.get("/items/import/template", requireAuth, requireJobContext, requirePermission("items", "view"), asyncHandler(async (_req, res) => {
   const worksheet = XLSX.utils.aoa_to_sheet([materialItemImportHeaders]);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Item Master");
@@ -9851,7 +9847,7 @@ app.get("/items/import/template", requireAuth, requireJobContext, requirePermiss
   res.send(buffer);
 }));
 
-app.get("/items/export.xlsx", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+app.get("/items/export.xlsx", requireAuth, requireJobContext, requirePermission("items", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const rows = (await query(`
     select
@@ -9895,7 +9891,7 @@ app.get("/items/export.xlsx", requireAuth, requireJobContext, requirePermission(
   res.send(buffer);
 }));
 
-app.get("/items", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+app.get("/items", requireAuth, requireJobContext, requirePermission("items", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
   const descriptionQ = String(req.query.description || "").trim();
@@ -10001,7 +9997,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
     <td>${esc(formatPlainNumberDisplay(item.thk_2))}</td>
     <td>${esc(item.specs)}</td>
     <td>${esc(item.notes)}</td>
-    <td>${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/${item.id}/edit">Edit</a>` : ""}</td>
+    <td>${canAccess(req.user, "items", "edit") ? `<a class="btn btn-secondary" href="/items/${item.id}/edit">Edit</a>` : ""}</td>
   </tr>`).join("");
   res.send(layout("Item Master", `
     <h1>Item Master</h1>
@@ -10020,11 +10016,11 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
         </div>
         <div class="actions">
           <button type="submit">Filter Items</button>
-          ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-primary" href="/items/new">Add Item</a>` : ""}
-          ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/import-page">Import Items</a>` : ""}
-          ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="${escAttr(bulkEditHref)}">Bulk Edit Filtered</a>` : ""}
+          ${canAccess(req.user, "items", "edit") ? `<a class="btn btn-primary" href="/items/new">Add Item</a>` : ""}
+          ${canAccess(req.user, "items", "edit") ? `<a class="btn btn-secondary" href="/items/import-page">Import Items</a>` : ""}
+          ${canAccess(req.user, "items", "edit") ? `<a class="btn btn-secondary" href="${escAttr(bulkEditHref)}">Bulk Edit Filtered</a>` : ""}
           ${isAdminRole(req.user) ? `<a class="btn btn-secondary" href="/settings/cleanup?target=material_items">Cleanup Items</a>` : ""}
-          ${canAccess(req.user, "inventory", "edit") ? `<a class="btn btn-secondary" href="/items/specs">Specs</a>` : ""}
+          ${canAccess(req.user, "items", "edit") ? `<a class="btn btn-secondary" href="/items/specs">Specs</a>` : ""}
           <a class="btn btn-secondary" href="/items">Clear</a>
           <a class="btn btn-secondary" href="/items/export.xlsx">Export XLSX</a>
           <a class="btn btn-secondary" href="/items/import/template">Download Import Template</a>
@@ -10041,7 +10037,7 @@ app.get("/items", requireAuth, requireJobContext, requirePermission("inventory",
   `, req.user));
 }));
 
-app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
   const descriptionQ = String(req.query.description || "").trim();
@@ -10161,7 +10157,7 @@ app.get("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("i
   `, req.user));
 }));
 
-app.post("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.post("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const itemIds = [].concat(req.body.item_ids || [])
     .map((value) => Number(value))
@@ -10217,7 +10213,7 @@ app.post("/items/bulk-edit", requireAuth, requireJobContext, requirePermission("
   res.redirect(`/items${returnParams.toString() ? `?${returnParams.toString()}` : ""}`);
 }));
 
-app.post("/items/bulk-edit/:id/delete", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.post("/items/bulk-edit/:id/delete", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const itemId = Number(req.params.id);
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
@@ -10247,7 +10243,7 @@ app.post("/items/bulk-edit/:id/delete", requireAuth, requireJobContext, requireP
   res.redirect(`/items/bulk-edit${returnParams.toString() ? `?${returnParams.toString()}` : ""}`);
 }));
 
-app.get("/items/new", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.get("/items/new", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const specs = await getMaterialSpecOptions(currentJobId(req));
   const itemFormSpecOptions = specs.map((spec) => `<option value="${escAttr(spec.id)}">${esc(formatMaterialSpecLabel(spec))}</option>`).join("");
   res.send(layout("Add Item", `
@@ -10283,7 +10279,7 @@ app.get("/items/new", requireAuth, requireJobContext, requirePermission("invento
   `, req.user));
 }));
 
-app.post("/items", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.post("/items", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const result = await upsertMaterialMasterItem(client, req.body, jobId);
@@ -10293,7 +10289,7 @@ app.post("/items", requireAuth, requireJobContext, requirePermission("inventory"
   res.redirect(`/items?q=${encodeURIComponent(String(req.body.item_code || "").trim())}`);
 }));
 
-app.get("/items/specs", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.get("/items/specs", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const q = String(req.query.q || "").trim();
   const params = [jobId];
@@ -10446,7 +10442,7 @@ async function upsertLineClassIndexRow(client, jobId, row) {
   return { status: "inserted", id: inserted.id, row: normalized };
 }
 
-app.post("/items/specs", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.post("/items/specs", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
     const result = await upsertLineClassIndexRow(client, jobId, req.body);
@@ -10456,7 +10452,7 @@ app.post("/items/specs", requireAuth, requireJobContext, requirePermission("inve
   res.redirect("/items/specs");
 }));
 
-app.post("/items/specs/:id(\\d+)", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.post("/items/specs/:id(\\d+)", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const specId = Number(req.params.id);
   const normalized = normalizeLineClassIndexRow(req.body);
@@ -10500,7 +10496,7 @@ app.post("/items/specs/:id(\\d+)", requireAuth, requireJobContext, requirePermis
   res.redirect("/items/specs");
 }));
 
-app.get("/items/specs/import/template", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (_req, res) => {
+app.get("/items/specs/import/template", requireAuth, requireJobContext, requirePermission("items", "view"), asyncHandler(async (_req, res) => {
   const worksheet = XLSX.utils.aoa_to_sheet([lineClassIndexImportHeaders]);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Line Class Index");
@@ -10510,7 +10506,7 @@ app.get("/items/specs/import/template", requireAuth, requireJobContext, requireP
   res.send(buffer);
 }));
 
-app.get("/items/specs/export.xlsx", requireAuth, requireJobContext, requirePermission("inventory", "view"), asyncHandler(async (req, res) => {
+app.get("/items/specs/export.xlsx", requireAuth, requireJobContext, requirePermission("items", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const rows = (await query(`
     select coalesce(service_code, '') as service_code,
@@ -10533,7 +10529,7 @@ app.get("/items/specs/export.xlsx", requireAuth, requireJobContext, requirePermi
   res.send(buffer);
 }));
 
-app.post("/items/specs/import", requireAuth, requireJobContext, requirePermission("inventory", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+app.post("/items/specs/import", requireAuth, requireJobContext, requirePermission("items", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (!rows.length) throw new Error("No rows found.");
   const jobId = currentJobId(req);
@@ -10563,7 +10559,7 @@ app.post("/items/specs/import", requireAuth, requireJobContext, requirePermissio
   res.redirect(`/imports/${batchId}`);
 }));
 
-app.get("/items/import-page", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.get("/items/import-page", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   res.send(layout("Import Items", `
     <h1>Import Items</h1>
     <div class="card">
@@ -10587,7 +10583,7 @@ app.get("/items/import-page", requireAuth, requireJobContext, requirePermission(
   `, req.user));
 }));
 
-app.post("/items/import", requireAuth, requireJobContext, requirePermission("inventory", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
+app.post("/items/import", requireAuth, requireJobContext, requirePermission("items", "edit"), upload.single("sheet"), asyncHandler(async (req, res) => {
   const rows = parseUploadedRows(req.file, req.body.csv_text);
   if (!rows.length) throw new Error("No rows found.");
   const jobId = currentJobId(req);
@@ -10617,7 +10613,7 @@ app.post("/items/import", requireAuth, requireJobContext, requirePermission("inv
   res.redirect(`/imports/${batchId}`);
 }));
 
-app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const [itemResult, specs, selectedSpecResult] = await Promise.all([
     query(`
@@ -10692,7 +10688,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
   `, req.user));
 }));
 
-app.post("/items/:id/edit", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.post("/items/:id/edit", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const itemId = Number(req.params.id);
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
@@ -10706,7 +10702,7 @@ app.post("/items/:id/edit", requireAuth, requireJobContext, requirePermission("i
   res.redirect(`/items?q=${encodeURIComponent(String(req.body.item_code || "").trim())}`);
 }));
 
-app.post("/items/:id/delete", requireAuth, requireJobContext, requirePermission("inventory", "edit"), asyncHandler(async (req, res) => {
+app.post("/items/:id/delete", requireAuth, requireJobContext, requirePermission("items", "edit"), asyncHandler(async (req, res) => {
   const itemId = Number(req.params.id);
   const jobId = currentJobId(req);
   await withTransaction(async (client) => {
@@ -10728,12 +10724,18 @@ app.post("/settings/permissions", requireAuth, requireRole(adminEquivalentRoles)
   for (const role of permissionRoles) {
     nextMatrix[role] = {};
     for (const section of permissionSections) {
-      const currentDefaults = defaultPermissionMatrix[role]?.[section.key] || {};
+      const currentDefaults = getPermissionsForRole(role)[section.key] || {};
       nextMatrix[role][section.key] = {
         ...currentDefaults,
         view: isCheckedFormValue(req.body[`perm__${role}__${section.key}__view`]),
         edit: isCheckedFormValue(req.body[`perm__${role}__${section.key}__edit`])
       };
+      if (section.key === "yard") {
+        delete nextMatrix[role].yard.edit;
+        for (const { key } of yardPermissionActions) {
+          nextMatrix[role].yard[key] = isCheckedFormValue(req.body[`perm__${role}__yard__${key}`]);
+        }
+      }
       if (section.key === "min_max") {
         nextMatrix[role][section.key].create = isCheckedFormValue(req.body[`perm__${role}__${section.key}__create`]);
       }
@@ -15212,7 +15214,7 @@ app.get("/rfq", requireAuth, requireJobContext, requirePermission("rfqs", "view"
         <div class="actions">
           <button type="submit">Filter RFQs</button>
           <a class="btn btn-secondary" href="/rfq">Clear</a>
-          ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
+          ${canAccess(req.user, "items", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
           <a class="btn btn-secondary" href="/sto-packages">STO Packages</a>
           <a class="btn btn-secondary" href="/rfq/sto-packages">STO Package Report</a>
           <a class="btn btn-primary" href="/rfq/new">Create RFQ</a>
@@ -17530,7 +17532,7 @@ app.get("/rfq/:id/items/existing", requireAuth, requireJobContext, requirePermis
       <p class="muted">Filter the master item list like a spreadsheet, then add the line into this RFQ. Each add creates a separate line, even for the same item code.</p>
       <div class="actions" style="margin-bottom:12px;">
         <a class="btn btn-secondary" href="/rfq/${rfqId}">Back To RFQ</a>
-        ${canAccess(req.user, "inventory", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
+        ${canAccess(req.user, "items", "view") ? `<a class="btn btn-secondary" href="/items">Item Master</a>` : ""}
       </div>
       <form method="get" action="/rfq/${rfqId}/items/existing" class="stack" style="margin-bottom:12px;">
         <div class="grid">
@@ -20682,6 +20684,10 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
       <h1 style="margin:0;">Inventory by Location</h1>
       <a class="btn btn-primary" href="/inventory/export.xlsx">Download Entire Inventory</a>
     </div>
+    <div class="actions">
+      <a class="btn btn-secondary" href="/inventory-audit">Inventory Audit</a>
+      ${canEditInventoryAudit(req.user) ? `<a class="btn btn-primary" href="/yard/location-inventory">Location Inventory</a>` : ""}
+    </div>
     <div class="card">
       <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">
         <form method="get" action="/inventory" class="stack">
@@ -20869,7 +20875,7 @@ app.get("/inventory-audit", requireAuth, requireJobContext, requirePermission("i
     <div class="card">
       <div class="actions">
         ${canEditInventoryAudit(req.user) ? `<a class="btn btn-primary" href="/inventory-audit/new">New Audit</a>` : ""}
-        <a class="btn btn-secondary" href="/yard">Back To Yard</a>
+        <a class="btn btn-secondary" href="/inventory">Back To Inventory</a>
       </div>
     </div>
     ${canEditInventoryAudit(req.user) ? `

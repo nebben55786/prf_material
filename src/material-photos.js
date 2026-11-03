@@ -29,7 +29,7 @@ const scopeConfig = {
     idColumn: "material_item_id",
     table: "material_items",
     labelColumn: "item_code",
-    permission: "inventory",
+    permission: "items",
     editAction: "edit",
     viewAction: "view",
     targetLabel: "Item"

@@ -75,7 +75,7 @@ export async function mergeItems(db,{jobId,sourceId,targetId,sourceVersion,targe
 }
 export function registerItemMergeRoutes(app,d) {
   const {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,getCurrentOnHandRows,auditLog,recomputeBomIssuedSummaries}=d;
-  const middleware=[requireAuth,requireJobContext,requirePermission('inventory','edit')];
+  const middleware=[requireAuth,requireJobContext,requirePermission('items','edit')];
   const read=(req,stage)=>{const token=readSession(String(req.body.token||''));if(!token||token.scope!=='merge_items'||token.stage!==stage||token.job_id!==currentJobId(req)||token.user_id!==req.user.id||token.source_id!==Number(req.params.id)||token.expires<Date.now())throw fail('This merge form expired. Open Merge Item again.');return token;};
   const sign=(req,data)=>signSession({scope:'merge_items',job_id:currentJobId(req),user_id:req.user.id,expires:Date.now()+3600000,...data});
   app.get('/items/:id/merge',...middleware,asyncHandler(async(req,res)=>{

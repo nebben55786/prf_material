@@ -2,7 +2,7 @@ const occupied = row => Math.abs(Number(row.qty_on_hand || 0)) > 0.00001 || Math
 export const inventoryAtStorage = (rows, warehouse, location) => rows.filter(r => String(r.warehouse).trim().toLowerCase() === String(warehouse).trim().toLowerCase() && (location == null || String(r.location).trim().toLowerCase() === String(location).trim().toLowerCase()) && occupied(r));
 export function registerInventoryMoveRoutes(app, d) {
   const {query,withTransaction,requireAuth,requireJobContext,requireRole,adminEquivalentRoles,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,getCurrentOnHandRows,buildInventoryEntryKey,auditLog}=d;
-  const path='/yard/move-inventory', middleware=[requireAuth,requireJobContext,requireRole(adminEquivalentRoles),requirePermission('settings','edit')];
+  const path='/yard/move-inventory', middleware=[requireAuth,requireJobContext,requirePermission('yard','move_inventory')];
   const fail=message=>Object.assign(new Error(message),{statusCode:400});
   const sign=(req,data)=>signSession({scope:'inventory_move',job_id:currentJobId(req),user_id:req.user.id,expires:Date.now()+3600000,...data});
   function read(req,stage) {const data=readSession(String(req.body.token||''));if(!data||data.scope!=='inventory_move'||data.job_id!==currentJobId(req)||data.user_id!==req.user.id||data.expires<Date.now()||data.stage!==stage) throw fail('This move form expired. Reload the inventory before moving it.');return data;}

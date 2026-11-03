@@ -60,7 +60,7 @@ export async function renameItemIdent(db, {jobId,itemId,oldIdent,newIdent,userId
 }
 export function registerItemIdentRoutes(app,d) {
   const {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,auditLog}=d;
-  const middleware=[requireAuth,requireJobContext,requirePermission('inventory','edit')];
+  const middleware=[requireAuth,requireJobContext,requirePermission('items','edit')];
   app.get('/items/:id/change-ident',...middleware,asyncHandler(async(req,res)=>{
     const item=(await query('select * from material_items where id=$1 and job_id=$2',[req.params.id,currentJobId(req)])).rows[0];
     if(!item)throw fail('Item not found in the current job.');
