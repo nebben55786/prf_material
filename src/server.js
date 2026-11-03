@@ -1,3 +1,4 @@
+import { withItemMasterAttributes } from "./inventory-display.js";
 import { registerItemIdentRoutes, getIssuedIdentRequests } from "./item-ident.js";
 import { registerInventoryMoveRoutes, inventoryAtStorage } from "./inventory-moves.js";
 import { registerLocationInventoryRoutes } from "./location-inventory.js";
@@ -20619,9 +20620,10 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
   const sort = String(req.query.sort || "item_code").trim();
   const dir = String(req.query.dir || "asc").trim().toLowerCase() === "desc" ? "desc" : "asc";
   const sortSql = allowedSorts[sort] || allowedSorts.item_code;
-  const [warehouseOptions, locationMap] = await Promise.all([
+  const [warehouseOptions, locationMap, masterResult] = await Promise.all([
     getWarehouseOptions(jobId),
-    getWarehouseLocationMap(jobId)
+    getWarehouseLocationMap(jobId),
+    query("select item_code,description,size_1,size_2,thk_1,thk_2,material_type,uom,commodity_code from material_items where job_id=$1", [jobId])
   ]);
   const params = [];
   const where = [];
@@ -20632,14 +20634,6 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
   if (locationFilter) {
     params.push(locationFilter);
     where.push(`lower(coalesce(location, '')) = lower($${params.length})`);
-  }
-  if (identFilter) {
-    params.push(`%${identFilter}%`);
-    where.push(`(coalesce(item_code, '') ilike $${params.length} or coalesce(description, '') ilike $${params.length})`);
-  }
-  if (sizeFilter) {
-    params.push(`%${sizeFilter}%`);
-    where.push(`concat_ws(' / ', size_1, size_2, thk_1, thk_2) ilike $${params.length}`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
   const inventoryQueryString = (source = {}) => new URLSearchParams({
@@ -20657,7 +20651,19 @@ app.get("/inventory", requireAuth, requireJobContext, requirePermission("invento
     params,
     orderSql: `${sortSql} ${dir}, inventory_by_location.item_code asc, inventory_by_location.warehouse asc, inventory_by_location.location asc`
   });
-  const rows = showZero ? allRows : allRows.filter(row => Number(row.qty_on_hand) !== 0 || Number(row.qty_osd) !== 0);
+  const displayRows = withItemMasterAttributes(allRows, masterResult.rows);
+  const rows = displayRows.filter(row => {
+    if (!showZero && Number(row.qty_on_hand) === 0 && Number(row.qty_osd) === 0) return false;
+    if (identFilter && ![row.item_code,row.description].some(value => String(value || "").toLowerCase().includes(identFilter.toLowerCase()))) return false;
+    const sizeText = [row.size_1,row.size_2,row.thk_1,row.thk_2].map(value => formatPlainNumberDisplay(value)).filter(Boolean).join(" / ");
+    return !sizeFilter || sizeText.toLowerCase().includes(sizeFilter.toLowerCase());
+  });
+  const sortKey = Object.hasOwn(allowedSorts,sort) ? sort : "item_code";
+  const compareText = (a,b) => String(a || "").localeCompare(String(b || ""), undefined, {numeric:true,sensitivity:"base"});
+  rows.sort((a,b) => {
+    const primary = ["qty_on_hand","qty_osd"].includes(sortKey) ? Number(a[sortKey])-Number(b[sortKey]) : compareText(a[sortKey],b[sortKey]);
+    return primary * (dir === "desc" ? -1 : 1) || compareText(a.item_code,b.item_code) || compareText(a.warehouse,b.warehouse) || compareText(a.location,b.location);
+  });
   const sortLink = (column) => `/inventory?${inventoryQueryString({ warehouse_filter: warehouseFilter, location_filter: locationFilter, ident_filter: identFilter, sort: column, dir: nextSortDir(sort, dir, column) })}`;
   const warehouseOptionsHtml = [`<option value="">All warehouses</option>`]
     .concat(warehouseOptions.map((row) => `<option value="${esc(row.name)}" ${row.name === warehouseFilter ? "selected" : ""}>${esc(row.name)}</option>`))
@@ -20742,13 +20748,13 @@ app.get("/inventory/export.xlsx", requireAuth, requireJobContext, requirePermiss
       orderSql: "inventory_by_location.item_code, inventory_by_location.warehouse, inventory_by_location.location"
     }),
     query(`
-      select item_code, description, material_type, uom
+      select item_code, description, material_type, uom, size_1, size_2, thk_1, thk_2, commodity_code
       from material_items
       where job_id = $1
       order by item_code
     `, [jobId])
   ]);
-  const currentRows = filterRedundantZeroInventoryRows(currentRowsRaw);
+  const currentRows = filterRedundantZeroInventoryRows(withItemMasterAttributes(currentRowsRaw, itemRows.rows));
   const itemMeta = new Map(itemRows.rows.map((row) => [normalizeInventoryKeyPart(row.item_code), row]));
   const stockedItemCodes = new Set(currentRows.map((row) => normalizeInventoryKeyPart(row.item_code)).filter(Boolean));
   const zeroQuantityRows = itemRows.rows
@@ -20758,10 +20764,10 @@ app.get("/inventory/export.xlsx", requireAuth, requireJobContext, requirePermiss
       description: row.description,
       material_type: row.material_type,
       uom: row.uom,
-      size_1: "",
-      size_2: "",
-      thk_1: "",
-      thk_2: "",
+      size_1: row.size_1 || "",
+      size_2: row.size_2 || "",
+      thk_1: row.thk_1 || "",
+      thk_2: row.thk_2 || "",
       warehouse: "",
       location: "",
       qty_on_hand: 0,

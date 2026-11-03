@@ -409,6 +409,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.ok((await db.query('select is_active from warehouse_locations where warehouse_id=9204')).rows.every(r=>!r.is_active));
 
   // Inventory size filtering and zero visibility work together without hiding OS&D stock.
+  await db.query("update material_items set size_1='42',description='Canonical valve description' where id=9198");
   await db.exec("insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,9198,3,'Yard','NEW','DAMAGED')");
   let inventoryPage=await (await request('/inventory?ident_filter=VALVE-ZERO&size_filter=42')).text();
   assert.match(inventoryPage,/Show Zero Quantities/);
@@ -416,10 +417,20 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.match(inventoryPage,/size_filter=42/);assert.match(inventoryPage,/show_zero=1/);
   inventoryPage=await (await request('/inventory?ident_filter=VALVE-ZERO&size_filter=42&show_zero=1')).text();
   assert.match(inventoryPage,/Hide Zero Quantities/);
-  assert.equal(Array.from(inventoryPage.matchAll(/<tr>\s*<td>VALVE-ZERO<\/td>/g)).length,2);
+  assert.equal(Array.from(inventoryPage.matchAll(/<tr>\s*<td>VALVE-ZERO<\/td>/g)).length,3);
+  assert.match(inventoryPage,/Canonical valve description/);
   inventoryPage=await (await request('/inventory?warehouse_filter=Yard&location_filter=NEW&ident_filter=VALVE-ZERO&size_filter=99999&show_zero=1')).text();
   assert.match(inventoryPage,/No inventory rows match these filters/);
   assert.match(inventoryPage,/size_filter=99999/);assert.match(inventoryPage,/warehouse_filter=Yard/);assert.match(inventoryPage,/location_filter=NEW/);
+
+  // Master dimensions also appear on stock received without a size, and in the download.
+  response=await request('/inventory/export.xlsx');assert.equal(response.status,200);
+  const displayXlsx=(await import('xlsx')).default;
+  const displayBook=displayXlsx.read(Buffer.from(await response.arrayBuffer()),{type:'buffer'});
+  const valveExport=displayXlsx.utils.sheet_to_json(displayBook.Sheets.Inventory).filter(r=>r.Item==='VALVE-ZERO');
+  assert.ok(valveExport.length>0);assert.ok(valveExport.every(r=>String(r['Size 1'])==='42'&&r.Description==='Canonical valve description'));
+  assert.equal(valveExport.reduce((n,r)=>n+Number(r['Qty OS&D']),0),3);
+  assert.equal((await db.query('select size_1 from po_lines where id=9197')).rows[0].size_1,''); // ledger snapshot is unchanged
 
   // Downloaded reset template can be filled and imported without changing another job.
   assert.match(await (await request('/inventory-audit')).text(),/Download XLSX Template/);
