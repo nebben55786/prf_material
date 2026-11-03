@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import XLSX from "xlsx";
 import { importHeaders, parseRequisitionWorkbook, registerRequisitionExcelRoutes } from "../src/requisition-excel.js";
 
-function file(rows) {
+function file(rows, headers = importHeaders) {
   const book = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([importHeaders, ...rows]), "Import");
+  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([headers, ...rows]), "Import");
   return XLSX.write(book, { type: "buffer", bookType: "xlsx" });
 }
 test("Excel imports group request lines and reject invalid or conflicting rows", () => {
@@ -33,12 +33,16 @@ test("template download contains a blank import sheet and current-job BOM refere
 });
 
 test("import creates grouped requests through a transaction and rejects lines outside the selected BOM", async () => {
-  for (const valid of [true, false]) {
+  for (const mode of ["ident", "numeric-ident", "legacy-ident", "legacy-id", "missing", "ambiguous"]) {
+    const valid = !["missing", "ambiguous"].includes(mode);
+    const reference = mode === "legacy-id" ? 123 : mode === "numeric-ident" ? "123" : "102B2";
+    const legacy = mode.startsWith("legacy");
     let handler, committed = false, rolledBack = false, audited = false;
     const pass = () => {};
     const client = { query: async (sql,params) => {
       if (sql.startsWith("select * from bom_headers")) { assert.deepEqual(params,[10,42]); return { rows: [{ id:10 }] }; }
-      if (sql.startsWith("select * from bom_lines")) { assert.deepEqual(params,[123,10]); return { rows: valid ? [{ item_code:"ITEM" }] : [] }; }
+      if (sql.startsWith("select * from bom_lines")) { assert.deepEqual(params,[reference,10]); assert.ok(sql.includes(mode === "legacy-id" ? "where id=$1" : "where item_code=$1")); return { rows: mode === "missing" ? [] : mode === "ambiguous" ? [{ id:123 },{ id:124 }] : [{ id:123,item_code:"ITEM" }] }; }
+      if (sql.startsWith("insert into material_requisition_lines")) assert.deepEqual(params,[42,99,123,2]);
       return { rows: [{ id:99 }] };
     } };
     registerRequisitionExcelRoutes({ get: pass, post: (path,...handlers) => { handler=handlers.at(-1); } }, {
@@ -48,9 +52,9 @@ test("import creates grouped requests through a transaction and rejects lines ou
       getAvailableInventoryByItemMap: async () => new Map([["ITEM",10]]), buildInventoryItemKey: line => line.item_code,
       getUserDisplayName: () => "Tester", getRequisitionMaterialShortages: async () => [], auditLog: async () => { audited=true; }
     });
-    const req = { user:{ id:1 },body:{ bom_id:10,delivery_location_id:3 },file:{ originalname:"import.xlsx",buffer:file([["A",123,2,"Requester","Recipient","",""]]) } };
+    const req = { user:{ id:1 },body:{ bom_id:10,delivery_location_id:3 },file:{ originalname:"import.xlsx",buffer:file([["A",reference,2,"Requester","Recipient","",""]], legacy ? importHeaders.map((h,i) => i === 1 ? "BOM Line ID" : h) : importHeaders) } };
     const res = { redirect(url) { assert.equal(url,"/requisitions/excel?imported=1"); } };
     if (valid) { await handler(req,res); assert.ok(committed && audited); }
-    else { await assert.rejects(handler(req,res),/not in the selected BOM/); assert.ok(rolledBack && !committed && !audited); }
+    else { await assert.rejects(handler(req,res),mode === "ambiguous" ? /matches multiple lines/ : /not in the selected BOM/); assert.ok(rolledBack && !committed && !audited); }
   }
 });
