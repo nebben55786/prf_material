@@ -32,6 +32,52 @@ test("template download contains a blank import sheet and current-job BOM refere
   assert.equal(XLSX.utils.sheet_to_json(book.Sheets["BOM Lines"])[0]["BOM Line ID"],123);
 });
 
+test("review highlights combined overages without writes, rechecks stock, and saves edited quantities", async () => {
+  let handler, stock = 3;
+  const writes = [];
+  const pass = () => {};
+  const client = { query: async (sql, params) => {
+    if (sql.startsWith("select * from bom_headers")) return { rows: [{ id:10,bom_no:"BOM" }] };
+    if (sql.startsWith("select * from bom_lines")) return { rows: [{ id:123,item_code:"104B3",description:"Part" }] };
+    writes.push({ sql,params });
+    return { rows: [{ id:99 }] };
+  } };
+  registerRequisitionExcelRoutes({ get:pass, post: (_path,...handlers) => { handler=handlers.at(-1); } }, {
+    requireAuth:pass, requireJobContext:pass, requirePermission:() => pass, asyncHandler:fn => fn, upload:{ single:() => pass },
+    layout:(_title,body) => body, esc:value => String(value ?? ""), currentJobId:() => 42,
+    withTransaction:fn => fn(client), getDeliveryLocation:async () => ({ id:3,name:"Yard" }),
+    getAvailableInventoryByItemMap:async () => new Map([["104B3",stock]]), buildInventoryItemKey:line => line.item_code,
+    nextDeliveryRequestNumber:async () => { writes.push({ sql:"number" }); return "REQ"; },
+    getUserDisplayName:() => "Tester", getRequisitionMaterialShortages:async () => [], auditLog:async () => {}
+  });
+  const buffer = file([["A","104B3",2,"Paul","Paul","",""],["B","104B3",2,"Paul","Paul","",""]]);
+  const req = { user:{ id:1 },body:{ bom_id:10,delivery_location_id:3 },file:{ originalname:"import.xlsx",buffer } };
+  let html, redirect;
+  const res = { send:value => { html=value; }, redirect:value => { redirect=value; } };
+  await handler(req,res);
+  assert.equal(writes.length,0);
+  assert.match(html,/Overage Qty/);
+  assert.match(html,/color:#b42318;font-weight:bold;">1<\/td>/);
+  delete req.file;
+  Object.assign(req.body,{ workbook:buffer.toString("base64"),qty_2:"2",qty_3:"1",confirm:"save" });
+  stock = 1;
+  await handler(req,res);
+  assert.equal(writes.length,0);
+  assert.equal(redirect,undefined);
+  assert.match(html,/Some quantities exceed/);
+  stock = 3;
+  req.body.qty_3 = "0";
+  req.body.confirm = "review";
+  await handler(req,res);
+  assert.match(html,/name="qty_3" value="0"/);
+  assert.equal(writes.length,0);
+  req.body.confirm = "save";
+  await handler(req,res);
+  assert.equal(redirect,"/requisitions/excel?imported=1");
+  const lines = writes.filter(write => write.sql.startsWith("insert into material_requisition_lines"));
+  assert.deepEqual(lines.map(line => line.params),[[42,99,123,2]]);
+});
+
 test("import creates grouped requests through a transaction and rejects lines outside the selected BOM", async () => {
   for (const mode of ["ident", "numeric-ident", "legacy-ident", "legacy-id", "missing", "ambiguous"]) {
     const valid = !["missing", "ambiguous"].includes(mode);
@@ -47,14 +93,14 @@ test("import creates grouped requests through a transaction and rejects lines ou
     } };
     registerRequisitionExcelRoutes({ get: pass, post: (path,...handlers) => { handler=handlers.at(-1); } }, {
       requireAuth: pass, requireJobContext: pass, requirePermission: () => pass, asyncHandler: fn => fn, upload: { single: () => pass },
-      currentJobId: () => 42, withTransaction: async fn => { try { await fn(client); committed=true; } catch (error) { rolledBack=true; throw error; } },
+      layout: (_title,body) => body, esc: value => String(value ?? ""), currentJobId: () => 42, withTransaction: async fn => { try { const result = await fn(client); committed=true; return result; } catch (error) { rolledBack=true; throw error; } },
       getDeliveryLocation: async () => ({ id:3,name:"Yard",request_prefix:"TEST" }), nextDeliveryRequestNumber: async () => "TEST-PT-0001",
       getAvailableInventoryByItemMap: async () => new Map([["ITEM",10]]), buildInventoryItemKey: line => line.item_code,
       getUserDisplayName: () => "Tester", getRequisitionMaterialShortages: async () => [], auditLog: async () => { audited=true; }
     });
     const req = { user:{ id:1 },body:{ bom_id:10,delivery_location_id:3 },file:{ originalname:"import.xlsx",buffer:file([["A",reference,2,"Requester","Recipient","",""]], legacy ? importHeaders.map((h,i) => i === 1 ? "BOM Line ID" : h) : importHeaders) } };
-    const res = { redirect(url) { assert.equal(url,"/requisitions/excel?imported=1"); } };
-    if (valid) { await handler(req,res); assert.ok(committed && audited); }
+    const res = { send(html) { assert.match(html,/Review Excel Import/); }, redirect(url) { assert.equal(url,"/requisitions/excel?imported=1"); } };
+    if (valid) { await handler(req,res); assert.ok(committed && !audited); req.body.workbook = req.file.buffer.toString("base64"); delete req.file; req.body.qty_2 = "2"; req.body.confirm = "save"; await handler(req,res); assert.ok(audited); }
     else { await assert.rejects(handler(req,res),mode === "ambiguous" ? /matches multiple lines/ : /not in the selected BOM/); assert.ok(rolledBack && !committed && !audited); }
   }
 });

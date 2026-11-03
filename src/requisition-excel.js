@@ -31,6 +31,25 @@ export function parseRequisitionWorkbook(buffer) {
   return [...groups.values()];
 }
 
+function renderImportReview(review, buffer, bomId, esc) {
+  return `
+    <h1>Review Excel Import</h1>
+    <div class="card"><p>BOM: ${esc(review.bom.bom_name || review.bom.bom_no)} | Delivery Location: ${esc(review.location.name)}</p>
+      <p>Review all lines before saving. Overages appear in red. Reduce quantities or enter zero to omit a line. Availability is checked against the combined quantities across this import.</p>
+      ${review.rows.some(row => row.overage > 0) ? '<p role="alert" style="color:#b42318;font-weight:bold;">Some quantities exceed available inventory. Adjust them and review again before saving.</p>' : ""}
+      <form method="post" action="/requisitions/excel/import" enctype="multipart/form-data" class="stack">
+        <input type="hidden" name="workbook" value="${esc(buffer.toString("base64"))}" />
+        <input type="hidden" name="bom_id" value="${bomId}" />
+        <input type="hidden" name="delivery_location_id" value="${review.location.id}" />
+        ${parseRequisitionWorkbook(buffer).flatMap(group => group.lines).filter(line => !review.rows.some(row => row.rowNumber === line.rowNumber)).map(line => `<input type="hidden" name="qty_${line.rowNumber}" value="0" />`).join("")}
+        <div class="scroll"><table><tr><th>Group</th><th>Ident</th><th>Description</th><th>Requested Qty</th><th>Available Qty</th><th>Overage Qty</th></tr>
+          ${review.rows.map(row => `<tr><td>${esc(row.group)}</td><td>${esc(row.line.item_code)}</td><td>${esc(row.line.description || "")}</td><td><input aria-label="Quantity for ${esc(row.line.item_code)} in group ${esc(row.group)}" name="qty_${row.rowNumber}" type="number" min="0" step="0.0001" value="${row.qty}" required style="min-width:100px;${row.overage > 0 ? "color:#b42318;font-weight:bold;" : ""}" /></td><td>${row.availableQty}</td><td style="${row.overage > 0 ? "color:#b42318;font-weight:bold;" : ""}">${row.overage}</td></tr>`).join("")}
+        </table></div>
+        <div class="actions"><button type="submit" name="confirm" value="review">Update Review</button><button type="submit" name="confirm" value="save">Save Requests</button><a class="btn btn-secondary" href="/requisitions/excel">Cancel</a></div>
+      </form>
+    </div>`;
+}
+
 export function registerRequisitionExcelRoutes(app, d) {
   const { query, withTransaction, requireAuth, requireJobContext, requirePermission, asyncHandler, currentJobId, layout, esc, canAccess, upload } = d;
   const access = [requireAuth, requireJobContext, requirePermission("requisitions", "view")];
@@ -55,7 +74,7 @@ export function registerRequisitionExcelRoutes(app, d) {
       ${canAccess(req.user, "requisitions", "create") ? `<div class="card"><h3>Import Requests</h3><p>Choose a BOM and delivery location. Enter item idents (for example, 102B2) in the Ident column, with one row per item. Use the same Request Group for lines belonging to one request. The BOM Lines sheet lists idents for reference. Older templates with a BOM Line ID heading also accept idents; numeric values under that heading remain database line IDs. Each group creates a new request with an automatically assigned number; acceptance and issuing follow the normal workflow.</p>
       <form method="post" action="/requisitions/excel/import" enctype="multipart/form-data" class="stack">
         <div class="grid"><div><label>BOM</label><select name="bom_id" required><option value="">Choose BOM</option>${boms.map(b => `<option value="${b.id}">${esc(b.bom_name || b.bom_no)} (${esc(b.bom_no)})</option>`).join("")}</select></div><div><label>Delivery Location</label><select name="delivery_location_id" required><option value="">Choose location</option>${locations.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join("")}</select></div></div>
-        <div><label>Excel File</label><input type="file" name="sheet" accept=".xlsx" required /></div><p class="muted">All rows are validated together. If any row fails, no requests are saved. Uploading the same file again creates additional requests.</p><div class="actions"><button type="submit">Import Requests</button></div>
+        <div><label>Excel File</label><input type="file" name="sheet" accept=".xlsx" required /></div><p class="muted">Review quantities and availability before saving. Overages appear in red. Uploading the same file again creates additional requests.</p><div class="actions"><button type="submit">Review Import</button></div>
       </form></div>` : ""}
     `, req.user));
   }));
@@ -64,18 +83,32 @@ export function registerRequisitionExcelRoutes(app, d) {
     download(res, [["Import", [importHeaders]], ["BOM Lines", [["BOM Line ID", "BOM", "Line", "Ident", "Description", "UOM"], ...rows.map(r => [r.id,r.bom_no,r.line_no,r.item_code,r.description,r.uom])]]], "requisition-import-template.xlsx");
   }));
   app.post("/requisitions/excel/import", ...access, requirePermission("requisitions", "create"), upload.single("sheet"), asyncHandler(async (req, res) => {
-    if (!req.file || !/\.xlsx$/i.test(req.file.originalname)) throw invalid("Choose an .xlsx import file.");
-    const groups = parseRequisitionWorkbook(req.file.buffer);
+    if (!req.file && !req.body.workbook) throw invalid("Choose an .xlsx import file.");
+    if (req.file && !/\.xlsx$/i.test(req.file.originalname)) throw invalid("Choose an .xlsx import file.");
+    const buffer = req.file ? req.file.buffer : Buffer.from(String(req.body.workbook), "base64");
+    const groups = parseRequisitionWorkbook(buffer);
+    if (!req.file) {
+      for (const group of groups) {
+        for (const line of group.lines) {
+          const raw = String(req.body["qty_" + line.rowNumber] ?? "").trim();
+          const qty = Number(raw);
+          if (!raw || !Number.isFinite(qty) || qty < 0 || Math.abs(qty * 10000 - Math.round(qty * 10000)) > 0.00001) throw invalid("Enter quantities of zero or more, with up to four decimals.");
+          line.qty = qty;
+        }
+        group.lines = group.lines.filter(line => line.qty > 0);
+      }
+    }
+    const activeGroups = groups.filter(group => group.lines.length);
+    if (!activeGroups.length) throw invalid("Keep at least one request line with a positive quantity.");
     const jobId = currentJobId(req), bomId = Number(req.body.bom_id);
-    await withTransaction(async client => {
+    const review = await withTransaction(async client => {
       const bom = (await client.query("select * from bom_headers where id=$1 and job_id=$2 and coalesce(system_key,'')='' for share", [bomId, jobId])).rows[0];
       if (!bom) throw invalid("Choose a regular BOM in the current job.");
       const location = await d.getDeliveryLocation(client, jobId, req.body.delivery_location_id, { lock: true });
       const available = await d.getAvailableInventoryByItemMap(client, jobId);
-      for (const group of groups) {
-        const number = await d.nextDeliveryRequestNumber(client, jobId, location);
-        const [requestedBy, issuedTo, iwp, notes] = group.metadata;
-        const header = (await client.query(`insert into material_requisitions(job_id,requisition_no,bom_id,requested_by_user_id,requested_by_name,issued_to,iwp_no,notes,status,delivery_location_id,delivery_location_name,request_prefix,created_by_user_id,created_by_name) values($1,$2,$3,$4,$5,$6,$7,$8,'REQUESTED',$9,$10,$11,$4,$12) returning id`, [jobId,number,bomId,req.user.id,requestedBy,issuedTo,iwp,notes,location.id,location.name,location.request_prefix,d.getUserDisplayName(req.user)])).rows[0];
+      const reviewRows = [];
+      const totals = new Map();
+      for (const group of activeGroups) {
         const resolvedIds = new Set();
         for (const { lineId, reference, qty, rowNumber } of group.lines) {
           const matches = (await client.query(lineId !== null
@@ -86,14 +119,28 @@ export function registerRequisitionExcelRoutes(app, d) {
           const line = matches[0];
           if (resolvedIds.has(String(line.id))) throw invalid(`Row ${rowNumber}: duplicate BOM line for ${reference} in group ${group.key}.`);
           resolvedIds.add(String(line.id));
-          if (qty > Number(available.get(d.buildInventoryItemKey(line)) || 0)) throw invalid(`Group ${group.key}: quantity for ${line.item_code} exceeds available inventory.`);
-          await client.query("insert into material_requisition_lines(job_id,requisition_id,bom_line_id,qty_requested) values($1,$2,$3,$4)", [jobId,header.id,line.id,qty]);
+          const itemKey = d.buildInventoryItemKey(line);
+          const total = (totals.get(itemKey) || 0) + qty;
+          totals.set(itemKey, total);
+          const availableQty = Math.max(0, Number(available.get(itemKey) || 0));
+          const overage = Math.max(0, Math.round((total - availableQty) * 10000) / 10000);
+          reviewRows.push({ group: group.key, rowNumber, line, qty, availableQty, overage });
+        }
+      }
+      if (req.file || req.body.confirm !== "save" || reviewRows.some(row => row.overage > 0)) return { rows: reviewRows, bom, location };
+      for (const group of activeGroups) {
+        const number = await d.nextDeliveryRequestNumber(client, jobId, location);
+        const [requestedBy, issuedTo, iwp, notes] = group.metadata;
+        const header = (await client.query(`insert into material_requisitions(job_id,requisition_no,bom_id,requested_by_user_id,requested_by_name,issued_to,iwp_no,notes,status,delivery_location_id,delivery_location_name,request_prefix,created_by_user_id,created_by_name) values($1,$2,$3,$4,$5,$6,$7,$8,'REQUESTED',$9,$10,$11,$4,$12) returning id`, [jobId,number,bomId,req.user.id,requestedBy,issuedTo,iwp,notes,location.id,location.name,location.request_prefix,d.getUserDisplayName(req.user)])).rows[0];
+        for (const row of reviewRows.filter(row => row.group === group.key)) {
+          await client.query("insert into material_requisition_lines(job_id,requisition_id,bom_line_id,qty_requested) values($1,$2,$3,$4)", [jobId,header.id,row.line.id,row.qty]);
         }
         if ((await d.getRequisitionMaterialShortages(client, header.id, jobId)).length) await client.query("update material_requisitions set status='WAITING_ON_MATERIAL' where id=$1 and job_id=$2", [header.id,jobId]);
         await d.auditLog(client, req.user.id, "create", "material_requisition", header.id, `Excel import: ${number}`);
       }
     });
-    res.redirect(`/requisitions/excel?imported=${groups.length}`);
+    if (review) return res.send(layout("Review Excel Import", renderImportReview(review, buffer, bomId, esc), req.user));
+    res.redirect(`/requisitions/excel?imported=${activeGroups.length}`);
   }));
   return { download };
 }
