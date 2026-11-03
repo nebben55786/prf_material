@@ -1623,7 +1623,7 @@ function buildMrrFormPdf(header, lines, options = {}) {
   const allLineItems = normalizedLines;
   const allDiscrepancyItems = lines.filter((row) => {
     const status = String(row.status || "").trim().toUpperCase();
-    return status && status !== "OK" && status !== "NOT ON THIS LOAD";
+    return status && status !== "OK" && status !== "NOT ON THIS LOAD" && status !== "BACKORDER";
   });
   const jobNumber = String(options.jobNumber || "").trim();
   const deliveryLocation = String(options.deliveryLocation || "").trim();
@@ -9188,14 +9188,15 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requirePermission(
         trim(both ' |' from concat_ws(' | ',
           case when coalesce(po.po_no, '') <> '' then concat('PO ', po.po_no) else '' end,
           case when coalesce(m.mrr_number, '') <> '' then concat('MRR ', m.mrr_number) else '' end,
-          case when coalesce(r.osd_status, 'OK') <> 'OK' then concat('OS&D ', r.osd_status) else '' end,
-          coalesce(r.osd_notes, '')
+          case when upper(btrim(coalesce(r.osd_status, ''))) not in ('', 'OK', 'NOT ON THIS LOAD', 'BACKORDER')
+            then concat('OS&D ', r.osd_status) else null end,
+          nullif(btrim(r.osd_notes), '')
         )) as details
       from receipts r
       join po_lines pl on pl.id = r.po_line_id
       join material_items mi on mi.id = pl.material_item_id
       left join purchase_orders po on po.id = pl.po_id
-      left join mrr_logs m on m.id = r.mrr_log_id
+      left join mrr_logs m on m.id = r.mrr_log_id and m.job_id = r.job_id
       where r.job_id = $2 and (mi.item_code ilike $1 or mi.description ilike $1)
 
       union all
@@ -16793,7 +16794,7 @@ app.get("/rfq/:id", requireAuth, requireJobContext, requirePermission("rfqs", "v
         <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
           <div><label>Client Request #</label><input name="client_request_no" value="${esc(rfq.client_request_no || "")}" /></div>
           <div><label>PO Number</label><input id="rfq-po-number-${rfqId}" name="po_number" value="${esc(headerPoNumber)}" /></div>
-          <div><label>Vendor Quote Number</label><input name="vendor_quote_number" value="${esc(rfq.vendor_quote_number || "")}" /></div>
+          <div><label>Vendor Quote/Order Number</label><input name="vendor_quote_number" value="${esc(rfq.vendor_quote_number || "")}" /></div>
           <div><label>Requestor</label>${renderRfqRequestorInput(requestors, rfq.requestor_name || "")}</div>
         </div>
       </form>
@@ -19706,6 +19707,7 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
       <td style="width:1%; white-space:nowrap;">${shortCell}</td>
       <td>${warehouseCell}</td>
       <td>${locationCell}</td>
+      <td>${locked ? "" : `<textarea name="receiving_notes_${lineId}" aria-label="Receiving notes for PO line ${escAttr(line.po_line || String(lineId))}"></textarea>`}</td>
     </tr>`;
   }).join("");
   const historyRows = history.map((row) => `<tr>
@@ -19751,13 +19753,11 @@ app.get("/po/:id/receive", requireAuth, requireJobContext, requirePermission("re
         </div>
         <div class="scroll">
           <table>
-            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Open</th><th style="width:84px; white-space:nowrap;">Qty</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Short OS&amp;D</th><th style="width:1%; white-space:nowrap;">Short Handling</th><th>Warehouse</th><th>Location</th></tr>
-            ${lineRows || `<tr><td colspan="15" class="muted">No PO lines found.</td></tr>`}
+            <tr><th style="width:1%; white-space:nowrap;">PO Line</th><th style="width:1%; white-space:nowrap;">Item</th><th style="width:1%; white-space:nowrap;">Ordered</th><th style="width:1%; white-space:nowrap;">Open</th><th style="width:84px; white-space:nowrap;">Qty</th><th style="width:auto; min-width:320px;">Description</th><th style="width:1%; white-space:nowrap;">Size 1</th><th style="width:1%; white-space:nowrap;">Size 2</th><th style="width:1%; white-space:nowrap;">Thk 1</th><th style="width:1%; white-space:nowrap;">Thk 2</th><th style="width:1%; white-space:nowrap;">Received</th><th style="width:1%; white-space:nowrap;">Short OS&amp;D</th><th style="width:1%; white-space:nowrap;">Short Handling</th><th>Warehouse</th><th>Location</th><th>Receiving Notes</th></tr>
+            ${lineRows || `<tr><td colspan="16" class="muted">No PO lines found.</td></tr>`}
           </table>
         </div>
         <div style="text-align:right;"><strong>Total Pieces Received: <output data-receiving-piece-total aria-live="polite" aria-atomic="true">0</output></strong></div>
-        <div><label>MRR Notes</label><textarea name="mrr_notes"></textarea></div>
-        <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions">${canPostReceipt ? `<button type="submit" ${hasWarehouseLocations ? "" : "disabled"}>Post Receipt</button>` : `<span class="chip">Fully Received</span>`}<a class="btn btn-secondary" href="/po">Back</a></div>
       </form>
       <script src="/public/receiving-visibility.js" defer></script>
@@ -19933,7 +19933,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
       po.description || "",
       receivedDate,
       receivedBy,
-      mrrNotes,
+      "",
       loadNumber
     ])).rows[0];
     await saveMaterialLogLookup(client, "received_by", receivedBy, jobId);
@@ -19965,7 +19965,7 @@ app.post("/po/:id/receive", requireAuth, requireJobContext, requirePermission("r
       const location = normalizeLocationName(req.body[`location_${lineId}`]);
       await assertValidWarehouseLocation(client, warehouse, location, jobId);
       const shortAction = String(req.body[`short_action_${lineId}`] || req.body.short_action_default || "not_on_load").trim().toLowerCase();
-      const enteredNotes = String(req.body.osd_notes || "").trim();
+      const enteredNotes = [...new Set([req.body[`receiving_notes_${lineId}`], mrrNotes, req.body.osd_notes].map((value) => String(value || "").trim()).filter(Boolean))].join(" | ");
       let enteredStatus = "OK";
       let osdStatus = "";
       let osdQty = 0;
@@ -20459,7 +20459,7 @@ app.get("/receive/:mrrId", requireAuth, requireJobContext, requirePermission("re
           <div><label>Short Handling</label><select name="short_action"><option value="not_on_load" selected>Not on this load</option><option value="backorder">Backorder</option><option value="osd">OS&amp;D</option></select></div>
         </div>
         <div style="text-align:right;"><strong>Total Pieces Received: <output data-receiving-piece-total aria-live="polite" aria-atomic="true">0</output></strong></div>
-        <div><label>OS&D Notes</label><textarea name="osd_notes"></textarea></div>
+        <div><label>Receiving Line Notes</label><textarea name="osd_notes"></textarea></div>
         <div class="actions"><button type="submit" ${canReceiveOnExistingMrr ? "" : "disabled"}>${po ? "Post Receipt Against PO" : "Log No-PO Receipt"}</button><a class="btn btn-secondary" href="${escAttr(backHref)}">Back</a></div>
       </form>
       <script src="/public/receiving-piece-count.js" defer></script>
@@ -21442,7 +21442,6 @@ app.get("/material-logs/mrr/new", requireAuth, requireJobContext, requirePermiss
           <div><label>OPI Date</label><input type="date" name="opi_date" /></div>
         </div>
         <div><label>Material Description</label><textarea name="material_description"></textarea></div>
-        <div><label>Notes</label><textarea name="notes"></textarea></div>
         <div class="actions"><button type="submit">Add MRR</button><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
       </form>
     </div>
@@ -23013,7 +23012,7 @@ app.get("/material-logs/mrr/:mrrId/receipts/:receiptId/edit", requireAuth, requi
           <div><label>Warehouse</label><select id="receipt-line-warehouse-${receiptId}" name="warehouse" required onchange='syncLocationOptions("receipt-line-warehouse-${receiptId}", "receipt-line-location-${receiptId}", ${escAttr(JSON.stringify(locationMap))}, "${escAttr(normalizedRowLocation)}")'>${warehouseOptionsHtml}</select></div>
           <div><label>Location</label><select id="receipt-line-location-${receiptId}" name="location" data-placeholder="Select location" required><option value="">Select location</option></select></div>
         </div>
-        <div><label>Notes</label><textarea name="osd_notes">${esc(row.osd_notes || "")}</textarea></div>
+        <div><label>Receiving Line Notes</label><textarea name="osd_notes">${esc(row.osd_notes || "")}</textarea></div>
         <div class="actions"><button type="submit">Save MRR Line</button><a class="btn btn-secondary" href="${esc(returnTo)}">Back</a></div>
       </form>
       <script>syncLocationOptions("receipt-line-warehouse-${receiptId}", "receipt-line-location-${receiptId}", ${JSON.stringify(locationMap)}, ${JSON.stringify(normalizedRowLocation)});</script>
@@ -23253,7 +23252,7 @@ app.get("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requirePe
           <div><label>OPI Date</label><input type="date" name="opi_date" value="${esc(row.opi_date)}" /></div>
         </div>
         <div><label>Description</label><textarea name="material_description">${esc(row.material_description)}</textarea></div>
-        <div><label>Notes</label><textarea name="notes">${esc(row.notes)}</textarea></div>
+        <div><label>Receiving Notes</label><div>${esc([...new Set([...poReceiptLines.rows, ...manualLines.rows].map((line) => String(line.notes || "").trim()).filter(Boolean))].join(" | ")) || "No receiving notes."}</div><div class="muted">Edit notes on the individual receiving lines below.</div></div>
           <div class="actions"><button type="submit">Save MRR</button><a class="btn btn-secondary" href="${escAttr(receiveRemainingHref)}">${esc(receiveRemainingLabel)}</a><a class="btn btn-secondary" target="_blank" href="/material-logs/mrr/${row.id}/form.pdf">Open MRR PDF</a><a class="btn btn-secondary" href="/material-logs/mrr/${row.id}/export-flow.xlsx">Export to FLOW</a><a class="btn btn-secondary" href="/material-logs/mrr">Back</a></div>
         </form>
       </div>
@@ -23273,7 +23272,7 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requireP
     const requestedMrrNumber = String(req.body.mrr_number || "").trim();
     if (!requestedMrrNumber) throw new Error("MRR Number is required.");
     const currentMrr = (await client.query(`
-      select id, mrr_number, opi_number, po_number
+      select id, mrr_number, opi_number, po_number, notes
       from mrr_logs
       where id = $1 and job_id = $2
       for update
@@ -23311,7 +23310,7 @@ app.post("/material-logs/mrr/:id/edit", requireAuth, requireJobContext, requireP
       req.body.material_description?.trim() || "",
       req.body.received_date?.trim() || "",
       req.body.received_by?.trim() || "",
-      req.body.notes?.trim() || "",
+      currentMrr.notes || "",
       req.body.load_number?.trim() || "",
       req.body.opi_number?.trim() || "",
       req.body.opi_date?.trim() || "",

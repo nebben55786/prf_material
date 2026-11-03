@@ -1,3 +1,4 @@
+import { mrrReceivingNotesSql } from "../receiving-notes.js";
 import { Readable } from "node:stream";
 import express from "express";
 import {
@@ -110,7 +111,7 @@ export function registerMrrScanRoutes(app, dependencies) {
       select m.id, m.discipline, m.mrr_number, m.vendor_name, po.id as po_id, coalesce(po.po_no, m.po_number) as po_number,
              coalesce(m.status, 'ACTIVE') as status,
              m.pick_ticket, m.material_description, m.received_date, m.received_by, m.load_number, m.opi_number,
-             m.scanned_pdf_pathname, m.notes
+             m.scanned_pdf_pathname, ${mrrReceivingNotesSql("m")} as notes
       from mrr_logs m
       left join purchase_orders po on po.id = m.app_po_id and po.job_id = m.job_id
       where m.job_id = $1

@@ -90,7 +90,8 @@ export function registerMrrDocumentRoutes(app, dependencies) {
       ordered: row.ordered_qty ? formatQtyDisplay(row.ordered_qty) : "",
       shipped: row.ordered_qty ? formatQtyDisplay(row.ordered_qty) : "",
       received: formatQtyDisplay(row.received_qty),
-      discrepancy: [row.osd_status && row.osd_status !== "OK" ? row.osd_status : "", row.notes || ""].filter(Boolean).join(" | ")
+      discrepancy: !["", "OK", "NOT ON THIS LOAD", "BACKORDER"].includes(String(row.osd_status || "").trim().toUpperCase())
+        ? [row.osd_status, row.notes || ""].filter(Boolean).join(" | ") : ""
     }));
     const pdfBuffer = buildMrrFormPdf({
       mrr_number: header.mrr_number || "",
@@ -100,7 +101,7 @@ export function registerMrrDocumentRoutes(app, dependencies) {
       received_date: header.received_date || "",
       received_by: header.received_by || "",
       load_number: header.load_number || "",
-      notes: header.notes || "",
+      notes: [...new Set([...poReceiptLines.rows, ...manualLines.rows].map((row) => String(row.notes || "").trim()).filter(Boolean))].join(" | "),
       container_type: "",
       material_description: header.material_description || ""
     }, printableLines, {

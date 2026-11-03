@@ -98,20 +98,57 @@ test("MRR lines can be deleted and added individually with PO and job isolation"
     insert into osd_logs(job_id,mrr_log_id,receipt_id,po_id,po_line_id) select 101,1801,id,1201,1301 from receipts where mrr_log_id=1801;
   `);
   const headerBody = {mrr_number:'MRR-TEST',app_po_id:'1201',received_date:'2026-10-06',received_by:'Nancy Bird',material_description:'Valves',notes:'Initial header note'};
-  for (const notes of ['Initial header note','Updated header note','']) {
-    const saved = await request('/material-logs/mrr/1801/edit',{...headerBody,notes});
-    assert.equal(saved.status,302,await saved.text());
-    assert.equal((await db.query('select notes from mrr_logs where id=1801')).rows[0].notes,notes);
-    assert.equal(saved.headers.get('location'),'/material-logs/mrr/1801/edit?saved=1');
-    const pdfResponse = await request('/material-logs/mrr/1801/form.pdf');
-    assert.equal(pdfResponse.status,200);
-    const pdf=Buffer.from(await pdfResponse.arrayBuffer()).toString('latin1');
-    if (notes) assert.ok(pdf.includes(notes));
-    else assert.ok(!pdf.includes('Updated header note'));
-    const reloaded = await request('/material-logs/mrr/1801/edit');
-    assert.match(await reloaded.text(),new RegExp('<textarea name="notes">'+notes+'</textarea>'));
-  }
   const receiptId = (await db.query("select id from receipts where mrr_log_id=1801")).rows[0].id;
+  const itemHistory = async () => {
+    const response = await request('/yard/item-history?item=PIPE');
+    assert.equal(response.status, 200, await response.clone().text());
+    const html = await response.text();
+    const history = html.slice(html.indexOf('<h3 style="margin-top:0;">Transaction History</h3>'));
+    const receiptRow = history.match(/<tr>\s*<td>[^]*?<td>Receipt<\/td>[^]*?<\/tr>/)?.[0];
+    assert.ok(receiptRow);
+    return receiptRow;
+  };
+  for (const notes of ['GRR-00144', 'GRR-00140', '']) {
+    const saved = await request(`/material-logs/mrr/1801/receipts/${receiptId}/edit`, {
+      qty_received:'20', warehouse:'Yard', location:'BIN', osd_status:'NOT ON THIS LOAD', osd_notes:notes
+    });
+    assert.equal(saved.status, 302, await saved.text());
+    assert.equal((await db.query('select osd_notes from receipts where id=$1',[receiptId])).rows[0].osd_notes, notes);
+    assert.equal((await db.query('select notes from mrr_logs where id=1801')).rows[0].notes, '');
+    const history = await itemHistory();
+    if (notes) assert.ok(history.includes(notes));
+    else assert.doesNotMatch(history, /GRR-00140|GRR-00144/);
+    assert.doesNotMatch(history, /OS&amp;D/);
+    assert.match(history, /<td>20<\/td>\s*<td>Yes<\/td>\s*<td>\+20<\/td>/);
+    const mrrPage = await request('/material-logs/mrr/1801/edit');
+    const mrrHtml = await mrrPage.text();
+    assert.doesNotMatch(mrrHtml, /<textarea name="notes">/);
+    if (notes) assert.ok(mrrHtml.includes(notes));
+    const listHtml = await (await request('/material-logs/mrr')).text();
+    if (notes) assert.ok(listHtml.includes(notes));
+    else assert.doesNotMatch(listHtml, /GRR-00140|GRR-00144/);
+    const pdfResponse = await request('/material-logs/mrr/1801/form.pdf');
+    assert.equal(pdfResponse.status, 200);
+    const pdf = Buffer.from(await pdfResponse.arrayBuffer()).toString('latin1');
+    if (notes) assert.ok(pdf.includes(notes));
+    else assert.ok(!pdf.includes('GRR-00140'));
+  }
+  for (const status of ['OK', 'NOT ON THIS LOAD', 'BACKORDER', 'SHORTAGE', 'OVERAGE', 'DAMAGED']) {
+    await db.query('update receipts set osd_status=$1, osd_notes=$2 where id=$3',[status,'Line detail',receiptId]);
+    const history = await itemHistory();
+    assert.ok(history.includes('Line detail'));
+    if (['SHORTAGE','OVERAGE','DAMAGED'].includes(status)) assert.ok(history.includes('OS&amp;D '+status));
+    else assert.doesNotMatch(history, /OS&amp;D/);
+  }
+  // Another receipt on the same MRR must keep its own note out of this line.
+  await db.exec("insert into receipts(job_id,mrr_log_id,po_line_id,qty_received,warehouse,location,osd_status,osd_notes) values(101,1801,1302,1,'Yard','BIN','OK','OTHER-LINE-NOTE')");
+  assert.ok(!(await itemHistory()).includes('OTHER-LINE-NOTE'));
+  const summary = await (await request('/material-logs/mrr')).text();
+  assert.ok(summary.includes('Line detail') && summary.includes('OTHER-LINE-NOTE'));
+  await db.exec('delete from receipts where mrr_log_id=1801 and po_line_id=1302');
+  assert.equal((await request('/material-logs/mrr/1801/edit',{...headerBody,notes:'Do not overwrite line notes'})).status,302);
+  assert.ok(!(await itemHistory()).includes('Do not overwrite line notes'));
+  await db.query("update receipts set osd_status='OK', osd_notes='' where id=$1",[receiptId]);
   const edit = await request('/material-logs/mrr/1801/edit');
   assert.equal(edit.status,200,await edit.clone().text());
   const html = await edit.text();
