@@ -1,3 +1,4 @@
+import { registerRequisitionExcelRoutes } from "./requisition-excel.js";
 import { resolveRolePermissions, hasSectionPermission, yardPermissionActions } from "./permissions.js";
 import { registerItemMergeRoutes } from "./item-merge.js";
 import { withItemMasterAttributes } from "./inventory-display.js";
@@ -13120,7 +13121,9 @@ app.get("/requisitions/new", requireAuth, requireJobContext, requirePermission("
   `, req.user));
 });
 
-app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requisitions", "view"), async (req, res) => {
+const requisitionExcel = registerRequisitionExcelRoutes(app, { query, withTransaction, requireAuth, requireJobContext, requirePermission, asyncHandler, currentJobId, layout, esc, canAccess, upload, getDeliveryLocation, nextDeliveryRequestNumber, getAvailableInventoryByItemMap, buildInventoryItemKey, getUserDisplayName, getRequisitionMaterialShortages, auditLog });
+
+app.get(["/requisitions", "/requisitions/excel/export.xlsx"], requireAuth, requireJobContext, requirePermission("requisitions", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
   const description = String(req.query.description || "").trim();
   let status = requisitionStatusKey(req.query.status);
@@ -13157,8 +13160,11 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     ${whereSql}
     group by mr.id, bh.bom_no, bh.bom_name, bh.description
     order by mr.id desc
-    limit 300
+    ${req.path.endsWith("export.xlsx") ? "" : "limit 300"}
   `, params)).rows;
+  if (req.path.endsWith("export.xlsx")) {
+    return requisitionExcel.download(res, [["Requisitions", [["Req #", "BOM", "Requested By", "Issued To", "Notes", "IWP", "Lines", "Qty", "Status", "Created By", "Created"], ...rows.map(row => [row.requisition_no, row.bom_name || row.bom_description || row.bom_no, row.requested_by_name, row.issued_to || "", row.notes || "", row.iwp_no || "", Number(row.line_count), Number(row.qty_requested), requisitionStatusLabel(row.has_issued_loads && isVerifiedStageRequisitionStatus(row.status) ? "PARTIALLY_ISSUED" : row.status), row.created_by_name || "Unknown", formatShortDateTime(row.created_at)])]]], "material-requisitions.xlsx");
+  }
   const tableRows = rows.map((row) => `<tr>
     <td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
     <td>${esc(row.bom_name || row.bom_description || row.bom_no)}</td>
@@ -13175,9 +13181,10 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
   </tr>`).join("");
   res.send(layout("Requisitions", `
     <h1>Material Requisitions</h1>
-    ${canAccess(req.user, "requisitions", "create") ? `<div class="card">
-      <div class="actions"><a class="btn btn-primary" href="/requisitions/new">New Request</a></div>
-    </div>` : ""}
+    <div class="card"><div class="actions">
+      ${canAccess(req.user, "requisitions", "create") ? `<a class="btn btn-primary" href="/requisitions/new">New Request</a>` : ""}
+      <a class="btn btn-secondary" href="/requisitions/excel?${escAttr(new URLSearchParams({ description, status }).toString())}">Excel Import / Export</a>
+    </div></div>
     <div class="card">
       <form method="get" action="/requisitions" class="stack">
         <div class="grid">
@@ -13189,7 +13196,7 @@ app.get("/requisitions", requireAuth, requireJobContext, requirePermission("requ
     </div>
     <div class="card scroll"><table><tr><th>Req #</th><th>BOM</th><th>Requested By</th><th>Issued To</th><th>Notes</th><th>IWP</th><th>Lines</th><th>Qty</th><th>Status</th><th>Created By</th><th>Created</th><th>Actions</th></tr>${tableRows || `<tr><td colspan="12" class="muted">No requisitions yet.</td></tr>`}</table></div>
   `, req.user));
-});
+}));
 
 app.get("/bom/:id/lines", requireAuth, requireJobContext, requirePermission("bom", "view"), asyncHandler(async (req, res) => {
   const jobId = currentJobId(req);
