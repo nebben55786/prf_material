@@ -501,6 +501,85 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request('/items/1001/change-ident',{token:renameToken,new_ident:'WRONG-JOB'})).status,400);
   await request('/jobs/select',{job_id:'101'});
 
+  // Merge equivalent unissued items with colliding BOM lines, count rows, specs, and vendor request lines.
+  await db.exec(`
+    insert into material_items(id,job_id,item_code,description,material_type,uom,size_1,notes) values
+      (9501,101,'MERGE-OLD','Old tee wording','Fitting','EA','','Source note'),
+      (9502,101,'MERGE-KEEP','Canonical 12 inch tee','Fittings','EA','12','Keep note'),
+      (9503,101,'MERGE-WRONG-UOM','Feet','pipe','FT','',''),
+      (9504,102,'MERGE-OLD','Other job tee','Fitting','EA','','');
+    insert into bom_headers(id,job_id,job_number,bom_no,bom_type,status) values(9500,101,'A','MERGE-BOM','pipe','ACTIVE');
+    insert into bom_lines(id,bom_id,line_no,item_code,description,uom,qty_required,size_1) values(9510,9500,'1','MERGE-OLD','Old tee wording','EA',2,''),(9511,9500,'1','MERGE-KEEP','Canonical 12 inch tee','EA',3,'12');
+    insert into material_requisitions(id,job_id,requisition_no,bom_id,requested_by_name,status) values(9520,101,'MERGE-REQ',9500,'Test','ACCEPTED');
+    insert into material_requisition_lines(id,job_id,requisition_id,bom_line_id,qty_requested) values(9521,101,9520,9510,2),(9522,101,9520,9511,3);
+    insert into material_requisition_loads(id,job_id,requisition_id,load_sequence,load_no,trailer_number,status) values(9523,101,9520,1,'MERGE-LOAD-001','T1','PLANNED');
+    insert into material_requisition_load_lines(load_id,requisition_line_id,qty) values(9523,9521,1),(9523,9522,1);
+    insert into rfqs(id,job_id,rfq_no,project_name) values(9530,101,'MERGE-RFQ','Test');
+    insert into rfq_items(id,job_id,rfq_id,material_item_id,item_code_snapshot,description_snapshot,qty) values(9531,101,9530,9501,'MERGE-OLD','Old tee wording',2),(9532,101,9530,9502,'MERGE-KEEP','Canonical 12 inch tee',3);
+    insert into po_lines(id,job_id,po_id,rfq_item_id,material_item_id,item_code_snapshot,description_snapshot,qty_ordered,size_1) values(9541,101,1201,9531,9501,'MERGE-OLD','Old tee wording',5,''),(9542,101,1201,9532,9502,'MERGE-KEEP','Canonical 12 inch tee',7,'12');
+    insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,9541,5,'Yard','BIN','OK'),(101,9542,7,'Yard','BIN','OK'),(101,9541,1,'Yard','BIN','DAMAGED'),(101,9542,2,'Yard','BIN','DAMAGED');
+    insert into inventory_location_moves(job_id,item_code,description,from_warehouse,from_location,to_warehouse,to_location,qty,qty_osd) values(101,'MERGE-OLD','Old tee wording','Yard','BIN','Yard','NEW',1,1);
+    insert into inventory_audit_reports(id,job_id,report_no,created_by) values(9550,101,'MERGE-AUDIT',100);
+    insert into inventory_audit_report_lines(id,job_id,report_id,item_code,description,size_1,warehouse,location,actual_qty,adjustment_qty) values(9551,101,9550,'MERGE-OLD','Old tee wording','','Yard','BIN',7,2),(9552,101,9550,'MERGE-KEEP','Canonical 12 inch tee','12','Yard','BIN',6,-1);
+    insert into inventory_adjustment_lines(job_id,report_id,report_line_id,item_code,description,size_1,warehouse,location,qty_adjustment) values(101,9550,9551,'MERGE-OLD','Old tee wording','','Yard','BIN',2),(101,9550,9552,'MERGE-KEEP','Canonical 12 inch tee','12','Yard','BIN',-1);
+    insert into inventory_audit_counts(job_id,item_code,description,size_1,warehouse,location,actual_qty) values(101,'MERGE-OLD','Old tee wording','','Yard','BIN',7),(101,'MERGE-KEEP','Canonical 12 inch tee','12','Yard','BIN',6);
+    insert into material_specs(id,job_id,name,service_code,material_specification) values(9560,101,'Merge Spec A','MERGE-A','A'),(9561,101,'Merge Spec B','MERGE-B','B');
+    insert into material_item_specs(job_id,material_item_id,spec_id) values(101,9501,9560),(101,9501,9561),(101,9502,9560);
+    insert into material_photos(job_id,process_type,material_item_id,filename,blob_pathname) values(101,'item',9501,'old.jpg','merge-old-photo'),(101,'item',9502,'keep.jpg','merge-keep-photo');
+    insert into material_receiving_logs(job_id,item_code,ident_code,fluor_item_code,description) values(101,'MERGE-OLD','MERGE-OLD','MERGE-OLD','Old tee wording');
+    insert into osd_logs(job_id,item_code,description) values(101,'MERGE-OLD','Old tee wording');
+    insert into vendor_fmr_request_lines(job_id,po_number,item_code,abbrev_description,qty_ordered,qty_received) values(101,'MERGE-PO','MERGE-OLD','Old tee wording',5,4),(101,'MERGE-PO','MERGE-KEEP','Canonical 12 inch tee',7,6);
+  `);
+  assert.match(await (await request('/items/9501/edit')).text(),/Merge Item/);
+  const mergeStart=await (await request('/items/9501/merge?q=MERGE')).text();
+  const mergeSelect=tokenFrom(mergeStart);
+  assert.equal((await request('/items/9501/merge/review',{token:mergeSelect,target_id:'9501'})).status,400);
+  assert.equal((await request('/items/9501/merge/review',{token:mergeSelect,target_id:'9503'})).status,400);
+  assert.equal((await request('/items/9501/merge/review',{token:mergeSelect,target_id:'9504'})).status,400);
+  response=await request('/items/9501/merge/review',{token:mergeSelect,target_id:'9502'});assert.equal(response.status,200,await response.clone().text());
+  const mergeReview=await response.text();assert.match(mergeReview,/Canonical 12 inch tee/);assert.match(mergeReview,/<td>12<\/td>/);
+  const mergeSave=tokenFrom(mergeReview);
+  await db.query("update material_requisitions set status='ISSUED' where id=9520");
+  assert.equal((await request('/items/9501/merge/save',{token:mergeSave})).status,400);
+  await db.query('update material_requisition_lines set bom_line_id=9511 where id=9521');
+  response=await request('/items/9501/merge/save',{token:mergeSave});assert.equal(response.status,400);assert.match(await response.text(),/MERGE-KEEP cannot be merged/);
+  await db.query('update material_requisition_lines set bom_line_id=9510 where id=9521');
+  await db.query("update material_requisitions set status='ACCEPTED' where id=9520");
+  await db.query("update material_items set description='Changed during review' where id=9502");
+  assert.equal((await request('/items/9501/merge/save',{token:mergeSave})).status,400);
+  await db.query("update material_items set description='Canonical 12 inch tee' where id=9502");
+  const addedStock=(await db.query("insert into receipts(job_id,po_line_id,qty_received,warehouse,location,osd_status) values(101,9541,1,'Yard','BIN','OK') returning id")).rows[0];
+  assert.equal((await request('/items/9501/merge/save',{token:mergeSave})).status,400);
+  await db.query('delete from receipts where id=$1',[addedStock.id]);
+  // A late failure must roll back photos, BOM links, stock keys, and source deletion.
+  await db.exec("create function reject_merge_audit() returns trigger language plpgsql as $$ begin if new.action='merge_items' then raise exception 'Forced merge rollback'; end if; return new; end $$; create trigger reject_merge_audit before insert on audit_log for each row execute function reject_merge_audit()");
+  const originalMergeError=console.error;console.error=()=>{};
+  try { response=await request('/items/9501/merge/save',{token:mergeSave}); } finally { console.error=originalMergeError; }
+  assert.equal(response.status,500);assert.match(await response.text(),/Forced merge rollback/);
+  assert.equal(Number((await db.query('select count(*) as n from material_items where id=9501')).rows[0].n),1);
+  assert.equal((await db.query('select material_item_id from po_lines where id=9541')).rows[0].material_item_id,9501);
+  assert.equal(Number((await db.query("select count(*) as n from inventory_audit_counts where job_id=101 and item_code in ('MERGE-OLD','MERGE-KEEP')")).rows[0].n),2);
+  await db.exec('drop trigger reject_merge_audit on audit_log; drop function reject_merge_audit()');
+  response=await request('/items/9501/merge/save',{token:mergeSave});assert.equal(response.status,302,await response.clone().text());
+  assert.equal((await request('/items/9501/merge/save',{token:mergeSave})).status,400);
+  assert.equal(Number((await db.query('select count(*) as n from material_items where id=9501')).rows[0].n),0);
+  assert.equal((await db.query('select item_code from material_items where id=9504')).rows[0].item_code,'MERGE-OLD');
+  assert.ok((await db.query('select material_item_id,item_code_snapshot,description_snapshot from po_lines where id in (9541,9542)')).rows.every(r=>Number(r.material_item_id)===9502&&r.item_code_snapshot==='MERGE-KEEP'&&r.description_snapshot==='Canonical 12 inch tee'));
+  assert.equal(Number((await db.query('select sum(qty_received) as n from receipts where po_line_id in (9541,9542)')).rows[0].n),15);
+  const mergedBom=(await db.query('select * from bom_lines where bom_id=9500')).rows;assert.equal(mergedBom.length,1);assert.equal(mergedBom[0].item_code,'MERGE-KEEP');assert.equal(Number(mergedBom[0].qty_required),5);
+  assert.ok((await db.query('select bom_line_id,qty_requested from material_requisition_lines where requisition_id=9520')).rows.every(r=>r.bom_line_id===mergedBom[0].id));
+  assert.equal(Number((await db.query('select sum(qty) as n from material_requisition_load_lines where load_id=9523')).rows[0].n),2);
+  const mergedCounts=(await db.query("select * from inventory_audit_counts where job_id=101 and item_code='MERGE-KEEP'")).rows;assert.equal(mergedCounts.length,1);assert.equal(Number(mergedCounts[0].actual_qty),13);assert.equal(mergedCounts[0].size_1,'12');
+  assert.equal(Number((await db.query('select count(*) as n from material_item_specs where material_item_id=9502')).rows[0].n),2);
+  assert.equal(Number((await db.query('select count(*) as n from material_photos where material_item_id=9502')).rows[0].n),2);
+  const mergedFmr=(await db.query("select * from vendor_fmr_request_lines where job_id=101 and po_number='MERGE-PO'")).rows;assert.equal(mergedFmr.length,1);assert.equal(Number(mergedFmr[0].qty_ordered),12);assert.equal(Number(mergedFmr[0].qty_received),10);
+  const mergedInventoryPage=await (await request(li+'?warehouse=Yard&location=BIN')).text();
+  const mergedInventory=JSON.parse(Buffer.from(tokenFrom(mergedInventoryPage).split('.')[0],'base64url').toString()).rows.filter(r=>r.item_code==='MERGE-KEEP');assert.equal(mergedInventory.length,1);assert.equal(Number(mergedInventory[0].qty_on_hand),12);assert.equal(Number(mergedInventory[0].qty_osd),2);
+  const movedMergePage=await (await request(li+'?warehouse=Yard&location=NEW')).text();
+  const movedMergeStock=JSON.parse(Buffer.from(tokenFrom(movedMergePage).split('.')[0],'base64url').toString()).rows.find(r=>r.item_code==='MERGE-KEEP');assert.equal(Number(movedMergeStock.qty_on_hand),1);assert.equal(Number(movedMergeStock.qty_osd),1);
+  for(const [table,column,scope] of identTargets)assert.equal(Number((await db.query(`select count(*) as n from ${table} where ${scope} and ${column}='MERGE-OLD'`,[101])).rows[0].n),0,table+'.'+column);
+  assert.equal(Number((await db.query("select count(*) as n from audit_log where action='merge_items' and entity_id='9502'")).rows[0].n),1);
+
   await request('/jobs/select',{job_id:'102'});
   assert.equal((await request(li+'/save',{token:reviewToken})).status,400);
   await request('/jobs/select',{job_id:'101'});
@@ -515,6 +594,7 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await request('/yard/move-inventory?location_id=9300')).status,403);
   assert.equal((await request('/inventory-audit/template.xlsx')).status,403);
   assert.equal((await request('/items/1001/change-ident')).status,403);
+  assert.equal((await request('/items/9502/merge')).status,403);
   assert.equal((await request(legacyPath+'/unissue',{reason:'Forbidden'})).status,403);
   assert.equal((await request(p1 + "/sign", signature)).status, 403);
   await db.query("insert into users(id,username,password_hash,role) values(102,'location-warehouse',$1,'warehouse')",[await bcrypt.hash('test-password',4)]);

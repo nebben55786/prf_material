@@ -1,3 +1,4 @@
+import { registerItemMergeRoutes } from "./item-merge.js";
 import { withItemMasterAttributes } from "./inventory-display.js";
 import { registerItemIdentRoutes, getIssuedIdentRequests } from "./item-ident.js";
 import { registerInventoryMoveRoutes, inventoryAtStorage } from "./inventory-moves.js";
@@ -8124,6 +8125,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
   `, req.user));
 });
 
+registerItemMergeRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,getCurrentOnHandRows,auditLog,recomputeBomIssuedSummaries});
 registerItemIdentRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,auditLog});
 registerInventoryMoveRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requireRole,adminEquivalentRoles,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,getCurrentOnHandRows,buildInventoryEntryKey,auditLog});
 registerLocationInventoryRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requireInventoryAuditEdit,asyncHandler,currentJobId,layout,esc,signSession,readSession,getWarehouseOptions,getWarehouseLocationMap,normalizeWarehouseLocationValues,assertValidWarehouseLocation,getCurrentOnHandRows,buildInventoryEntryKey,saveInventoryAuditReport,upsertMaterialMasterItem,getVerifiedAllocatedInventoryTotalsByItem,auditLog});
@@ -10660,6 +10662,8 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("in
   });
   res.send(layout("Edit Item", `
     <h1>Edit Item</h1>
+    ${req.query.merged ? `<div class="card success">Items merged. The kept ident and description are now used throughout this job.</div>` : ""}
+    <div class="actions"><a class="btn btn-secondary" href="/items/${item.id}/merge">Merge Item</a></div>
     <div class="card">
       <form method="post" action="/items/${item.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(item.updated_token)}" />
