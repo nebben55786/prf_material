@@ -35,15 +35,17 @@ function renderImportReview(review, buffer, bomId, esc) {
   return `
     <h1>Review Excel Import</h1>
     <div class="card"><p>BOM: ${esc(review.bom.bom_name || review.bom.bom_no)} | Delivery Location: ${esc(review.location.name)}</p>
-      <p>Review all lines before saving. Overages appear in red. Reduce quantities or enter zero to omit a line. Availability is checked against the combined quantities across this import.</p>
+      <p>Review all lines before saving. Overages appear in red. Reduce quantities, enter zero, or use Delete Line to omit a line from this import. Availability is checked against the combined quantities across this import.</p>
       ${review.rows.some(row => row.overage > 0) ? '<p role="alert" style="color:#b42318;font-weight:bold;">Some quantities exceed available inventory. Adjust them and review again before saving.</p>' : ""}
+      ${review.rows.some(row => row.error) ? '<p role="alert" style="color:#b42318;font-weight:bold;">Some lines have errors. Delete those lines before saving.</p>' : ""}
+      ${!review.rows.length ? '<p role="alert">No lines remain. Cancel to upload another file.</p>' : ""}
       <form method="post" action="/requisitions/excel/import" enctype="multipart/form-data" class="stack">
         <input type="hidden" name="workbook" value="${esc(buffer.toString("base64"))}" />
         <input type="hidden" name="bom_id" value="${bomId}" />
         <input type="hidden" name="delivery_location_id" value="${review.location.id}" />
         ${parseRequisitionWorkbook(buffer).flatMap(group => group.lines).filter(line => !review.rows.some(row => row.rowNumber === line.rowNumber)).map(line => `<input type="hidden" name="qty_${line.rowNumber}" value="0" />`).join("")}
-        <div class="scroll"><table><tr><th>Group</th><th>Ident</th><th>Description</th><th>Requested Qty</th><th>Available Qty</th><th>Overage Qty</th></tr>
-          ${review.rows.map(row => `<tr><td>${esc(row.group)}</td><td>${esc(row.line.item_code)}</td><td>${esc(row.line.description || "")}</td><td><input aria-label="Quantity for ${esc(row.line.item_code)} in group ${esc(row.group)}" name="qty_${row.rowNumber}" type="number" min="0" step="0.0001" value="${row.qty}" required style="min-width:100px;${row.overage > 0 ? "color:#b42318;font-weight:bold;" : ""}" /></td><td>${row.availableQty}</td><td style="${row.overage > 0 ? "color:#b42318;font-weight:bold;" : ""}">${row.overage}</td></tr>`).join("")}
+        <div class="scroll"><table><tr><th>Excel Row</th><th>Group</th><th>Ident</th><th>Description</th><th>Requested Qty</th><th>Available Qty</th><th>Overage Qty</th><th>Issue</th><th>Actions</th></tr>
+          ${review.rows.map(row => `<tr><td>${row.rowNumber}</td><td>${esc(row.group)}</td><td>${esc(row.line.item_code)}</td><td>${esc(row.line.description || "")}</td><td><input aria-label="Quantity for ${esc(row.line.item_code)} in group ${esc(row.group)}" name="qty_${row.rowNumber}" type="number" min="0" step="0.0001" value="${row.qty}" required style="min-width:100px;${row.overage > 0 ? "color:#b42318;font-weight:bold;" : ""}" /></td><td>${row.error ? "—" : row.availableQty}</td><td style="${row.overage > 0 ? "color:#b42318;font-weight:bold;" : ""}">${row.error ? "—" : row.overage}</td><td style="color:#b42318;font-weight:bold;">${esc(row.error || "")}</td><td><button type="submit" class="btn btn-danger" name="delete_row" value="${row.rowNumber}" formnovalidate>Delete Line</button></td></tr>`).join("")}
         </table></div>
         <div class="actions"><button type="submit" name="confirm" value="review">Update Review</button><button type="submit" name="confirm" value="save">Save Requests</button><a class="btn btn-secondary" href="/requisitions/excel">Cancel</a></div>
       </form>
@@ -90,7 +92,7 @@ export function registerRequisitionExcelRoutes(app, d) {
     if (!req.file) {
       for (const group of groups) {
         for (const line of group.lines) {
-          const raw = String(req.body["qty_" + line.rowNumber] ?? "").trim();
+          const raw = String(req.body.delete_row === String(line.rowNumber) ? "0" : req.body["qty_" + line.rowNumber] ?? "").trim();
           const qty = Number(raw);
           if (!raw || !Number.isFinite(qty) || qty < 0 || Math.abs(qty * 10000 - Math.round(qty * 10000)) > 0.00001) throw invalid("Enter quantities of zero or more, with up to four decimals.");
           line.qty = qty;
@@ -99,7 +101,6 @@ export function registerRequisitionExcelRoutes(app, d) {
       }
     }
     const activeGroups = groups.filter(group => group.lines.length);
-    if (!activeGroups.length) throw invalid("Keep at least one request line with a positive quantity.");
     const jobId = currentJobId(req), bomId = Number(req.body.bom_id);
     const review = await withTransaction(async client => {
       const bom = (await client.query("select * from bom_headers where id=$1 and job_id=$2 and coalesce(system_key,'')='' for share", [bomId, jobId])).rows[0];
@@ -114,10 +115,18 @@ export function registerRequisitionExcelRoutes(app, d) {
           const matches = (await client.query(lineId !== null
             ? "select * from bom_lines where id=$1 and bom_id=$2"
             : "select * from bom_lines where item_code=$1 and bom_id=$2", [lineId ?? reference,bomId])).rows;
-          if (!matches.length) throw invalid(`Row ${rowNumber}: ${lineId !== null ? "BOM Line ID" : "Ident"} ${reference} is not in the selected BOM.`);
-          if (matches.length > 1) throw invalid(`Row ${rowNumber}: Ident ${reference} matches multiple lines in the selected BOM. Use the numeric BOM Line ID from the reference sheet under a BOM Line ID heading to select the exact line.`);
+          let error = "";
+          if (!matches.length) error = `${lineId !== null ? "BOM Line ID" : "Ident"} ${reference} is not in the selected BOM.`;
+          else if (matches.length > 1) error = `Ident ${reference} matches multiple lines in the selected BOM. Delete this line or reimport using its numeric BOM Line ID.`;
+          if (error) {
+            reviewRows.push({ group: group.key, rowNumber, line: { item_code: reference }, qty, overage: 0, error });
+            continue;
+          }
           const line = matches[0];
-          if (resolvedIds.has(String(line.id))) throw invalid(`Row ${rowNumber}: duplicate BOM line for ${reference} in group ${group.key}.`);
+          if (resolvedIds.has(String(line.id))) {
+            reviewRows.push({ group: group.key, rowNumber, line, qty, overage: 0, error: `Duplicate BOM line for ${reference} in group ${group.key}.` });
+            continue;
+          }
           resolvedIds.add(String(line.id));
           const itemKey = d.buildInventoryItemKey(line);
           const total = (totals.get(itemKey) || 0) + qty;
@@ -127,7 +136,7 @@ export function registerRequisitionExcelRoutes(app, d) {
           reviewRows.push({ group: group.key, rowNumber, line, qty, availableQty, overage });
         }
       }
-      if (req.file || req.body.confirm !== "save" || reviewRows.some(row => row.overage > 0)) return { rows: reviewRows, bom, location };
+      if (req.file || req.body.delete_row || !reviewRows.length || req.body.confirm !== "save" || reviewRows.some(row => row.error || row.overage > 0)) return { rows: reviewRows, bom, location };
       for (const group of activeGroups) {
         const number = await d.nextDeliveryRequestNumber(client, jobId, location);
         const [requestedBy, issuedTo, iwp, notes] = group.metadata;

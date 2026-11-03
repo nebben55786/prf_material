@@ -38,7 +38,7 @@ test("review highlights combined overages without writes, rechecks stock, and sa
   const pass = () => {};
   const client = { query: async (sql, params) => {
     if (sql.startsWith("select * from bom_headers")) return { rows: [{ id:10,bom_no:"BOM" }] };
-    if (sql.startsWith("select * from bom_lines")) return { rows: [{ id:123,item_code:"104B3",description:"Part" }] };
+    if (sql.startsWith("select * from bom_lines")) return { rows: params[0] === "184B2" ? [] : [{ id:123,item_code:"104B3",description:"Part" }] };
     writes.push({ sql,params });
     return { rows: [{ id:99 }] };
   } };
@@ -76,9 +76,34 @@ test("review highlights combined overages without writes, rechecks stock, and sa
   assert.equal(redirect,"/requisitions/excel?imported=1");
   const lines = writes.filter(write => write.sql.startsWith("insert into material_requisition_lines"));
   assert.deepEqual(lines.map(line => line.params),[[42,99,123,2]]);
+  writes.length = 0;
+  redirect = undefined;
+  const missingBuffer = file([["A","104B3",2,"Paul","Paul","",""],["A","184B2",1,"Paul","Paul","",""]]);
+  req.file = { originalname:"import.xlsx",buffer:missingBuffer };
+  req.body = { bom_id:10,delivery_location_id:3 };
+  await handler(req,res);
+  assert.match(html,/Ident 184B2 is not in the selected BOM/);
+  assert.match(html,/name="delete_row" value="3"/);
+  assert.equal(writes.length,0);
+  delete req.file;
+  Object.assign(req.body,{ workbook:missingBuffer.toString("base64"),qty_2:"2",qty_3:"1",confirm:"save" });
+  await handler(req,res);
+  assert.equal(writes.length,0);
+  assert.equal(redirect,undefined);
+  req.body.delete_row = "3";
+  await handler(req,res);
+  assert.doesNotMatch(html,/Ident 184B2 is not in the selected BOM/);
+  assert.match(html,/name="qty_3" value="0"/);
+  assert.equal(writes.length,0);
+  delete req.body.delete_row;
+  req.body.qty_3 = "0";
+  await handler(req,res);
+  assert.equal(redirect,"/requisitions/excel?imported=1");
+  assert.deepEqual(writes.filter(w => w.sql.startsWith("insert into material_requisition_lines")).map(w => w.params),[[42,99,123,2]]);
+
 });
 
-test("import creates grouped requests through a transaction and rejects lines outside the selected BOM", async () => {
+test("import resolves idents and keeps missing or ambiguous lines in review without saving", async () => {
   for (const mode of ["ident", "numeric-ident", "legacy-ident", "legacy-id", "missing", "ambiguous"]) {
     const valid = !["missing", "ambiguous"].includes(mode);
     const reference = mode === "legacy-id" ? 123 : mode === "numeric-ident" ? "123" : "102B2";
@@ -99,8 +124,8 @@ test("import creates grouped requests through a transaction and rejects lines ou
       getUserDisplayName: () => "Tester", getRequisitionMaterialShortages: async () => [], auditLog: async () => { audited=true; }
     });
     const req = { user:{ id:1 },body:{ bom_id:10,delivery_location_id:3 },file:{ originalname:"import.xlsx",buffer:file([["A",reference,2,"Requester","Recipient","",""]], legacy ? importHeaders.map((h,i) => i === 1 ? "BOM Line ID" : h) : importHeaders) } };
-    const res = { send(html) { assert.match(html,/Review Excel Import/); }, redirect(url) { assert.equal(url,"/requisitions/excel?imported=1"); } };
+    const res = { send(html) { assert.match(html,/Review Excel Import/); if (!valid) { assert.match(html,mode === "ambiguous" ? /matches multiple lines/ : /not in the selected BOM/); assert.match(html,/name="delete_row" value="2"/); } }, redirect(url) { assert.equal(url,"/requisitions/excel?imported=1"); } };
     if (valid) { await handler(req,res); assert.ok(committed && !audited); req.body.workbook = req.file.buffer.toString("base64"); delete req.file; req.body.qty_2 = "2"; req.body.confirm = "save"; await handler(req,res); assert.ok(audited); }
-    else { await assert.rejects(handler(req,res),mode === "ambiguous" ? /matches multiple lines/ : /not in the selected BOM/); assert.ok(rolledBack && !committed && !audited); }
+    else { await handler(req,res); assert.ok(committed && !rolledBack && !audited); req.body.workbook = req.file.buffer.toString("base64"); delete req.file; Object.assign(req.body,{ qty_2:"2",confirm:"save" }); await handler(req,res); assert.ok(!audited); }
   }
 });
