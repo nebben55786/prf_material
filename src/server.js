@@ -1,4 +1,5 @@
 import { registerRequisitionExcelRoutes } from "./requisition-excel.js";
+import { registerRfqPoPdfRoutes } from "./routes/rfq-po-pdf.js";
 import { resolveRolePermissions, hasSectionPermission, yardPermissionActions } from "./permissions.js";
 import { registerItemMergeRoutes } from "./item-merge.js";
 import { withItemMasterAttributes } from "./inventory-display.js";
@@ -15246,6 +15247,12 @@ registerRfqConfirmationRoutes(app, {
   requireJobContext, requirePermission, withTransaction
 });
 
+registerRfqPoPdfRoutes(app, {
+  query, withTransaction, requireAuth, requireJobContext, requirePermission, asyncHandler, currentJobId,
+  layout, esc, signSession, readSession, getNextRfqNumber, syncRfqVendors, upsertRfqItemRow,
+  writeQuoteRevision, recalcRfqStatus, auditLog
+});
+
 app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {
   const jobId = currentJobId(req);
   const [nextRfqNo, jobNumber, vendorsRes, requestors] = await Promise.all([
@@ -15259,7 +15266,10 @@ app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "e
   res.send(layout("Create RFQ", `
     <h1>Create RFQ</h1>
     <div class="card">
-      <div class="actions"><a class="btn btn-secondary" href="/rfq/import/template">Download RFQ Import Template</a></div>
+      <div class="actions">
+        <a class="btn btn-secondary" href="/rfq/new/po-pdf">Create RFQ from PO PDF</a>
+        <a class="btn btn-secondary" href="/rfq/import/template">Download RFQ Import Template</a>
+      </div>
     </div>
     <div class="card">
       <form id="rfq-create-form" method="post" action="/rfq" class="stack">
