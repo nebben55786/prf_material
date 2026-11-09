@@ -1,3 +1,5 @@
+import DOMMatrixFallback from "@thednp/dommatrix";
+
 const unsupported = () => new Error("This PDF does not contain a readable purchase order in the supported layout.");
 const decimal = /^(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,4})?$/;
 
@@ -22,10 +24,15 @@ export function formatPoRequestor(value) {
 
 export async function extractPoPdf(buffer) {
   if (!Buffer.isBuffer(buffer) || !buffer.subarray(0, 5).equals(Buffer.from("%PDF-"))) throw unsupported();
+  // PDF.js constructs a matrix at module load even for text extraction.
+  globalThis.DOMMatrix ??= DOMMatrixFallback;
   const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
   // Keep the worker visible to Vercel's dependency tracing.
   await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
-  const task = getDocument({ data: new Uint8Array(buffer), isEvalSupported: false, useSystemFonts: true, stopAtErrors: true });
+  const task = getDocument({
+    data: new Uint8Array(buffer), isEvalSupported: false, useSystemFonts: true,
+    isOffscreenCanvasSupported: false, isImageDecoderSupported: false, stopAtErrors: true
+  });
   try {
     const document = await task.promise;
     if (document.numPages > 25) throw new Error("Purchase order PDFs may have up to 25 pages.");

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { registerHooks } from "node:module";
 import test from "node:test";
 import bcrypt from "bcryptjs";
 import { PGlite } from "@electric-sql/pglite";
@@ -103,7 +104,19 @@ test("PO PDF review creates one awarded RFQ using current-job idents and rolls b
   assert.match(await invalid.text(), /does not contain a readable purchase order/);
   const upload = new FormData();
   upload.set("po_pdf", new Blob([purchaseOrderPdf()], { type: "application/pdf" }), "fixture.pdf");
-  const preview = await request(`${path}/review`, upload);
+  // The deployed text reader must work even when PDF.js cannot load native canvas.
+  const withoutNativeCanvas = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier === "@napi-rs/canvas") throw Object.assign(new Error("Native canvas unavailable"), { code: "MODULE_NOT_FOUND" });
+      return nextResolve(specifier, context);
+    }
+  });
+  let preview;
+  try {
+    preview = await request(`${path}/review`, upload);
+  } finally {
+    withoutNativeCanvas.deregister();
+  }
   const html = await preview.text();
   assert.equal(preview.status, 200, html.match(/role="alert">([^<]+)/)?.[1]);
   assert.match(html, /value="580852-1"/);

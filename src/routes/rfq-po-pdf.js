@@ -113,7 +113,9 @@ export function registerRfqPoPdfRoutes(app, d) {
     try {
       draft = await extractPoPdf(req.file.buffer);
     } catch (error) {
-      const detail = /^(This PDF|Could not read purchase order line|Purchase order PDFs)/.test(error.message) ? error.message : "Could not read this PDF. Upload a text-based purchase order in the supported layout.";
+      const knownFormatError = /^(This PDF|Could not read purchase order line|Purchase order PDFs)/.test(error.message);
+      if (!knownFormatError) console.warn("[rfq-po-pdf] extraction failed", error.name, error.code ?? "", error.stack?.split("\n").slice(1, 3).join("\n") ?? "");
+      const detail = knownFormatError ? error.message : "Could not read this PDF. Upload a text-based purchase order in the supported layout.";
       return uploadPage(req, res.status(400), detail);
     }
     const token = d.signSession({
