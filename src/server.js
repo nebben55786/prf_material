@@ -3840,7 +3840,7 @@ async function addMaterialItemSpecs(client, materialItemId, jobId, specNames = [
   }
 }
 
-async function upsertMaterialMasterItem(client, row, jobId) {
+async function upsertMaterialMasterItem(client, row, jobId, { createOnly = false } = {}) {
   const normalized = normalizeMaterialItemImportRow(row);
   const presentFields = normalized.__presentFields || {};
   const hasField = (fieldName) => presentFields[fieldName] !== false;
@@ -3848,6 +3848,9 @@ async function upsertMaterialMasterItem(client, row, jobId) {
   if (!itemCode) return { status: "skipped", errorCode: "missing_item_code", message: "Item code is required." };
   if (!normalized.description) return { status: "skipped", errorCode: "missing_description", message: "Description is required." };
   const existing = await client.query("select * from material_items where job_id = $1 and lower(item_code) = lower($2) limit 1", [jobId, itemCode]);
+  if (createOnly && existing.rows[0]) {
+    return { status: "skipped", message: "This ident already exists in Item Master. Choose it as an existing item." };
+  }
   let status = "inserted";
   let itemId;
   if (existing.rows[0]) {
@@ -15250,7 +15253,7 @@ registerRfqConfirmationRoutes(app, {
 registerRfqPoPdfRoutes(app, {
   query, withTransaction, requireAuth, requireJobContext, requirePermission, asyncHandler, currentJobId,
   layout, esc, signSession, readSession, getNextRfqNumber, syncRfqVendors, upsertRfqItemRow,
-  writeQuoteRevision, recalcRfqStatus, auditLog
+  writeQuoteRevision, recalcRfqStatus, auditLog, canAccess, upsertMaterialMasterItem
 });
 
 app.get("/rfq/new", requireAuth, requireJobContext, requirePermission("rfqs", "edit"), async (req, res) => {

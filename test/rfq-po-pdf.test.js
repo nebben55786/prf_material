@@ -19,7 +19,8 @@ function purchaseOrderPdf() {
     header(417) + line(407, 1, "G3200RG15018M Gasket", "64.00", "12.41");
   const second = header(747) + line(736, 2, "G3200RG15018M Gasket", "8.00", "13.50") +
     line(711, 3, "VENDOR-ONLY Alternate gasket", "2.00", "3.50") +
-    line(687, 4, "SKIP-ME Unneeded part", "1.00", "1.00");
+    line(687, 4, "NEW-PART New part", "1.00", "1.00") +
+    line(663, 5, "SKIP-ME Unneeded part", "1.00", "1.00");
   const page = content => `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents ${content} 0 R >>`;
   const stream = contents => `<< /Length ${contents.length} >>\nstream\n${contents}endstream`;
   const objects = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
@@ -125,16 +126,26 @@ test("PO PDF review creates one awarded RFQ using current-job idents and rolls b
   assert.match(html, /name="ident_0"[^>]+value="G3200RG15018M"/);
   assert.match(html, /name="ident_1"[^>]+value="G3200RG15018M"/);
   assert.match(html, /name="ident_2"[^>]+value=""/);
-  assert.deepEqual((await (await request(`${path}/idents?q=Alternate%20gasket`)).json()).map(item => item.item_code), ["LOCAL-IDENT"]);
+  assert.match(html, /Find Ident/);
+  assert.match(html, /name="new_ident_3"[^>]+value="NEW-PART"/);
+  const search = await (await request(`${path}/idents?q=gasket%20alternate`)).json();
+  assert.deepEqual(search.items.map(item => item.item_code), ["LOCAL-IDENT"]);
+  await db.exec(`insert into material_items(id,job_id,item_code,description,material_type,uom)
+    select n, 101, 'SEARCH-' || n, 'Searchable threaded gasket', 'pipe', 'EA' from generate_series(2001, 2030) as n`);
+  const firstPage = await (await request(`${path}/idents?q=threaded%20searchable`)).json();
+  const secondPage = await (await request(`${path}/idents?q=threaded%20searchable&page=1`)).json();
+  assert.deepEqual([firstPage.items.length, firstPage.more, secondPage.items.length, secondPage.more], [25, true, 5, false]);
   const body = new URLSearchParams({
     review_token: html.match(/name="review_token" value="([^"]+)"/)[1],
     po_number: "580852-1", project_name: "PO 580852-1", requestor_name: "Joshua David Hoffmann", due_date: "2026-12-01", vendor_id: "101",
-    ident_0: "G3200RG15018M", ident_1: "G3200RG15018M", ident_2: "OTHER-JOB", skip_3: "1"
+    ident_0: "G3200RG15018M", ident_1: "G3200RG15018M", ident_2: "OTHER-JOB",
+    new_3: "1", new_ident_3: "NEW-PART", new_description_3: "New part", new_unit_3: "EA", new_type_3: "pipe", skip_4: "1"
   });
   const assertEmpty = async () => {
     for (const table of ["rfqs", "rfq_items", "rfq_vendors", "quotes", "quote_revisions", "purchase_orders"]) {
       assert.equal((await db.query(`select count(*)::int as n from ${table}`)).rows[0].n, 0, table);
     }
+    assert.equal((await db.query("select count(*)::int as n from material_items where item_code = 'NEW-PART'")).rows[0].n, 0);
   };
   await assertEmpty();
   const crossJob = await request(`${path}/create`, body);
@@ -145,6 +156,11 @@ test("PO PDF review creates one awarded RFQ using current-job idents and rolls b
   assert.equal(unitMismatch.status, 422);
   assert.match(await unitMismatch.text(), /Item Master unit BOX/);
   body.set("confirm_units", "1");
+  body.set("new_ident_3", "g3200rg15018m");
+  const duplicate = await request(`${path}/create`, body);
+  assert.equal(duplicate.status, 422);
+  assert.match(await duplicate.text(), /already exists/);
+  body.set("new_ident_3", "NEW-PART");
   await db.exec("alter table quotes add constraint test_force_failure check (unit_price <> 13.50)");
   assert.equal((await request(`${path}/create`, body)).status, 500);
   await assertEmpty();
@@ -165,6 +181,8 @@ test("PO PDF review creates one awarded RFQ using current-job idents and rolls b
     from rfq_items join quotes on quotes.rfq_item_id = rfq_items.id order by po_line
   `)).rows;
   assert.deepEqual(lines.map(row => [row.po_line, row.item_code_snapshot, Number(row.qty), Number(row.awarded_vendor_id), Number(row.awarded_unit_price), Number(row.unit_price)]),
-    [["1", "G3200RG15018M", 64, 101, 12.41, 12.41], ["2", "G3200RG15018M", 8, 101, 13.5, 13.5], ["3", "LOCAL-IDENT", 2, 101, 3.5, 3.5]]);
+    [["1", "G3200RG15018M", 64, 101, 12.41, 12.41], ["2", "G3200RG15018M", 8, 101, 13.5, 13.5], ["3", "LOCAL-IDENT", 2, 101, 3.5, 3.5], ["4", "NEW-PART", 1, 101, 1, 1]]);
+  assert.deepEqual((await db.query("select item_code, description, material_type, uom from material_items where job_id = 101 and item_code = 'NEW-PART'")).rows,
+    [{ item_code: "NEW-PART", description: "New part", material_type: "pipe", uom: "EA" }]);
   assert.equal((await db.query("select count(*)::int as n from purchase_orders")).rows[0].n, 0);
 });

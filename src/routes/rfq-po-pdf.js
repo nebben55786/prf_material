@@ -49,6 +49,7 @@ export function registerRfqPoPdfRoutes(app, d) {
     const [activeVendors, matches] = await Promise.all([vendors(), findIdents(runner, jobId, codes)]);
     const vendorMatches = activeVendors.filter(vendor => vendorKey(vendor.name) === vendorKey(draft.vendorName));
     const selectedVendor = body ? input(body, "vendor_id") : vendorMatches.length === 1 ? String(vendorMatches[0].id) : "";
+    const canAddItem = d.canAccess(req.user, "items", "edit");
     const rows = draft.lines.map((line, i) => {
       const match = matches.get(normalize(codes[i]));
       const ident = body ? codes[i] : match?.item_code || "";
@@ -56,8 +57,20 @@ export function registerRfqPoPdfRoutes(app, d) {
       return `<tr>
         <td>${esc(line.lineNumber)}</td><td>${esc(line.itemNumber)}</td><td>${esc(line.description)}</td>
         <td>${esc(line.quantity)}</td><td>${esc(line.unit)}</td><td>$${esc(line.unitPrice)}</td>
-        <td><input name="ident_${i}" aria-label="Ident for PO line ${esc(line.lineNumber)}" value="${esc(ident)}" list="po-ident-options" autocomplete="off" data-po-ident data-po-unit="${esc(line.unit)}" placeholder="Search ident or description" style="min-width:190px" />
+        <td data-po-match>
+          <div class="actions"><input name="ident_${i}" aria-label="Ident for PO line ${esc(line.lineNumber)}" value="${esc(ident)}" autocomplete="off" data-po-ident data-po-unit="${esc(line.unit)}" placeholder="Enter an ident or use Find Ident" style="min-width:190px" />
+          <button type="button" class="btn btn-secondary" data-po-find data-po-number="${esc(line.itemNumber)}" data-po-description="${esc(line.description)}" data-po-line="${esc(line.lineNumber)}">Find Ident</button></div>
           <div data-po-ident-status aria-live="polite" class="muted">${match ? esc(match.description) : "Choose an existing ident or skip this line."}${mismatch ? ` <strong style="color:#b42318">Item Master unit: ${esc(match.uom || "(blank)")}</strong>` : ""}</div>
+          ${canAddItem ? `<details ${body && input(body, `new_${i}`) === "1" ? "open" : ""}>
+            <summary>Add New Item</summary>
+            <label><input type="checkbox" name="new_${i}" value="1" ${body && input(body, `new_${i}`) === "1" ? "checked" : ""} /> Create this item when saving</label>
+            <div class="grid">
+              <label>New Ident<input name="new_ident_${i}" maxlength="120" value="${esc(body ? input(body, `new_ident_${i}`) : line.itemNumber)}" /></label>
+              <label>Description<input name="new_description_${i}" maxlength="500" value="${esc(body ? input(body, `new_description_${i}`) : line.description)}" /></label>
+              <label>Unit<input name="new_unit_${i}" maxlength="40" value="${esc(body ? input(body, `new_unit_${i}`) : line.unit)}" /></label>
+              <label>Material Type<input name="new_type_${i}" maxlength="80" value="${esc(body ? input(body, `new_type_${i}`) : "misc")}" /></label>
+            </div>
+          </details>` : ""}
         </td>
         <td><label><input type="checkbox" name="skip_${i}" value="1" ${body && input(body, `skip_${i}`) === "1" ? "checked" : ""} /> Skip</label></td>
       </tr>`;
@@ -80,12 +93,26 @@ export function registerRfqPoPdfRoutes(app, d) {
             </select></div>
           </div>
           <p>Choose a current-job ident for each line you want to include. The RFQ will use Item Master's unit and the PDF's quantity and unit price.</p>
-          <datalist id="po-ident-options"></datalist>
           <div class="scroll"><table><thead><tr><th>PO Line</th><th>PDF Item Number</th><th>PDF Description</th><th>Quantity</th><th>PDF Unit</th><th>Unit Price</th><th>Item Master Ident</th><th>Skip</th></tr></thead><tbody>${rows}</tbody></table></div>
           <label><input type="checkbox" name="confirm_units" value="1" ${body && input(body, "confirm_units") === "1" ? "checked" : ""} /> I reviewed any differences between PDF units and Item Master units.</label>
           <div class="actions"><button type="submit">Create Awarded RFQ</button><a class="btn btn-secondary" href="${path}">Cancel</a></div>
         </form>
       </div>
+      <dialog id="po-ident-search" style="width:min(760px,94vw);max-height:90vh">
+        <div class="stack">
+          <h2>Find Item Master Ident</h2>
+          <p data-po-source></p>
+          <label for="po-ident-query">Search by ident or description keywords</label>
+          <input id="po-ident-query" type="search" maxlength="120" placeholder="Example: gasket ring 150" />
+          <div class="actions">
+            <button type="button" class="btn btn-secondary" data-po-use-number>Search PDF Item Number</button>
+            <button type="button" class="btn btn-secondary" data-po-use-description>Search PDF Description</button>
+          </div>
+          <p data-po-results-status role="status"></p>
+          <div class="scroll" style="max-height:45vh"><table><thead><tr><th>Ident</th><th>Description</th><th>Unit</th><th>Action</th></tr></thead><tbody data-po-results></tbody></table></div>
+          <div class="actions"><button type="button" class="btn btn-secondary" data-po-previous>Previous</button><button type="button" class="btn btn-secondary" data-po-next>Next</button><button type="button" class="btn btn-secondary" data-po-close>Close</button></div>
+        </div>
+      </dialog>
       <script src="/public/rfq-po-pdf.js" defer></script>
     `, req.user));
   }
@@ -93,14 +120,21 @@ export function registerRfqPoPdfRoutes(app, d) {
   app.get(path, ...access, (req, res) => uploadPage(req, res));
   app.get(`${path}/idents`, ...access, d.asyncHandler(async (req, res) => {
     const term = String(req.query.q || "").trim().slice(0, 120);
+    const page = Math.max(0, Math.min(10000, Number.parseInt(req.query.page, 10) || 0));
     res.set("Cache-Control", "no-store");
-    if (!term) return res.json([]);
+    if (!term) return res.json({ items: [], more: false });
+    const terms = term.toLowerCase().split(/\s+/).slice(0, 16);
     const result = await d.query(`
       select item_code, description, uom from material_items
-      where job_id = $1 and (strpos(lower(item_code), lower($2)) > 0 or strpos(lower(description), lower($2)) > 0)
-      order by (lower(item_code) = lower($2)) desc, item_code, id limit 25
-    `, [d.currentJobId(req), term]);
-    res.json(result.rows);
+      where job_id = $1 and not exists (
+        select 1 from unnest($3::text[]) as keywords(word)
+        where strpos(lower(item_code || ' ' || coalesce(description, '')), word) = 0
+      )
+      order by (lower(item_code) = lower($2)) desc, (strpos(lower(item_code), lower($2)) = 1) desc,
+        (strpos(lower(coalesce(description, '')), lower($2)) > 0) desc, item_code, id
+      limit 26 offset $4
+    `, [d.currentJobId(req), term, terms, page * 25]);
+    res.json({ items: result.rows.slice(0, 25), more: result.rows.length > 25 });
   }));
   app.post(`${path}/review`, ...access, d.asyncHandler(async (req, res) => {
     try {
@@ -139,13 +173,25 @@ export function registerRfqPoPdfRoutes(app, d) {
     const requestor = input(body, "requestor_name");
     const description = input(body, "project_name");
     const dueDate = input(body, "due_date");
-    const included = draft.lines.map((line, index) => ({ ...line, ident: input(body, `ident_${index}`), skipped: input(body, `skip_${index}`) === "1" })).filter(line => !line.skipped);
+    const included = draft.lines.flatMap((line, index) => {
+      if (input(body, `skip_${index}`) === "1") return [];
+      const newItem = input(body, `new_${index}`) === "1" ? {
+        item_code: input(body, `new_ident_${index}`),
+        description: input(body, `new_description_${index}`),
+        uom: input(body, `new_unit_${index}`),
+        material_type: input(body, `new_type_${index}`) || "misc"
+      } : null;
+      return [{ ...line, ident: newItem?.item_code ?? input(body, `ident_${index}`), newItem }];
+    });
     try {
       if (!poNumber || poNumber.length > 120 || !requestor || requestor.length > 250 || !description || description.length > 250) throw reviewError("Enter a PO number, requestor, and description.");
       const date = new Date(dueDate);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== dueDate) throw reviewError("Enter a valid due date.");
       if (!/^[1-9]\d{0,17}$/.test(vendorId)) throw reviewError("Choose an existing vendor.");
       if (!included.length) throw reviewError("Include at least one line.");
+      if (included.some(line => line.newItem) && !d.canAccess(req.user, "items", "edit")) {
+        throw reviewError("Item Master edit permission is required to add new items.");
+      }
       const id = await d.withTransaction(async client => {
         // Serialize PDF imports per job so a double submit cannot create two RFQs.
         await client.query("select pg_advisory_xact_lock(hashtext($1))", [`rfq-po-pdf:${jobId}`]);
@@ -158,8 +204,20 @@ export function registerRfqPoPdfRoutes(app, d) {
         const vendor = (await client.query("select id from vendors where id = $1 and is_active = true for share", [vendorId])).rows[0];
         if (!vendor) throw reviewError("Choose an active vendor.");
         const matches = await findIdents(client, jobId, included.map(line => line.ident), true);
+        const additions = new Map();
+        for (const { newItem, ident, lineNumber } of included) {
+          if (!newItem) continue;
+          if (!ident || ident.length > 120 || !newItem.description || newItem.description.length > 500 || !newItem.uom || newItem.uom.length > 40 || newItem.material_type.length > 80) {
+            throw reviewError(`PO line ${lineNumber}: enter a valid new ident, description, and unit.`);
+          }
+          const key = normalize(ident);
+          if (matches.has(key)) throw reviewError(`PO line ${lineNumber}: ident ${ident} already exists. Choose it as an existing item.`);
+          if (additions.has(key)) throw reviewError(`PO line ${lineNumber}: ident ${ident} is already marked new on another line. Enter that ident as an existing match on this line.`);
+          additions.set(key, newItem);
+        }
         for (const line of included) {
-          const match = matches.get(normalize(line.ident));
+          const key = normalize(line.ident);
+          const match = matches.get(key) || additions.get(key);
           if (!match) throw reviewError(`PO line ${line.lineNumber}: choose a unique Item Master ident from this job or skip the line.`);
           if (normalize(match.uom) !== normalize(line.unit) && input(body, "confirm_units") !== "1") {
             throw reviewError(`PO line ${line.lineNumber}: PDF unit ${line.unit} differs from Item Master unit ${match.uom || "(blank)"}. Review and confirm the unit differences before saving.`);
@@ -171,6 +229,18 @@ export function registerRfqPoPdfRoutes(app, d) {
           values ($1, $2, $3, $4, $5, $6, 'WAITING_ON_QUOTES') returning id
         `, [jobId, rfqNo, description, poNumber, requestor, dueDate])).rows[0];
         await d.syncRfqVendors(client, rfq.id, [vendor.id]);
+        for (const [key, item] of additions) {
+          let result;
+          try {
+            result = await d.upsertMaterialMasterItem(client, item, jobId, { createOnly: true });
+          } catch (error) {
+            if (error.code === "23505") throw reviewError(`Ident ${item.item_code} already exists. Choose it as an existing item.`);
+            throw error;
+          }
+          if (result.status !== "inserted") throw reviewError(`Ident ${item.item_code}: ${result.message}`);
+          matches.set(key, result.item);
+          await d.auditLog(client, req.user.id, "inserted", "material_item", result.id, item.item_code);
+        }
         for (const line of included) {
           const item = matches.get(normalize(line.ident));
           const result = await d.upsertRfqItemRow(client, rfq.id, { item_code: item.item_code, qty: line.quantity, po_line: line.lineNumber }, jobId);
