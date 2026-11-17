@@ -1,5 +1,5 @@
 // Search the selected job's entire Item Master, not a browser-limited option list.
-export async function searchTrackerItems(db,jobId,filters={}) {
+export async function searchTrackerItems(db,jobId,filters={},scope={}) {
   const params=[jobId],where=['job_id=$1'];
   const literal=value=>String(value??'').trim().slice(0,200).replace(/[\\%_]/g,'\\$&');
   const clauses=[
@@ -11,6 +11,7 @@ export async function searchTrackerItems(db,jobId,filters={}) {
     params.push('%'+token+'%');where.push(`${column} ilike $${params.length} escape E'\\\\'`);
   }
   if(String(filters.type||'').trim()){params.push(String(filters.type).trim().slice(0,200));where.push(`material_type=$${params.length}`);}
+  if(scope.allowedCodes){params.push(scope.allowedCodes);where.push(`lower(btrim(item_code))=any($${params.length}::text[])`);}
   const count=Number((await db.query('select count(*) as total from material_items where '+where.join(' and '),params)).rows[0].total);
   const limit=50,pages=Math.max(1,Math.ceil(count/limit));
   const requested=Number(filters.page),page=Number.isSafeInteger(requested)&&requested>0?Math.min(requested,pages):1;
@@ -19,7 +20,8 @@ export async function searchTrackerItems(db,jobId,filters={}) {
   return {items:rows,total:count,page,pages,limit,types};
 }
 
-export function withTrackerItemStock(items,stockRows,available,keyForItem) {
+export function withTrackerItemStock(items,stockRows,available,keyForItem,filters={}) {
+  const normalize=value=>String(value||'').trim().toLowerCase(),warehouseFilter=normalize(filters.warehouse),locationFilter=normalize(filters.location);
   const locations=new Map();
   for(const row of stockRows){
     const key=keyForItem(row),warehouse=String(row.warehouse||'').trim(),location=String(row.location||'').trim();
@@ -31,8 +33,17 @@ export function withTrackerItemStock(items,stockRows,available,keyForItem) {
   const qty=value=>Math.round(Math.max(0,Number(value)||0)*10000)/10000;
   return items.map(item=>{
     const key=keyForItem(item);
-    const stock_locations=[...(locations.get(key)?.values()||[])].map(s=>({...s,qty_on_hand:qty(s.qty_on_hand)})).filter(s=>s.qty_on_hand>0)
+    const stock_locations=[...(locations.get(key)?.values()||[])].map(s=>({...s,qty_on_hand:qty(s.qty_on_hand)})).filter(s=>s.qty_on_hand>0&&(!warehouseFilter||normalize(s.warehouse)===warehouseFilter)&&(!locationFilter||normalize(s.location)===locationFilter))
       .sort((a,b)=>a.warehouse.localeCompare(b.warehouse)||a.location.localeCompare(b.location));
-    return {...item,qty_available:qty(available.get(key)),stock_locations};
+    const onHand=stock_locations.reduce((sum,s)=>sum+s.qty_on_hand,0);
+    return {...item,qty_available:qty(Math.min(qty(available.get(key)),warehouseFilter||locationFilter?onHand:Infinity)),stock_locations};
   });
+}
+
+export function trackerStockFilterCodes(stockRows,available,keyForItem,filters={}) {
+  const inStock=['1','true','on'].includes(String(filters.in_stock_only||'').toLowerCase());
+  if(!inStock&&!String(filters.warehouse||'').trim()&&!String(filters.location||'').trim())return undefined;
+  const items=[...new Map(stockRows.map(r=>[keyForItem(r),{item_code:r.item_code}])).values()];
+  return withTrackerItemStock(items,stockRows,available,keyForItem,filters)
+    .filter(i=>i.stock_locations.length&&(!inStock||i.qty_available>0)).map(i=>String(i.item_code).trim().toLowerCase());
 }

@@ -164,14 +164,16 @@ export function createTrackerService(d) {
     const doc=await trackerDocument(db,jobId,id,kind);
     const before=await stockSnapshot(db,jobId);
     if(doc.cancelled || Number(version)!==Number(doc.version))throw trackerError('Document changed or was cancelled. Reload before editing.',409);
-    if(kind==='issuing'&&(await db.query('select id from tracker_postings where job_id=$1 and document_id=$2 and not reversed limit 1',[jobId,id])).rows.length)throw trackerError('Reverse posted issues before correcting ticket details.');
+    const numberOnly=Object.keys(patch).length===1&&Object.hasOwn(patch,'number');
+    if(kind==='issuing'&&!numberOnly&&(await db.query('select id from tracker_postings where job_id=$1 and document_id=$2 and not reversed limit 1',[jobId,id])).rows.length)throw trackerError('Reverse posted issues before correcting ticket details.');
     const fields=kind==='receiving'?receiptFields:ticketFields;
     let number=doc.number;
     for(const [k,v] of Object.entries(patch)) {
-      if(k==='number' && kind==='receiving') {
+      if(k==='number') {
         number=text(v);
-        if(!number || number.length>100 || /[\x00-\x1f]/.test(number))throw trackerError('Enter a valid GRR number.');
-        if((await db.query('select id from mrr_logs where job_id=$1 and mrr_number=$2',[jobId,number])).rows.length)throw trackerError('That number is already used by an MRR.');
+        if(!number || number.length>100 || /[\x00-\x1f]/.test(number))throw trackerError('Enter a valid '+(kind==='receiving'?'GRR':'GRPT')+' number.');
+        const legacy=kind==='receiving'?'select id from mrr_logs where job_id=$1 and mrr_number=$2':'select id from material_requisitions where job_id=$1 and requisition_no=$2';
+        if((await db.query(legacy,[jobId,number])).rows.length)throw trackerError('That number is already used by '+(kind==='receiving'?'an MRR.':'an existing request.'));
       } else {
         if(!fields.includes(k))throw trackerError('Unknown document field: '+k);
         if(text(v).length>2000)throw trackerError('Cell text is too long.');
@@ -188,7 +190,7 @@ export function createTrackerService(d) {
     await db.query('update tracker_documents set data=$4,number=$5,version=version+1 where job_id=$1 and id=$2 and kind=$3',[jobId,id,kind,JSON.stringify(doc.data),number]);
     if(kind==='receiving')for(const r of await rows(db,jobId,id))await validateReceipt(db,jobId,r,doc);
     await assertStock(db,jobId,before);await reserve(db,jobId);await seedTrackerCounter(db,jobId,kind);
-    await auditLog(db,userId,'update','tracker_document',id,JSON.stringify(patch));
+    await auditLog(db,userId,'update','tracker_document',id,JSON.stringify(Object.hasOwn(patch,'number')?{...patch,previous_number:doc.number}:patch));
     return trackerDocument(db,jobId,id,kind);
   }
   async function addParts(db,{jobId,documentId,kind,version,parts,userId}) {

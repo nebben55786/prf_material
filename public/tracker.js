@@ -33,10 +33,10 @@
   const header=document.getElementById('tracker-header'),tbody=document.querySelector('#tracker-grid tbody'),thead=document.querySelector('#tracker-grid thead');
   const documentFields=receiving?[
     ['number','GRR Number'],['vendor_id','Responsible Party (Vendor)','vendor'],['po_number','PO #'],['received_date','Date Received','date'],['received_by','Received By (Materials)','received_by'],['area','Area','area']
-  ]:[['external_reference','3 Part Number'],['requestor','Requestor','contact'],['usage','Needs / Usage'],['requested_date','Date Requested','date'],['date_required','Date Required','date'],['issued_to','Issued To','contact'],['shift','Shift','shift'],['destination','Deliver To','destination'],['delivery_instructions','Delivery Instructions'],['notes','Notes']];
+  ]:[['number','GRPT Number'],['external_reference','3 Part Number'],['requestor','Requestor','contact'],['usage','Needs / Usage'],['requested_date','Date Requested','date'],['date_required','Date Required','date'],['issued_to','Issued To','contact'],['shift','Shift','shift'],['destination','Deliver To','destination'],['delivery_instructions','Delivery Instructions'],['notes','Notes']];
   const columns=receiving?[
     ['number','GRR'],['job','Job Number'],['vendor','Responsible Party (Vendor)'],['po_number','PO #'],['received_date','Date Received'],['received_by','Received By (Materials)'],['category','Category','text'],['subcategory','Subcategory','text'],['size','Size'],['length','Length (FT)','text'],['item_code','Part Ident','item'],['description','UID Description','description'],['uom','UOM'],['quantity','Qty / LF Received','quantity'],['area','Area','text'],['priority','Priority','text'],['receipt_issued','Total Issued'],['remaining','Remaining Row Stock'],['warehouse','Location (Warehouse)','warehouse'],['location','Grid (Storage Location)','location'],['osd','OS&D','checkbox'],['notes','Comments','text'],['tickets','Picking Tickets'],['status','Status']
-  ]:[['number','PT Number'],['job','Job Number'],['external_reference','3 Part Number','text'],['line','Line Item'],['requestor','Requestor'],['item_code','Ident','item'],['description','Description','description'],['usage','Needs / Usage','text'],['quantity','Qty Req','quantity'],['issued_quantity','Qty Issued'],['balance','Balance to Be Issued'],['reserved_quantity','Reserved'],['shortage','Shortage'],['requested_date','Date Requested'],['issued_date','Date Issued'],['issued_to','Issued To'],['notes','Notes','text'],['shift','Shift (Issued)'],['ticket','PT Link']];
+  ]:[['number','GRPT Number'],['job','Job Number'],['external_reference','3 Part Number','text'],['line','Line Item'],['requestor','Requestor'],['item_code','Ident','item'],['description','Description','description'],['usage','Needs / Usage','text'],['quantity','Qty Req','quantity'],['issued_quantity','Qty Issued'],['balance','Balance to Be Issued'],['reserved_quantity','Reserved'],['shortage','Shortage'],['requested_date','Date Requested'],['issued_date','Date Issued'],['issued_to','Issued To'],['notes','Notes','text'],['shift','Shift (Issued)'],['ticket','PT Link']];
   function options(type,row){
     if(type==='vendor')return state.lists.vendors.map(v=>[String(v.id),v.name]);
     if(type==='contact')return [...new Set(state.lists.contacts.filter(c=>c.active).flatMap(c=>[c.day_contact,c.night_contact_1,c.night_contact_2]).filter(Boolean))].map(v=>[v,v]);
@@ -97,7 +97,7 @@
       enqueue(async()=>{const saved=await api(base+'/documents/'+doc.id+'/rows/'+r.id,{version:r.version,patch});Object.assign(r,saved);doc.version=saved.document_version;delete input.dataset.saveError;if(!input.closest('tr')?.querySelector('[data-save-error]'))input.closest('tr')?.classList.remove('tracker-error');syncRow(r);},failureKey).catch(()=>{input.dataset.saveError='1';input.closest('tr')?.classList.add('tracker-error');});
     };
   }
-  function syncReceiptNumber(saved,input,submitted){
+  function syncDocumentNumber(saved,input,submitted){
     const previous=(doc&&String(doc.id)===String(saved.id)?doc:state.documents.find(d=>String(d.id)===String(saved.id)))?.number;
     if(doc&&String(doc.id)===String(saved.id))Object.assign(doc,saved);
     const entry=state.documents.find(d=>String(d.id)===String(saved.id));if(entry)Object.assign(entry,saved);
@@ -114,17 +114,17 @@
     }
     if(input.value===submitted)input.value=saved.number;
   }
-  function bindReceiptNumber(input,row){
+  function bindDocumentNumber(input,row){
     input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();event.stopPropagation();input.blur();}});
     input.onchange=()=>{
       const value=input.value,receipt=doc||state.documents.find(d=>String(d.id)===String(row.document_id));
-      enqueue(async()=>{const saved=await api(base+'/documents/'+receipt.id,{version:receipt.version,patch:{number:value}});syncReceiptNumber(saved,input,value);},'receipt-number:'+receipt.id)
+      enqueue(async()=>{const saved=await api(base+'/documents/'+receipt.id,{version:receipt.version,patch:{number:value}});syncDocumentNumber(saved,input,value);},'receipt-number:'+receipt.id)
         .catch(()=>{input.dataset.saveError='1';input.closest('tr')?.classList.add('tracker-error');});
     };
   }
-  function renderHeader(){if(!doc)return;header.replaceChildren();for(const [key,label,type='text'] of documentFields){const labelEl=el('label',{textContent:label}),i=control(type,key==='number'?doc.number:doc.data[key]);i.disabled=!editable||(!receiving&&state.rows.some(r=>Number(r.issued_quantity)>0));i.dataset.header=key;
+  function renderHeader(){if(!doc)return;header.replaceChildren();for(const [key,label,type='text'] of documentFields){const labelEl=el('label',{textContent:label}),i=control(type,key==='number'?doc.number:doc.data[key]);i.disabled=!editable||(!receiving&&key!=='number'&&state.rows.some(r=>Number(r.issued_quantity)>0));i.dataset.header=key;
       if(key==='number')i.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();i.blur();}});
-      i.onchange=()=>{const value=i.value;enqueue(async()=>{const saved=await api(base+'/documents/'+doc.id,{version:doc.version,patch:{[key]:value}});if(key==='number')syncReceiptNumber(saved,i,value);else Object.assign(doc,saved);for(const r of state.rows)syncRow(r);if(receiving)await refreshRows();},key==='number'?'receipt-number:'+doc.id:'header:'+key).catch(()=>{});};labelEl.append(i);header.append(labelEl);}
+      i.onchange=()=>{const value=i.value;enqueue(async()=>{const saved=await api(base+'/documents/'+doc.id,{version:doc.version,patch:{[key]:value}});if(key==='number')syncDocumentNumber(saved,i,value);else Object.assign(doc,saved);for(const r of state.rows)syncRow(r);if(receiving)await refreshRows();},key==='number'?'receipt-number:'+doc.id:'header:'+key).catch(()=>{});};labelEl.append(i);header.append(labelEl);}
   }
   let sortField='',sortDirection=1;
   function renderGrid(){
@@ -133,10 +133,10 @@
     if(sortField)rows.sort((a,b)=>String(rowValue(a,sortField)).localeCompare(String(rowValue(b,sortField)),undefined,{numeric:true})*sortDirection);
     for(const r of rows){const tr=el('tr');tr.dataset.id=r.id;
       for(const [field,label,type] of columns){const td=el('td');td.dataset.field=field;
-        if(field==='number'&&receiving&&state.edit&&!r.cancelled&&!doc?.cancelled){
+        if(field==='number'&&state.edit&&!r.cancelled&&!doc?.cancelled){
           const wrap=el('div',{className:'tracker-grr-cell'}),input=control('text',rowValue(r,field));input.dataset.field='number';input.maxLength=100;
-          input.setAttribute('aria-label','GRR number for row '+r.id);input.title='Change the GRR number for all lines on this receipt.';bindReceiptNumber(input,r);
-          wrap.append(input,el('a',{href:base+'?document='+r.document_id,textContent:'Open',title:'Open receipt details'}));td.append(wrap);
+          input.setAttribute('aria-label',(receiving?'GRR':'GRPT')+' number for row '+r.id);input.title='Change the number for all lines on this '+(receiving?'receipt.':'ticket.');bindDocumentNumber(input,r);
+          wrap.append(input,el('a',{href:base+'?document='+r.document_id,textContent:'Open',title:receiving?'Open receipt details':'Open ticket details'}));td.append(wrap);
         }
         else if(type&&editable){const i=control(type,rowValue(r,field),r);i.disabled=!receiving&&Number(r.issued_quantity)>0;i.setAttribute('aria-label',label+' for row '+r.id);i.dataset.field=field;bindRowChange(i,r,field,type);
           if(['item','description'].includes(type)){
@@ -154,6 +154,17 @@
   }
   const partsDialog=document.getElementById('tracker-parts-dialog'),partSelection=new Map();
   const partFilters={q:document.getElementById('tracker-parts-search'),ident:document.getElementById('tracker-parts-ident'),description:document.getElementById('tracker-parts-description'),size:document.getElementById('tracker-parts-size'),type:document.getElementById('tracker-parts-type')};
+  if(!receiving){
+    partFilters.warehouse=document.getElementById('tracker-parts-warehouse');partFilters.location=document.getElementById('tracker-parts-location');partFilters.in_stock_only=document.getElementById('tracker-parts-in-stock');
+    partFilters.warehouse.append(...[...new Set(state.lists.locations.map(s=>s.warehouse))].sort().map(value=>el('option',{value,textContent:value})));
+  }
+  function syncPartLocations(){
+    if(receiving)return;const previous=partFilters.location.value,warehouse=partFilters.warehouse.value.toLowerCase();
+    const names=[...new Set(state.lists.locations.filter(s=>!warehouse||s.warehouse.toLowerCase()===warehouse).map(s=>s.location))].sort();
+    partFilters.location.replaceChildren(el('option',{value:'',textContent:'All locations'}),...names.map(value=>el('option',{value,textContent:value})));
+    partFilters.location.value=names.includes(previous)?previous:'';
+  }
+  function resetPartFilters(){for(const input of Object.values(partFilters)){if(input.type==='checkbox')input.checked=false;else input.value='';}syncPartLocations();}
   const partResults=document.querySelector('#tracker-parts-results tbody'),partError=document.getElementById('tracker-parts-error'),partCount=document.getElementById('tracker-parts-count'),partAdd=document.getElementById('tracker-parts-add');
   let partTarget=null,partsOpening=false,partPage={items:[],page:1,pages:1,total:0},partRequest=0,partAbort=null,partTimer=null,partsBusy=false;
   const partErrorMessage=message=>{partError.textContent=message||'';};
@@ -212,7 +223,7 @@
     partCount.textContent='Searching all job parts…';partErrorMessage('');const resultsWrap=document.querySelector('.tracker-parts-results');resultsWrap.inert=true;resultsWrap.setAttribute('aria-busy','true');let loaded=false;
     for(const name of ['first','previous','next','last'])document.getElementById('tracker-parts-'+name).disabled=true;
     document.getElementById('tracker-parts-select-page').disabled=true;
-    const params=new URLSearchParams({page:String(page)});for(const [key,input] of Object.entries(partFilters))if(input.value.trim())params.set(key,input.value.trim());
+    const params=new URLSearchParams({page:String(page)});for(const [key,input] of Object.entries(partFilters)){if(input.type==='checkbox'){if(input.checked)params.set(key,'1');}else if(input.value.trim())params.set(key,input.value.trim());}
     try{
       const result=await api(base+'/items?'+params,undefined,partAbort.signal);if(request!==partRequest||!partsDialog.open)return;
       partPage=result;const oldType=partFilters.type.value;partFilters.type.replaceChildren(el('option',{value:'',textContent:'All types'}),...result.types.map(value=>el('option',{value,textContent:value})));partFilters.type.value=oldType;
@@ -224,7 +235,7 @@
     if(partsOpening||partsDialog.open||!editable)return;partsOpening=true;
     try{
       await queue;if(!target&&failed){report('Correct unsaved cell errors before adding parts.','error');return;}
-      partTarget=target;partsDialog.dataset.mode=target?'single':'multiple';partSelection.clear();for(const input of Object.values(partFilters))input.value='';
+      partTarget=target;partsDialog.dataset.mode=target?'single':'multiple';partSelection.clear();resetPartFilters();
       if(target)partFilters[target.type==='item'?'ident':'description'].value=String(target.search||'').trim();
       document.getElementById('tracker-parts-title').textContent=target?'Choose Part from Item Master':'Add Parts from Item Master';
       document.getElementById('tracker-parts-review').hidden=!!target;document.getElementById('tracker-parts-clear-selection').hidden=!!target;partAdd.hidden=!!target;
@@ -245,8 +256,8 @@
     }catch(error){partErrorMessage(error.message);}
     finally{partsBusy=false;selectionCount();}
   }
-  for(const input of Object.values(partFilters)){input.addEventListener(input.tagName==='SELECT'?'change':'input',()=>{clearTimeout(partTimer);partTimer=setTimeout(()=>searchParts(1),200);});input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();searchParts(1);}});}
-  document.getElementById('tracker-parts-clear-filters').onclick=()=>{for(const input of Object.values(partFilters))input.value='';searchParts(1);};
+  for(const input of Object.values(partFilters)){input.addEventListener(input.tagName==='SELECT'||input.type==='checkbox'?'change':'input',()=>{if(input===partFilters.warehouse)syncPartLocations();clearTimeout(partTimer);partTimer=setTimeout(()=>searchParts(1),200);});input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();searchParts(1);}});}
+  document.getElementById('tracker-parts-clear-filters').onclick=()=>{resetPartFilters();searchParts(1);};
   document.getElementById('tracker-parts-select-page').onclick=()=>{const remove=partPage.items.every(i=>partSelection.has(String(i.id)));for(const item of partPage.items){if(remove)partSelection.delete(String(item.id));else if(!partSelection.has(String(item.id))){if(partSelection.size>=200){partErrorMessage('Add up to 200 parts at a time.');break;}partSelection.set(String(item.id),{item,quantity:''});}}renderPartResults();reviewSelection();};
   document.getElementById('tracker-parts-clear-selection').onclick=()=>{if(partsBusy)return;partSelection.clear();renderPartResults();reviewSelection();};
   document.getElementById('tracker-parts-review').ontoggle=()=>{if(document.getElementById('tracker-parts-review').open)reviewSelection();};

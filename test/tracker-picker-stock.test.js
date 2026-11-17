@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {withTrackerItemStock} from '../src/tracker-item-search.js';
+import {withTrackerItemStock,trackerStockFilterCodes} from '../src/tracker-item-search.js';
 
 test('picker shows shared unreserved quantity and groups usable stock by warehouse/location',()=>{
   const key=row=>String(row.item_code).trim().toLowerCase();
@@ -22,4 +22,9 @@ test('picker shows shared unreserved quantity and groups usable stock by warehou
   ]);
   assert.equal(empty.qty_available,0);assert.deepEqual(empty.stock_locations,[]);
   assert.equal(items[0].stock_locations,undefined);
+  const [bin]=withTrackerItemStock(items,stock,new Map([['pipe',5.25]]),key,{warehouse:'MAIN YARD',location:'b'});
+  assert.equal(bin.qty_available,3);assert.deepEqual(bin.stock_locations,[{warehouse:'Main Yard',location:'B',qty_on_hand:3}]);
+  assert.deepEqual(trackerStockFilterCodes(stock,new Map([['pipe',0]]),key,{in_stock_only:'1'}),[]);
+  assert.deepEqual(trackerStockFilterCodes(stock,new Map([['pipe',0]]),key,{warehouse:'Main Yard',location:'B'}),['pipe']);
+  assert.deepEqual(trackerStockFilterCodes(stock,new Map([['pipe',5.25]]),key,{in_stock_only:'1',warehouse:'Quarantine'}),[]);
 });
