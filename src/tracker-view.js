@@ -13,11 +13,25 @@ export function renderTrackerPage(state) {
     </div>
     ${!s.setup&&s.job.job_number===s.referenceJob?'<p class="muted">Initial setup imports day/night contacts and continues GRR / GRPT numbering. It does not import stock or transaction history.</p>':''}
     ${doc?`<div class="card"><h2>${esc(doc.number)}${doc.cancelled?' — Cancelled':''}</h2><div id="tracker-header" class="grid"></div><div class="actions">
-      ${s.edit&&!doc.cancelled?'<button type="button" id="tracker-add-row">Add Row</button><button type="button" class="btn btn-secondary" id="tracker-cancel">Cancel Document</button>':''}
+      ${s.edit&&!doc.cancelled?'<button type="button" id="tracker-add-parts">Add Parts from Item Master</button><button type="button" id="tracker-add-row" class="btn btn-secondary">Add Blank Row</button><button type="button" class="btn btn-secondary" id="tracker-cancel">Cancel Document</button>':''}
       ${!receiving?`<a class="btn btn-secondary" target="_blank" rel="noopener" href="/tracker/issuing/documents/${doc.id}/pick-ticket.pdf">Print Pick Ticket</a>${s.issue&&!doc.cancelled?'<button type="button" id="tracker-allocate">Post Issue / Review Allocations</button>':''}`:''}
       </div></div>`:''}
     <div class="tracker-toolbar"><label>Filter rows <input id="tracker-filter" type="search" placeholder="Ident, description, location, number…"></label><span class="muted">${doc&&!doc.cancelled&&s.edit?'Cells save automatically. Tab moves between cells; paste rows from Excel.':'Select a document to edit its rows.'}</span></div>
     <div class="tracker-scroll" tabindex="0" aria-label="${receiving?'Receiving':'Issuing'} spreadsheet"><table id="tracker-grid"><thead></thead><tbody></tbody></table></div>
+    <dialog id="tracker-parts-dialog" aria-labelledby="tracker-parts-title"><div class="tracker-parts-heading"><h2 id="tracker-parts-title">Add Parts from Item Master</h2><button type="button" class="btn btn-secondary" id="tracker-parts-close">Close</button></div>
+      <p>Search all parts in job ${esc(s.job.job_number)}. Combine filters to narrow the results.</p>
+      <div class="tracker-parts-filters">
+        <label>Search all fields<input type="search" id="tracker-parts-search" placeholder="Words or part numbers"></label>
+        <label>Ident<input type="search" id="tracker-parts-ident" placeholder="Part ident contains…"></label>
+        <label>Description<input type="search" id="tracker-parts-description" placeholder="Description contains…"></label>
+        <label>Size / Thickness<input type="search" id="tracker-parts-size" placeholder="e.g. 12 STD"></label>
+        <label>Material Type<select id="tracker-parts-type"><option value="">All types</option></select></label>
+      </div><div class="actions"><button type="button" class="btn btn-secondary" id="tracker-parts-clear-filters">Clear Filters</button><button type="button" class="btn btn-secondary" id="tracker-parts-select-page">Select This Page</button><span id="tracker-parts-count" role="status" aria-live="polite"></span></div>
+      <div class="tracker-parts-results"><table id="tracker-parts-results"><thead><tr><th>Select</th><th>Ident</th><th>Description</th><th>Size 1</th><th>Size 2</th><th>Thk 1</th><th>Thk 2</th><th>Type</th><th>UOM</th><th>Quantity</th></tr></thead><tbody></tbody></table></div>
+      <div class="tracker-parts-pages"><button type="button" class="btn btn-secondary" id="tracker-parts-first">First</button><button type="button" class="btn btn-secondary" id="tracker-parts-previous">Previous</button><label>Page <input type="number" id="tracker-parts-page" min="1" value="1" aria-label="Results page"></label><span id="tracker-parts-pages"></span><button type="button" class="btn btn-secondary" id="tracker-parts-next">Next</button><button type="button" class="btn btn-secondary" id="tracker-parts-last">Last</button></div>
+      <details id="tracker-parts-review"><summary>Review selected parts</summary><div class="tracker-parts-selection"><table><thead><tr><th>Ident</th><th>Description</th><th>Quantity</th><th></th></tr></thead><tbody id="tracker-parts-selected"></tbody></table></div></details>
+      <div class="tracker-parts-footer"><span id="tracker-parts-selection-count">0 parts selected</span><button type="button" class="btn btn-secondary" id="tracker-parts-clear-selection">Clear Selection</button><button type="button" id="tracker-parts-add">Add Selected Parts</button></div><p id="tracker-parts-help">Enter quantities here or later in the grid. Selections stay selected when you change filters or pages.</p><p id="tracker-parts-error" role="alert"></p>
+    </dialog>
     <dialog id="tracker-issue-dialog"><h2>Post Issue</h2><p>Oldest available stock is suggested first. Change the quantities and locations below before posting.</p><label>Date issued <input type="date" id="tracker-issued-date"></label><div id="tracker-allocations"></div><div class="actions"><button type="button" id="tracker-post-issue">Post Issue</button><button type="button" id="tracker-close-dialog" class="btn btn-secondary">Close</button></div><p id="tracker-issue-error" role="alert"></p><div id="tracker-postings"></div></dialog>
     <script type="application/json" id="tracker-state">${JSON.stringify(s).replaceAll('<','\\u003c')}</script><script src="/public/tracker.js" defer></script></section>`;
 }

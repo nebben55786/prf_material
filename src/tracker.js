@@ -191,6 +191,28 @@ export function createTrackerService(d) {
     await auditLog(db,userId,'update','tracker_document',id,JSON.stringify(patch));
     return trackerDocument(db,jobId,id,kind);
   }
+  async function addParts(db,{jobId,documentId,kind,version,parts,userId}) {
+    await lockTrackerJob(db,jobId);
+    const doc=await trackerDocument(db,jobId,documentId,kind);
+    if(doc.cancelled)throw trackerError('This document is cancelled.');
+    if(Number(version)!==Number(doc.version))throw trackerError('The document changed. Reload before adding parts.',409);
+    if(!Array.isArray(parts)||!parts.length||parts.length>200)throw trackerError('Select between 1 and 200 parts to add.');
+    const selected=parts.map(p=>({id:Number(p.material_item_id),quantity:trackerQuantity(String(p.quantity??'').trim()||'0')}));
+    if(selected.some(p=>!Number.isSafeInteger(p.id)||p.id<1)||new Set(selected.map(p=>p.id)).size!==selected.length)throw trackerError('Select each part only once per batch.');
+    const items=(await db.query('select * from material_items where job_id=$1 and id=any($2::bigint[])',[jobId,selected.map(p=>p.id)])).rows;
+    if(items.length!==selected.length)throw trackerError('One or more selected parts are no longer in this job’s Item Master. Refresh the search.');
+    const blank=(await db.query("select id from tracker_rows where job_id=$1 and document_id=$2 and material_item_id is null and quantity=0 and posted_quantity=0 and warehouse='' and location='' and data='{}'::jsonb order by id limit 1",[jobId,documentId])).rows[0];
+    for(let index=0;index<selected.length;index++){
+      const part=selected[index],item=items.find(i=>Number(i.id)===part.id);
+      const values=[jobId,documentId,item.id,...['item_code','description','size_1','size_2','thk_1','thk_2','uom','material_type'].map(f=>item[f]||''),part.quantity];
+      if(index===0&&blank)await db.query('update tracker_rows set material_item_id=$3,item_code=$4,description=$5,size_1=$6,size_2=$7,thk_1=$8,thk_2=$9,uom=$10,material_type=$11,quantity=$12,version=version+1 where job_id=$1 and document_id=$2 and id=$13',[...values,blank.id]);
+      else await db.query('insert into tracker_rows(job_id,document_id,material_item_id,item_code,description,size_1,size_2,thk_1,thk_2,uom,material_type,quantity) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',values);
+    }
+    await db.query('update tracker_documents set version=version+1 where job_id=$1 and id=$2',[jobId,documentId]);
+    await reserve(db,jobId);
+    await auditLog(db,userId,'add_parts','tracker_document',documentId,JSON.stringify(selected));
+    return {document:await trackerDocument(db,jobId,documentId,kind),rows:await rows(db,jobId,documentId)};
+  }
   async function sources(db,jobId,rowId) {
     const r=(await db.query('select * from tracker_rows where job_id=$1 and id=$2',[jobId,rowId])).rows[0];
     if(!r)throw trackerError('Row not found.',404);
@@ -277,5 +299,5 @@ export function createTrackerService(d) {
     await db.query('update tracker_rows set reserved_quantity=0,version=version+1 where job_id=$1 and document_id=$2',[jobId,documentId]);
     await assertStock(db,jobId,before);await reserve(db,jobId);await auditLog(db,userId,'cancel','tracker_document',documentId,kind);
   }
-  return {rows,reserve,saveRow,saveDocument,sources,postIssue,reverse,cancel};
+  return {rows,reserve,saveRow,saveDocument,addParts,sources,postIssue,reverse,cancel};
 }

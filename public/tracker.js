@@ -6,8 +6,8 @@
   const state=JSON.parse((stateElement||contactElement).textContent),status=document.getElementById('tracker-status');
   let pending=0,failed=false,queue=Promise.resolve();const failures=new Map();
   function report(message,type='saved'){status.textContent=message;status.dataset.state=type;}
-  async function api(path,body){
-    const response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Tracker-Token':state.token},body:body===undefined?undefined:JSON.stringify(body)});
+  async function api(path,body,signal){
+    const response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Tracker-Token':state.token},body:body===undefined?undefined:JSON.stringify(body),signal});
     if(response.redirected)throw new Error('Your session changed. Reload before continuing.');
     const data=await response.json().catch(()=>{throw new Error('Unable to save. Reload after checking your connection.');});
     if(!response.ok)throw new Error(data.error||'Unable to save.');return data;
@@ -54,11 +54,10 @@
     const i=el('input',{type:type==='date'?'date':type==='checkbox'?'checkbox':'text'});
     if(type==='checkbox')i.checked=!!value;else i.value=value??'';
     if(type==='quantity')i.inputMode='decimal';
-    if(['item','description'].includes(type))i.setAttribute('list',type==='item'?'tracker-idents':'tracker-descriptions');
+    if(['item','description'].includes(type))i.placeholder='Type or Find…';
     if(['received_by','area'].includes(type)){const id='tracker-options-'+type;let list=document.getElementById(id);if(!list){list=el('datalist',{id});for(const [v] of options(type))list.append(el('option',{value:v}));document.body.append(list);}i.setAttribute('list',id);}
     return i;
   }
-  for(const type of ['item','description']){const list=el('datalist',{id:type==='item'?'tracker-idents':'tracker-descriptions'});for(const item of state.lists.items)list.append(el('option',{value:type==='item'?item.item_code:item.description+' ['+item.item_code+']',label:type==='item'?item.description:item.item_code}));document.body.append(list);}
   function rowValue(r,key){
     const data=doc?.data||r.document_data||{};
     if(key==='number')return doc?.number||r.number;
@@ -94,7 +93,7 @@
     input.onchange=()=>{
       const raw=type==='checkbox'?input.checked:input.value;
       const failureKey='row:'+r.id+':'+field;
-      let patch;try{patch=patchFor(field,type,raw);}catch(e){failed=true;failures.set(failureKey,e.message);input.dataset.saveError='1';report(e.message,'error');input.closest('tr').classList.add('tracker-error');return;}
+      let patch;try{patch=patchFor(field,type,raw);}catch(e){if(['item','description'].includes(type)){openPartsPicker({row:r,input,field,type,search:raw});return;}failed=true;failures.set(failureKey,e.message);input.dataset.saveError='1';report(e.message,'error');input.closest('tr').classList.add('tracker-error');return;}
       enqueue(async()=>{const saved=await api(base+'/documents/'+doc.id+'/rows/'+r.id,{version:r.version,patch});Object.assign(r,saved);doc.version=saved.document_version;delete input.dataset.saveError;if(!input.closest('tr')?.querySelector('[data-save-error]'))input.closest('tr')?.classList.remove('tracker-error');syncRow(r);},failureKey).catch(()=>{input.dataset.saveError='1';input.closest('tr')?.classList.add('tracker-error');});
     };
   }
@@ -108,13 +107,121 @@
     if(sortField)rows.sort((a,b)=>String(rowValue(a,sortField)).localeCompare(String(rowValue(b,sortField)),undefined,{numeric:true})*sortDirection);
     for(const r of rows){const tr=el('tr');tr.dataset.id=r.id;
       for(const [field,label,type] of columns){const td=el('td');td.dataset.field=field;
-        if(type&&editable){const i=control(type,rowValue(r,field),r);i.disabled=!receiving&&Number(r.issued_quantity)>0;i.setAttribute('aria-label',label+' for row '+r.id);i.dataset.field=field;bindRowChange(i,r,field,type);td.append(i);}
+        if(type&&editable){const i=control(type,rowValue(r,field),r);i.disabled=!receiving&&Number(r.issued_quantity)>0;i.setAttribute('aria-label',label+' for row '+r.id);i.dataset.field=field;bindRowChange(i,r,field,type);
+          if(['item','description'].includes(type)){
+            const wrap=el('div',{className:'tracker-cell-picker'}),find=el('button',{type:'button',textContent:'Find',className:'btn btn-secondary',disabled:i.disabled});
+            find.setAttribute('aria-label','Find part by '+label+' for row '+r.id);find.onclick=()=>openPartsPicker({row:r,input:i,field,type,search:i.value});
+            i.onkeydown=e=>{let exact=true;try{patchFor(field,type,i.value);}catch{exact=false;}if(e.key==='F2'||(e.altKey&&e.key==='ArrowDown')||(e.key==='Enter'&&!exact)){e.preventDefault();e.stopPropagation();openPartsPicker({row:r,input:i,field,type,search:i.value});}};
+            wrap.append(i,find);td.append(wrap);
+          }else td.append(i);
+        }
         else if(field==='tickets'){for(const l of r.ticket_links||[])td.append(el('a',{className:'tracker-readonly',textContent:l.number,href:l.url,target:'_blank',rel:'noopener'}));}
         else if(field==='number'||field==='ticket'){td.append(el('a',{className:'tracker-readonly',href:field==='ticket'?'/tracker/issuing/documents/'+r.document_id+'/pick-ticket.pdf':base+'?document='+r.document_id,textContent:field==='ticket'?'Pick Ticket':String(rowValue(r,field))}));}
         else td.append(el('span',{className:'tracker-readonly',textContent:String(rowValue(r,field))}));tr.append(td);
       }tbody.append(tr);
     }
   }
+  const partsDialog=document.getElementById('tracker-parts-dialog'),partSelection=new Map();
+  const partFilters={q:document.getElementById('tracker-parts-search'),ident:document.getElementById('tracker-parts-ident'),description:document.getElementById('tracker-parts-description'),size:document.getElementById('tracker-parts-size'),type:document.getElementById('tracker-parts-type')};
+  const partResults=document.querySelector('#tracker-parts-results tbody'),partError=document.getElementById('tracker-parts-error'),partCount=document.getElementById('tracker-parts-count'),partAdd=document.getElementById('tracker-parts-add');
+  let partTarget=null,partsOpening=false,partPage={items:[],page:1,pages:1,total:0},partRequest=0,partAbort=null,partTimer=null,partsBusy=false;
+  const partErrorMessage=message=>{partError.textContent=message||'';};
+  function selectionCount(){
+    document.getElementById('tracker-parts-selection-count').textContent=partSelection.size+' part'+(partSelection.size===1?'':'s')+' selected across all pages';
+    partAdd.disabled=partsBusy||!partSelection.size;
+  }
+  function reviewSelection(){
+    const body=document.getElementById('tracker-parts-selected');body.replaceChildren();
+    for(const [id,selection] of partSelection){
+      const tr=el('tr');tr.append(el('td',{textContent:selection.item.item_code}),el('td',{textContent:selection.item.description}));
+      const cell=el('td'),input=el('input',{value:selection.quantity,inputMode:'decimal',placeholder:'Enter later'});input.setAttribute('aria-label','Selected quantity for '+selection.item.item_code);
+      input.oninput=()=>{selection.quantity=input.value;const visible=partResults.querySelector('tr[data-item-id="'+id+'"] input[data-part-quantity]');if(visible)visible.value=input.value;};cell.append(input);tr.append(cell);
+      const action=el('td'),remove=el('button',{type:'button',className:'btn btn-secondary',textContent:'Remove'});remove.onclick=()=>{partSelection.delete(id);renderPartResults();reviewSelection();};action.append(remove);tr.append(action);body.append(tr);
+    }
+    selectionCount();
+  }
+  function choosePart(item,quantity=''){
+    if(partsBusy)return;
+    partSelection.clear();partSelection.set(String(item.id),{item,quantity});selectionCount();
+    if(partTarget)applyParts();
+  }
+  function renderPartResults(){
+    partResults.replaceChildren();
+    for(const item of partPage.items){
+      const id=String(item.id),selected=partSelection.get(id),tr=el('tr');tr.dataset.itemId=id;
+      const cell=el('td');
+      if(partTarget){const choose=el('button',{type:'button',className:'btn btn-secondary',textContent:'Choose'});choose.setAttribute('aria-label','Choose '+item.item_code);choose.onclick=()=>choosePart(item);cell.append(choose);}
+      else {
+        const checkbox=el('input',{type:'checkbox',checked:!!selected});checkbox.setAttribute('aria-label','Select '+item.item_code);
+        checkbox.onchange=()=>{if(checkbox.checked){if(partSelection.size>=200){checkbox.checked=false;partErrorMessage('Add up to 200 parts at a time.');return;}partSelection.set(id,{item,quantity:tr.querySelector('[data-part-quantity]').value});}else partSelection.delete(id);selectionCount();if(document.getElementById('tracker-parts-review').open)reviewSelection();};cell.append(checkbox);
+      }
+      tr.append(cell);for(const field of ['item_code','description','size_1','size_2','thk_1','thk_2','material_type','uom'])tr.append(el('td',{textContent:item[field]||''}));
+      const quantityCell=el('td'),quantity=el('input',{value:selected?.quantity||'',inputMode:'decimal',placeholder:partTarget?'':'Enter later',disabled:!!partTarget});quantity.dataset.partQuantity='';quantity.setAttribute('aria-label','Quantity for '+item.item_code);
+      quantity.oninput=()=>{if(!partSelection.has(id)&&partSelection.size>=200){partErrorMessage('Add up to 200 parts at a time.');return;}partSelection.set(id,{item,quantity:quantity.value});tr.querySelector('input[type="checkbox"]').checked=true;selectionCount();};quantityCell.append(quantity);tr.append(quantityCell);partResults.append(tr);
+    }
+    if(!partPage.items.length){const tr=el('tr'),cell=el('td',{textContent:'No parts match these filters. Try fewer words or clear a filter.'});cell.colSpan=10;tr.append(cell);partResults.append(tr);}
+    const first=partPage.total?(partPage.page-1)*partPage.limit+1:0,last=Math.min(partPage.total,partPage.page*partPage.limit);
+    partCount.textContent=`Showing ${first.toLocaleString()}–${last.toLocaleString()} of ${partPage.total.toLocaleString()} matching parts`;
+    document.getElementById('tracker-parts-page').value=partPage.page;document.getElementById('tracker-parts-page').max=partPage.pages;
+    document.getElementById('tracker-parts-pages').textContent='of '+partPage.pages.toLocaleString();
+    for(const name of ['first','previous'])document.getElementById('tracker-parts-'+name).disabled=partPage.page<=1;
+    for(const name of ['next','last'])document.getElementById('tracker-parts-'+name).disabled=partPage.page>=partPage.pages;
+    document.getElementById('tracker-parts-select-page').hidden=!!partTarget;
+    selectionCount();
+  }
+  async function searchParts(page=1){
+    clearTimeout(partTimer);partAbort?.abort();partAbort=new AbortController();const request=++partRequest;
+    partCount.textContent='Searching all job parts…';partErrorMessage('');const resultsWrap=document.querySelector('.tracker-parts-results');resultsWrap.inert=true;resultsWrap.setAttribute('aria-busy','true');let loaded=false;
+    for(const name of ['first','previous','next','last'])document.getElementById('tracker-parts-'+name).disabled=true;
+    document.getElementById('tracker-parts-select-page').disabled=true;
+    const params=new URLSearchParams({page:String(page)});for(const [key,input] of Object.entries(partFilters))if(input.value.trim())params.set(key,input.value.trim());
+    try{
+      const result=await api(base+'/items?'+params,undefined,partAbort.signal);if(request!==partRequest||!partsDialog.open)return;
+      partPage=result;const oldType=partFilters.type.value;partFilters.type.replaceChildren(el('option',{value:'',textContent:'All types'}),...result.types.map(value=>el('option',{value,textContent:value})));partFilters.type.value=oldType;
+      renderPartResults();loaded=true;
+    }catch(error){if(error.name!=='AbortError'&&request===partRequest){partErrorMessage(error.message);partCount.textContent='Search could not be loaded.';}}
+    finally{if(request===partRequest){document.getElementById('tracker-parts-select-page').disabled=!loaded||partsBusy||!partPage.items.length;resultsWrap.inert=!loaded;resultsWrap.setAttribute('aria-busy','false');}}
+  }
+  async function openPartsPicker(target=null){
+    if(partsOpening||partsDialog.open||!editable)return;partsOpening=true;
+    try{
+      await queue;if(!target&&failed){report('Correct unsaved cell errors before adding parts.','error');return;}
+      partTarget=target;partsDialog.dataset.mode=target?'single':'multiple';partSelection.clear();for(const input of Object.values(partFilters))input.value='';
+      if(target)partFilters[target.type==='item'?'ident':'description'].value=String(target.search||'').trim();
+      document.getElementById('tracker-parts-title').textContent=target?'Choose Part from Item Master':'Add Parts from Item Master';
+      document.getElementById('tracker-parts-review').hidden=!!target;document.getElementById('tracker-parts-clear-selection').hidden=!!target;partAdd.hidden=!!target;
+      document.getElementById('tracker-parts-help').textContent=target?'Choose a matching part to fill both ident and description. The row’s quantity stays unchanged.':'Enter quantities here or later in the grid. Selections stay selected when you change filters or pages.';
+      reviewSelection();partResults.replaceChildren();partsDialog.showModal();(target?(target.type==='item'?partFilters.ident:partFilters.description):partFilters.q).focus();await searchParts();
+    }finally{partsOpening=false;}
+  }
+  async function applyParts(){
+    if(partsBusy||!partSelection.size)return;partsBusy=true;partErrorMessage('');selectionCount();
+    try{
+      if(partTarget){
+        const {row,input,field}=partTarget,item=[...partSelection.values()][0].item;
+        await enqueue(async()=>{const saved=await api(base+'/documents/'+doc.id+'/rows/'+row.id,{version:row.version,patch:{material_item_id:item.id}});Object.assign(row,saved);doc.version=saved.document_version;if(!state.lists.items.some(i=>String(i.id)===String(item.id)))state.lists.items.push(item);delete input.dataset.saveError;input.value=rowValue(row,field);syncRow(row);if(!input.closest('tr')?.querySelector('[data-save-error]'))input.closest('tr')?.classList.remove('tracker-error');},'row:'+row.id+':'+field);
+      }else {
+        await enqueue(async()=>{const result=await api(base+'/documents/'+doc.id+'/parts',{version:doc.version,parts:[...partSelection.values()].map(s=>({material_item_id:s.item.id,quantity:s.quantity.trim()||'0'}))});Object.assign(doc,result.document);state.rows=result.rows;for(const {item} of partSelection.values())if(!state.lists.items.some(i=>String(i.id)===String(item.id)))state.lists.items.push(item);document.getElementById('tracker-filter').value='';sortField='';renderGrid();},'add-parts');
+      }
+      closePartsPicker();
+    }catch(error){partErrorMessage(error.message);}
+    finally{partsBusy=false;selectionCount();}
+  }
+  for(const input of Object.values(partFilters)){input.addEventListener(input.tagName==='SELECT'?'change':'input',()=>{clearTimeout(partTimer);partTimer=setTimeout(()=>searchParts(1),200);});input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();searchParts(1);}});}
+  document.getElementById('tracker-parts-clear-filters').onclick=()=>{for(const input of Object.values(partFilters))input.value='';searchParts(1);};
+  document.getElementById('tracker-parts-select-page').onclick=()=>{const remove=partPage.items.every(i=>partSelection.has(String(i.id)));for(const item of partPage.items){if(remove)partSelection.delete(String(item.id));else if(!partSelection.has(String(item.id))){if(partSelection.size>=200){partErrorMessage('Add up to 200 parts at a time.');break;}partSelection.set(String(item.id),{item,quantity:''});}}renderPartResults();reviewSelection();};
+  document.getElementById('tracker-parts-clear-selection').onclick=()=>{if(partsBusy)return;partSelection.clear();renderPartResults();reviewSelection();};
+  document.getElementById('tracker-parts-review').ontoggle=()=>{if(document.getElementById('tracker-parts-review').open)reviewSelection();};
+  document.getElementById('tracker-parts-first').onclick=()=>searchParts(1);document.getElementById('tracker-parts-previous').onclick=()=>searchParts(partPage.page-1);
+  document.getElementById('tracker-parts-next').onclick=()=>searchParts(partPage.page+1);document.getElementById('tracker-parts-last').onclick=()=>searchParts(partPage.pages);
+  document.getElementById('tracker-parts-page').onchange=e=>searchParts(Math.max(1,Number(e.target.value)||1));
+  document.getElementById('tracker-parts-page').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();searchParts(Math.max(1,Number(e.target.value)||1));}};
+  function resetPartsPicker(){clearTimeout(partTimer);partAbort?.abort();partRequest++;if(partTarget?.input)partTarget.input.value=rowValue(partTarget.row,partTarget.field);partTarget=null;}
+  function closePartsPicker(){resetPartsPicker();partsDialog.close();}
+  document.getElementById('tracker-parts-close').onclick=()=>{if(!partsBusy)closePartsPicker();};partAdd.onclick=applyParts;
+  partsDialog.addEventListener('cancel',e=>{e.preventDefault();if(!partsBusy)closePartsPicker();});
+  partsDialog.addEventListener('close',()=>{if(!partsDialog.open)resetPartsPicker();});
+  document.getElementById('tracker-add-parts')?.addEventListener('click',()=>openPartsPicker());
   const hr=el('tr');for(const [field,label] of columns){const th=el('th',{textContent:label,tabIndex:0});th.dataset.field=field;th.setAttribute('scope','col');th.title='Click to sort; drag right edge to resize';const sort=()=>{sortDirection=sortField===field?-sortDirection:1;sortField=field;renderGrid();};th.onclick=e=>{if(e.offsetX<th.clientWidth-12)sort();};th.onkeydown=e=>{if(e.key==='Enter')sort();};hr.append(th);}thead.append(hr);
   new ResizeObserver(()=>document.querySelector('.tracker-scroll').style.setProperty('--tracker-first-width',hr.firstChild.getBoundingClientRect().width+'px')).observe(hr.firstChild);
   async function refreshRows(){

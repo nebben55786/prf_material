@@ -12,7 +12,7 @@ test('tracker quantity accepts decimals and rejects invalid stock values',()=>{
   for(const q of ['-1','1e3','NaN','','1.00001','1,23'])assert.throws(()=>trackerQuantity(q));
 });
 
-test('tracker routes reconcile stock, holds, partial issues, reversals, numbering, contacts and job isolation',async t=>{
+test('tracker routes reconcile stock and search/add parts across a large job-scoped catalog',async t=>{
   const db=new PGlite();t.after(()=>db.close());
   for(const f of fs.readdirSync(new URL('../db/migrations/',import.meta.url)).filter(f=>f.endsWith('.sql')).sort())await db.exec(fs.readFileSync(new URL('../db/migrations/'+f,import.meta.url),'utf8'));
   await db.query("insert into users(id,username,password_hash,role) values(900,'tracker-test',$1,'admin')",[await bcrypt.hash('tracker-test',4)]);
@@ -52,6 +52,15 @@ test('tracker routes reconcile stock, holds, partial issues, reversals, numberin
   async function stock(){const html=await (await request('/inventory')).text();assert.match(html,/TRACK-PIPE/);const state=(await db.query('select sum(posted_quantity)::numeric as receipts from tracker_rows r join tracker_documents d on d.id=r.document_id where d.kind=\'receiving\' and not d.cancelled')).rows[0];return Number(state.receipts);}
   assert.equal(await stock(),20);
   assert.equal((await db.query('select count(*)::int as n from purchase_orders')).rows[0].n,0);
+  await db.exec(`insert into material_items(id,job_id,item_code,description,material_type,uom,size_1,thk_1)
+    select 10000+n,901,'SEARCH-'||lpad(n::text,4,'0'),'Carbon steel pipe','pipe','FT',case when n%2=0 then '12' else '6' end,'STD' from generate_series(1,1250) n;
+    insert into material_items(id,job_id,item_code,description,material_type,uom) values(15000,901,'PERCENT%_PART','Literal wildcard test','misc','EA');`);
+  const findParts=async query=>{const response=await request('/tracker/receiving/items?'+new URLSearchParams(query));const data=await response.json();assert.equal(response.status,200,JSON.stringify(data));return data;};
+  let found=await findParts({ident:'SEARCH-'});assert.equal(found.total,1250);assert.equal(found.items.length,50);assert.equal(found.pages,25);
+  found=await findParts({ident:'SEARCH-',page:25});assert.equal(found.items.at(-1).item_code,'SEARCH-1250');
+  found=await findParts({q:'carbon pipe',size:'12 STD',type:'pipe'});assert.equal(found.total,625);assert.ok(found.items.every(i=>i.size_1==='12'));
+  assert.equal((await findParts({ident:'%'})).total,1);assert.equal((await findParts({ident:'_'})).total,1);
+  assert.equal((await findParts({q:"' OR 1=1 --"})).total,0);assert.equal((await findParts({ident:'OTHER'})).total,0);
   await saveRow('receiving',receipt,{...r,version:0},{quantity:21},409);
   let ticket=await create('issuing');assert.equal(ticket.number,'GRPT-01655');
   const contact=(await db.query('select day_contact from tracker_contacts where job_id=901 order by id limit 1')).rows[0].day_contact;
@@ -101,10 +110,44 @@ test('tracker routes reconcile stock, holds, partial issues, reversals, numberin
         assert.equal(await page.evaluate(()=>document.activeElement.dataset.field),'location');
         await page.locator('#tracker-grid tbody tr').nth(1).locator('select[data-field="location"]').selectOption('B');
         await page.waitForFunction(()=>document.querySelector('#tracker-status').textContent==='Saved');
-        await page.locator('#tracker-grid th').first().evaluate(th=>th.style.width='200px');await page.waitForTimeout(100);
+        await page.locator('#tracker-grid th').first().evaluate(th=>th.style.width='200px');await page.waitForFunction(()=>Math.round(parseFloat(getComputedStyle(document.querySelector('#tracker-grid th:nth-child(2)')).left))===Math.round(document.querySelector('#tracker-grid th').getBoundingClientRect().width));
         assert.equal(await page.locator('#tracker-grid th').nth(1).evaluate(th=>Math.round(parseFloat(getComputedStyle(th).left))),Math.round(await page.locator('#tracker-grid th').first().evaluate(th=>th.getBoundingClientRect().width)));
         await page.locator('#tracker-grid th').first().evaluate(th=>th.style.width='140px');
         await page.screenshot({path:process.env.TRACKER_QA_DIR+'/receiving-desktop.png',fullPage:true});
+        // Browse the whole catalog, retain selections across pages/filters, and add together.
+        const pickerDocument=await create('receiving');await page.goto(base+'/tracker/receiving?document='+pickerDocument.id);
+        await page.locator('#tracker-add-parts').click();await page.waitForSelector('#tracker-parts-dialog[open]');
+        await page.locator('#tracker-parts-ident').fill('SEARCH-');
+        await page.waitForFunction(()=>document.querySelector('#tracker-parts-count').textContent.includes('1,250 matching parts'));
+        assert.equal(await page.locator('#tracker-parts-results tbody tr').count(),50);
+        await page.getByRole('checkbox',{name:'Select SEARCH-0001',exact:true}).check();
+        await page.locator('#tracker-parts-next').click();await page.waitForFunction(()=>document.querySelector('#tracker-parts-page').value==='2');
+        await page.getByRole('textbox',{name:'Quantity for SEARCH-0051',exact:true}).fill('2');
+        await page.locator('#tracker-parts-size').fill('12 STD');await page.locator('#tracker-parts-description').fill('carbon pipe');
+        await page.waitForFunction(()=>document.querySelector('#tracker-parts-count').textContent.includes('625 matching parts'));
+        assert.match(await page.locator('#tracker-parts-selection-count').textContent(),/2 parts selected/);
+        await page.locator('#tracker-parts-search').fill('SEARCH-1250');await page.waitForFunction(()=>document.querySelector('#tracker-parts-count').textContent.includes('of 1 matching parts'));
+        await page.getByRole('textbox',{name:'Quantity for SEARCH-1250',exact:true}).fill('3');
+        await page.locator('#tracker-parts-search').fill('');await page.waitForFunction(()=>document.querySelector('#tracker-parts-count').textContent.includes('625 matching parts'));
+        await page.locator('#tracker-parts-review summary').click();await page.waitForFunction(()=>document.querySelectorAll('#tracker-parts-selected tr').length===3);
+        await page.screenshot({path:process.env.TRACKER_QA_DIR+'/part-picker-desktop.png',fullPage:true});
+        await page.locator('#tracker-parts-add').click();await page.waitForFunction(()=>!document.querySelector('#tracker-parts-dialog').open&&document.querySelector('#tracker-status').textContent==='Saved');
+        assert.equal(await page.locator('#tracker-grid tbody tr').count(),3);
+        assert.deepEqual(await page.locator('#tracker-grid input[data-field="item_code"]').evaluateAll(inputs=>inputs.map(i=>i.value)),['SEARCH-0001','SEARCH-0051','SEARCH-1250']);
+        assert.deepEqual(await page.locator('#tracker-grid input[data-field="quantity"]').evaluateAll(inputs=>inputs.map(i=>i.value)),['0','2','3']);
+        const firstPickerRow=page.locator('#tracker-grid tbody tr').first();await firstPickerRow.getByRole('button',{name:/Find part by Part Ident/}).click();
+        await page.locator('#tracker-parts-ident').fill('SEARCH-0002');await page.waitForFunction(()=>document.querySelector('#tracker-parts-count').textContent.includes('of 1 matching parts'));
+        await page.getByRole('button',{name:'Choose SEARCH-0002',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('#tracker-parts-dialog').open);
+        assert.equal(await firstPickerRow.locator('input[data-field="item_code"]').inputValue(),'SEARCH-0002');
+        assert.equal(await firstPickerRow.locator('input[data-field="quantity"]').inputValue(),'0');
+        await firstPickerRow.locator('input[data-field="item_code"]').fill('NOT-A-PART');await firstPickerRow.locator('input[data-field="item_code"]').press('Enter');
+        await page.waitForFunction(()=>document.querySelector('#tracker-parts-dialog').open&&document.querySelector('#tracker-parts-count').textContent.includes('of 0 matching parts'));
+        await page.locator('#tracker-parts-close').click();assert.equal(await firstPickerRow.locator('input[data-field="item_code"]').inputValue(),'SEARCH-0002');
+        await page.setViewportSize({width:390,height:844});await page.locator('#tracker-add-parts').click();
+        await page.waitForFunction(()=>document.querySelector('#tracker-parts-count').textContent.includes('matching parts'));
+        await page.screenshot({path:process.env.TRACKER_QA_DIR+'/part-picker-phone.png'});
+        assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+        await page.locator('#tracker-parts-close').click();await page.setViewportSize({width:1440,height:1000});
         await page.goto(base+'/tracker/issuing?document='+ticket.id);await page.locator('#tracker-allocate').click();await page.waitForSelector('#tracker-issue-dialog[open]');
         assert.ok(await page.locator('[data-allocation]').count()>0);
         await page.screenshot({path:process.env.TRACKER_QA_DIR+'/allocations-desktop.png',fullPage:true});await page.locator('#tracker-close-dialog').click();
@@ -146,6 +189,17 @@ test('tracker routes reconcile stock, holds, partial issues, reversals, numberin
   await post('/tracker/issuing/documents/'+legacyTicket.id+'/issue',{version:legacyReview.document.version,request_key:'legacy-source-dimensions',issued_date:'2026-11-17',allocations:[{row_id:legacyLine.id,...source,quantity:4}]});
   const allocated=(await db.query('select a.size_1 from tracker_allocations a where row_id=$1',[legacyLine.id])).rows[0];assert.equal(allocated.size_1,'');
   const longTicket=await create('issuing');
+  let addDoc=await create('receiving');
+  const batch=await post('/tracker/receiving/documents/'+addDoc.id+'/parts',{version:addDoc.version,parts:[{material_item_id:10001,quantity:2},{material_item_id:11250,quantity:3}]});
+  assert.equal(batch.rows.length,2);assert.ok(batch.rows.every(r=>Number(r.posted_quantity)===0));
+  await post('/tracker/receiving/documents/'+addDoc.id+'/parts',{version:batch.document.version,parts:[{material_item_id:10002,quantity:1},{material_item_id:902,quantity:1}]},400);
+  assert.equal((await page('receiving',addDoc.id)).rows.length,2);
+  await post('/tracker/receiving/documents/'+addDoc.id+'/parts',{version:batch.document.version,parts:[{material_item_id:10002,quantity:-1}]},400);
+  await post('/tracker/receiving/documents/'+addDoc.id+'/parts',{version:1,parts:[{material_item_id:10002,quantity:1}]},409);
+  const issueBatch=await post('/tracker/issuing/documents/'+longTicket.id+'/parts',{version:longTicket.version,parts:[{material_item_id:901,quantity:2}]});
+  assert.equal(Number(issueBatch.rows[0].reserved_quantity),2);
+  // Keep the 40-line pagination fixture independent of the batch-add assertion.
+  await db.query('delete from tracker_rows where document_id=$1',[longTicket.id]);
   await db.query(`insert into tracker_rows(job_id,document_id,material_item_id,item_code,description,uom,quantity)
     select 901,$1,903,'OTHER-PIPE','Line '||n||' - detailed material description','FT',1 from generate_series(1,40) n`,[longTicket.id]);
   const longPdf=Buffer.from(await (await request('/tracker/issuing/documents/'+longTicket.id+'/pick-ticket.pdf')).arrayBuffer());
@@ -158,6 +212,7 @@ test('tracker routes reconcile stock, holds, partial issues, reversals, numberin
   assert.equal((await request('/vendors/merge',{source_id:901,target_id:906},true)).status,302);
   assert.equal((await page('receiving',receipt.id)).selected.data.vendor_id,'906');
   assert.equal((await request('/jobs/select',{job_id:902},true)).status,302);await page('receiving');
+  assert.equal((await findParts({ident:'SEARCH-'})).total,0);
   await post('/tracker/receiving/documents/'+receipt.id,{version:receipt.version,patch:{po_number:'STEAL'}},404);
   await post('/tracker/reference/import',{},400);
   assert.equal((await create('receiving')).number,'GRR-00001');
