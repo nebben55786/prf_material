@@ -1,3 +1,4 @@
+import {allocateLegacyTrackerReceipt} from './tracker.js';
 // Original request lines own demand; only posted issue transactions reduce reservations.
 function loadError(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
@@ -91,7 +92,8 @@ function registerRequisitionLoadRoutes(app, d) {
       const allocations = buildPickLocationAllocations(locations, qty);
       if (allocations.reduce((n, a) => n + Number(a.qty_issued), 0) + 1e-7 < qty) throw loadError("Not enough warehouse inventory for " + line.item_code);
       for (const a of allocations) {
-        await db.query(`insert into material_issue_transactions(job_id,requisition_id,requisition_line_id,source_bom_line_id,issue_source,warehouse,location,qty_issued,created_by,load_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [currentJobId(req), h.id, line.requisition_line_id, line.bom_line_id, line.system_key === "UNALLOCATED" ? "UNALLOCATED" : "BOM", a.warehouse, a.location, a.qty_issued, req.user.id, l.id]);
+        const transaction=await db.query(`insert into material_issue_transactions(job_id,requisition_id,requisition_line_id,source_bom_line_id,issue_source,warehouse,location,qty_issued,created_by,load_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning id`, [currentJobId(req), h.id, line.requisition_line_id, line.bom_line_id, line.system_key === "UNALLOCATED" ? "UNALLOCATED" : "BOM", a.warehouse, a.location, a.qty_issued, req.user.id, l.id]);
+        await allocateLegacyTrackerReceipt(db,{jobId:currentJobId(req),transactionId:transaction.rows[0].id,item:line.item_code,warehouse:a.warehouse,location:a.location,quantity:a.qty_issued,getCurrentOnHandRows});
         const loc = locations.find((r) => r.warehouse === a.warehouse && r.location === a.location);
         loc.qty_available -= Number(a.qty_issued);
       }

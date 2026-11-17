@@ -481,6 +481,8 @@ test("split loads keep reservations, issue independently, and retain separate ti
   assert.equal((await db.query('select item_code from material_items where id=1001')).rows[0].item_code,'PIPE');
   assert.equal(Number((await db.query("select count(*) as n from inventory_location_moves where item_code='ROLLBACK-PIPE'")).rows[0].n),0);
   const issueBeforeRename=Number((await db.query('select sum(qty_issued) as n from material_issue_transactions where job_id=101')).rows[0].n);
+  const trackerDoc=(await db.query("insert into tracker_documents(job_id,kind,number) values(101,'issuing','GRPT-RENAME') returning id")).rows[0];
+  await db.query("insert into tracker_rows(job_id,document_id,material_item_id,item_code,description) values(101,$1,1001,'PIPE','Pipe')",[trackerDoc.id]);
   const receiptBeforeRename=Number((await db.query('select sum(qty_received) as n from receipts where job_id=101')).rows[0].n);
   response=await request('/items/1001/change-ident',{token:renameToken,new_ident:'PIPE-RENAMED'});assert.equal(response.status,302,await response.clone().text());
   assert.equal((await request('/items/1001/change-ident',{token:renameToken,new_ident:'PIPE-AGAIN'})).status,400);

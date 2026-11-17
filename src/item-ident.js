@@ -10,12 +10,13 @@ export const identTargets = [
   ['inventory_audit_counts','item_code','job_id=$1'],
   ['inventory_audit_report_lines','item_code','job_id=$1'],
   ['inventory_adjustment_lines','item_code','job_id=$1'],
-  ['inventory_location_moves','item_code','job_id=$1']
+  ['inventory_location_moves','item_code','job_id=$1'],
+  ['tracker_rows','item_code','job_id=$1']
 ];
 const fail = message => Object.assign(new Error(message), {statusCode:400});
 export async function getIssuedIdentRequests(db, jobId, ident) {
   return (await db.query(`
-    select distinct mr.id,mr.requisition_no
+    select distinct mr.id,mr.requisition_no,false as tracker
     from material_requisitions mr
     join material_requisition_lines mrl on mrl.requisition_id=mr.id
     join bom_lines bl on bl.id=mrl.bom_line_id
@@ -24,7 +25,13 @@ export async function getIssuedIdentRequests(db, jobId, ident) {
       and (mr.status='ISSUED' or coalesce(mrl.qty_issued,0)>0
         or exists(select 1 from material_issue_transactions mit where mit.job_id=$1 and mit.requisition_line_id=mrl.id and mit.qty_issued>0)
         or exists(select 1 from material_requisition_load_lines ll join material_requisition_loads l on l.id=ll.load_id where ll.requisition_line_id=mrl.id and l.job_id=$1 and l.status='ISSUED'))
-    order by mr.id`,[jobId,ident])).rows;
+    union all
+    select distinct d.id,d.number as requisition_no,true as tracker
+    from tracker_documents d join tracker_rows r on r.document_id=d.id and r.job_id=d.job_id
+    join tracker_allocations a on a.row_id=r.id and a.job_id=r.job_id
+    join tracker_postings p on p.id=a.posting_id and p.job_id=a.job_id
+    where d.job_id=$1 and lower(btrim(r.item_code))=lower(btrim($2)) and not p.reversed
+    order by id`,[jobId,ident])).rows;
 }
 async function assertIdentNotIssued(db,jobId,ident) {
   const requests=await getIssuedIdentRequests(db,jobId,ident);
@@ -53,6 +60,7 @@ export async function renameItemIdent(db, {jobId,itemId,oldIdent,newIdent,userId
     const result=await db.query(`update ${table} set ${column}=$3 where ${scope} and (lower(btrim(${column}))=lower(btrim($2))${linked}) returning id`,params);
     affected[table+'.'+column]=result.rows.length;
   }
+  await db.query('update tracker_rows set version=version+1 where job_id=$1 and material_item_id=$2',[jobId,itemId]);
   await db.query('update inventory_audit_reports set ident_filter=$3 where job_id=$1 and lower(btrim(ident_filter))=lower(btrim($2))',[jobId,old,next]);
   await db.query('update material_items set item_code=$3,updated_at=now() where id=$1 and job_id=$2',[itemId,jobId,next]);
   await auditLog(db,userId,'rename_ident','material_item',itemId,JSON.stringify({old_ident:old,new_ident:next,affected}));

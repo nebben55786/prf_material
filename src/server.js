@@ -1,4 +1,6 @@
 import { registerRequisitionExcelRoutes } from "./requisition-excel.js";
+import { registerTrackerRoutes } from "./routes/tracker.js";
+import { trackerInventorySql, trackerReservationSql, allocateLegacyTrackerReceipt } from "./tracker.js";
 import { registerRfqPoPdfRoutes } from "./routes/rfq-po-pdf.js";
 import { resolveRolePermissions, hasSectionPermission, yardPermissionActions } from "./permissions.js";
 import { registerItemMergeRoutes } from "./item-merge.js";
@@ -253,6 +255,7 @@ function getAppHeaderTitle(user = null) {
 }
 
 app.use(express.urlencoded({ extended: true, limit: "20mb", parameterLimit: 20000 }));
+app.use('/tracker', express.json({ limit: '1mb' }));
 app.use(cookieParser(undefined, { decode: safeCookieDecode }));
 app.use("/public", express.static(path.join(process.cwd(), "public")));
 app.get(["/favicon.ico", "/favicon.png"], (_req, res) => {
@@ -1858,6 +1861,7 @@ function layout(title, body, user) {
         .filter((section) => section.key !== "settings" && section.key !== "min_max")
         .map((section) => `<a href="${isWarehouseUser(user) && section.key === "dashboard" ? "/yard" : section.href}">${section.label}</a>`)
         .concat(isAdminRole(user) ? `<a href="/notes">Notes</a>` : "")
+        .concat(canAccess(user, "receiving", "view") || canAccess(user, "requisitions", "view") ? `<a href="/tracker">Job Material Tracker</a>` : "")
         .concat(`<a href="/user">User</a>`)
         .concat(`<a href="/logout">Logout</a>`)
         .join("")
@@ -2684,6 +2688,7 @@ async function mergeVendors(client, sourceVendorId, targetVendorId, userId) {
   await client.query("update rfq_quote_files set vendor_id = $2 where vendor_id = $1", [sourceId, targetId]);
   await client.query("update rfq_items set awarded_vendor_id = $2 where awarded_vendor_id = $1", [sourceId, targetId]);
   await client.query("update purchase_orders set vendor_id = $2, updated_at = now() where vendor_id = $1", [sourceId, targetId]);
+  await client.query("update tracker_documents set data=jsonb_set(data,'{vendor_id}',to_jsonb($2::text)),version=version+1 where kind='receiving' and data->>'vendor_id'=$1::text", [sourceId, targetId]);
 
   const sourceName = String(source.name || "").trim();
   const targetName = String(target.name || "").trim();
@@ -5051,6 +5056,8 @@ function getInventoryByLocationSubquery(jobId = null) {
         select job_id,item_code,description,size_1,size_2,thk_1,thk_2,from_warehouse,from_location,-qty,-qty_osd from inventory_location_moves
         union all
         select job_id,item_code,description,size_1,size_2,thk_1,thk_2,to_warehouse,to_location,qty,qty_osd from inventory_location_moves
+        union all
+        ${trackerInventorySql}
       ) inventory_offsets
       ${adjustmentJobFilterSql}
       group by
@@ -5327,11 +5334,14 @@ async function getVerifiedAllocatedInventoryTotals(runner = { query }, jobId = n
       coalesce(bl.size_2, ''),
       coalesce(bl.thk_1, ''),
       coalesce(bl.thk_2, '')
+    union all
+    select item_code,size_1,size_2,thk_1,thk_2,qty_allocated_total from (${trackerReservationSql('$1')}) tracker_holds
   `, [jobId])).rows;
 }
 
 async function getVerifiedAllocatedInventoryTotalsByItem(runner = { query }, jobId = null) {
   return (await runner.query(`
+    select item_code,sum(qty_allocated_total) as qty_allocated_total from (
     select
       bl.item_code,
       sum(${outstandingReservationSql}) as qty_allocated_total
@@ -5341,12 +5351,16 @@ async function getVerifiedAllocatedInventoryTotalsByItem(runner = { query }, job
     where mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
       and ($1::bigint is null or mr.job_id = $1)
     group by bl.item_code
+    union all
+    select item_code,qty_allocated_total from (${trackerReservationSql('$1')}) tracker_holds
+    ) combined_holds group by item_code
   `, [jobId])).rows;
 }
 
 function getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId = null) {
   const jobFilterSql = Number.isFinite(Number(jobId)) ? `and mr.job_id = ${Number(jobId)}` : "";
   return `
+    select item_code,sum(qty_allocated_total) as qty_allocated_total from (
     select
       bl.item_code,
       sum(${outstandingReservationSql}) as qty_allocated_total
@@ -5356,6 +5370,9 @@ function getVerifiedAllocatedInventoryTotalsByItemSubquery(jobId = null) {
     where mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
       ${jobFilterSql}
     group by bl.item_code
+    union all
+    select item_code,qty_allocated_total from (${trackerReservationSql(Number(jobId)||'null')}) tracker_holds
+    ) combined_holds group by item_code
   `;
 }
 
@@ -8122,6 +8139,7 @@ app.get("/dashboard", requireAuth, requireJobContext, requirePermission("dashboa
 });
 
 registerItemMergeRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,getCurrentOnHandRows,auditLog,recomputeBomIssuedSummaries});
+registerTrackerRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,layout,esc,canAccess,signSession,readSession,getCurrentOnHandRows,getAvailableInventoryByItemMap,buildInventoryItemKey,getVerifiedAllocatedInventoryTotalsByItem,assertValidWarehouseLocation,auditLog,buildDrawnPdf,pickTicketLogoBuffer});
 registerItemIdentRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,auditLog});
 registerInventoryMoveRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requireRole,adminEquivalentRoles,requirePermission,asyncHandler,currentJobId,layout,esc,signSession,readSession,getCurrentOnHandRows,buildInventoryEntryKey,auditLog});
 registerLocationInventoryRoutes(app, {query,withTransaction,requireAuth,requireJobContext,requireInventoryAuditEdit,asyncHandler,currentJobId,layout,esc,signSession,readSession,getWarehouseOptions,getWarehouseLocationMap,normalizeWarehouseLocationValues,assertValidWarehouseLocation,getCurrentOnHandRows,buildInventoryEntryKey,saveInventoryAuditReport,upsertMaterialMasterItem,getVerifiedAllocatedInventoryTotalsByItem,auditLog});
@@ -9237,6 +9255,23 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requirePermission(
       where mv.job_id=$2 and (mv.item_code ilike $1 or mv.description ilike $1)
 
       union all
+      select r.created_at,r.item_code,r.description,initcap(lower(r.warehouse)),upper(r.location),
+        r.posted_quantity,case when r.osd then 0 else r.posted_quantity end,true,'Tracker Receipt',
+        coalesce(d.data->>'received_by',''),concat(d.number,' | PO ',d.data->>'po_number',' | ',coalesce(r.data->>'notes',''))
+      from tracker_rows r join tracker_documents d on d.id=r.document_id and d.job_id=r.job_id
+      where r.job_id=$2 and d.kind='receiving' and not d.cancelled and r.posted_quantity>0 and (r.item_code ilike $1 or r.description ilike $1)
+
+      union all
+      select p.created_at,r.item_code,r.description,initcap(lower(a.warehouse)),upper(a.location),a.quantity,
+        case when p.reversed then 0 else -a.quantity end,not p.reversed,
+        case when p.reversed then 'Tracker Issue (Reversed)' else 'Tracker Issue' end,
+        coalesce(d.data->>'issued_to',''),concat(d.number,' | Issue #',p.id)
+      from tracker_allocations a join tracker_postings p on p.id=a.posting_id and p.job_id=a.job_id
+      join tracker_rows r on r.id=a.row_id and r.job_id=a.job_id
+      join tracker_documents d on d.id=p.document_id and d.job_id=p.job_id
+      where a.job_id=$2 and (r.item_code ilike $1 or r.description ilike $1)
+
+      union all
 
       select
         mrl.created_at as transaction_date,
@@ -9346,7 +9381,7 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requirePermission(
   </tr>`).join("");
   const reservationRows = itemFilter ? (await query(`
     select bl.item_code, bl.uom, mr.id, mr.requisition_no, mr.status, mr.issued_to,
-      sum(${outstandingReservationSql}) as qty_reserved
+      sum(${outstandingReservationSql}) as qty_reserved, false as tracker
     from material_requisition_lines mrl
     join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
@@ -9354,7 +9389,12 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requirePermission(
       and mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
     group by bl.item_code, bl.uom, mr.id
     having sum(${outstandingReservationSql}) > 0
-    order by bl.item_code, mr.requisition_no, mr.id, bl.uom
+    union all
+    select r.item_code,r.uom,d.id,d.number,'RESERVED',d.data->>'issued_to',sum(r.reserved_quantity),true
+    from tracker_rows r join tracker_documents d on d.id=r.document_id and d.job_id=r.job_id
+    where r.job_id=$2 and (r.item_code ilike $1 or r.description ilike $1) and d.kind='issuing' and not d.cancelled
+    group by r.item_code,r.uom,d.id having sum(r.reserved_quantity)>0
+    order by item_code,requisition_no,id,uom
   `, [`%${itemFilter}%`, jobId])).rows : [];
   const reservationTotals = new Map();
   for (const row of reservationRows) {
@@ -9367,7 +9407,7 @@ app.get("/yard/item-history", requireAuth, requireJobContext, requirePermission(
     <td>${esc(row.item_code)}</td><td><a href="/requisitions/reservations?item_code=${encodeURIComponent(row.item_code)}" target="_blank" rel="noopener">${esc(formatQtyDisplay(row.qty_reserved))}</a></td><td>${esc(row.uom || "")}</td>
   </tr>`).join("");
   const reservationMarkup = reservationRows.map(row => `<tr>
-    <td>${esc(row.item_code)}</td><td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
+    <td>${esc(row.item_code)}</td><td><a href="${row.tracker?'/tracker/issuing?document=':'/requisitions/'}${row.id}">${esc(row.requisition_no)}</a></td>
     <td>${esc(row.status)}</td><td>${esc(row.issued_to || "")}</td>
     <td>${esc(formatQtyDisplay(row.qty_reserved))}</td><td>${esc(row.uom || "")}</td>
   </tr>`).join("");
@@ -10670,7 +10710,7 @@ app.get("/items/:id/edit", requireAuth, requireJobContext, requirePermission("it
       <form method="post" action="/items/${item.id}/edit" class="stack">
         <input type="hidden" name="updated_token" value="${esc(item.updated_token)}" />
         <div class="grid-4">
-          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" readonly />${issuedIdentRequests.length ? `<button type="button" class="btn btn-secondary" disabled>Change Ident</button><p class="muted">Ident locked by issued requests: ${issuedIdentRequests.map(r=>`<a href="/requisitions/${r.id}">${esc(r.requisition_no)}</a>`).join(", ")}</p>` : `<a class="btn btn-secondary" href="/items/${item.id}/change-ident">Change Ident</a>`}</div>
+          <div><label>Item Code</label><input name="item_code" value="${esc(item.item_code)}" readonly />${issuedIdentRequests.length ? `<button type="button" class="btn btn-secondary" disabled>Change Ident</button><p class="muted">Ident locked by issued requests: ${issuedIdentRequests.map(r=>`<a href="${r.tracker?'/tracker/issuing?document=':'/requisitions/'}${r.id}">${esc(r.requisition_no)}</a>`).join(", ")}</p>` : `<a class="btn btn-secondary" href="/items/${item.id}/change-ident">Change Ident</a>`}</div>
           <div><label>Description</label><input name="description" value="${esc(item.description)}" required /></div>
           <div><label>Type</label><input name="material_type" value="${esc(item.material_type)}" /></div>
           <div><label>UOM</label><input name="uom" value="${esc(item.uom)}" /></div>
@@ -12713,7 +12753,7 @@ app.get("/requisitions/reservations", requireAuth, requireJobContext, requirePer
   const rows = (await query(`
     select mr.id, mr.requisition_no, mr.status, mr.requested_by_name, mr.issued_to,
       bh.bom_name, bh.bom_no, bl.uom,
-      sum(${outstandingReservationSql}) as qty_reserved
+      sum(${outstandingReservationSql}) as qty_reserved, false as tracker
     from material_requisition_lines mrl
     join material_requisitions mr on mr.id = mrl.requisition_id
     join bom_lines bl on bl.id = mrl.bom_line_id
@@ -12722,7 +12762,12 @@ app.get("/requisitions/reservations", requireAuth, requireJobContext, requirePer
       and mr.status in ('ACCEPTED', 'VERIFIED', 'FLAGGED', 'LOADED')
     group by mr.id, bh.bom_name, bh.bom_no, bl.uom
     having sum(${outstandingReservationSql}) > 0
-    order by mr.requisition_no, mr.id, bl.uom
+    union all
+    select d.id,d.number,'RESERVED',d.data->>'requestor',d.data->>'issued_to','Job Material Tracker','',r.uom,sum(r.reserved_quantity),true
+    from tracker_rows r join tracker_documents d on d.id=r.document_id and d.job_id=r.job_id
+    where r.job_id=$1 and r.item_code=$2 and d.kind='issuing' and not d.cancelled
+    group by d.id,r.uom having sum(r.reserved_quantity)>0
+    order by requisition_no,id,uom
   `, [currentJobId(req), itemCode])).rows;
   res.set("Cache-Control", "private, no-store");
   res.send(layout("Reserved Quantities", `
@@ -12733,7 +12778,7 @@ app.get("/requisitions/reservations", requireAuth, requireJobContext, requirePer
       <div class="scroll"><table>
         <thead><tr><th>Request</th><th>BOM</th><th>Status</th><th>Requested By</th><th>Issued To</th><th>Reserved Qty</th><th>UOM</th></tr></thead>
         <tbody>${rows.map(row => `<tr>
-          <td><a href="/requisitions/${row.id}">${esc(row.requisition_no)}</a></td>
+          <td><a href="${row.tracker?'/tracker/issuing?document=':'/requisitions/'}${row.id}">${esc(row.requisition_no)}</a></td>
           <td>${esc(row.bom_name || row.bom_no)}</td><td>${esc(row.status)}</td>
           <td>${esc(row.requested_by_name || "")}</td><td>${esc(row.issued_to || "")}</td>
           <td>${esc(formatQtyDisplay(row.qty_reserved))}</td><td>${esc(row.uom || "")}</td>
@@ -14013,6 +14058,7 @@ app.post("/requisitions/:id/verify", requireAuth, requireJobContext, requirePerm
   const jobId = currentJobId(req);
   const result = await withTransaction(async (client) => {
     const header = (await client.query("select * from material_requisitions where id = $1 and job_id = $2 for update", [req.params.id, jobId])).rows[0];
+    await client.query('select id from jobs where id=$1 for update', [jobId]);
     if (!header) throw new Error("Requisition not found.");
     if ((await client.query("select 1 from material_requisition_loads where requisition_id=$1 and job_id=$2 and status<>'CANCELLED' limit 1",[req.params.id,jobId])).rows.length) throw Object.assign(new Error('This request already has active loads.'),{statusCode:400});
     const statusKey = requisitionStatusKey(header.status);
@@ -14435,9 +14481,10 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
     `, [line.requisition_line_id, parseQtyValue(line.qty_issued || 0), jobId]);
     const allocations = lineAllocations.get(Number(line.requisition_line_id)) || [];
     for (const allocation of allocations) {
-      await client.query(`
+      const issueTransaction = await client.query(`
         insert into material_issue_transactions (job_id, requisition_id, requisition_line_id, source_bom_line_id, issue_source, warehouse, location, qty_issued, created_by)
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        returning id
       `, [
         jobId,
         requisitionId,
@@ -14449,6 +14496,7 @@ async function issueRequisitionToField(client, requisitionId, jobId, userId) {
         allocation.qty_issued,
         userId || null
       ]);
+      await allocateLegacyTrackerReceipt(client,{jobId,transactionId:issueTransaction.rows[0].id,item:line.item_code,warehouse:allocation.warehouse,location:allocation.location,quantity:allocation.qty_issued,getCurrentOnHandRows});
     }
   }
   await client.query(`

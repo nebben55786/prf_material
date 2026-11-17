@@ -1,0 +1,150 @@
+{
+  "source": "Piping Material Tracker xAI Gun Range 11.17.2026-1242.xlsx",
+  "job_number": "8883",
+  "floors": {
+    "receiving": 826,
+    "issuing": 1654
+  },
+  "contacts": [
+    {
+      "day_contact": "ADAM FREEMAN 318-491-6213",
+      "night_contact_1": "TACO",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "BRAD WIGGINS 985-413-8613",
+      "night_contact_1": "RICKY GROS",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "CHRIS G 832-849-8425",
+      "night_contact_1": "GONZALO PUENTE - 713-907-4609",
+      "night_contact_2": "Miguel Gonzalez 409-347-3382"
+    },
+    {
+      "day_contact": "CLAYTON ZIEGLER (225) 397-9395",
+      "night_contact_1": "CAM KAY (281) 515-8181",
+      "night_contact_2": "BRIAN GROS (225) 202-7457"
+    },
+    {
+      "day_contact": "COREY GREER / TRENT MICHEL 225-281-0707",
+      "night_contact_1": "CALEB COARSEY 225-719-0174",
+      "night_contact_2": "SONNY - 318-581-1629"
+    },
+    {
+      "day_contact": "DRAKE HEBERT 985-519-2498",
+      "night_contact_1": "RAY LABORDE 225-432-9982",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "DRAKE VERRETT (985) 519-6878",
+      "night_contact_1": "RAY LABORDE 225-432-9982",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "DUALLY 409-656-3155",
+      "night_contact_1": "RICKY GROS",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "EMANUELL PADILLA 863-448-3847",
+      "night_contact_1": "CALEB COARSEY 225-719-0174",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "EMILIO CERDA 713-412-4696",
+      "night_contact_1": "GONZALO PUENTE - 713-907-4609",
+      "night_contact_2": "Miguel Gonzalez 409-347-3382"
+    },
+    {
+      "day_contact": "AMADORE TORRES 361-500-2215",
+      "night_contact_1": "SOAP 225-432-9982",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "Grant Printup - 985-974-4144",
+      "night_contact_1": "\"Poncho\" - 956-693-3587",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "HANK CHIRO 225-247-1280",
+      "night_contact_1": "",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "HUGO RAYMUNDO 832-964-8947",
+      "night_contact_1": "CALEB COARSEY 225-719-0174",
+      "night_contact_2": "TRENT RUTLAND 601-563-5280"
+    },
+    {
+      "day_contact": "JAMIE SEDOTAL- 225-802-9311",
+      "night_contact_1": "Trent Rutland - 901-483-2769",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "JASON CAVALIER 985-513-2333",
+      "night_contact_1": "CAM KAY (281) 515-8181",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "JORDAN COX 985-714-2776",
+      "night_contact_1": "Josh (Nights) 225-335-0681",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "JOSE GUILLEN 409-543-9926",
+      "night_contact_1": "GONZALO PUENTE - 713-907-4609",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "OSCAR CEBALLOS 956-272-5056",
+      "night_contact_1": "MARTIN BARRAGAN LUA",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "OSIEL REYNA 346-529-2379",
+      "night_contact_1": "Miguel Gonzalez 409-347-3382",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "PAUL LEONARD 225-454-8493",
+      "night_contact_1": "RAY LABORDE 225-432-9982",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "SOAP 225-432-9982",
+      "night_contact_1": "CALEB COARSEY 225-719-0174",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "ALFONSO PEREZ 251-513-7485",
+      "night_contact_1": "SOAP 225-432-9982",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "EDDIE V 956-391-4082",
+      "night_contact_1": "Miguel Gonzalez 409-347-3382",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "MIGUEL GONZALEZ 409-347-3382",
+      "night_contact_1": "GONZALO PUENTE - 713-907-4609",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "RUBEN GARCIA 956-379-1051",
+      "night_contact_1": "MARIO LOPEZ 832-226-2094",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "JOAN RICHARDSON 561-506-3810",
+      "night_contact_1": "GONZALO PUENTE - 713-907-4609",
+      "night_contact_2": ""
+    },
+    {
+      "day_contact": "ANA SALAS 281-896-2787",
+      "night_contact_1": "GONZALO PUENTE - 713-907-4609",
+      "night_contact_2": ""
+    }
+  ]
+}

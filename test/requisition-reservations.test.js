@@ -13,6 +13,8 @@ test('reservation drilldown matches outstanding active demand and isolates jobs/
     create table bom_lines(id int primary key,item_code text,uom text);
     create table material_requisition_lines(id int primary key,requisition_id int,bom_line_id int,qty_requested numeric);
     create table material_issue_transactions(requisition_line_id int,qty_issued numeric);
+    create table tracker_documents(id int primary key,job_id int,number text,data jsonb,kind text,cancelled boolean);
+    create table tracker_rows(id int primary key,job_id int,document_id int,item_code text,description text,uom text,reserved_quantity numeric);
     insert into bom_headers values(1,'Supports','BOM-1');
     insert into bom_lines values(1,'204P2','EA'),(2,'OTHER','EA');
     insert into material_requisitions values

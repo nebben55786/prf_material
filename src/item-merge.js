@@ -29,6 +29,7 @@ export async function mergeItems(db,{jobId,sourceId,targetId,sourceVersion,targe
   const stock=mergeStockSnapshot(await getCurrentOnHandRows(db,{jobId}),[source.item_code,target.item_code]);
   if(JSON.stringify(stock)!==JSON.stringify(stockSnapshot))throw fail('Inventory changed after review. Review the merge again.');
   const canonical=[target.item_code,target.description,target.size_1||'',target.size_2||'',target.thk_1||'',target.thk_2||''];
+  await db.query(`update tracker_rows set material_item_id=$3,item_code=$4,description=$5,size_1=$6,size_2=$7,thk_1=$8,thk_2=$9,uom=$10,material_type=$11,version=version+1 where job_id=$1 and (material_item_id=any($2::bigint[]) or lower(btrim(item_code))=any($12::text[]))`,[jobId,[source.id,target.id],target.id,...canonical,target.uom,target.material_type,codes]);
   // Repoint BOM links before combining colliding BOM line numbers. Request/load line IDs stay intact.
   const bomRows=(await db.query('select bl.* from bom_lines bl join bom_headers bh on bh.id=bl.bom_id where bh.job_id=$1 and lower(btrim(bl.item_code))=any($2::text[]) order by bl.id for update of bl',[jobId,codes])).rows;
   const groups=new Map();
