@@ -97,8 +97,34 @@
       enqueue(async()=>{const saved=await api(base+'/documents/'+doc.id+'/rows/'+r.id,{version:r.version,patch});Object.assign(r,saved);doc.version=saved.document_version;delete input.dataset.saveError;if(!input.closest('tr')?.querySelector('[data-save-error]'))input.closest('tr')?.classList.remove('tracker-error');syncRow(r);},failureKey).catch(()=>{input.dataset.saveError='1';input.closest('tr')?.classList.add('tracker-error');});
     };
   }
+  function syncReceiptNumber(saved,input,submitted){
+    const previous=(doc&&String(doc.id)===String(saved.id)?doc:state.documents.find(d=>String(d.id)===String(saved.id)))?.number;
+    if(doc&&String(doc.id)===String(saved.id))Object.assign(doc,saved);
+    const entry=state.documents.find(d=>String(d.id)===String(saved.id));if(entry)Object.assign(entry,saved);
+    for(const row of state.rows)if(String(row.document_id)===String(saved.id)){
+      row.number=saved.number;row.document_version=saved.version;row.document_data=saved.data;
+      const tr=tbody.querySelector('tr[data-id="'+row.id+'"]'),numberInput=tr?.querySelector('input[data-field="number"]');
+      if(numberInput){delete numberInput.dataset.saveError;if(numberInput!==document.activeElement||numberInput.value===submitted||numberInput.value===previous)numberInput.value=saved.number;}
+      if(tr&&!tr.querySelector('[data-save-error]'))tr.classList.remove('tracker-error');
+    }
+    const option=[...document.getElementById('tracker-document').options].find(o=>o.value===String(saved.id));if(option)option.textContent=saved.number;
+    if(doc&&String(doc.id)===String(saved.id)){
+      document.getElementById('tracker-document-title').textContent=saved.number;
+      const headerNumber=header.querySelector('[data-header="number"]');if(headerNumber){delete headerNumber.dataset.saveError;if(headerNumber!==document.activeElement||headerNumber.value===submitted||headerNumber.value===previous)headerNumber.value=saved.number;}
+    }
+    if(input.value===submitted)input.value=saved.number;
+  }
+  function bindReceiptNumber(input,row){
+    input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();event.stopPropagation();input.blur();}});
+    input.onchange=()=>{
+      const value=input.value,receipt=doc||state.documents.find(d=>String(d.id)===String(row.document_id));
+      enqueue(async()=>{const saved=await api(base+'/documents/'+receipt.id,{version:receipt.version,patch:{number:value}});syncReceiptNumber(saved,input,value);},'receipt-number:'+receipt.id)
+        .catch(()=>{input.dataset.saveError='1';input.closest('tr')?.classList.add('tracker-error');});
+    };
+  }
   function renderHeader(){if(!doc)return;header.replaceChildren();for(const [key,label,type='text'] of documentFields){const labelEl=el('label',{textContent:label}),i=control(type,key==='number'?doc.number:doc.data[key]);i.disabled=!editable||(!receiving&&state.rows.some(r=>Number(r.issued_quantity)>0));i.dataset.header=key;
-      i.onchange=()=>{const value=i.value;enqueue(async()=>{const saved=await api(base+'/documents/'+doc.id,{version:doc.version,patch:{[key]:value}});Object.assign(doc,saved);for(const r of state.rows)syncRow(r);if(receiving)await refreshRows();},'header:'+key).catch(()=>{});};labelEl.append(i);header.append(labelEl);}
+      if(key==='number')i.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();i.blur();}});
+      i.onchange=()=>{const value=i.value;enqueue(async()=>{const saved=await api(base+'/documents/'+doc.id,{version:doc.version,patch:{[key]:value}});if(key==='number')syncReceiptNumber(saved,i,value);else Object.assign(doc,saved);for(const r of state.rows)syncRow(r);if(receiving)await refreshRows();},key==='number'?'receipt-number:'+doc.id:'header:'+key).catch(()=>{});};labelEl.append(i);header.append(labelEl);}
   }
   let sortField='',sortDirection=1;
   function renderGrid(){
@@ -107,7 +133,12 @@
     if(sortField)rows.sort((a,b)=>String(rowValue(a,sortField)).localeCompare(String(rowValue(b,sortField)),undefined,{numeric:true})*sortDirection);
     for(const r of rows){const tr=el('tr');tr.dataset.id=r.id;
       for(const [field,label,type] of columns){const td=el('td');td.dataset.field=field;
-        if(type&&editable){const i=control(type,rowValue(r,field),r);i.disabled=!receiving&&Number(r.issued_quantity)>0;i.setAttribute('aria-label',label+' for row '+r.id);i.dataset.field=field;bindRowChange(i,r,field,type);
+        if(field==='number'&&receiving&&state.edit&&!r.cancelled&&!doc?.cancelled){
+          const wrap=el('div',{className:'tracker-grr-cell'}),input=control('text',rowValue(r,field));input.dataset.field='number';input.maxLength=100;
+          input.setAttribute('aria-label','GRR number for row '+r.id);input.title='Change the GRR number for all lines on this receipt.';bindReceiptNumber(input,r);
+          wrap.append(input,el('a',{href:base+'?document='+r.document_id,textContent:'Open',title:'Open receipt details'}));td.append(wrap);
+        }
+        else if(type&&editable){const i=control(type,rowValue(r,field),r);i.disabled=!receiving&&Number(r.issued_quantity)>0;i.setAttribute('aria-label',label+' for row '+r.id);i.dataset.field=field;bindRowChange(i,r,field,type);
           if(['item','description'].includes(type)){
             const wrap=el('div',{className:'tracker-cell-picker'}),find=el('button',{type:'button',textContent:'Find',className:'btn btn-secondary',disabled:i.disabled});
             find.setAttribute('aria-label','Find part by '+label+' for row '+r.id);find.onclick=()=>openPartsPicker({row:r,input:i,field,type,search:i.value});
@@ -155,11 +186,18 @@
         const checkbox=el('input',{type:'checkbox',checked:!!selected});checkbox.setAttribute('aria-label','Select '+item.item_code);
         checkbox.onchange=()=>{if(checkbox.checked){if(partSelection.size>=200){checkbox.checked=false;partErrorMessage('Add up to 200 parts at a time.');return;}partSelection.set(id,{item,quantity:tr.querySelector('[data-part-quantity]').value});}else partSelection.delete(id);selectionCount();if(document.getElementById('tracker-parts-review').open)reviewSelection();};cell.append(checkbox);
       }
-      tr.append(cell);for(const field of ['item_code','description','size_1','size_2','thk_1','thk_2','material_type','uom'])tr.append(el('td',{textContent:item[field]||''}));
+      tr.append(cell,el('td',{textContent:item.item_code||''}));
+      if(!receiving){
+        const availableCell=el('td',{className:'tracker-part-available',textContent:[Number(item.qty_available||0),item.uom].filter(v=>v!==undefined&&v!=='').join(' ')});availableCell.dataset.partAvailable='';
+        const locationCell=el('td');locationCell.dataset.partLocations='';
+        for(const storage of item.stock_locations||[]){const entry=el('div',{className:'tracker-part-location'});entry.append(el('strong',{textContent:[storage.warehouse,storage.location].filter(Boolean).join(' / ')}),el('span',{textContent:[storage.qty_on_hand,item.uom,'on hand'].filter(v=>v!==undefined&&v!=='').join(' ')}));locationCell.append(entry);}
+        if(!locationCell.childNodes.length)locationCell.textContent='No on-hand stock';tr.append(availableCell,locationCell);
+      }
+      for(const field of ['description','size_1','size_2','thk_1','thk_2','material_type','uom'])tr.append(el('td',{textContent:item[field]||''}));
       const quantityCell=el('td'),quantity=el('input',{value:selected?.quantity||'',inputMode:'decimal',placeholder:partTarget?'':'Enter later',disabled:!!partTarget});quantity.dataset.partQuantity='';quantity.setAttribute('aria-label','Quantity for '+item.item_code);
       quantity.oninput=()=>{if(!partSelection.has(id)&&partSelection.size>=200){partErrorMessage('Add up to 200 parts at a time.');return;}partSelection.set(id,{item,quantity:quantity.value});tr.querySelector('input[type="checkbox"]').checked=true;selectionCount();};quantityCell.append(quantity);tr.append(quantityCell);partResults.append(tr);
     }
-    if(!partPage.items.length){const tr=el('tr'),cell=el('td',{textContent:'No parts match these filters. Try fewer words or clear a filter.'});cell.colSpan=10;tr.append(cell);partResults.append(tr);}
+    if(!partPage.items.length){const tr=el('tr'),cell=el('td',{textContent:'No parts match these filters. Try fewer words or clear a filter.'});cell.colSpan=receiving?10:12;tr.append(cell);partResults.append(tr);}
     const first=partPage.total?(partPage.page-1)*partPage.limit+1:0,last=Math.min(partPage.total,partPage.page*partPage.limit);
     partCount.textContent=`Showing ${first.toLocaleString()}–${last.toLocaleString()} of ${partPage.total.toLocaleString()} matching parts`;
     document.getElementById('tracker-parts-page').value=partPage.page;document.getElementById('tracker-parts-page').max=partPage.pages;

@@ -18,3 +18,21 @@ export async function searchTrackerItems(db,jobId,filters={}) {
   const types=(await db.query("select distinct material_type from material_items where job_id=$1 and coalesce(material_type,'')<>'' order by material_type",[jobId])).rows.map(r=>r.material_type);
   return {items:rows,total:count,page,pages,limit,types};
 }
+
+export function withTrackerItemStock(items,stockRows,available,keyForItem) {
+  const locations=new Map();
+  for(const row of stockRows){
+    const key=keyForItem(row),warehouse=String(row.warehouse||'').trim(),location=String(row.location||'').trim();
+    if(!locations.has(key))locations.set(key,new Map());
+    const storageKey=JSON.stringify([warehouse.toLowerCase(),location.toLowerCase()]);
+    const storage=locations.get(key).get(storageKey)||{warehouse,location,qty_on_hand:0};
+    storage.qty_on_hand+=Number(row.qty_on_hand||0);locations.get(key).set(storageKey,storage);
+  }
+  const qty=value=>Math.round(Math.max(0,Number(value)||0)*10000)/10000;
+  return items.map(item=>{
+    const key=keyForItem(item);
+    const stock_locations=[...(locations.get(key)?.values()||[])].map(s=>({...s,qty_on_hand:qty(s.qty_on_hand)})).filter(s=>s.qty_on_hand>0)
+      .sort((a,b)=>a.warehouse.localeCompare(b.warehouse)||a.location.localeCompare(b.location));
+    return {...item,qty_available:qty(available.get(key)),stock_locations};
+  });
+}

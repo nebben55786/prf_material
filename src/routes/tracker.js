@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import {createTrackerService,trackerDocument,trackerError,lockTrackerJob,nextTrackerNumber,seedTrackerCounter} from '../tracker.js';
 import {renderTrackerPage,renderTrackerContacts} from '../tracker-view.js';
 import {buildTrackerPdf} from '../tracker-pdf.js';
-import {searchTrackerItems} from '../tracker-item-search.js';
+import {searchTrackerItems,withTrackerItemStock} from '../tracker-item-search.js';
 const reference=JSON.parse(fs.readFileSync(new URL('../tracker-reference.json',import.meta.url),'utf8'));
 
 export function registerTrackerRoutes(app,d) {
@@ -50,7 +50,18 @@ export function registerTrackerRoutes(app,d) {
     res.set('Cache-Control','private, no-store');res.send(layout('Job Material Tracker',renderTrackerPage(state),req.user));
   }));
   app.get(base+'/:kind/lookups',...auth,access('view'),json(req=>lists(currentJobId(req),req.user)));
-  app.get(base+'/:kind/items',...auth,access('view'),json(req=>searchTrackerItems({query},currentJobId(req),req.query)));
+  app.get(base+'/:kind/items',...auth,access('view'),json(async req=>{
+    const jobId=currentJobId(req),result=await searchTrackerItems({query},jobId,req.query);
+    if(kind(req)==='issuing'&&result.items.length){
+      const codes=result.items.map(i=>String(i.item_code).trim().toLowerCase());
+      const [stock,available]=await Promise.all([
+        d.getCurrentOnHandRows({query},{jobId,whereSql:'where lower(btrim(inventory_by_location.item_code))=any($1::text[])',params:[codes]}),
+        d.getAvailableInventoryByItemMap({query},jobId)
+      ]);
+      result.items=withTrackerItemStock(result.items,stock,available,d.buildInventoryItemKey);
+    }
+    return result;
+  }));
   app.post(base+'/:kind/documents/:id/parts',...auth,access('edit'),mutation,json(req=>withTransaction(db=>service.addParts(db,{jobId:currentJobId(req),documentId:req.params.id,kind:kind(req),version:req.body.version,parts:req.body.parts,userId:req.user.id}))));
   app.post(base+'/:kind/documents',...auth,access('create'),mutation,json(req=>withTransaction(async db=>{
     const jobId=currentJobId(req),k=kind(req);await lockTrackerJob(db,jobId);
